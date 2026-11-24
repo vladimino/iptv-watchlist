@@ -2,7 +2,7 @@
 
 **Status:** Proposed. The owner's disposition of 2026-11-24 kept B, 1C, 2B and 3C and asked for 4-7 to be reworked; this revision awaits a new, explicit, ADR-specific Product Owner decision. It is not Accepted.  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after two design reviews, after the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) and after the [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220).  
+**Recorded at:** 2026-11-24. Revised the same day after two design reviews, after the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) after the [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220) and after its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516).  
 **Approval source:** not decided. The record was requested in the owner's handoff on [PR #972](https://github.com/vladimino/iptv-watchlist/pull/972#issuecomment-7127786410). The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) chose directions; it accepts no design and grants no implementation or activation GO.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK) (audit and decision), under [AIR-546](https://trello.com/c/1dRSJEbp) and [AIR-275](https://trello.com/c/4x7hH0gI); related [AIR-559](https://trello.com/c/733sRAxu) and [AIR-547](https://trello.com/c/99faXisC).
@@ -171,21 +171,29 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 | Option | What is stored | Finds earlier attempts after | Cost |
 | --- | --- | --- | --- |
 | **K1 pointer** | the `requestId` (the receipt row carries its target) in the writer's own record: one field in the Diary `linking` intent and in the `admitting` row; the inferred commit has no mutable per-item record, so it needs one more store | the record survives. It fails when the record is lost or evicted, and a second attempt overwrites the pointer to the first unless a list is kept | three writer records change; the inferred commit gains a store |
-| **K2 operation key (recommended)** | an additive, nullable, indexed column `operation_key` on `canonical_write_receipt`, set to `admission:<kind>:<code>` (kind `inferred_import`, `lid` or `short_code`) | any loss of the writer record (the key derives from the code the source presents again), a redirect (the key has no target), a changed digest (same key, new request) and concurrent attempts (all rows share the key) | one additive column and index on the shared receipt table (an ADR 0119 amendment). Other origins leave it null |
+| **K2 operation key (recommended)** | an additive, nullable column `operation_key` on `canonical_write_receipt`, set to `admission:<kind>:<code>` (kind `inferred_import`, `lid` or `short_code`). It comes with a **partial unique index** on `(origin, operation_key) WHERE state IN ('pending','failed','unknown')`: at most one unresolved attempt per key, enforced by the database | any loss of the writer record (the key derives from the code the source presents again), a redirect (the key has no target), a changed digest (same key, new request) and concurrent attempts (all rows share the key) | one additive column and index on the shared receipt table (an ADR 0119 amendment). Other origins leave it null |
 
 - **Uniqueness of K2.** A code is unique per admission (D1 `film_rated_admission.source_code` is unique), and `kind` separates Letterboxd ids from short codes.
 - **Different codes for the same target** have different keys; the fenced batch decides between them (decision 3 table).
 - **Retention receipts** use no key, or their own `retention:` namespace, so the admission lookup never sees them.
 
-**Reconcile before reacquiring (with K2; K1 is the same protocol over its pointer).**
-1. **Read** every receipt with `origin = 'rated_admission_retention'` and `operation_key = admission:<kind>:<code>`.
-2. **Any `applied`:** committed by that request. Record which request applied, and whether it was this writer's own earlier attempt or another writer's. Proceed to the next stage without reacquiring. A same-pair admission row with no applied receipt is `present` from a legacy or other route, and it writes **no** evidence (ADR 0210 decision 4).
-3. **Every non-terminal (`pending`, `failed`, `unknown`):**
-   - `pending` inside its window: **wait**. The result is non-terminal and is retried later; a live attempt is never stolen.
-   - Otherwise: move the receipt to `abandoned` (`superseded_by_retry`) in a fenced update that matches its `request_id`, `state` and `attempts`. After that update the original batch's tail can never match, so its effect is impossible. That is the terminal proof of no outstanding effect, independent of clocks.
-   - If the update matches nothing, the row changed meanwhile: re-read it (it may now be `applied`).
-   - A marker generation change also blocks every old tail.
-4. **Only when every receipt of the key is terminal and none is applied,** reacquire the source (decision 4) and plan a new request under the same key.
+**Matching scope: which earlier attempts belong to this work.** The key identifies the **item** (a code). The **logical work** of one attempt is narrower: the key, the intended movie (from the writer's durable record), and the source scope of this check (an archive digest, or the page-check evidence root). Three sets follow:
+- **Unresolved across the key** (`pending`, `failed`, `unknown`): every one of them is settled before anything else, whatever its movie or source. Any of them could still land and change the admission.
+- **Applied, same key and the same intended movie:** the admission is settled (`present`, or `admitted` when it is this work's own receipt). The writer proceeds **without reacquiring for the admission**. If this work is a new verification of another source scope (a second archive, a later page check), the writer still performs its own check, and records it through the evidence-only operation (ADR 0210 decision 4).
+- **Applied, another movie, or applied before an identity correction:** historical. The writer never links or admits on the strength of an applied receipt alone. It validates current state first: the admission row by code, the trusted claims, redirect and retirement. Then it follows the decision 3 table (`code_on_other_film` → conflict).
+
+**Reconcile, then reserve.**
+1. **Read** every receipt of the key.
+2. **Settle the unresolved set:**
+   - a `pending` receipt inside its window: **wait**, non-terminal (a live attempt is never stolen);
+   - otherwise: move it to `abandoned` (`superseded_by_retry`) in a fenced update matched on `request_id`, `state` and `attempts`. Its tail can then never match, and `abandoned` is terminal, so the receipt-transition triggers forbid any invocation from reopening it. If the update matches nothing, re-read the receipt.
+3. **Validate the applied set** against current state, as above.
+4. **Reacquire the source** (decision 4) only if this work still needs a check.
+5. **Reserve the new attempt atomically.** The new receipt is inserted `pending` under the key. The partial unique index makes the insert fail when another caller reserved the key between steps 1 and 5; that caller's attempt wins and this one is `in_flight` (non-terminal). The reservation itself is the serialization point. The column alone would not be.
+
+With K1 the same protocol runs over the pointer, and step 5 becomes a compare-and-swap of the pointer in the writer's record. The inferred commit, which has no mutable per-item record, needs one more store for it. That is part of K1's cost.
+
+**The evidence-only operation (ADR 0210) follows the same protocol** under its own key `evidence:<evidence_key>`. A lost response is answered by reading that key: an `applied` receipt means the row exists, and the unique `evidence_key` makes a replay a no-op.
 
 **Outcome rule (unchanged from the reviewed revision).** The outcome of an item is a function of durable state: the monotonic keep-first admission rows, plus whether this item's Ratings link is already committed. The same pair always ends the same way after a crash:
 
@@ -271,8 +279,8 @@ Both read and write the one shared Diary document, so a `linking` intent left by
 | `source_changed` | attempt + 1, review backoff; owner review at the cap | consumes an attempt; terminal at the cap |
 | `admission_conflict`, `other_code` | as today | consumes an attempt |
 
-- **Attempts are charged only for real checks.** The ledger charges an attempt only when **this** step's `resolve` actually checked the id (the Diary entry's `lastAttemptAt` equals this step's clock). Today it also charges from an untouched stale entry whose reason is outside `NOT_NOW` (`letterboxd-sync-admission.js:66`), which is a pre-existing defect (card D0).
-- **No ageing under `closed`.** While the admission marker is `closed`, the ledger's `age_exceeded` rule is not applied, so a closure cannot age a row out. The drain in decision 1 bounds the closed interval anyway.
+- **Attempts are charged only for real checks.** `resolve` returns an explicit per-id outcome `{checked: true|false, reason}`, and the ledger charges an attempt only for `checked: true`. It does not infer the check from the stored entry or from timestamps. Today it also charges from an untouched stale entry whose reason is outside `NOT_NOW` (`letterboxd-sync-admission.js:66`), which is a pre-existing defect (card D0).
+- **No ageing under `closed`.** The marker row keeps the cumulative closed duration, and the time of the last close and reopen. The ledger's age of a row is its elapsed time minus the closed time that overlapped the row's lifetime. So a closure neither ages a row out while it lasts nor makes it age out at once after reopening or activation.
 - **No eviction of link intents.** The Diary cap never evicts a `linking` or `link_failed` entry. Today it can (`letterboxd-facts.js:674-684`); this is a pre-existing defect (card D0).
 
 **Drain and parity (decision 1 steps 2-4) cover both callers:**
@@ -315,14 +323,14 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 
 | Card | Outcome | Depends on | Boundary | Gate | AIR-275 closure | A2 activation |
 | --- | --- | --- | --- | --- | --- | --- |
-| **D0** | Fix the pre-existing defects of decision 4b: Letterboxd producer fence on the admission batch and receipt writes; ledger attempts charged only for real checks; no eviction of link intents | — | active fix of today's code paths, no new path | implementation GO (owner may fold it into A1) | required | required |
-| **R1** | Receipt `operation_key` (0207-U1 = K2): additive migration file, writer support, lookup and the reconcile protocol of decision 3; unused until A1 | ADR 0207 accepted | dormant | implementation GO | required | required |
+| **D0** | Fix the pre-existing defects of decision 4b in today's code: Letterboxd producer fence on the admission batch and receipt writes; ledger attempts charged only for explicit checks; no eviction of link intents | — (**independent of accepting this ADR**: it corrects current production behaviour) | active fix of today's paths; no new path | its own implementation GO, which can be authorized on its own (or folded into A1 if the owner prefers) | required | required |
+| **R1** | **Only if 0207-U1 = K2:** receipt `operation_key` with its partial unique index (an additive migration file), writer support, lookup and the reconcile-and-reserve protocol of decision 3; unused until A1. With K1 the pointer work moves into A1 and R1 does not exist | ADR 0207 accepted | dormant | implementation GO | required if K2 | required if K2 |
 | **E1** | ADR 0210 initial slice: table, triggers, `identity_evidence` operation, writer helper | ADR 0210 accepted | dormant (no writer calls it) | implementation GO | required | required |
 | **A1** | Admission coordination behind the marker (decisions 1-6), using R1 and E1 at `d1` | D0, R1, E1 | dormant (`r2` legacy byte-identical; migrations absent is safe) | implementation GO | required | required |
 | **M1** | Apply the R1, E1 and A1 migrations; marker at `r2` | A1 merged and deployed | no behaviour change at `r2` | production GO (owner L2/L3) | required | required |
 | **A2** | Activation: decision 1 steps 2-5, then natural acceptance in `Верификация` | M1; plus C2 if 0207-U5 = (a) | **irreversibility boundary** at the flip | production GO (owner L3); residual risk accepted or No-GO | required | — |
 | **C1** | ADR 0211 producer, dormant: writer contract, parts, lease, deadline, outcome and Monitor reader, offline cost harness | ADR 0211 accepted | dormant (no activation state) | implementation GO | per 0207-U5 | per 0207-U5 |
-| **CM** | Apply C1's additive schema (`upstream_backoff` if 0211-5a, activation state if a table) | C1 merged and deployed | no behaviour change | production GO | per 0207-U5 | per 0207-U5 |
+| **CM** | Apply whichever additive schema C1 actually requires (its part-state table, its outcome outbox, the activation state if a table, `upstream_backoff` if 0211-5a); not needed if C1 requires none. C2 refuses to activate unless every required table is present (fail closed) | C1 merged and deployed | no behaviour change | production GO | per 0207-U5 | per 0207-U5 |
 | **C2** | Activate enrichment for Films admitted after the cutoff, at the measured bound | CM | durable activation, pause stops new work | production GO | per 0207-U5 | per 0207-U5 |
 | **C3a** | Widen enrichment to the 714 existing admitted Films | C2 results reviewed | eligibility change | owner decision + production GO | no | no |
 | **C3b** | Widen enrichment to Watchlist members (the pinned-run gap) | C2; its own decision | changes the Watchlist metadata path | owner decision (possibly its own ADR) + production GO | no | no |
@@ -335,8 +343,8 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | **E4b** | ADR 0184 planner also reads `restricts` rows | as above | reader switch | owner decision (ADR amendment) | no | no |
 | **E5** | Retire the unused 0001 assertion tables | — | schema cleanup | owner decision | no | no |
 
-- **Mandatory for AIR-275:** D0, R1, E1, A1, M1 and A2; after A2's acceptance no mutable R2 authority remains for admissions. C1, CM and C2 are added if 0207-U5 = (a).
-- **Mandatory before the A2 flip:** D0, R1, E1, A1 and M1, and C2 if 0207-U5 = (a).
+- **Mandatory for AIR-275:** D0, R1 (if K2), E1, A1, M1 and A2; after A2's acceptance no mutable R2 authority remains for admissions. C1, CM and C2 are added if 0207-U5 = (a).
+- **Mandatory before the A2 flip:** D0, R1 (if K2), E1, A1 and M1, and C2 if 0207-U5 = (a). A2 also verifies that every migration it depends on is applied.
 - **Longer-term catalog work, each card its own decision:** C3a, C3b, E2a-d, E3, E4a-b and E5.
 - **No dual writer at any point.** R2 coordination ends only at the A2 flip; the D1 writer was already canonical; every C and E card adds a writer under existing authorities.
 
@@ -346,6 +354,11 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
   - a `pending` receipt inside its window waits;
   - an expired `pending` or `unknown` receipt is abandoned before reacquiring, and its original tail then cannot land;
   - the source-changed race of decision 4 ends deterministically as `source_changed`;
+  - two concurrent digests under one key (one reservation wins, the other is `in_flight`);
+  - a second archive verifying an admitted pair (no new admission, one evidence-only row);
+  - an identity correction after an applied receipt (the stale receipt is not used to link);
+  - a lost response followed by a redirect;
+  - a lost response of the evidence-only operation;
 - the both-callers tests of decision 4b;
 - the legacy byte-identity at `r2` and the refusals at `closed`;
 - the marker invariants:
@@ -422,6 +435,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
   - [design review passed](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6037247874).
 - The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347).
 - The [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), whose findings decisions 3, 4, 4b and 7 address.
+- The [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516): the matching scope and atomic reservation of decision 3, the explicit check outcome and closed-time accounting of decision 4b, and the conditional R1 and CM cards.
 - Code checks of 24 Nov 2026 (`main` `26cfd115`): the receipt tail, the lookup by request id only, the missing Letterboxd producer fence on the admission batch, the Watchlist ledger attempt rule and the Diary cap.
 - Production L0 read, 24 Nov 2026 12:21 UTC: Watchlist marker `d1` generation 3; 714 of 714 admitted Films without `film_metadata`.
 
@@ -433,7 +447,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | 0207-U2 | Digest without clocks (`verified_at` = first admitting batch) and the outcomes `source_changed` and `source_unavailable` | accept; or keep the clock in the digest (incompatible with 4A) | accept |
 | 0207-U3 | Both-callers contract (decision 4b): fence, mapping, attempt charging, no ageing under `closed`, no eviction of link intents | accept; or a different mapping per reason | accept |
 | 0207-U4 | Fix the pre-existing defects as D0 ahead of A1, or inside A1 | D0 first; or inside A1 | D0 first (they affect production today) |
-| 0207-U5 | Canonical enrichment relative to the flip | (a) C1, CM and C2 before A2, so no thin interval and a longer AIR-275; (b) in parallel, A2 may flip first with an explicit thin interval for new rated Films | (a), following the owner's 6C remark that a longer migration is acceptable |
+| 0207-U5 | Canonical enrichment relative to the flip, **for newly admitted Films only** (the 714 legacy Films are scope C3a, decided separately) | (a) C1, CM and C2 before A2, so no thin interval for new admissions and a longer AIR-275; (b) in parallel, A2 may flip first with an explicit thin interval for new admissions | (a), following the owner's 6C remark that a longer migration is acceptable |
 
 Decisions B, 1C, 2B and 3C were made by the owner on 2026-11-24 and are not reopened. 4A, 5C, 6C and 7C are the owner's directions. This record proposes how to meet them, and each choice above can be decided on its own.
 

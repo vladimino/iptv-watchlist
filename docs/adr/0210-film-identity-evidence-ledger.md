@@ -2,7 +2,7 @@
 
 **Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220).  
+**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220) and its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516).  
 **Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That chose the direction; it does not accept this design.  
 **Related work:** [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI). [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Proposed) uses the initial slice (decision 7).  
 **Supersedes:** None. It amends nothing by itself. Every reader change is a separate later decision (decision 8).  
@@ -50,7 +50,7 @@ An evidence row states one **proposition** about a **subject** and, for relation
 | `relation` | `same_work` (two source entities are the same work), `film_has_id` (a canonical Film holds an external id), `candidate_for` (an observation is a candidate for a movie), `exists` (a source entity was observed) |
 | `object_kind`, `object_value` | as for the subject; empty for `exists` |
 
-- **Evidence can exist before a Film does.** A lid observed on a Watchlist (`letterboxd_lid … exists`) or a short code in an archive needs no Film and no canonical id. Storing it never creates, admits or merges a Film.
+- **The model admits evidence before a Film exists, but the first implementation does not store it.** A lid observed on a Watchlist (`letterboxd_lid … exists`) or a short code in an archive needs no Film and no canonical id, and storing it would never create, admit or merge a Film. Canonical receipts and fences target a Film or a Person, and an unbound observation has neither, so its receipted write path is later work (decision 7). Until then, unbound observations stay in their own domains: the Watchlist snapshot and ledger, the Ratings records, the archive candidate documents and the Discovery observations.
 - **Discovery observations are referenced, not copied.** They stay in the Discovery domain (ADR 0085). The ledger refers to them by `observation_key` only when a canonical route uses them.
 - **A Film is a subject only for `film_has_id`.** It is referenced by id with no foreign key, like the Discovery and prediction tables. A merged Film's rows keep the id they were written for, and readers resolve them through `film_redirect` to the surviving Film.
 - **A merge is not a refutation of anything.** A merge writes no evidence; the redirect is its record.
@@ -67,8 +67,9 @@ An evidence row states one **proposition** about a **subject** and, for relation
   - `title_only`, `title_year`, `title_year_search`;
   - `tmdb_detail_check`, `page_check`, `alias_bridge`;
   - `owner_statement`.
-- **`source_ref`** is the route's own stable reference: an archive digest, a page-check evidence digest, a Discovery observation key, a Watchlist snapshot id or an owner intent key.
-- **`source_scope`** is the part of that reference a reader filters on: for example the archive digest, so that **per-archive proof** is a direct query, not a dependency on the first admission's digest.
+- **`source_root`** is the identity of the underlying source content, independent of who observed it: the page-check evidence digest, the archive digest, the Discovery observation key or the owner intent key. The Diary caller and the Watchlist caller checking the same page share one `source_root`.
+- **`source_ref`** is the route's own reference to its observation of that root, for example the snapshot id or the chunk.
+- **`source_scope`** is the part a reader filters on, for example the archive digest, so that **per-archive proof** is a direct query, not a dependency on the first admission's digest.
 
 `page_check` from the Diary, from the Watchlist admission and from the rated archive is one method with three routes. The routes are no longer collapsed.
 
@@ -90,7 +91,12 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 ### 4. Identity, idempotence and the evidence-only operation
 
-- **Evidence key.** `evidence_key = sha256(subject, relation, object, polarity, route, method, source_ref, scope_evidence_key)`. It is `UNIQUE`, so an insert of an existing key is a no-op. A replay or a second caller writing the same proposition from the same source writes nothing new.
+- **Evidence key: one row per observation route.** `evidence_key = sha256(normalized proposition, polarity, route, method, source_root, source_scope, scope_evidence_key)`. It is `UNIQUE`, so an insert of an existing key is a no-op.
+  - **Normalized proposition.** For the symmetric `same_work`, the two sides are ordered canonically by `kind:value` before hashing, so A–B and B–A are one proposition. The directed relations (`film_has_id`, `candidate_for`) keep their direction.
+  - **Same route, same root:** the same row, so a replay writes nothing.
+  - **Another route, same root:** another row. The Watchlist check of a page that the Diary check already verified is recorded as its own observation, with the common `source_root`.
+  - **Independence.** Rows that share a `source_root` are **never** counted as independent corroboration.
+  - **`source_scope` is in the key,** so two independently verified archives never collide.
 - **Atomic with a canonical effect.** When evidence accompanies a canonical effect (an admission or a claim), it is written in **the same fenced batch** as that effect. Neither exists without the other.
 - **Evidence without a canonical effect.** A genuine new verification may have no canonical effect: the pair is already admitted (keep-first), or a second archive verifies the same pair. It is recorded by a new receipted canonical operation `identity_evidence`:
   - it runs under the Film/Person fence (marker generation);
@@ -104,7 +110,7 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 - **Append-only.** Triggers refuse UPDATE and DELETE. A monotonic `seq` orders rows causally.
 - **No "latest row" rule.** Rows from different `source_ref` values are all kept. Two archives give two rows, and two conflicting assertions coexist until a reader or an owner decides.
-- **Supersession is explicit.** A row may name `supersedes_key` only for the same proposition, route and `source_scope`, for example a re-check of the same page with new content.
+- **Supersession is explicit.** A row may name `supersedes_key` only for an existing row with the same normalized proposition, route and `source_scope`, for example a re-check of the same page with new content and therefore a new `source_root`. `supersedes_key` is part of the new row's identity, through `scope_evidence_key` or its own column in the key. A unique index allows each row to be superseded at most once, so a chain of supersessions is linear.
 - **Revocation and reinstatement** are new owner rows: a scoped `refutes`, then a later `asserts`. The higher `seq` wins within the owner tier.
 - **Precedence for readers.**
   - Owner rows outrank all others.
@@ -123,12 +129,13 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 ### 7. Initial slice (AIR-275) versus the future catalog model
 
-**Initial slice.** These are the only writers required by ADR 0207:
-- the table, its triggers, the `identity_evidence` operation and the writer helper;
+**Initial slice.** These are the only writers required by ADR 0207. Every row is **Film-bound**: its receipted target is the admitted or existing Film.
+- the table, its triggers, the `identity_evidence` operation (receipted, with the Film as target) and the writer helper;
 - the admission routes at ADR 0207 mode `d1`:
   - `restricts` from the inferred import;
-  - `asserts same_work` by `page_check` with route `ratings_diary`, `watchlist_admission` or `letterboxd_rated_archive`, written in the admission batch, or through `identity_evidence` when keep-first makes the admission a no-op;
-  - `exists` for the lid or short code.
+  - `asserts same_work` by `page_check` with route `ratings_diary`, `watchlist_admission` or `letterboxd_rated_archive`, written in the admission batch, or through `identity_evidence` when keep-first makes the admission a no-op.
+
+`exists` rows and every other unbound observation are **not** in the initial slice (decision 1).
 
 **Future catalog model.** Each is a separate card and decision:
 - Discovery admission rows (`candidate_for` and `tmdb_detail_check`, referencing observation keys);
@@ -147,17 +154,18 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 ### 9. Acceptance scenarios (for the implementation card)
 
-1. A Watchlist lid observed before any Film exists: one `exists` row; no Film, admission or claim.
+1. A Watchlist lid observed before any Film exists: no ledger row in the initial slice. The observation stays in the Watchlist domain, and no Film, admission or claim appears.
 2. An inferred import: `restricts same_work`. The claim planner still answers `not_proved`.
 3. A Diary page check that admits: `asserts same_work` (`ratings_diary`, `page_check`) in the admission batch.
-4. The same page later checked by the Watchlist caller, with the same digest: no new row.
+4. The same page later checked by the Watchlist caller, with the same digest: one new row (route `watchlist_admission`) with the same `source_root`. It does not count as independent corroboration. The same caller again: no new row.
 5. A pair admitted by the inferred import and later verified by a page: no-op admission plus one `identity_evidence` row; the `restricts` row stays, the proof now exists.
 6. A second archive verifying an admitted pair: one new row with that archive's `source_scope`; the admission is unchanged.
 7. A retry answering `present` without fetching: no row.
-8. Two concurrent verifications of the same pair: one row.
+8. Two concurrent verifications of the same pair from the same route and root: one row. From different archives: two rows with different `source_scope`. Symmetric order: one row.
 9. An owner revoke of one assignment, then a reinstatement: scoped `refutes`, then `asserts`, in `seq` order.
 10. A merge: no evidence row; reads through the redirect find the survivor.
-11. A replay of any of the above: no new row.
+11. A replay of any of the above, including a lost response of `identity_evidence` (settled through ADR 0207 decision 3 under the key `evidence:<evidence_key>`): no new row.
+12. A supersession: the new row names its predecessor; a second supersession of the same predecessor is refused.
 
 ## Alternatives considered
 

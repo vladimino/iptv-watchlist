@@ -2,7 +2,7 @@
 
 **Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220).  
+**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220) and its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516).  
 **Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 6C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "не вижу смысла упускать возможность сразу начать подготовку к глобальному каталогу, даже если миграция из-за этого займет больше времени". That chose the direction; it does not accept this design.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI).
@@ -50,7 +50,7 @@ With the Watchlist marker at `d1` (production, generation 3), a pinned EPG run f
 
 ### 1. A metadata-only writer contract
 
-The producer calls `writeFilmFacts` with **only** `metadata`, `sync`, `localization.sources` and `dimensions.metadata`. It always passes:
+The producer calls `writeFilmFacts` with **only** `metadata`, `sync` and `localization.sources`. It does **not** pass `dimensions.metadata`: that row's `provenance_json` is replaced by other metadata writers (`canonical-film-writers.js:175-177` keeps provenance keys only for the identity dimension), so it cannot hold this producer's state (decision 3). It always passes:
 - `requireExisting: true`;
 - the stored `contractVersion`;
 - the `expectedRevision` of its own snapshot, so a stale plan fails on the revision and is re-planned, never forced.
@@ -80,18 +80,40 @@ Two commit guards are added to the batch:
 ### 3. Parts, partial success and receipts
 
 Enrichment has three independent **parts**:
-- `core` (runtime, genres, poster, year, URL);
+- `core`: runtime, genres, poster, year and URL;
 - `credits`;
 - `localization`.
 
-Each part has its own state in the `metadata` lifecycle row's `provenance_json`: `{part: {status, sourceVersion, at, attempts, retryAt, lastError}}`. These are existing columns, so no schema change is needed.
+**Part state lives in its own minimal store**, an additive table `catalog_enrichment_part(film_id, part, status, source_version, refresh_epoch, attempts, retry_at, last_error, updated_at)`, primary key `(film_id, part)`. No other writer touches it. It is not kept in the `metadata` dimension's `provenance_json`, which the EPG producers overwrite.
+- **Completion comes from the canonical fields.** Whether a part is complete is derived from the stored canonical fields: for `core`, every required field is non-blank. The state row only records attempts, backoff, the source version and the outcome.
+- **A lost state update** therefore causes at most one redundant fetch, never a wrong write.
 
-- **A failed part** changes only its own state: attempts plus 1, a doubling backoff, and after 6 attempts `needs_attention`. It never retries a part that succeeded.
-- **Freshness.** `film_sync_state.metadata_at` is set only when `core` succeeded. Freshness (30 days, the existing rule) is per part.
-- **`sourceVersion`** is the SHA-256 of the canonical JSON of the TMDB fields actually used (or the Wikidata fields), with no clocks. The request id is `catalog_enrichment:<operation>:digest(event enrich:<film>:<part>, target, sourceVersion)`.
-- **The same source** gives the same request, and a lost response is answered by the receipt.
-- **Changed content** gives a new request. The earlier unapplied receipt is abandoned visibly as `producer_source_changed` by its readback, the existing mechanism.
-- **An `unknown` result** stays non-terminal and is reconciled by the origin's own inline reconcile before that part of that Film is re-planned.
+**Fill-only and freshness.** Because writes are fill-only, a part whose required fields are all filled is `complete` and is **not** fetched again by a 30-day staleness rule.
+- If the source has no value for a field (an empty or optional result, for example no poster), the part is `complete_with_gaps` and lists the missing fields. It is not retried on a schedule.
+- `film_sync_state.metadata_at` is set only when, after the write, every required `core` field is non-blank. It is not set after a skipped guard or an absent field.
+- A later legitimate refresh is an explicit, separately decided action. It raises the part's `refresh_epoch`, and that is part of the request identity.
+
+**Receipt identity.**
+- The event is `enrich:<film>:<part>:<refresh_epoch>`.
+- `sourceVersion` is the SHA-256 of the canonical JSON of the source fields used, with no clocks.
+- The request id derives from both. The same source and epoch give the same request.
+- Receipts carry `operation_key = enrich:<film>:<part>` and follow the same **reconcile-then-reserve** protocol as ADR 0207 decision 3:
+  - unresolved receipts of the key are settled (waited for, or abandoned in a fenced transition) before a changed-source retry;
+  - the new attempt is reserved atomically through the partial unique index.
+
+  Without K2 (ADR 0207-U1), the pointer is the part state row.
+
+**Multi-unit parts.**
+- `credits`:
+  1. idempotent `person_mutation` units (insert-if-absent);
+  2. one add-only `film_credits` unit.
+
+  If it is interrupted between them, the part is still incomplete by derivation. The retry finds the persons present (no-op) and writes the credits.
+- `core` is one `writeFilmFacts` batch.
+
+No part is ever marked complete while its canonical effect is missing.
+
+**A failed part** changes only its own state row: attempts plus 1, a doubling backoff, and after 6 attempts `needs_attention`. Parts that succeeded are never retried because another part failed.
 
 ### 4. Eligibility, scope and fairness
 
@@ -99,7 +121,7 @@ Each part has its own state in the `metadata` lifecycle row's `provenance_json`:
   - it has a `film_rated_admission` row (scope 0211-4a);
   - it exists, is not redirected and holds one trusted `tmdb` claim;
   - its movie id is not retired;
-  - one of its parts is missing, stale or past its `retryAt`;
+  - one of its parts is not `complete`/`complete_with_gaps` and its `retry_at` has passed (no staleness rule under fill-only);
   - its `metadata` dimension is not owner- or reviewed-locked.
 - **Fairness.** Due Films are taken **oldest first** by the time they became due (`due_since`, the admission time, or the part's `retryAt` for a retry), so a stream of new admissions cannot starve older ones.
 - **New-only activation (decision 6)** adds `verified_at ≥ cutoff`.
@@ -114,24 +136,33 @@ Each part has its own state in the `metadata` lifecycle row's `provenance_json`:
 - **Per-tick bounds.** At most **2 Films**, serially. Each Film makes at most 1 TMDB request (`append_to_response=credits,translations`) and 1 Wikidata request. That is at most 4 upstream subrequests and a small fixed number of D1 statements per tick, well below any platform limit.
   - The bound of 2 is a starting value. It is raised only by an owner decision after the measurement below.
   - At 2 per hour the 714 legacy Films (if 0211-4b is chosen) would take at least 15 days. That is a minimum, not an ETA.
-- **Shared upstream backoff (option 0211-5a).** One additive D1 table `upstream_backoff(source PRIMARY KEY, backoff_until, reason, updated_at)`.
-  - A 429, a challenge or a 403 from `tmdb`, `letterboxd` or `wikidata` writes `backoff_until`: Retry-After, clamped to 30-3,600 s, else 1 hour.
-  - Every catalog-enrichment tick reads it before any request, and stops for the source while it is in force.
-  - Discovery, the metadata stage and the Diary and Watchlist checks keep their own policies until each adopts the table in its own card. **This record does not change them.**
-  - Option 0211-5b: no shared table, per-producer backoff only, as today.
-- **Scheduling.** The step joins the hourly cron's `Promise.allSettled` as its own entry. Its errors are recorded, not swallowed:
-  - each tick writes one outcome row to the existing `canonical_producer_outcome` drain (Events Log), with counts per part and the stop reason;
-  - a Monitor fact reader is added (code in `monitor.js` and `MonitorPolicy`) for "due Films not progressing" and repeated backoff.
+- **Upstream politeness, initial local policy:**
+  - requests are serial, at least 250 ms apart for TMDB;
+  - a 429, a challenge or a 403 stops the tick for that source and stores `backoff_until` (Retry-After, clamped to 30-3,600 s, else 1 hour) in the producer's **own** state;
+  - every tick reads that state before any request.
+
+  This coordinates only this producer.
+- **Cross-producer coordination (option 0211-5).** A shared `upstream_backoff(source, backoff_until, reason, updated_at)` table is only actually shared once other producers read and write it. This record does not change Discovery, the metadata stage or the Diary and Watchlist checks.
+  - (a) Local policy now. A shared table, with each producer's adoption as its own card and decision, later.
+  - (b) Create the shared table now with this producer as its only participant. It is still effectively local until the adoption cards land.
+- **Scheduling.** The step joins the hourly cron's `Promise.allSettled` as its own entry, and its errors are recorded, not swallowed.
+- **Outcome outbox.** The existing `canonical_producer_outcome` (migration 0038) is specific to the EPG Producer chain (`programme_run_id`, `input_generation`, `owner_epoch`) and cannot hold these ticks. The producer therefore uses a small dedicated outbox `catalog_enrichment_tick(tick_id PRIMARY KEY, started_at, finished_at, state, counts_json, delivered_at, delivery_attempts)`.
+  - `tick_id` is stable for the tick: the lease id plus the hour. Delivery to the Events Log deduplicates by it and retries like the existing drains.
+  - A tick writes `started` before its first request and `finished` or `stopped` at the end.
+  - A Monitor fact reader (code in `monitor.js` and `MonitorPolicy`) reports a tick still `started` past its deadline plus a margin, repeated backoff, and due Films not progressing.
+  - The outbox is in card CM. Activation refuses (fails closed) when it, or any other required table, is absent.
 - **Measurement before raising the bound.** The dormant implementation ships an offline harness for the tick cost. The first activation runs at the bound of 2. Each tick's outcome records its wall time, fetch times and D1 statements, and the owner raises the bound only from those numbers.
 
 ### 6. Activation, pause and rollback
 
 - **Dormant delivery.** The implementation is delivered dormant: no activation row, so every tick reads "not active" and writes nothing.
 - **Activation.** Durable D1 activation state `{state, cutoff_at, scope}`, written by an owner-authorized operation. It lives either in the same `projection_run` row's `summary_json`, asserted with `json_extract`, or in one small additive single-row table. The implementation card chooses; the requirement is durability plus an in-batch assertion. New-only eligibility uses `cutoff_at`, never the deploy date.
-- **Pause.** An owner operation sets `state = paused`.
-  - Every tick reads the state at its start, and every write batch asserts it (one guard). After a pause, no new fetch starts and no write lands.
-  - A fetch already in flight completes but cannot write.
-  - A code revert stops future ticks but does **not** cancel a running one. The pause is the stop control.
+- **Pause.** An owner operation sets `state = paused` and raises the activation generation.
+  - The tick re-reads the state fresh **before every upstream request** and before every write.
+  - Every write batch asserts the activation generation and the lease (guards).
+  - After a pause no new request starts and no write lands.
+  - The residual: a request already in flight when the pause lands completes but cannot write. The drain is waiting the longest fetch timeout (25 s).
+  - A code revert stops future ticks but does not cancel a running one. The pause is the stop control.
 - **Rollback of data.** None: metadata already written is valid canonical data under fill-only and precedence. A wrong value is corrected by owner and review routes.
 
 ## Alternatives considered
@@ -152,15 +183,15 @@ Each part has its own state in the `metadata` lifecycle row's `provenance_json`:
 - **Admitted Films get canonical metadata** without EPG airing, through the existing writers, with no new metadata authority and no identity effect.
 - **New durable contracts:**
   - fill-only metadata with commit guards;
-  - per-part lifecycle state in an existing column;
+  - a part-state table owned by this producer, with completion derived from the canonical fields;
   - a `projection_run` lease and activation row;
-  - optionally the `upstream_backoff` table;
+  - a dedicated tick outbox, and a shared `upstream_backoff` table only if 0211-5 = (b);
   - one outcome stream and one Monitor reader.
 - **Metadata can stay partial** (fill-only, TMDB only) until 0211-1b and 0211-2b are decided.
 
 ## Recovery and migration boundary
 
-- With 0211-5a, one additive table, plus possibly one small activation table (decision 6). Otherwise no schema change.
+- Additive tables: `catalog_enrichment_part` and `catalog_enrichment_tick`, possibly a small activation table (decision 6), and the shared backoff table only if 0211-5 = (b). No change to existing tables.
 - Activation, pause and scope are durable owner operations. Data written is kept.
 - This ADR, even when Accepted, authorizes no activation, fetch or write.
 
@@ -175,7 +206,7 @@ Each part has its own state in the `metadata` lifecycle row's `provenance_json`:
 | --- | --- | --- |
 | 0211-1 | (a) fill-only metadata, or (b) per-field provenance (schema change) | (a) |
 | 0211-2 | (a) TMDB only, or (b) also a Letterboxd page with identity agreement | (a) |
-| 0211-3 | Three independent parts with per-part lifecycle state (decision 3) | yes |
+| 0211-3 | Three independent parts with their own state table, completion derived from the canonical fields, fill-only without staleness refetch, explicit refresh epochs (decision 3) | yes |
 | 0211-4 | Scope: (a) admitted Films after the cutoff; (b) also the 714 existing; (c) also Watchlist members | (a) now; (b) and (c) separate decisions |
-| 0211-5 | (a) the shared `upstream_backoff` table, or (b) per-producer backoff only | (a) |
+| 0211-5 | Cross-producer coordination: (a) local policy now, shared table with separate adoption cards later; (b) create the shared table now (still local until adoption) | (a) |
 | 0211-6 | The durable activation, pause and cutoff row (decision 6) | yes |
