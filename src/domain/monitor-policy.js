@@ -17,6 +17,7 @@ export const THRESHOLDS = Object.freeze({
   // passes its verdict in `facts.stall` (AIR-556), so the two surfaces cannot disagree.
   switchStuckMs: 2 * HOUR,            // a mode switch that stays open
   producerNoProgressMs: 2 * HOUR,     // AIR-572: the canonical Producer has no DURABLE progress for this long after publication or its last progress
+  producerClockFreshMs: 90 * MIN,     // AIR-593: a reader trusts the Monitor's stored Producer clock for this long (hourly tick + slack); must stay below producerNoProgressMs
 });
 export const ALERT_POLICY = Object.freeze({
   confirmSnapshots: 2,                // degraded issues alert after this many consecutive snapshots; needs_owner at once
@@ -177,6 +178,74 @@ export function evaluateCatalogPosters(facts) {
 // counters. A publication, a takeover, a lease renewal or a heartbeat never moves it. `current` means exactly one thing: the run of the published generation is
 // `passed` and its applied generation equals the published one. The stream is never `healthy` merely because the EPG publication succeeded.
 const IDENTITY_STOP = /^producer_identity_/;
+// AIR-572 / AIR-593. The durable progress clock, shared by the Monitor (the WRITER: it persists the clock in `monitor/state.json`) and the Footer (a READER:
+// it never writes it). PROVEN progress only: units finished in the SAME run row and the SAME pass (n_applied + n_noop + n_kept grew) or its cursor moved.
+// A new pass number, a new pass state, a new run row or a new generation changes nothing by itself, and a counter that falls (a replay) is never progress.
+// The first sighting of a pass is evidence only if it already finished units or holds a cursor, and then only at its own stored update time.
+// The writer dates a movement it observes at `now`, which is sound because it stores the new baseline with it (`observedAt` records that tick). A reader
+// does not store the baseline, so `now` would renew the window on every read of the same unchanged row: in `readOnly` a movement is dated by the run row's
+// own `updated_at` (never later than `now`), the first-tick grace does not exist (no stored clock: the streak starts at the publication), and nothing is
+// ever dated by the read itself.
+export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false} = {}) {
+  const prior = previous && typeof previous === 'object' ? previous : {};
+  const stamp = value => Number.isFinite(Date.parse(value || '')) ? Date.parse(value) : null;
+  const live = stamp(prior.liveSince) ?? (readOnly ? null : now);
+  const done = run ? Number(run.n_applied || 0) + Number(run.n_noop || 0) + Number(run.n_kept || 0) : null;
+  const cursor = run ? (run.cursor_id ?? null) : null;
+  const samePass = !!run && prior.runKey === run.run_key && prior.passNo === run.pass_no;
+  const moved = samePass && (done > Number(prior.done || 0) || (cursor !== null && cursor !== (prior.cursor ?? null)));
+  const seeded = !!run && !samePass && (done > 0 || cursor !== null) ? stamp(run.updated_at) : null;
+  const rowAt = run ? stamp(run.updated_at) : null;
+  const movedAt = readOnly ? (rowAt !== null ? Math.min(rowAt, now) : null) : now;
+  const progress = moved ? (movedAt ?? stamp(prior.progressAt)) : (seeded !== null ? Math.min(seeded, now) : stamp(prior.progressAt));
+  const published = stamp(publishedAt) ?? (readOnly ? null : now);
+  const streak = moved ? null : (stamp(prior.noProgressSince) ?? (Math.max(published ?? 0, live ?? 0) || null));
+  const since = moved ? progress : (Math.max(progress ?? 0, streak ?? 0) || null);
+  const at = value => value === null || value === undefined ? null : new Date(value).toISOString();
+  return {liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
+    progressAt: at(progress), noProgressSince: at(streak), sinceAt: at(since), ...(readOnly ? {} : {observedAt: at(now)})};
+}
+// A count from D1: a non-negative integer (or a string of digits). null, '', a negative, a fraction or NaN is unknown (null), never 0.
+const knownCount = value => typeof value === 'number' ? (Number.isInteger(value) && value >= 0 ? value : null) : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : null;
+// How far a READER may trust the stored Monitor clock: `fresh` when the Monitor wrote it within `producerClockFreshMs`, `stale` when older (or written before
+// AIR-593 without `observedAt`), `missing` when there is none and `unreadable` when the state document could not be read.
+function clockStateOf(previous, previousReadable, now) {
+  if (!previousReadable) return 'unreadable';
+  if (!previous || typeof previous !== 'object') return 'missing';
+  const observed = Date.parse(previous.observedAt || '');
+  return Number.isFinite(observed) && observed <= now + 5 * MIN && now - observed <= THRESHOLDS.producerClockFreshMs ? 'fresh' : 'stale';
+}
+// The facts of the `canonical_producer` stream from ONE bounded read (`readProducerMonitorFacts`) and the previous clock. `held` is the static delivery hold
+// (nothing is read). The run counters are cumulative over the passes of one run row, while `unit_count` is the current pass only, so `processed` is known
+// only on the first pass, only when every counter and the total are known, and never above the total; otherwise it is null (unknown), never a guessed number.
+// No identifier of the run, cursor or programme run is part of the facts the Footer shows. `readOnly` (the Footer) uses the reader clock above and adds
+// `clockState`.
+export function canonicalProducerFacts({held = false, read = null, previous = null, now, readOnly = false, previousReadable = true}) {
+  if (held) return {held: true, readable: true, clock: null};
+  const extra = readOnly ? {clockState: clockStateOf(previous, previousReadable, now)} : {};
+  if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now, {readOnly}), ...extra};
+  const clock = canonicalProducerClock(previous, read.run, read.publishedAt, now, {readOnly});
+  const {run, chain} = read;
+  const total = run ? knownCount(run.unit_count) : null;
+  const parts = run ? [run.n_applied, run.n_noop, run.n_kept].map(knownCount) : [];
+  const done = run && parts.every(value => value !== null) ? parts.reduce((sum, value) => sum + value, 0) : null;
+  const processed = run && knownCount(run.pass_no) === 1 && done !== null && total !== null && done <= total ? done : null;
+  return {held: false, readable: true, label: read.label, generation: Number.isInteger(read.generation) ? read.generation : null, publishedAt: read.publishedAt, sinceAt: clock.sinceAt, progressAt: clock.progressAt, clock, ...extra,
+    chain: chain ? {ownerState: chain.owner_state, stoppedBy: chain.stopped_by || null, recoveryClass: chain.recovery_class || null, nextAttemptAt: chain.next_attempt_at || null} : null,
+    run: run ? {passState: run.pass_state, sourceGeneration: run.source_generation, appliedGeneration: run.applied_generation || null, stoppedBy: run.stopped_by || null,
+      passNo: knownCount(run.pass_no), unitCount: total, processed, failed: knownCount(run.n_failed), completedAt: run.completed_at || null} : null};
+}
+// AIR-593. The READER's verdict: the Monitor's own `evaluateCanonicalProducer`, with one restriction. Every verdict that D1 alone decides (current, failed,
+// blocked, held, nothing published, waiting inside the window after the publication, stalled) stands whatever the clock. `lagging` alone says "published
+// long ago, but still moving", and only a fresh Monitor baseline can prove the moving part: a reader that dates progress by the row's `updated_at` cannot tell
+// finished units from another update of the row. Without a fresh clock it is `unconfirmed` (shown as unknown, never green), not `lagging`.
+export function evaluateCanonicalProducerReader(facts, now) {
+  const verdict = evaluateCanonicalProducer(facts, now);
+  if (verdict.facts?.status === 'lagging' && facts?.clockState !== 'fresh') {
+    return {...verdict, state: 'delayed', facts: {...verdict.facts, status: 'unconfirmed', clockState: facts?.clockState ?? null}};
+  }
+  return verdict;
+}
 export function evaluateCanonicalProducer(facts, now) {
   if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
   const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,

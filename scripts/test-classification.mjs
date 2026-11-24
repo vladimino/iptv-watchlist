@@ -977,6 +977,9 @@ export const FILES={
  "fingerprint-version-import.mjs": {
   "suite": "core"
  },
+ "footer-canonical-producer.mjs": {
+  "suite": "core"
+ },
  "footer-collection.mjs": {
   "suite": "core"
  },
