@@ -171,14 +171,14 @@ function bucket(w){return w.bucket;}
 }
 
 {
- // The Telegram text (ADR 0206 renderer): the alert counts the ownerless starts, the recovery says why it recovered.
+ // The Telegram text (ADR 0206 renderer, block layout of ADR 0212): the alert counts the ownerless starts, the recovery says why it recovered.
  const w=await openIncident(true);
- assert.match(w.texts[0],/Запусков без фильма с последнего прогресса \(за последние 2 ч\): \d+/,w.texts[0]);
+ assert.match(w.texts[0],/\nЗапусков без фильма \(за 2 ч\): \d+\n/,w.texts[0]);
  assert.ok(w.bucket.value(STATE).alerts.issues.predictions_no_progress.metrics.orphanStarts>0);
  w.bucket.set(QUEUE,{...queueDoc(),hotPending:[],coldPending:[],pending:[],priorityCount:0,coldRemaining:0});await w.tick(P+3*H);
- assert.match(w.texts[1],/Причина: сейчас нечего прогнозировать .*это не подтверждённый прогресс/,w.texts[1]);
+ assert.match(w.texts[1],/\n\nПричина: нечего прогнозировать\nОчередь пуста или повторы исчерпаны\nЭто не подтверждённый прогресс\n\n/,w.texts[1]);
  const v=await openIncident(true);const run=await v.start('good',P+2*H+5*MIN);await v.commit(run,P+2*H+9*MIN,{created:1});await v.tick(P+3*H);
- assert.match(v.texts[1],/Причина: прогресс снова подтверждён \(последний подтверждённый прогресс/,v.texts[1]);
+ assert.match(v.texts[1],/\n\nПричина: прогресс снова подтверждён\nПоследний прогресс: \d\d\.\d\d \d\d:\d\d\n\n/,v.texts[1]);
 }
 
 // ---- 2b. AIR-596 review: an unreadable split is unknown on both surfaces, never healthy or running; proven zero work stays healthy ----
@@ -256,12 +256,12 @@ function bucket(w){return w.bucket;}
  const entry=w.bucket.value(STATE).alerts.issues.predictions_no_progress;
  assert.deepEqual([entry.firstSeenAt,entry.metricsAt,entry.metrics.held,entry.sendCount],[alertAt,alertAt,'split_unknown',2],JSON.stringify(entry));
  assert.equal(w.texts.length,2);const reminder=w.texts[1];
- assert.match(reminder,/Напоминание/);assert.match(reminder,/Сейчас: нельзя прочитать, сколько фильмов доступно к прогнозу; инцидент остаётся открытым/);
- assert.match(reminder,/было не меньше 2 ч \(на последнем наблюдении 23\.11 23:28\)/,reminder);assert.doesNotMatch(reminder,/Доступно к прогнозу сейчас/,'no stale count shown as current');
+ assert.match(reminder,/Напоминание/);assert.match(reminder,/\nСейчас: число доступных не читается\nИнцидент остаётся открытым\n/);
+ assert.match(reminder,/⏱ Прогресс не подтверждён\nНе меньше: 2 ч\nПоследнее наблюдение: 23\.11 23:28/,reminder);assert.doesNotMatch(reminder,/Доступно:/,'no stale count shown as current');
  w.bucket.set(QUEUE,q);const run=await w.start('back',P+9*H-20*MIN);await w.commit(run,P+9*H-15*MIN,{created:2});
  await w.tick(P+9*H);assert.equal(w.texts.length,3);const recovery=w.texts[2];
- assert.match(recovery,/Проблема снята/);assert.match(recovery,/Причина: прогресс снова подтверждён/);assert.match(recovery,/на последнем наблюдении 23\.11 23:28/,recovery);
- assert.match(recovery,/Длительность инцидента по наблюдениям монитора: 7 ч/,recovery);
+ assert.match(recovery,/Проблема снята/);assert.match(recovery,/Причина: прогресс снова подтверждён/);assert.match(recovery,/Последнее наблюдение: 23\.11 23:28/,recovery);
+ assert.match(recovery,/🕒 Инцидент: 7 ч\n/,recovery);
 }
 
 {
