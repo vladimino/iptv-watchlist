@@ -17,6 +17,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Recovery procedures](recovery/README.md), including [D1 authority and recovery](recovery/d1-authority-and-time-travel.md)
 - [MCP connection and read-only smoke](mcp-connectivity.md)
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
+- [Prediction incident response: RCA, controlled diagnostic experiments and staged recovery](prediction-incident-response.md)
 - [Prediction auxiliary state in D1: checkpoint and outbox recovery, offline import and the AIR-554 handoff (D1 authority since 24 Nov 2026)](prediction-aux-state-cutover.md)
 - [Canonical Producer outcome outbox, migration 0038: operator, preflight, quiet window and readback (**applied to production 24 Nov 2026 13:33 UTC**, schema 37 to 38)](producer-outcome-0038-apply.md)
 - [Watchlist membership projection, migration 0037: operator, quiet window, readback and the read-only baseline preflight (prepared, not applied; needs 0036 and its own owner GO)](watchlist-membership-0037-apply.md)
