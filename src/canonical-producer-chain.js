@@ -221,6 +221,17 @@ export function leaseRenewStatements(fence,at,nowMs,revision){
   [lease,at,fence.programmeRunId,fence.epoch,fence.nonce,revision]],changesOne()];
 }
 
+// AIR-572 replay marker: the FIRST write of every `work` step renews the owner's lease (revision + 1) under the full owner fence. A re-entry of the same epoch (a step retry or an
+// instance replayed with the cached claim) then finds the chain revision moved past the claim's and never runs the expensive work again (see runProducerWorkflow).
+export async function markWorkEntered(env,{fence:f,at,nowMs}={}){
+ requireFence(f,['chain']);
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ await commit(env,gate,[fence(gate),...fenceStatements(f,{ownerOnly:true}),...leaseRenewStatements(f,at,nowMs,f.revision)]);
+ f.revision+=1;
+ return {state:'entered'};
+}
+
 export async function stopChain(env,{fence:f,revision,at,stoppedBy,recoveryClass,nowMs}={}){
  requireFence(f,['chain']);
  const gate=await routeOf(env);

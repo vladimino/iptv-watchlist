@@ -148,8 +148,23 @@ const P='run-p';
  assert.equal(d.continue,true);
  const h=Fence.successorDecision({spentCalls:9000,spentStatements:9000,estimateCalls:2000,estimateStatements:2000});
  assert.equal(h.continue,false);
- const inf=Fence.successorDecision({spentCalls:0,spentStatements:0,estimateCalls:9000,estimateStatements:9000});
- assert.equal(inf.reason,'producer_budget_infeasible');
+ // AIR-572 (production 24 Nov 2026): a large measured invocation hands over; infeasibility is the FLOOR plus the end reserve against the headroom (ADR 0141 D5), never a measured invocation.
+ assert.deepEqual(Fence.successorDecision({spentCalls:37000,spentStatements:37000,estimateCalls:37000,estimateStatements:37000}),{continue:false,reason:'handoff'});
+ assert.equal(Fence.successorDecision({spentCalls:0,spentStatements:0,estimateCalls:9000,estimateStatements:9000}).reason,'handoff');
+ assert.equal(Fence.successorDecision({limitCalls:500}).reason,'producer_budget_infeasible','floor 200 + reserve 80 do not fit half of 500');
+ // A-priori operation ceilings: a unit by kind and credits (two applies plus the slice commit), the end reserve kept on every admission, unknown operations never admitted.
+ const C=Fence.CHAIN_COST;
+ assert.equal(Fence.operationCost('unit',{kind:'person_mutation'}),2*C.unit.person_mutation+C.flush);
+ assert.equal(Fence.operationCost('unit',{kind:'film_credits',credits:50}),2*(C.unit.film_credits+50*C.unit.perCredit)+C.flush);
+ assert.equal(Fence.operationCost('unit',{kind:'unknown_kind'}),2*C.unit.other+C.flush);
+ assert.equal(Fence.operationCost('unit',{kind:'film_facts',refusal:true}),C.unit.refusal+C.flush);
+ assert.equal(Fence.operationCost('teleport'),Infinity);
+ const cap=Fence.CHAIN_HEADROOM*Fence.CHAIN_SUBREQUEST_LIMIT;
+ assert.equal(Fence.admitOperation({spentCalls:cap-C.end-500,spentStatements:0,cost:500}),true,'exactly at the headroom with the end reserve');
+ assert.equal(Fence.admitOperation({spentCalls:cap-C.end-499,spentStatements:0,cost:500}),false);
+ assert.equal(Fence.admitOperation({spentCalls:0,spentStatements:cap-C.end-499,cost:500}),false,'statements are bounded too');
+ assert.equal(Fence.admitOperation({spentCalls:0,spentStatements:0,cost:Infinity}),false);
+ assert.equal(Fence.admitOperation({spentCalls:NaN,spentStatements:0,cost:1}),false);
 }
 
 assert.equal(Fence.recoveryClassOf('producer_cas_lost'),'transient');
@@ -264,6 +279,8 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  assert.equal(result.pass.state,'already_complete');
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
 }
+
+// AIR-572 budget scenarios on the real Workflow path: tests/canonical-producer-budget.mjs and tests/canonical-producer-budget-boundaries.mjs (shared fixture: canonical-producer-budget-lib.mjs).
 
 // AIR-572 delivery hold: when on, both Producer entrypoints do zero I/O and affect nothing else. The shipped default is now lifted
 // (owner-approved, after the Watchlist membership switch to the Letterboxd Sync); the guard itself stays and is exercised explicitly.

@@ -270,6 +270,16 @@ export const FILES={
  "canonical-producer-adapters.mjs": {
   "suite": "core"
  },
+ "canonical-producer-budget-boundaries.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-budget-lib.mjs": {
+  "suite": "support",
+  "note": "AIR-572 library: the Producer budget fixture and the chain driver. Executing this file runs no check; canonical-producer-budget.mjs and canonical-producer-budget-boundaries.mjs import it."
+ },
+ "canonical-producer-budget.mjs": {
+  "suite": "core"
+ },
  "canonical-producer-chain.mjs": {
   "suite": "core"
  },

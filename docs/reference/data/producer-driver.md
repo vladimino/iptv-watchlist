@@ -30,6 +30,43 @@ The driver composes and decides nothing itself. The decisions are the pure modul
 
 **Limits.** No slice size, ceiling, deadline or lag SLA is chosen (D-C). `apply*Units` do not expose the receipt request id, so S4-4 writes no `receipt`-owned result: an unresolved receipt is a fail-closed stop and the own-origin reconcile resolves it. The retry pass selects origin `epg` in SQL before its limit (a dictionary backlog never fills the EPG budget) and handles nothing else; dictionary results are revalidated by re-observation in the next dictionary pass. A dictionary run has no durable completion claim (the cursor past the last unit is the evidence). A release of a Film that is not stored is left out of the plan and counted `absent`, so storing the Film later changes the fingerprint and replays the pass. The driver is not wired; wiring, bundling and the read model are S5-1.
 
+## Instance budget inside the Workflow chain (ADR 0141 D5, AIR-572)
+
+The chain meters every D1 binding call and every prepared statement (`meterD1`) of the WHOLE instance on one meter: the claim, every invocation and the end path. The cap is the headroom `CHAIN_HEADROOM × CHAIN_SUBREQUEST_LIMIT` (5,000), as T-6 of ADR 0141 decided; the T-6 meter itself is unchanged.
+
+**Admission, not estimation.** Every Producer operation is admitted BEFORE it runs, at an a-priori ceiling of its cost (`CHAIN_COST`, `operationCost`, `admitOperation` in `src/canonical-producer-fence.js`). Admission requires spent + ceiling + the end reserve (`CHAIN_COST.end`) within the cap, for calls and statements. The ceilings are:
+
+- **The start of an invocation:** snapshot, release pin, plan, open run.
+- **A unit, by its kind and input:**
+  - two applies, for the replan retry of `evaluate`;
+  - plus three per credit, where credits are bounded by `CREDITS_PER_UNIT_MAX` at plan time;
+  - plus the slice commit that may follow it.
+- **A sweep read and a sweep settle** of `supersedeEarlierResults`.
+- **The completion:** the live count and `commitPassComplete`.
+- **A receipt of the reconcile** (ADR 0141 T-10). The drain cuts each page to what the budget holds and is asked before every page, both at the start and before the completion.
+
+A refusal ends the step at a durable boundary: the slice prefix is committed, the sweep and the drain stop resumable, nothing is claimed. The step answers `partial` with reason `budget` (or `supersession_pending` with detail `budget`). The instance then hands over, and the successor resumes at the cursor, also when the cursor is already past the last unit.
+
+**Why the bound holds.** Every admitted operation costs at most its ceiling. `tests/canonical-producer-budget*.mjs` assert this for every admitted operation on the real path, including cheap no-op units followed by expensive credit changes, a planner refusal, a backlog of earlier results, lost receipt responses and narrow limits. So after any admitted operation the end reserve is still free. The end reserve covers the stop or hand-off, or the completion, of the chain.
+
+**Infeasible and caps.**
+- `producer_budget_infeasible` (fail_closed) means an instance made NO durable progress: no unit, sweep settle, completion or reconciled receipt. Its fixed part plus one operation and the reserve do not fit, so no successor could progress either.
+- At an invocation boundary, `successorDecision` continues in the same instance only while spent + the largest measured invocation + reserve fits. Its own infeasibility test is the floor plus the reserve, as ADR 0141 D5 words it.
+- A hand-off that `CHAIN_EPOCH_CAP` refuses now STOPS the chain (`producer_chain_epoch_cap`, fail_closed, visible to the monitor). Before this change it answered a hand-off without a successor and left the chain active.
+
+**Measured.** About 37 statements per applied unit and about 10 per no-op unit (offline, 24 Nov 2026, [evidence](../../evidence/d1-migration/air-572-producer-budget-rca-2026-11-24.md)). An instance therefore holds roughly 130 applied or 300 to 450 no-op units. Epochs count per programme run, and a re-publication of the same run (REOPEN) continues the count; every new publication starts at epoch 1.
+
+**Replay safety.**
+- **The problem.** The meter lives in one execution only. A `work` step that runs a second time for the same epoch cannot know what the failed attempt spent or which chain revision it reached. That happens on a step retry by the runtime, or on an instance replayed with the cached `nonce` and `claim` steps and fresh memory.
+- **The entry marker.** The first write of every `work` step renews the owner's lease under the full owner fence (`markWorkEntered`, revision + 1).
+- **Re-entry.** A re-entry finds the chain revision past the one its claim returned. It then runs no work: it re-reads the chain, refreshes the fence only under the exact owner proof (epoch, nonce, active), and stops the chain `producer_work_replayed`. That code is in the `transient` recovery class, so the existing hourly `recoverChain` relaunches the chain into a new epoch, with a fresh budget, after its backoff. Units and receipts resume from the durable cursor; nothing is redone or lost.
+- **Bound across attempts.** The failed attempt stayed inside its admissions, so the end reserve was still free when it failed. The re-entry spends at most that reserve. An attempt that failed before its marker can only have spent the entry reads, and every first entry pre-charges them (`CHAIN_COST.entry`).
+- **Progress.** Durable progress is acknowledged progress, never an admission. It counts:
+  - a committed slice, settle or completion, reported by the driver through `onDurable` after the commit succeeded;
+  - a reconcile page that settled a receipt.
+
+**One fence object.** The fence is ONE object for the whole invocation. `pinChainReleases` and every slice commit (lease renewal) advance `fence.revision` in place, and the stop, hand-off and completion use that same object. A copy made after the release pin fell behind and lost the revision CAS (`producer_cas_lost`, production epoch 1 of 24 Nov 2026).
+
 ## Source boundary and delivery hold (AIR-572)
 
 The Workflow forms its plan from the sealed published EPG documents, with each lid resolved through a trusted claim first (contract: [Producer target identity](../domain/film-person.md#producer-target-identity-air-572); code: `resolveSourceIdentities`). The Workflow step is called directly (`step.do(...)`), never bound. Both entrypoints return `held_by_delivery` before any access while `PRODUCER_DELIVERY_HOLD` is `true`. The hold is **lifted** (`false`) since the owner-approved AIR-572 change that followed the membership switch below (marker `sync` generation 1, 23 Nov 2026 UTC): the Producer no longer plans or writes `watchlist_film`, so the EPG-sealed Watchlist copy no longer decides membership.

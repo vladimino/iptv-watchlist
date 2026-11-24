@@ -6,11 +6,11 @@ import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFre
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
 import {
  CHAIN_BOUNDARY_MARGIN_MS,CHAIN_CREATE_ATTEMPTS,CHAIN_FLOOR_D1_CALLS,CHAIN_FLOOR_D1_STATEMENTS,CHAIN_LEASE_MS,
- CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,
+ CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,operationCost,admitOperation,
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
- claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,parseReleasePin,pinChainReleases,
+ claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,markWorkEntered,parseReleasePin,pinChainReleases,
  readChain,rebaseChain,recoverChain,relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
 } from './canonical-producer-chain.js';
 import {epgRunForGeneration} from './canonical-producer-store.js';
@@ -348,16 +348,23 @@ function receiptsBlockCompletion(summary){
  if(!summary||summary.skipped===true)return true;
  return (summary.failed||[]).length>0||(summary.waiting||[]).length>0||(summary.needsReview||[]).length>0;
 }
-async function drainEpgReceipts(env,plan,fence){
+// The receipt reconcile of ADR 0141 T-10 inside the instance budget (AIR-572): each page is admitted first, at the receipt ceiling per receipt, and is cut to what the budget
+// still holds (at least one receipt, at most RECEIPT_PAGE). A page the budget cannot hold ends the drain with {yield:true}: nothing is claimed and the next instance resumes.
+async function drainEpgReceipts(env,plan,fence,admit=()=>true,progress=()=>{}){
  if(!plan?.personPlan||!plan?.filmPlan)throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
  const scoped={...env,producerFence:fence};
  for(let page=0;page<RECEIPT_PAGES;page++){
-  const summary=await reconcileEpgRun(scoped,{plan:plan.personPlan,filmPlan:plan.filmPlan,limit:RECEIPT_PAGE});
+  let limit=RECEIPT_PAGE;
+  while(limit>0&&!admit('receipt',{count:limit}))limit--;
+  if(limit<1)return {yield:true};
+  const summary=await reconcileEpgRun(scoped,{plan:plan.personPlan,filmPlan:plan.filmPlan,limit});
   if(!summary||summary.skipped===true||receiptsBlockCompletion(summary)){
    const error=Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
    throw error;
   }
-  if((summary.considered||0)<RECEIPT_PAGE){
+  // Acknowledged progress: the reconcile answered and settled at least one receipt.
+  if((summary.considered||0)>0)progress();
+  if((summary.considered||0)<limit){
    let open=[];
    try{
     open=await many(database(scoped),"SELECT request_id FROM canonical_write_receipt WHERE origin='epg' AND state IN ('pending','failed','unknown') LIMIT 1",[]);
@@ -369,35 +376,95 @@ async function drainEpgReceipts(env,plan,fence){
  throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
 }
 
-export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVERY_HOLD}={}){
+// Options for tests only (production passes none): `limitCalls` narrows the instance limit to exercise the budget boundaries, `observe(op, detail, spent)` sees every admitted operation.
+export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVERY_HOLD,limitCalls,observe}={}){
  if(hold!==false)return {state:HELD_BY_DELIVERY};
  const P=payload?.programmeRunId,epoch=Number(payload?.epoch);
  if(typeof P!=='string'||!P||!Number.isInteger(epoch)||epoch<1)return {state:'invalid'};
  // AIR-572: `step` is a Cloudflare RPC stub. Its methods are callable but expose no `.bind`/`.call`/`.apply`, so the method is
  // invoked directly on the stub (`step.do(...)`), never detached or bound. Without a step (an offline run) the callback runs inline.
  const doStep=(name,fn)=>step&&step.do?step.do(name,fn):fn();
- const totals={calls:0,statements:0,invocations:0,maxCalls:0,maxStatements:0};
+ // ADR 0141 D5 (AIR-572): ONE meter for the whole instance, from its first read through the claim, every invocation and the end path. Every Producer operation is admitted
+ // first at its a-priori ceiling with the end reserve kept (`admitOperation`), so the instance never leaves its headroom and always has room to stop or hand over.
+ const instance={calls:0,statements:0,batches:0};
+ const ienv=meteredEnv(env,instance);
+ const totals={calls:0,statements:0,invocations:0,maxCalls:0,maxStatements:0,admitted:0,progressed:false};
+ const admit=(op,detail)=>{
+  const cost=op==='receipt'?operationCost('receipt')*Math.max(1,Number(detail?.count)||1):operationCost(op,detail);
+  const ok=admitOperation({spentCalls:instance.calls,spentStatements:instance.statements,cost,...(Number.isFinite(limitCalls)?{limitCalls}:{})});
+  if(ok){
+   totals.admitted++;
+   if(typeof observe==='function')observe(op,detail,{calls:instance.calls,statements:instance.statements});
+  }
+  return ok;
+ };
  const nonce=await doStep('nonce',async()=>crypto.randomUUID());
- let chain=await readChain(env,P);
+ let chain=await readChain(ienv,P);
  if(!chain||chain.owner_epoch!==epoch)return {state:'not_owner'};
- let published=await readPublished(env);
+ let published=await readPublished(ienv);
  if(!published?.ready||published.programmeRunId!==P)return {state:'producer_generation_superseded'};
- const claimed=await doStep('claim',async()=>claimChain(env,{programmeRunId:P,epoch,instanceId:producerInstanceId(P,epoch),nonce,generation:Number(published.generation),revision:chain.revision,at:new Date().toISOString(),nowMs:Date.now()}));
+ const claimed=await doStep('claim',async()=>claimChain(ienv,{programmeRunId:P,epoch,instanceId:producerInstanceId(P,epoch),nonce,generation:Number(published.generation),revision:chain.revision,at:new Date().toISOString(),nowMs:Date.now()}));
  if(claimed.state!=='owned')return {state:'not_owner'};
  chain=claimed.chain;
  let fence={kind:'chain',programmeRunId:P,epoch,nonce,inputGeneration:Number(chain.input_generation),revision:chain.revision};
  let rebases=0;
+ // Replay safety (ADR 0141 D5, AIR-572). The meter lives in this execution only, so a `work` step that runs a SECOND time for the same epoch (a step retry, or an instance
+ // replayed with the cached nonce and claim and fresh memory) cannot know what the failed attempt spent or which revision it reached. Such a re-entry never runs the expensive
+ // work: it re-reads the chain, refreshes the fence ONLY under the exact owner proof (epoch, nonce, active, same programme run) and stops the chain `producer_work_replayed`
+ // (transient), so the existing hourly `recoverChain` relaunches it into a NEW epoch with a fresh budget after its backoff. A re-entry is recognised by the entry marker,
+ // in fresh or in the same memory: the first write of every work step renews the lease (`markWorkEntered`), so a chain revision past the claim's proves an earlier attempt. Without that write a failed attempt can only have spent the entry reads, which the first entry charges up front (`CHAIN_COST.entry`). Total per instance: the
+ // failed attempt stayed inside its admissions (spent + ceiling + end reserve within the cap), and the re-entry spends at most the end reserve.
+ const claimRevision=Number(chain.revision);
+ const replayed=async scoped=>{
+  const row=await readChain(scoped,P);
+  if(!row||row.owner_epoch!==epoch||row.claim_nonce!==nonce||row.owner_state!=='active')return {state:'not_owner',replayed:true};
+  fence.revision=Number(row.revision);fence.inputGeneration=Number(row.input_generation);
+  await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_work_replayed'});
+  return {state:'stopped',code:'producer_work_replayed'};
+ };
+ const enter=async()=>{
+  const scoped={...ienv,producerFence:fence};
+  const row=await readChain(scoped,P);
+  if(row&&row.owner_epoch===epoch&&row.claim_nonce===nonce&&Number(row.revision)!==claimRevision)return replayed(scoped);
+  instance.calls+=operationCost('entry');instance.statements+=operationCost('entry');
+  await markWorkEntered(scoped,{fence,at:new Date().toISOString()});
+  return null;
+ };
+ // The budget ran out at a durable boundary. An instance that made NO durable progress (no unit, sweep settle, completion or reconciled receipt) cannot progress in any instance:
+ // its fixed part plus one operation and the end reserve exceed the headroom. That is `producer_budget_infeasible` (fail_closed). Otherwise the successor resumes at the cursor.
+ // A hand-off the epoch cap refuses writes nothing in `handoffChain`; the chain is then STOPPED on the record (`producer_chain_epoch_cap`, fail_closed, visible to the monitor)
+ // instead of answering a hand-off without a successor and leaving an active chain to a lapsing lease.
+ const handOver=async(scoped,reason)=>{
+  const hand=await handoffChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),nowMs:Date.now()});
+  if(hand.state==='handed_off'){
+   await createInstance(env,hand.instanceId,{programmeRunId:P,epoch:hand.epoch});
+   return {state:'handoff',epoch:hand.epoch,...(reason?{reason}:{})};
+  }
+  if(hand.state==='stopped'){
+   await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:hand.code});
+   return {state:'stopped',code:hand.code};
+  }
+  return {state:'dormant'};
+ };
+ const yieldBudget=async scoped=>{
+  if(!totals.progressed){
+   await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_budget_infeasible'});
+   return {state:'stopped',code:'producer_budget_infeasible'};
+  }
+  return handOver(scoped,'budget');
+ };
  const work=async()=>{
   const meter={calls:0,statements:0,batches:0};
-  const scoped=meteredEnv({...env,producerFence:fence},meter);
+  const scoped=meteredEnv({...ienv,producerFence:fence},meter);
+  if(!admit('invocation'))return yieldBudget(scoped);
   const stored=await readChain(scoped,P);
   const pinned=parseReleasePin(stored?.release_pin);
   const snap=await acquireSealedSnapshot(scoped,P,stored?.release_pin?{previousIds:pinned}:{});
   if(!snap.ok){
    if(snap.code==='producer_input_superseded'||snap.code==='producer_generation_superseded'){
     if(rebases>=CHAIN_REBASE_CAP){await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_input_unstable'});return {state:'stopped',code:'producer_input_unstable'};}
-    published=await readPublished(env);
-    const rebased=await rebaseChain(env,{fence,revision:fence.revision,generation:Number(published.generation),at:new Date().toISOString()});
+    published=await readPublished(ienv);
+    const rebased=await rebaseChain(ienv,{fence,revision:fence.revision,generation:Number(published.generation),at:new Date().toISOString()});
     if(rebased.state==='rebased'){fence=rebased.fence;rebases++;return work();}
     return {state:'stopped',code:'producer_input_superseded'};
    }
@@ -407,11 +474,10 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
   }
   fence.inputGeneration=snap.generation;
   if(!stored?.release_pin){
+   // `pinChainReleases` advances `fence.revision` IN PLACE. The fence must stay the SAME object that `scoped.producerFence` holds: every slice commit renews the lease through that object
+   // and moves its revision, so a copy made here would fall behind and the later stop or hand-off would lose its revision CAS (production 24 Nov 2026, epoch 1: `producer_cas_lost`).
    const pinnedAt=await pinChainReleases(scoped,{fence,revision:fence.revision,departed:snap.departed,at:new Date().toISOString()});
-   if(pinnedAt.chain){
-    chain=pinnedAt.chain;
-    fence={...fence,revision:Number(pinnedAt.chain.revision)};
-   }
+   if(pinnedAt.chain)chain=pinnedAt.chain;
   }
   const at=new Date().toISOString();
   const passParams={
@@ -421,16 +487,23 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
    prerequisites:async()=>({}),generationOrder,inputProvenance:{complete:true,committed:true,sealed:true,publishedGeneration:snap.label},
   };
   const plan=await buildEpgPlan(scoped,passParams);
-  try{await drainEpgReceipts(scoped,plan,fence);}
+  let drained;
+  const reconciled=()=>{totals.progressed=true;};
+  try{drained=await drainEpgReceipts(scoped,plan,fence,admit,reconciled);}
   catch(error){
    const code=error?.code||'receipt_state_conflict';
    await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:code}).catch(()=>{});
    return {state:'stopped',code};
   }
+  if(drained?.yield===true){totals.invocations++;return yieldBudget(scoped);}
   const pass=await runEpgProducerPass(scoped,{
    ...passParams,
+   admit,
+   // Durable progress is ACKNOWLEDGED progress: a committed slice, a committed settle, a committed completion (the driver calls this after each commit succeeded).
+   onDurable:reconciled,
    beforePassComplete:async()=>{
-    await drainEpgReceipts(scoped,plan,fence);
+    const done=await drainEpgReceipts(scoped,plan,fence,admit,reconciled);
+    return done?.yield===true?{yield:true}:undefined;
    },
   });
   totals.invocations++;totals.calls+=meter.calls;totals.statements+=meter.statements;
@@ -452,19 +525,18 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:pass.code||'unclassified'}).catch(()=>{});
    return {state:'stopped',code:pass.code,pass};
   }
-  const decision=successorDecision({spentCalls:totals.calls,spentStatements:totals.statements,estimateCalls:totals.maxCalls||CHAIN_FLOOR_D1_CALLS,estimateStatements:totals.maxStatements||CHAIN_FLOOR_D1_STATEMENTS});
+  if(pass.state==='partial'&&(pass.reason==='budget'||pass.detail==='budget'))return yieldBudget(scoped);
+  const decision=successorDecision({spentCalls:instance.calls,spentStatements:instance.statements,estimateCalls:totals.maxCalls||CHAIN_FLOOR_D1_CALLS,estimateStatements:totals.maxStatements||CHAIN_FLOOR_D1_STATEMENTS,...(Number.isFinite(limitCalls)?{limitCalls}:{})});
   if(decision.reason==='producer_budget_infeasible'){
    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_budget_infeasible'});
    return {state:'stopped',code:'producer_budget_infeasible'};
   }
-  if(!decision.continue){
-   const hand=await handoffChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),nowMs:Date.now()});
-   if(hand.state==='handed_off')await createInstance(env,hand.instanceId,{programmeRunId:P,epoch:hand.epoch});
-   return {state:'handoff',epoch:hand.epoch};
-  }
+  if(!decision.continue)return handOver(scoped);
   return work();
  };
- return doStep('work',work);
+ const result=await doStep('work',async()=>(await enter())||work());
+ if(typeof observe==='function')observe('end',null,{calls:instance.calls,statements:instance.statements});
+ return result;
 }
 
 export async function retryEpgProducerResultsFenced(env,params){
