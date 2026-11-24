@@ -1,6 +1,6 @@
 # Canonical Producer outcome outbox, migration 0038: operator, preflight, quiet window, readback (the apply needs its own owner GO)
 
-**Status:** prepared on 24 Nov 2026 under [AIR-594](https://trello.com/c/iPaLDfzP) for [ADR 0208](../adr/0208-producer-outcome-events-delivery-store.md) (Accepted, option B). **Not applied.** A read-only preflight on the deployed `main` read `apply` on 24 Nov 2026 12:22 UTC ([evidence](../evidence/d1-migration/air-594-0038-preflight-2026-11-24.md)). **This runbook authorizes no operation;** the apply is one separate owner GO.
+**Status:** prepared on 24 Nov 2026 under [AIR-594](https://trello.com/c/iPaLDfzP) for [ADR 0208](../adr/0208-producer-outcome-events-delivery-store.md) (Accepted, option B). A read-only preflight on the deployed `main` read `apply` on 24 Nov 2026 12:22 UTC ([evidence](../evidence/d1-migration/air-594-0038-preflight-2026-11-24.md)). **Applied to production D1 `iptv` on 24 Nov 2026 13:33 UTC** under the owner GO, schema 37 to 38, through the merged operator ([evidence](../evidence/d1-migration/air-594-0038-apply-2026-11-24.md)). **This runbook authorizes no further operation.**
 
 ## What the apply does, and does not
 
