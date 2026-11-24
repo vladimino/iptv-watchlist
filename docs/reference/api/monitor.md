@@ -67,13 +67,13 @@ ADR 0206 decision 9 (proposed, owner review pending); rendered by the pure `Moni
 
 | Line | Content |
 | --- | --- |
-| Header | Marker, kind and subsystem: `🚨 Сбой` (critical alert), `⚠️ Проблема` (ordinary alert), `🔁 Напоминание`, `⛔ Ухудшение`, `✅ Восстановлено`, `🧪 Тест`, then `·` and the subsystem (`Программа`, `Находки`, `Оценки`, `Прогнозы`, `Постеры`, `Letterboxd Sync`, `Обогащение каталога`, `Монитор`) |
-| Problem | A fixed Russian title per issue key (`Решено: …` on a recovery); an unknown key shows its sanitized code |
+| Header | Marker, kind and subsystem: `🚨 Сбой` (critical alert), `⚠️ Проблема` (ordinary alert), `🔁 Напоминание`, `⛔ Ухудшение`, `✅ Проблема снята`, `🧪 Тест`, then `·` and the subsystem (`Программа`, `Находки`, `Оценки`, `Прогнозы`, `Постеры`, `Letterboxd Sync`, `Обогащение каталога`, `Монитор`) |
+| Problem | A fixed Russian title per issue key (`Больше не наблюдается: …` on a recovery); an unknown key shows its sanitized code. A legacy recovery with the stream `canonical` or `catalog` is named by its issue key |
 | Severity | `🔴 критично` or `🟠 деградация`; on a recovery `Была критичной` when it was |
 | Statistics | `• label: value` lines from the issue's typed `metrics` (for example eligible and queued predictions, ownerless starts, remaining Discovery chunks, the EPG due time and last publication, the quarantine or stop reason, the poster detail, the Letterboxd backlog). Left out when unknown; never on a recovery |
-| `⏱ Без прогресса` | The domain's own no-progress period and its onset (last confirmed progress), when the facts carry it; `⏱ Опоздание` for EPG |
+| `⏱ Без …` | The domain's own stall at the observation, labelled by what it measures: Predictions without confirmed progress (with the last confirmed progress); Discovery without allowed progress (`max(overdue, idle)`, with the allowed time) and, as a statistic, the last finished chunk; the Producer without confirmed progress counted from its reference (`отсчёт с`, possibly the publication) beside the last confirmed progress or `не было в этом окне`. `⏱ Опоздание` for EPG |
 | `🕒 Инцидент открыт` | The monitor's observed lifetime: from `firstSeenAt` (first snapshot, possibly before the confirmation) to the observation that planned the message (`observedAt`, else the queue time) |
-| `🕒 Длительность инцидента` | Recovery only: `firstSeenAt` to the detection (`endedAt`, frozen when planned; legacy: queue time). A late delivery never lengthens it |
+| `🕒 Длительность инцидента по наблюдениям монитора` | Recovery only: `firstSeenAt` to the detection (`endedAt`, frozen when planned; legacy: queue time). A late delivery never lengthens it. About the domain a recovery repeats only the last measured stall as `было не меньше X (на последнем наблюдении …)`; it never claims the domain recovered at the noticing tick |
 | `📨 Отправлено с задержкой` | Only when the send is more than 15 minutes after the observation or detection |
 | `🌐 В целом` | The overall state at the send. On a recovery while the site is still degraded: `остаются другие проблемы (восстановлена только эта)` |
 | `Время` | The send time in Europe/Madrid, labelled; all times in the text are Madrid |

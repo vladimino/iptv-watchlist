@@ -15,10 +15,11 @@ const samples=[];
 const sample=(label,text)=>{samples.push({label,text});return text;};
 
 // 1. The owner's Predictions example (22 Nov 2026): 3533 eligible, 15 h without confirmed progress, 11 ownerless starts, last progress 21.11 17:00:23 UTC,
-// alert 08:00:23 UTC, recovery 13:00:23 UTC. The issue comes from the real policy, so the statistics are its typed metrics, not a parsed sentence.
+// alert 08:00:23 UTC, recovery noticed at 13:00:23 UTC. The issue comes from the real policy, so the statistics are its typed metrics, not a parsed sentence.
+const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligibleNow:3533,lastProgressAt:'2026-11-21T17:00:23.000Z',stall:{state:'no_progress',reason:'repeated_orphan_starts',orphanStarts:11,idleMs},...extra});
 {
  const now=T('2026-11-22T08:00:23Z');
- const evaluated=P.evaluatePredictions({present:true,pendingCount:3600,eligibleNow:3533,lastProgressAt:'2026-11-21T17:00:23.000Z',stall:{state:'no_progress',reason:'repeated_orphan_starts',orphanStarts:11,idleMs:15*H}},null,now);
+ const evaluated=P.evaluatePredictions(predictionFacts(15*H),null,now);
  const item=evaluated.issues[0];
  assert.deepEqual(item.metrics,{eligible:3533,pending:3600,idleMs:15*H,orphanStarts:11,lastProgressAt:'2026-11-21T17:00:23.000Z'},'typed metrics from the facts already read');
  const plan=P.planAlerts(evaluated.issues,{issues:{}},now);
@@ -31,49 +32,75 @@ const sample=(label,text)=>{samples.push({label,text});return text;};
   '• Доступно к прогнозу сейчас: 3533',
   '• В очереди всего: 3600',
   '• Запусков без фильма с последнего прогресса: 11',
-  '⏱ Без прогресса: 15 ч (последний подтверждённый прогресс 21.11 18:00)',
+  '⏱ Без подтверждённого прогресса: 15 ч (последний подтверждённый прогресс 21.11 18:00)',
   '🕒 Инцидент открыт: 22.11 09:00 · идёт меньше минуты',
   '🌐 В целом: ⚠️ есть проблемы',
   'Время: 22.11 09:00:30 · Мадрид (Europe/Madrid)',
   'Ref: predictions_no_progress|alert|2026-11-22T08:00:23.000Z'].join('\n'));
- // The issue clears at 13:00:23 UTC: one recovery, frozen at its detection, with the stored metrics as its domain onset.
- const recovered=P.planAlerts([],{issues:{predictions_no_progress:{...plan.state.issues.predictions_no_progress,lastSentAt:alert.observedAt,sendCount:1}}},T('2026-11-22T13:00:23Z')).sends[0];
- assert.deepEqual([recovered.kind,recovered.stream,recovered.endedAt,recovered.firstSeenAt],['recovery','predictions','2026-11-22T13:00:23.000Z','2026-11-22T08:00:23.000Z']);
+ // The issue is still seen at the 12:00:23 tick (19 h without confirmed progress); a productive batch then lands at 12:10 and the 13:00:23 tick no
+ // longer sees the issue. The recovery reports the last measured stall as a lower bound at its observation, never the 20 h up to the noticing tick.
+ let state=plan.state;state.issues.predictions_no_progress={...state.issues.predictions_no_progress,lastSentAt:alert.observedAt,sendCount:1};
+ for(const hour of [9,10,11,12])state=P.planAlerts(P.evaluatePredictions(predictionFacts((hour-8+15)*H),null,T('2026-11-22T'+String(hour).padStart(2,'0')+':00:23Z')).issues,state,T('2026-11-22T'+String(hour).padStart(2,'0')+':00:23Z')).state;
+ assert.deepEqual([state.issues.predictions_no_progress.metrics.idleMs,state.issues.predictions_no_progress.metricsAt],[19*H,'2026-11-22T12:00:23.000Z'],'the entry keeps the last measured stall and when it was measured');
+ const healthy=P.evaluatePredictions(predictionFacts(null,{lastProgressAt:'2026-11-22T12:10:00.000Z',stall:{state:'ok',idleMs:50*MIN}}),null,T('2026-11-22T13:00:23Z'));
+ assert.deepEqual(healthy.issues,[]);
+ const recovered=P.planAlerts(healthy.issues,state,T('2026-11-22T13:00:23Z')).sends[0];
+ assert.deepEqual([recovered.kind,recovered.stream,recovered.endedAt,recovered.firstSeenAt,recovered.metricsAt],['recovery','predictions','2026-11-22T13:00:23.000Z','2026-11-22T08:00:23.000Z','2026-11-22T12:00:23.000Z']);
  const message={...recovered,id:'predictions_no_progress|recovery|2026-11-22T13:00:23.000Z',queuedAt:recovered.endedAt};
- const text=sample('Predictions recovery (owner example)',render(message,'healthy','2026-11-22T13:00:30Z'));
+ const text=sample('Predictions recovery (owner example; progress landed at 12:10 UTC, between the last observation and the noticing tick)',render(message,'healthy','2026-11-22T13:00:30Z'));
  assert.equal(text,[
-  '✅ Восстановлено · Прогнозы',
-  'Решено: Нет подтверждённого прогресса прогнозов',
-  '⏱ Без прогресса было: 20 ч (с 21.11 18:00)',
-  '🕒 Длительность инцидента: 5 ч (22.11 09:00 → 22.11 14:00)',
+  '✅ Проблема снята · Прогнозы',
+  'Больше не наблюдается: Нет подтверждённого прогресса прогнозов',
+  '⏱ Без подтверждённого прогресса было не меньше 19 ч (на последнем наблюдении 22.11 13:00)',
+  '🕒 Длительность инцидента по наблюдениям монитора: 5 ч (22.11 09:00 → 22.11 14:00)',
   '🌐 В целом сейчас: ✅ всё в порядке',
   'Время: 22.11 14:00:30 · Мадрид (Europe/Madrid)',
   'Ref: predictions_no_progress|recovery|2026-11-22T13:00:23.000Z'].join('\n'));
+ assert.doesNotMatch(text,/20 ч/,'the gap up to the noticing tick is not presented as the domain outage');
  // Frozen: the same recovery delivered six hours later after an outage reports the same durations and says it was late.
  const late=render(message,'healthy','2026-11-22T19:30:00Z').split('\n');
- assert.ok(late.includes('🕒 Длительность инцидента: 5 ч (22.11 09:00 → 22.11 14:00)'),'a late delivery does not lengthen the incident');
+ assert.ok(late.includes('🕒 Длительность инцидента по наблюдениям монитора: 5 ч (22.11 09:00 → 22.11 14:00)'),'a late delivery does not lengthen the incident');
  assert.ok(late.includes('📨 Отправлено с задержкой: обнаружено 22.11 14:00, отправлено 22.11 20:30'));
+ // An issue that disappears without any evidence of progress (the queue split became unreadable: delayed, never an alert) still reads only as "no
+ // longer seen": the stall line stays the last measured lower bound and nothing claims that predictions recovered.
+ const unreadable=P.evaluatePredictions(predictionFacts(null,{stall:{state:'unknown',reason:'queue_unreadable',idleMs:null}}),null,T('2026-11-22T13:00:23Z'));
+ assert.deepEqual([unreadable.state,unreadable.issues.length],['delayed',0]);
+ const gone=P.planAlerts(unreadable.issues,state,T('2026-11-22T13:00:23Z')).sends[0];
+ const goneText=sample('Recovery without evidence of progress (the issue only disappeared)',render({...gone,id:'predictions_no_progress|recovery|x',queuedAt:gone.endedAt},'delayed','2026-11-22T13:00:30Z')).split('\n');
+ assert.equal(goneText[1],'Больше не наблюдается: Нет подтверждённого прогресса прогнозов');
+ assert.ok(goneText.includes('⏱ Без подтверждённого прогресса было не меньше 19 ч (на последнем наблюдении 22.11 13:00)'));
+ assert.ok(goneText.includes('🌐 В целом сейчас: 🕓 есть задержки'));
+ assert.ok(!goneText.some(line=>/восстановлен|Восстановлено/.test(line)),'a missing issue is not presented as a physical recovery');
 }
 
 // 2. The owner's Discovery example (12 Nov 2026): the executor stalled alert at 04:00:42 UTC, its recovery at 05:00:42 UTC while the site stays degraded.
+// Only a finished chunk (`lastChunkFinishedAt`) is progress; the continuation record's update time is not.
 {
  const now=T('2026-11-12T04:00:42Z');
- const evaluated=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T03:20:00.000Z',readout:{stalled:true,quarantined:false},continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:12,at:'2026-11-12T03:20:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T03:30:00.000Z'}},now);
+ const evaluated=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T03:20:00.000Z',readout:{stalled:true,quarantined:false},continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:12,at:'2026-11-12T03:50:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T03:30:00.000Z'}},now);
  const item=evaluated.issues.find(entry=>entry.key==='discovery_executor_stalled');
- assert.deepEqual(item.metrics,{remainingChunks:12,lastProgressAt:'2026-11-12T03:20:00.000Z',executor:'workflow'});
+ assert.deepEqual(item.metrics,{remainingChunks:12,lastChunkAt:'2026-11-12T03:20:00.000Z',executor:'workflow'},'the record time 03:50 is not taken as progress');
  const first=P.planAlerts([item],{issues:{}},T('2026-11-12T03:00:42Z'));
  const plan=P.planAlerts([item],first.state,now);
  const alert={...plan.sends[0],id:'discovery_executor_stalled|alert|2026-11-12T04:00:42.000Z',queuedAt:'2026-11-12T04:00:42.000Z',observedAt:'2026-11-12T04:00:42.000Z'};
  const alertText=sample('Discovery alert (owner example; first seen one tick before the confirmation)',render(alert,'degraded','2026-11-12T04:00:50Z')).split('\n');
  assert.equal(alertText[0],'⚠️ Проблема · Находки');assert.equal(alertText[1],'Исполнитель Находок (Workflow) остановился');
+ assert.ok(alertText.includes('• Последний завершённый чанк: 12.11 04:20'));
+ assert.ok(alertText.includes('⏱ С последнего завершённого чанка: 41 мин'),'measured from the finished chunk to the observation');
  assert.ok(alertText.includes('🕒 Инцидент открыт: 12.11 04:00 · идёт 1 ч'),'firstSeenAt before the confirmation is the opening of the incident');
- assert.ok(alertText.includes('⏱ Без прогресса: 41 мин (последний подтверждённый прогресс 12.11 04:20)'),'without a measured idle the period runs from the known onset to the observation');
  const recovered=P.planAlerts([],{issues:{discovery_executor_stalled:{...plan.state.issues.discovery_executor_stalled,sendCount:1,lastSentAt:alert.observedAt}}},T('2026-11-12T05:00:42Z')).sends[0];
  const text=sample('Discovery recovery while another issue is still open (owner example)',render({...recovered,id:'discovery_executor_stalled|recovery|2026-11-12T05:00:42.000Z',queuedAt:recovered.endedAt},'degraded','2026-11-12T05:00:50Z')).split('\n');
- assert.equal(text[0],'✅ Восстановлено · Находки');
- assert.ok(text.includes('🕒 Длительность инцидента: 2 ч (12.11 04:00 → 12.11 06:00)'));
+ assert.equal(text[0],'✅ Проблема снята · Находки');
+ assert.ok(text.includes('🕒 Длительность инцидента по наблюдениям монитора: 2 ч (12.11 04:00 → 12.11 06:00)'));
  assert.ok(text.includes('🌐 В целом сейчас: ⚠️ остаются другие проблемы (восстановлена только эта)'),'a recovery of one issue never claims the site is healthy');
  assert.ok(!text.some(line=>/всё в порядке/.test(line)));
+ // discovery_stalled keeps the threshold's own diagnostic: no ALLOWED progress for max(overdue, idle) (the policy's idle still counts the record time), with
+ // the allowed time and, separately, the last finished chunk.
+ const stalled=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T00:00:00.000Z',readout:null,continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:7,at:'2026-11-12T03:00:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T00:30:00.000Z'}},now).issues.find(entry=>entry.key==='discovery_stalled');
+ assert.deepEqual(stalled.metrics,{remainingChunks:7,stalledMs:T('2026-11-12T04:00:42Z')-T('2026-11-12T00:30:00Z'),allowedAt:'2026-11-12T00:30:00.000Z',lastChunkAt:'2026-11-12T00:00:00.000Z',executor:'workflow'});
+ const stalledText=sample('Discovery stalled (no allowed progress)',render({...stalled,kind:'alert',firstSeenAt:'2026-11-12T03:00:42.000Z',observedAt:'2026-11-12T04:00:42.000Z',id:'discovery_stalled|alert|x'},'degraded','2026-11-12T04:00:50Z')).split('\n');
+ assert.ok(stalledText.includes('⏱ Без разрешённого прогресса: 3 ч 31 мин (следующий шаг был разрешён с 12.11 01:30)'));
+ assert.ok(stalledText.includes('• Последний завершённый чанк: 12.11 01:00'));
 }
 
 // 3. Every kind has its own marker; critical has its own alert marker; reminder, escalation and test are labelled.
@@ -81,7 +108,7 @@ const sample=(label,text)=>{samples.push({label,text});return text;};
  const base={key:'canonical_producer_failed',stream:'canonical_producer',severity:'degraded',critical:true,firstSeenAt:'2026-11-24T02:00:00.000Z',observedAt:'2026-11-24T03:00:00.000Z',metrics:{stoppedBy:'producer_budget_infeasible',hard:true,generation:'r1:5'}};
  const at='2026-11-24T03:00:10Z';
  const first=kind=>render({...base,kind,id:'canonical_producer_failed|'+kind+'|x'},'degraded',at).split('\n')[0];
- assert.deepEqual(['alert','reminder','escalation','recovery'].map(first),['🚨 Сбой · Обогащение каталога','🔁 Напоминание · Обогащение каталога','⛔ Ухудшение · Обогащение каталога','✅ Восстановлено · Обогащение каталога']);
+ assert.deepEqual(['alert','reminder','escalation','recovery'].map(first),['🚨 Сбой · Обогащение каталога','🔁 Напоминание · Обогащение каталога','⛔ Ухудшение · Обогащение каталога','✅ Проблема снята · Обогащение каталога']);
  assert.equal(first.call(null,'alert'),'🚨 Сбой · Обогащение каталога');
  assert.equal(render({...base,critical:false,kind:'alert',id:'x'},'degraded',at).split('\n')[0],'⚠️ Проблема · Обогащение каталога');
  const hard=sample('Canonical Producer critical alert (hard stop)',render({...base,kind:'alert',id:'canonical_producer_failed|alert|2026-11-24T03:00:00.000Z'},'degraded',at)).split('\n');
@@ -122,7 +149,7 @@ const sample=(label,text)=>{samples.push({label,text});return text;};
  assert.ok(text.includes('🕒 Инцидент открыт: неизвестно'));
  assert.ok(!text.some(line=>/: 0\b|-3|1\.5|NaN|undefined|null/.test(line)),'no fabricated zero, NaN or null');
  const recovery=render({kind:'recovery',key:'epg_stale',stream:'epg',severity:'healthy',message:'Recovered',id:'epg_stale|recovery|x'},'healthy','2026-11-24T10:00:00Z').split('\n');
- assert.ok(recovery.includes('🕒 Длительность инцидента: неизвестно'));
+ assert.ok(recovery.includes('🕒 Длительность инцидента по наблюдениям монитора: неизвестно'));
  assert.equal(R.duration(-1),'неизвестно');assert.equal(R.duration(NaN),'неизвестно');assert.equal(R.duration(30000),'меньше минуты');
  assert.deepEqual([45*MIN,90*MIN,15*H,50*H].map(R.duration),['45 мин','1 ч 30 мин','15 ч','2 д 2 ч']);
 }
@@ -136,9 +163,12 @@ const sample=(label,text)=>{samples.push({label,text});return text;};
  assert.ok(text.includes('🕒 Инцидент открыт: 24.11 06:00 · идёт 2 ч'),'the queue time stands in for the observation');
  assert.ok(text.includes('🌐 В целом: ⚠️ есть проблемы'));assert.equal(text.at(-1),'Ref: '+legacy.id,'the stable id is kept');
  const recovery=render({kind:'recovery',key:'discovery_stalled',severity:'healthy',stream:'discovery',message:'Recovered',firstSeenAt:'2026-11-24T01:00:00.000Z',id:'discovery_stalled|recovery|2026-11-24T04:00:00.000Z',queuedAt:'2026-11-24T04:00:00.000Z'},'healthy','2026-11-24T06:00:00Z').split('\n');
- assert.ok(recovery.includes('🕒 Длительность инцидента: 3 ч (24.11 02:00 → 24.11 05:00)'),'a legacy recovery ends at its queue time, frozen');
- // A legacy recovery of `canonical_producer_*` carried the stream `canonical` (the key prefix): it still renders.
- assert.equal(render({kind:'recovery',key:'canonical_producer_failed',severity:'healthy',stream:'canonical',message:'Recovered',id:'x'},'healthy','2026-11-24T06:00:00Z').split('\n')[0],'✅ Восстановлено · canonical');
+ assert.ok(recovery.includes('🕒 Длительность инцидента по наблюдениям монитора: 3 ч (24.11 02:00 → 24.11 05:00)'),'a legacy recovery ends at its queue time, frozen');
+ // A legacy recovery of `canonical_producer_*` / `catalog_posters_*` carried the key prefix as its stream (`canonical`, `catalog`): the issue key still
+ // identifies the real subsystem for the text (the stored and webhook fields are not changed).
+ assert.equal(render({kind:'recovery',key:'canonical_producer_failed',severity:'healthy',stream:'canonical',message:'Recovered',id:'x'},'healthy','2026-11-24T06:00:00Z').split('\n')[0],'✅ Проблема снята · Обогащение каталога');
+ assert.equal(render({kind:'recovery',key:'catalog_posters_failed',severity:'healthy',stream:'catalog',message:'Recovered',id:'x'},'healthy','2026-11-24T06:00:00Z').split('\n')[0],'✅ Проблема снята · Постеры');
+ assert.equal(render({kind:'recovery',key:'odd_key',severity:'healthy',stream:'canonical',message:'Recovered',id:'x'},'healthy','2026-11-24T06:00:00Z').split('\n')[0],'✅ Проблема снята · canonical','without a matching key the code stays as it is');
 }
 
 // 8. Long and unsafe input: markup, control and direction characters, a huge detail and a huge id stay bounded; the Ref line is never cut.
@@ -160,6 +190,39 @@ const sample=(label,text)=>{samples.push({label,text});return text;};
  assert.deepEqual([recovery.stream,recovery.wasCritical,recovery.endedAt],['canonical_producer',true,'2026-11-24T10:00:00.000Z'],'the recovery names its real stream (no longer the key prefix) and is frozen at detection');
  const legacyRecovery=P.planAlerts([],{issues:{canonical_producer_failed:{severity:'needs_owner',firstSeenAt:'2026-11-24T08:00:00.000Z',seen:2,lastSentAt:'2026-11-24T08:00:00.000Z',sendCount:1}}},t0).sends[0];
  assert.equal(legacyRecovery.stream,'canonical','an entry stored before ADR 0206 has no stream: the previous key-prefix fallback stays');
+}
+
+// 10. Review fixtures: baseline versus confirmed progress, diagnostic details kept, out-of-range times, no manufactured counts.
+{
+ const now=T('2026-11-24T10:00:00Z');
+ // A Producer window counted from the publication with no confirmed progress at all: the reference is shown as a reference, not as progress.
+ const baseline=P.evaluateCanonicalProducer({readable:true,held:false,label:'r9:3',publishedAt:'2026-11-24T06:30:00.000Z',sinceAt:'2026-11-24T06:30:00.000Z',progressAt:null,run:{passState:'active'},chain:{ownerState:'active'}},now).issues[0];
+ assert.equal(baseline.key,'canonical_producer_no_progress');
+ assert.deepEqual(baseline.metrics,{idleMs:3.5*H,sinceAt:'2026-11-24T06:30:00.000Z',chain:'active',run:'active',generation:'r9:3'},'no progressAt: nothing confirmed');
+ const baselineText=sample('Canonical Producer without confirmed progress (window counted from the publication)',render({...baseline,kind:'alert',firstSeenAt:'2026-11-24T10:00:00.000Z',observedAt:'2026-11-24T10:00:00.000Z',id:'canonical_producer_no_progress|alert|x'},'degraded','2026-11-24T10:00:05Z')).split('\n');
+ assert.ok(baselineText.includes('⏱ Без подтверждённого прогресса: 3 ч 30 мин (отсчёт с 24.11 07:30)'));
+ assert.ok(baselineText.includes('• Последний подтверждённый прогресс: не было в этом окне'));
+ assert.ok(!baselineText.some(line=>/последний подтверждённый прогресс 24\.11 07:30/.test(line)),'the reference is never called progress');
+ const confirmed=P.evaluateCanonicalProducer({readable:true,held:false,label:'r9:3',publishedAt:'2026-11-24T05:00:00.000Z',sinceAt:'2026-11-24T07:00:00.000Z',progressAt:'2026-11-24T07:00:00.000Z',run:{passState:'active'},chain:{ownerState:'active'}},now).issues[0];
+ assert.ok(render({...confirmed,kind:'alert',firstSeenAt:'2026-11-24T10:00:00.000Z',id:'x'},'degraded','2026-11-24T10:00:05Z').includes('• Последний подтверждённый прогресс: 24.11 08:00'));
+ // Letterboxd keeps "never succeeded" apart from "older than 24 h"; Ratings keeps "two hours after the due time".
+ const lb=warning=>P.evaluateLetterboxd({health:'healthy',mode:'cloudflare',sources:{watchlist:{stale:true,warning}}},now).issues.find(entry=>entry.key==='letterboxd_watchlist_stale');
+ assert.ok(render({...lb('watchlist_never_succeeded'),kind:'alert',id:'x'},'degraded','2026-11-24T10:00:05Z').includes('• Подробно: ни одного полного скана Watchlist с запуска исполнителя'));
+ assert.ok(sample('Letterboxd Watchlist stale for 24 h',render({...lb('watchlist_stale'),kind:'alert',firstSeenAt:'2026-11-24T09:00:00.000Z',observedAt:'2026-11-24T10:00:00.000Z',id:'letterboxd_watchlist_stale|alert|x'},'degraded','2026-11-24T10:00:05Z')).includes('• Подробно: нет успешного полного скана Watchlist больше 24 ч'));
+ const ratings=sample('Ratings stalled',render({...P.evaluateRatings({mode:'cloudflare',health:'stalled'},now).issues[0],kind:'alert',firstSeenAt:'2026-11-24T09:00:00.000Z',observedAt:'2026-11-24T10:00:00.000Z',id:'ratings_stalled|alert|x'},'degraded','2026-11-24T10:00:05Z')).split('\n');
+ assert.equal(ratings[1],'Оценки: нет завершённого дня и прогресса через 2 ч после срока');
+ assert.ok(ratings.includes('• Подробно: нет завершённого дня и подтверждённого прогресса через 2 ч после срока (17:00 Мадрид)'));
+ // Out-of-range and malformed times are unknown and never reach Intl (a RangeError there would lose the message).
+ for(const bad of [9e15,-9e15,'+275760-09-13T00:00:00.001Z',Infinity,'2026-13-45T99:00:00Z',{},[]]){
+  const text=R.telegramText({kind:'recovery',key:'epg_stale',stream:'epg',severity:'healthy',firstSeenAt:bad,endedAt:bad,metrics:{idleMs:5*H},metricsAt:bad,id:'epg_stale|recovery|x'},{overall:'healthy',now:typeof bad==='number'?bad:T('2026-11-24T10:00:00Z')});
+  assert.ok(text.includes('🕒 Длительность инцидента по наблюдениям монитора: неизвестно'),String(bad));
+  const alert=R.telegramText({kind:'alert',key:'predictions_no_progress',stream:'predictions',severity:'degraded',firstSeenAt:bad,observedAt:bad,metrics:{idleMs:H,lastProgressAt:bad},id:'x'},{overall:'degraded',now:T('2026-11-24T10:00:00Z')});
+  assert.ok(alert.includes('🕒 Инцидент открыт: неизвестно')&&alert.includes('(последний подтверждённый прогресс неизвестно)'),String(bad));
+ }
+ // An unknown queue size is not reported as 0.
+ const unknownPending=P.evaluatePredictions({present:true,eligibleNow:5,lastProgressAt:null,stall:{state:'no_progress',reason:'no_progress',idleMs:2*H}},null,now).issues[0];
+ assert.equal('pending' in unknownPending.metrics,false,'a missing pendingCount is not coerced to 0 in the metrics');
+ assert.ok(!render({...unknownPending,kind:'alert',id:'x'},'degraded','2026-11-24T10:00:05Z').includes('В очереди всего'));
 }
 
 if(process.env.IPTV_PRINT_SAMPLES)for(const item of samples)console.log('### '+item.label+'\n\n```text\n'+item.text+'\n```\n');

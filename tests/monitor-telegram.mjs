@@ -64,7 +64,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 {
  const t=setup();
  const text=kind=>(t.M.internals.telegramText({kind,severity:'degraded',stream:'epg',key:'epg_stale',message:'No generation published',id:'x'},'degraded',T0)).split('\n')[0];
- assert.deepEqual(['alert','reminder','escalation','recovery','test'].map(text),['⚠️ Проблема · Программа','🔁 Напоминание · Программа','⛔ Ухудшение · Программа','✅ Восстановлено · Программа','🧪 Тест · Программа']);
+ assert.deepEqual(['alert','reminder','escalation','recovery','test'].map(text),['⚠️ Проблема · Программа','🔁 Напоминание · Программа','⛔ Ухудшение · Программа','✅ Проблема снята · Программа','🧪 Тест · Программа']);
  assert.equal(t.M.internals.telegramText({kind:'alert',severity:'degraded',critical:true,stream:'epg',key:'epg_authority',id:'x'},'degraded',T0).split('\n')[0],'🚨 Сбой · Программа','a critical alert has its own marker');
 }
 
@@ -179,7 +179,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.deepEqual(t.bucket.value(KEY).outbox.slice(0,3).map(item=>item.id.slice(0,2)),['se','se','se']);assert.deepEqual(t.bucket.value(KEY).outbox.slice(-2).map(item=>item.id),['seed_0|recovery|x','seed_1|recovery|x'],'failed heads moved to the tail');
  t.answer(()=>({status:200,body:{ok:true,result:{}}}));let hour=2;
  for(;t.bucket.value(KEY).outbox.length&&hour<20;hour++)await t.M.run(t.env,{now:T0+hour*H});
- assert.equal(hour,8,'drained at five per tick');assert.equal(new Set(tg(t.calls).filter(item=>item.body.text.startsWith('✅ Восстановлено')).map(item=>item.body.text.split('\n').find(line=>line.startsWith('Ref: ')))).size,30,'all thirty Refs were delivered');
+ assert.equal(hour,8,'drained at five per tick');assert.equal(new Set(tg(t.calls).filter(item=>item.body.text.startsWith('✅ Проблема снята')).map(item=>item.body.text.split('\n').find(line=>line.startsWith('Ref: ')))).size,30,'all thirty Refs were delivered');
 }
 
 // 10. Concurrent ticks send once over Telegram; a recovery superseded by a reoccurrence is never sent.
@@ -236,13 +236,13 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  const lines=sent[0].body.text.split('\n');assert.equal(lines[0],'🔁 Напоминание · Оценки');assert.equal(lines.at(-1),'Ref: '+pendingId,'the receiver can still drop a repeat by its id');
  const doc=t.bucket.value(KEY);assert.doesNotMatch(JSON.stringify(doc),/needs_owner/,'the next write carries no needs_owner');
  assert.deepEqual(doc.outbox,[]);assert.equal(doc.overall,'degraded');
- assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0),sendCount:2,sendDay:day,sendsToday:2,stream:'ratings',metrics:{reason:'budget_exhausted'}},'history kept; the delivery at T0 (not the queue time T0-1h) is the last send');
+ assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0),sendCount:2,sendDay:day,sendsToday:2,stream:'ratings',metrics:{reason:'budget_exhausted'},metricsAt:at(T0)},'history kept; the delivery at T0 (not the queue time T0-1h) is the last send');
  for(const hour of [1,2,3,4,5])await t.M.run(t.env,{now:T0+hour*H});
  assert.equal(tg(t.calls).length,1,'no reminder before 6 h after the successful delivery');
  await t.M.run(t.env,{now:T0+6*H});assert.deepEqual(tg(t.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['🔁 Напоминание · Оценки'],'the reminder 6 h after the last delivery');
  t.ctx.model={mode:'cloudflare',health:'healthy',failure:null};
  await t.M.run(t.env,{now:T0+7*H});await t.M.run(t.env,{now:T0+8*H});
- assert.deepEqual(tg(t.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['✅ Восстановлено · Оценки'],'one recovery');
+ assert.deepEqual(tg(t.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['✅ Проблема снята · Оценки'],'one recovery');
 }
 
 // 14. ADR 0206 settlement: a delayed delivery counts from its successful send, on the UTC day it was sent, never from the time it was queued.
