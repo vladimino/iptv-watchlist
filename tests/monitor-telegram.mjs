@@ -43,7 +43,7 @@ const tg=calls=>calls.filter(item=>item.url.startsWith('https://api.telegram.org
 const owner=t=>{t.ctx.model={mode:'cloudflare',health:'quarantined',quarantine:{reason:'budget_exhausted'}};};
 const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.from({length:count},(_,index)=>({id:'seed_'+index+'|recovery|x',kind:'recovery',severity:'healthy',stream:'epg',key:'seed_'+index,message:'Recovered',queuedAt:at(T0)}));t.bucket.set(KEY,doc);};
 
-// 1. The fixed Bot API endpoint, a plain-text body and the AIR-349 accounting: a needs-owner issue alerts at once, delivered once.
+// 1. The fixed Bot API endpoint, a plain-text body and the AIR-349 accounting: a critical issue (ADR 0206) alerts at once, delivered once.
 {
  const t=setup();healthy(t.bucket);owner(t);
  const result=plain(await t.M.run(t.env,{now:T0}));assert.deepEqual([result.sent,result.failed],[1,0]);
@@ -52,7 +52,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.deepEqual(Object.keys(sent[0].body).sort(),['chat_id','disable_web_page_preview','text'],'no parse_mode: plain text');
  assert.equal(sent[0].body.chat_id,CHAT);assert.equal(sent[0].body.disable_web_page_preview,true);
  const lines=sent[0].body.text.split('\n');
- assert.equal(lines[0],'IPTV monitor: ALERT (needs_owner)');assert.ok(lines.includes('Stream: ratings'));assert.ok(lines.includes('Issue: ratings_quarantined'));
+ assert.equal(lines[0],'IPTV monitor: ALERT (degraded, critical)');assert.ok(lines.includes('Stream: ratings'));assert.ok(lines.includes('Issue: ratings_quarantined'));
  assert.ok(lines.some(line=>line.startsWith('Overall: ')));assert.ok(lines.includes('At: '+at(T0)));assert.ok(lines.some(line=>line.startsWith('Ref: ratings_quarantined|alert|')));
  const doc=t.bucket.value(KEY);assert.deepEqual(doc.outbox,[]);assert.equal(doc.alerts.issues.ratings_quarantined.sendCount,1);assert.equal(doc.lastDeliveryFailure,null);
  assert.equal(t.calls.filter(item=>item.method==='GET').length,1,'the heartbeat ping is unchanged');
@@ -141,7 +141,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  const t=setup({MONITOR_TRANSPORT:undefined,MONITOR_WEBHOOK_URL:'https://hooks.example/alert'});healthy(t.bucket);owner(t);
  const result=plain(await t.M.run(t.env,{now:T0}));assert.equal(result.sent,1);
  assert.equal(tg(t.calls).length,0,'Telegram is not used unless it is chosen');
- const posted=t.calls.filter(item=>item.url.startsWith('https://hooks.example/'));assert.equal(posted.length,1);assert.deepEqual(Object.keys(posted[0].body).sort(),['at','id','key','kind','message','overall','severity','source','stream']);
+ const posted=t.calls.filter(item=>item.url.startsWith('https://hooks.example/'));assert.equal(posted.length,1);assert.deepEqual(Object.keys(posted[0].body).sort(),['at','critical','id','key','kind','message','overall','severity','source','stream']);
  const status=plain(await t.M.status(t.env,T0));assert.deepEqual([status.transport,status.alerting],['webhook',true]);
  const chosen=setup({MONITOR_WEBHOOK_URL:'https://hooks.example/alert'});healthy(chosen.bucket);owner(chosen);await chosen.M.run(chosen.env,{now:T0});
  assert.equal(chosen.calls.filter(item=>item.url.startsWith('https://hooks.example/')).length,0,'a chosen Telegram transport never falls back to the webhook');assert.equal(tg(chosen.calls).length,1);
@@ -180,7 +180,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  t.answer(()=>({status:500,raw:''}));await t.M.run(t.env,{now:T0+H});
  assert.deepEqual(t.bucket.value(KEY).outbox.map(item=>item.kind),['recovery']);owner(t);
  t.answer(()=>({status:200,body:{ok:true,result:{}}}));const before=tg(t.calls).length;await t.M.run(t.env,{now:T0+2*H});
- const fresh=tg(t.calls).slice(before);assert.deepEqual(fresh.map(item=>item.body.text.split('\n')[0]),['IPTV monitor: ALERT (needs_owner)'],'only the new alert is sent: the pending recovery was superseded');
+ const fresh=tg(t.calls).slice(before);assert.deepEqual(fresh.map(item=>item.body.text.split('\n')[0]),['IPTV monitor: ALERT (degraded, critical)'],'only the new alert is sent: the pending recovery was superseded');
  assert.deepEqual(t.bucket.value(KEY).outbox,[]);
 }
 {
@@ -209,4 +209,32 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.equal((source.match(/api\.telegram\.org/g)||[]).length,1,'one fixed Bot API host');assert.doesNotMatch(source,/getUpdates|setWebhook|parse_mode/,'outbound sendMessage only, plain text');
 }
 
-console.log('Monitor Telegram: fixed endpoint and plain text, ok:false/401/403/429/timeout/malformed/network never count as delivered, retry_after hold without sleeping, fail-closed configuration, no leak, transport choice, off no-op (the retired dry token included), AIR-349 outbox budget and CAS over Telegram passed');
+// 13. ADR 0206 rollout over a state document written before it: the stored `needs_owner` is read as degraded and critical, the undelivered message keeps its id
+// and is delivered once, the history and the last send time are kept, the next reminder comes 6 h after the last delivery and one recovery follows.
+{
+ const t=setup();healthy(t.bucket);owner(t);
+ const day=at(T0).slice(0,10),issue='ratings_quarantined',pendingId=issue+'|reminder|'+at(T0-H);
+ t.bucket.set(KEY,{schemaVersion:1,updatedAt:at(T0-H),heartbeatAt:at(T0-H),mode:'on',overall:'needs_owner',
+  streams:[{stream:'ratings',state:'needs_owner',facts:{mode:'cloudflare',health:'quarantined'},issues:[{key:issue,severity:'needs_owner'}]}],
+  alerts:{issues:{[issue]:{severity:'needs_owner',firstSeenAt:at(T0-3*H),seen:3,lastSentAt:at(T0-3*H),sendCount:1,sendDay:day,sendsToday:1}}},
+  outbox:[{kind:'reminder',key:issue,severity:'needs_owner',stream:'ratings',message:'The Ratings run is quarantined (budget_exhausted)',firstSeenAt:at(T0-3*H),id:pendingId,queuedAt:at(T0-H),after:{lastSentAt:at(T0-H),sendCount:2,sendDay:day,sendsToday:2}}],
+  cancelledUndelivered:0,holdUntil:null,lastDeliveryFailure:{at:at(T0-H),reason:'http_500'},predictions:null,epgSeen:null,lastTestAt:null});
+ const read=plain(await t.M.status(t.env,T0));
+ assert.equal(read.overall,'degraded');assert.deepEqual(read.openIssues.map(item=>[item.key,item.severity,item.critical,item.sendCount]),[[issue,'degraded',true,1]]);
+ assert.deepEqual(read.streams.map(item=>[item.stream,item.state,item.issues.map(entry=>[entry.severity,entry.critical])]),[['ratings','degraded',[['degraded',true]]]]);
+ assert.equal(t.bucket.value(KEY).overall,'needs_owner','the status read writes nothing');
+ await t.M.run(t.env,{now:T0});
+ const sent=tg(t.calls);assert.equal(sent.length,1,'only the undelivered message: no new alert, escalation or recovery because the enum changed');
+ const lines=sent[0].body.text.split('\n');assert.equal(lines[0],'IPTV monitor: REMINDER (degraded, critical)');assert.equal(lines.at(-1),'Ref: '+pendingId,'the receiver can still drop a repeat by its id');
+ const doc=t.bucket.value(KEY);assert.doesNotMatch(JSON.stringify(doc),/needs_owner/,'the next write carries no needs_owner');
+ assert.deepEqual(doc.outbox,[]);assert.equal(doc.overall,'degraded');
+ assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0-H),sendCount:2,sendDay:day,sendsToday:2},'history kept, accounting moved by the delivery');
+ for(const hour of [1,2,3,4])await t.M.run(t.env,{now:T0+hour*H});
+ assert.equal(tg(t.calls).length,1,'no reminder before 6 h after the last delivery');
+ await t.M.run(t.env,{now:T0+5*H});assert.deepEqual(tg(t.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: REMINDER (degraded, critical)'],'the reminder 6 h after the last delivery');
+ t.ctx.model={mode:'cloudflare',health:'healthy',failure:null};
+ await t.M.run(t.env,{now:T0+6*H});await t.M.run(t.env,{now:T0+7*H});
+ assert.deepEqual(tg(t.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: RECOVERED (healthy)'],'one recovery');
+}
+
+console.log('Monitor Telegram: fixed endpoint and plain text, ok:false/401/403/429/timeout/malformed/network never count as delivered, retry_after hold without sleeping, fail-closed configuration, no leak, transport choice, off no-op (the retired dry token included), AIR-349 outbox budget and CAS over Telegram, ADR 0206 rollout over a needs_owner state passed');

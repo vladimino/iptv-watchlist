@@ -1,6 +1,6 @@
 // AIR-543 / ADR 0179. The `catalog_posters` stream of the production Monitor, over the real Monitor and the real poster module: the first-run
 // grace is a write-once baseline of the Monitor's own document, a first valid checkpoint fixes `seenAt`, a later loss is `lost` (never a new grace),
-// a degraded or needs_owner state is an issue that alerts through the existing policy, and a healthy week raises nothing.
+// a degraded state is an issue that alerts through the existing policy (a failed run is critical, ADR 0206), and a healthy week raises nothing.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -66,7 +66,8 @@ const state=bucket=>bucket.snapshot()[KEY];
  const {bucket,env,M}=setup();healthy(bucket);
  const keyOf=async(cp,now=T0)=>{bucket.set(CP,cp);await M.run(env,{now});const s=state(bucket).streams.find(item=>item.stream==='catalog_posters');return [s.facts.state,s.state,s.issues.map(item=>item.key)];};
  assert.deepEqual(await keyOf({schemaVersion:1,status:'pending'}),['unknown','degraded',['catalog_posters_unknown']]);
- assert.deepEqual(await keyOf(checkpoint({status:'failed'}),T0+H),['failed','needs_owner',['catalog_posters_failed']]);
+ assert.deepEqual(await keyOf(checkpoint({status:'failed'}),T0+H),['failed','degraded',['catalog_posters_failed']]);
+ assert.equal(state(bucket).streams.find(item=>item.stream==='catalog_posters').issues[0].critical,true,'a failed run is critical (ADR 0206)');
  const full=Array.from({length:8},(_,i)=>({id:'e'+i,at:at(T0-H),payload:{type:'catalog_posters'},deliveredAt:null}));
  assert.deepEqual(await keyOf(checkpoint({outbox:full}),T0+2*H),['stalled','degraded',['catalog_posters_stalled']]);
  assert.deepEqual(await keyOf(checkpoint({status:'pending',nextRetryAt:at(T0+20*H),lastAttemptAt:at(T0-H)}),T0+3*H),['waiting','waiting',[]],'a legitimate backoff is not an issue');

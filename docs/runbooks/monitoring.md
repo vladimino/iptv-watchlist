@@ -36,6 +36,8 @@ Read `GET /api/monitor/status` first (a pure read), then the domain's own status
 
 `waiting` and `delayed` never alert: a backlog inside its backoff, an EPG within two hours of its due time and a Ratings cooldown are by design.
 
+Since [ADR 0206](../adr/0206-monitor-four-states-one-reminder-interval.md) (AIR-592) every alert is `degraded`; there is no `needs_owner`. A message marked `critical` (Telegram `(degraded, critical)`, webhook `critical: true`) is a proven hard failure (a quarantine, a held authority, a failed poster run, a `blocked` Producer stop) and arrived on the first snapshot; an ordinary one was confirmed first. Both remind at most every 6 hours after the last delivered message, and an ordinary issue that turns critical sends one `ESCALATION`. A `needs_owner` still shown in an old Telegram history or a status read before the first tick after deployment means the same as critical `degraded`. Acknowledgement and snooze do not exist; the owner fixes the cause and the issue recovers on its own.
+
 ## Cost, retention and privacy
 
 When `on`, one tick is a handful of small R2 reads, one conditional R2 write and at most the alerts and one ping; when `off` it does nothing. The state document is one small object overwritten each tick. Messages and state hold no titles, ratings, credentials or private records.

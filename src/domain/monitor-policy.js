@@ -3,8 +3,20 @@
 // and no randomness of its own: callers pass the time, and the Madrid schedule helper for the daily EPG expectation.
 // The monitor only diagnoses and reports. Recovery belongs to the domain executors (ADR 0089).
 
-export const STATES = Object.freeze(['healthy', 'waiting', 'delayed', 'degraded', 'needs_owner']);
-export const STATE_RANK = Object.freeze({healthy: 0, waiting: 1, delayed: 2, degraded: 3, needs_owner: 4});
+// AIR-592 (ADR 0206): four states. `needs_owner` is retired as a state and a severity: the site has one recipient of every alert, so a separate
+// owner tier with its own cooldown added nothing. A proven hard failure (quarantine, a fail-closed or terminal stop, a held authority) is a
+// `degraded` issue marked `critical: true`: it alerts at its first snapshot and keeps the diagnosis, but shares the one reminder interval.
+export const STATES = Object.freeze(['healthy', 'waiting', 'delayed', 'degraded']);
+export const STATE_RANK = Object.freeze({healthy: 0, waiting: 1, delayed: 2, degraded: 3});
+// The retired value as it may still sit in `monitor/state.json` written before ADR 0206 (alert entries, stream snapshots, outbox messages).
+// Readers map it here: `needs_owner` reads as `degraded` with `critical: true`, so a rollout keeps every issue key, its history and its last send time.
+export const LEGACY_SEVERITY = 'needs_owner';
+export const normalizeSeverity = value => value === LEGACY_SEVERITY ? 'degraded' : value;
+export const isCritical = item => !!item && (item.critical === true || item.severity === LEGACY_SEVERITY);
+export function normalizeMessage(message) {
+  if (!message || message.severity !== LEGACY_SEVERITY) return message;
+  return {...message, severity: 'degraded', critical: true};
+}
 const MIN = 60000, HOUR = 3600000;
 
 export const EPG_SCHEDULE = Object.freeze({hour: 17, minute: 0});
@@ -19,17 +31,18 @@ export const THRESHOLDS = Object.freeze({
   producerNoProgressMs: 2 * HOUR,     // AIR-572: the canonical Producer has no DURABLE progress for this long after publication or its last progress
 });
 export const ALERT_POLICY = Object.freeze({
-  confirmSnapshots: 2,                // degraded issues alert after this many consecutive snapshots; needs_owner at once
+  confirmSnapshots: 2,                // an ordinary degraded issue alerts after this many consecutive snapshots; a critical one at once
   // AIR-556: the prediction no-progress verdict is computed from stored run times, not from a transient read, so one snapshot confirms it. With
   // the 60-minute limit and the hourly Cron tick the alert follows the last confirmed progress by 60 to about 120 minutes (+ cron/Telegram latency).
   // AIR-572: both Producer verdicts come from stored durable facts (run counters, chain state), so one snapshot confirms them.
   confirmSnapshotsByKey: Object.freeze({predictions_no_progress: 1, canonical_producer_no_progress: 1, canonical_producer_failed: 1}),
-  cooldownMs: Object.freeze({degraded: 6 * HOUR, needs_owner: 2 * HOUR}),
+  reminderMs: 6 * HOUR,               // ADR 0206: one REMINDER interval per issue, critical or not
   maxPerIssuePerDay: 8,
 });
 const RESOURCE_CODES = ['exceeded_memory', 'exceeded_cpu', 'worker_1102'];
 
 const issue = (key, severity, stream, message, extra = {}) => ({key, severity, stream, message, ...extra});
+const critical = (key, stream, message, extra = {}) => issue(key, 'degraded', stream, message, {critical: true, ...extra});
 const worst = issues => issues.reduce((state, item) => STATE_RANK[item.severity] > STATE_RANK[state] ? item.severity : state, 'healthy');
 const time = value => { const ms = typeof value === 'number' ? value : Date.parse(value || ''); return Number.isFinite(ms) ? ms : null; };
 const hours = ms => Math.max(0, Math.round(ms / HOUR * 10) / 10);
@@ -39,7 +52,7 @@ const unreadable = (stream, key) => ({stream, state: 'degraded', issues: [issue(
 export function evaluateEpg(facts, now, {dailyDue}) {
   if (!facts || facts.error) return unreadable('epg', 'EPG');
   const issues = [];
-  if (facts.authority === 'held' || facts.authority === 'unreadable') issues.push(issue('epg_authority', 'needs_owner', 'epg', 'The published EPG authority is ' + facts.authority));
+  if (facts.authority === 'held' || facts.authority === 'unreadable') issues.push(critical('epg_authority', 'epg', 'The published EPG authority is ' + facts.authority));
   const today = dailyDue(now, EPG_SCHEDULE);
   const latest = today.due ? today : dailyDue(today.dueAt - 24 * HOUR, EPG_SCHEDULE); // 24 h back stays on the previous Madrid date across DST
   const publishedAt = time(facts.publishedAt);
@@ -63,7 +76,7 @@ export function evaluateEpg(facts, now, {dailyDue}) {
 export function evaluateDiscovery(facts, now) {
   if (!facts || facts.error) return unreadable('discovery', 'Discovery');
   const issues = [];
-  if (facts.readout?.quarantined) issues.push(issue('discovery_quarantined', 'needs_owner', 'discovery', 'The Discovery executor retry budget is exhausted and the run is quarantined'));
+  if (facts.readout?.quarantined) issues.push(critical('discovery_quarantined', 'discovery', 'The Discovery executor retry budget is exhausted and the run is quarantined'));
   const record = facts.continuation || null;
   const backlog = !!record && (record.remainingChunks > 0 || record.stage === 'running' || record.reason === 'chunk_budget');
   let state = 'healthy';
@@ -96,8 +109,8 @@ export function evaluateRatings(model, now) {
   let state = 'healthy';
   if (health === 'waiting' || health === 'cooldown') state = 'waiting';
   else if (health === 'stalled') { state = 'degraded'; issues.push(issue('ratings_stalled', 'degraded', 'ratings', 'No completed Ratings day and no durable progress since two hours after the due time')); }
-  else if (health === 'quarantined') { state = 'needs_owner'; issues.push(issue('ratings_quarantined', 'needs_owner', 'ratings', 'The Ratings run is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
-  else if (health === 'failed_permanent') { state = 'needs_owner'; issues.push(issue('ratings_failed_permanent', 'needs_owner', 'ratings', 'The Ratings run failed with a permanent error')); }
+  else if (health === 'quarantined') { state = 'degraded'; issues.push(critical('ratings_quarantined', 'ratings', 'The Ratings run is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
+  else if (health === 'failed_permanent') { state = 'degraded'; issues.push(critical('ratings_failed_permanent', 'ratings', 'The Ratings run failed with a permanent error')); }
   else if (health === 'unknown') { state = 'degraded'; issues.push(issue('ratings_unreadable', 'degraded', 'ratings', 'The Ratings read model could not be read')); }
   if (model.mode === 'switching') {
     const since = time(model.updatedAt || model.switchedAt);
@@ -121,7 +134,7 @@ export function evaluateLetterboxd(model, now) {
   else if (health === 'stalled') { state = 'degraded'; issues.push(issue('letterboxd_slot_stalled', 'degraded', 'letterboxd', 'A Letterboxd slot stayed open after its window ended')); }
   else if (health === 'missed') { state = 'degraded'; issues.push(issue('letterboxd_slot_missed', 'degraded', 'letterboxd', 'A Letterboxd slot was missed and recorded without a run')); }
   else if (health === 'failed') { state = 'degraded'; issues.push(issue('letterboxd_slots_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot failed for both sources')); }
-  else if (health === 'quarantined') { state = 'needs_owner'; issues.push(issue('letterboxd_quarantined', 'needs_owner', 'letterboxd', 'Letterboxd Sync is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
+  else if (health === 'quarantined') { state = 'degraded'; issues.push(critical('letterboxd_quarantined', 'letterboxd', 'Letterboxd Sync is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
   else if (health === 'unreadable') { state = 'degraded'; issues.push(issue('letterboxd_unreadable', 'degraded', 'letterboxd', 'The Letterboxd Sync read model could not be read')); }
   if (model.sources?.watchlist?.stale) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_watchlist_stale', 'degraded', 'letterboxd', model.sources.watchlist.warning === 'watchlist_never_succeeded' ? 'No complete Watchlist scan has succeeded since the executor started' : 'No complete Watchlist scan has succeeded for 24 hours')); }
   // Each source has its own signal: one update can fail while the other succeeds (the approved contract), and neither outcome hides or rewrites the other's confirmed success. A rate limit is "not now" and never alerts.
@@ -161,15 +174,16 @@ export function evaluatePredictions(facts, previous, now) {
 }
 
 // ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).
-// The projection already carries the existing vocabulary in `monitor`; only a degraded or needs_owner state raises an issue. A normal no-poster
-// verdict, an empty due set, a first-run grace and a legitimate retry wait are never issues. An unreadable fact is a fault, never a pass.
+// The projection already carries the existing vocabulary in `monitor` (and `critical` for a failed run); only a degraded state raises an issue. A normal
+// no-poster verdict, an empty due set, a first-run grace and a legitimate retry wait are never issues. An unreadable fact is a fault, never a pass.
 export function evaluateCatalogPosters(facts) {
-  if (!facts || facts.error || !STATES.includes(facts.monitor)) return unreadable('catalog_posters', 'catalog poster');
+  const monitor = normalizeSeverity(facts?.monitor);
+  if (!facts || facts.error || !STATES.includes(monitor)) return unreadable('catalog_posters', 'catalog poster');
   const issues = [];
-  if (facts.monitor === 'degraded' || facts.monitor === 'needs_owner') {
-    issues.push(issue('catalog_posters_' + facts.state, facts.monitor, 'catalog_posters', 'Catalog poster retry is ' + facts.state + (facts.detail ? ' (' + facts.detail + ')' : '')));
+  if (monitor === 'degraded') {
+    issues.push(issue('catalog_posters_' + facts.state, 'degraded', 'catalog_posters', 'Catalog poster retry is ' + facts.state + (facts.detail ? ' (' + facts.detail + ')' : ''), isCritical({critical: facts.critical, severity: facts.monitor}) ? {critical: true} : {}));
   }
-  return {stream: 'catalog_posters', state: facts.monitor, issues, facts: {state: facts.state, detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null}};
+  return {stream: 'catalog_posters', state: monitor, issues, facts: {state: facts.state, detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null}};
 }
 
 // ---- Canonical Producer (AIR-572): the EPG -> canonical Film/Person Producer, judged by DURABLE progress only. `facts.sinceAt` is the reference time of the
@@ -190,9 +204,10 @@ export function evaluateCanonicalProducer(facts, now) {
   if (run && run.passState === 'passed' && run.sourceGeneration === facts.label && run.appliedGeneration === facts.label) return out('healthy', 'current', []);
   const stoppedBy = chain?.ownerState === 'stopped' ? (chain.stoppedBy || 'unclassified') : run?.passState === 'stopped' ? (run.stoppedBy || 'unclassified') : null;
   if (stoppedBy) {
+    // A hard stop (an identity code, or a terminal, fail_closed or exhausted class) is critical: it alerts at once and an earlier recoverable stop of the
+    // same issue escalates. A recoverable stop is an ordinary degraded issue. Both keep `status` (blocked / failed) and the stop reason as diagnosis.
     const hard = IDENTITY_STOP.test(stoppedBy) || ['terminal', 'fail_closed', 'exhausted'].includes(chain?.recoveryClass || 'fail_closed');
-    const severity = hard ? 'needs_owner' : 'degraded';
-    return out(severity, hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', severity, 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; it needs the owner' : '; automatic recovery is pending'))], {stoppedBy});
+    return out('degraded', hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), hard ? {critical: true} : {})], {stoppedBy});
   }
   const since = time(facts.sinceAt), age = since === null ? null : Math.max(0, now - since);
   if (age === null || age > THRESHOLDS.producerNoProgressMs) {
@@ -202,7 +217,7 @@ export function evaluateCanonicalProducer(facts, now) {
   return out('waiting', published !== null && now - published > THRESHOLDS.producerNoProgressMs ? 'lagging' : 'waiting', []);
 }
 
-// All four streams (plus catalog posters when its facts are supplied) and the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
+// All four streams (plus catalog posters, Letterboxd Sync and the canonical Producer when their facts are supplied) and the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
 export function evaluateAll(facts, previous, now, helpers) {
   const streams = [
     evaluateEpg(facts.epg, now, helpers),
@@ -218,23 +233,27 @@ export function evaluateAll(facts, previous, now, helpers) {
   return {overall, streams, issues};
 }
 
-// ---- Alert planning: single issue key, confirmation, cooldown, escalation, bounded sends, recovery once.
-// `state` is {issues: {key: {severity, firstSeenAt, seen, lastSentAt, sendCount, sendDay, sendsToday}}}. Returns the messages to send
-// and the next state; nothing is sent here.
+// ---- Alert planning: single issue key, confirmation, one reminder interval, escalation, bounded sends, recovery once.
+// `state` is {issues: {key: {severity, critical, firstSeenAt, seen, lastSentAt, sendCount, sendDay, sendsToday}}}. Returns the messages to send
+// and the next state; nothing is sent here. ADR 0206: every actionable issue is `degraded`; `critical` (a proven hard failure) confirms at the first
+// snapshot, an ordinary one after `confirmSnapshots` (or its per-key count). Both remind every `reminderMs`. An issue that turns from ordinary to
+// critical escalates once inside the interval; critical to ordinary sends nothing. An entry stored before ADR 0206 with `severity: needs_owner`
+// reads as critical: its history, counters and key are kept, it does not escalate or recover, and its next reminder is `lastSentAt + reminderMs`.
 export function planAlerts(issues, state, now) {
   const previous = state?.issues || {};
   const next = {}, sends = [];
   const day = new Date(now).toISOString().slice(0, 10);
-  const actionable = issues.filter(item => item.severity === 'degraded' || item.severity === 'needs_owner');
+  const actionable = issues.filter(item => normalizeSeverity(item.severity) === 'degraded');
   for (const item of actionable) {
     const old = previous[item.key] || null;
-    const entry = {severity: item.severity, firstSeenAt: old?.firstSeenAt || new Date(now).toISOString(), seen: (old?.seen || 0) + 1, lastSentAt: old?.lastSentAt || null, sendCount: old?.sendCount || 0, sendDay: old?.sendDay === day ? day : day, sendsToday: old?.sendDay === day ? old.sendsToday || 0 : 0};
-    const escalated = !!old && old.severity !== item.severity && STATE_RANK[item.severity] > STATE_RANK[old.severity];
-    const confirmed = item.severity === 'needs_owner' || entry.seen >= (ALERT_POLICY.confirmSnapshotsByKey[item.key] ?? ALERT_POLICY.confirmSnapshots);
+    const hard = isCritical(item);
+    const entry = {severity: 'degraded', critical: hard, firstSeenAt: old?.firstSeenAt || new Date(now).toISOString(), seen: (old?.seen || 0) + 1, lastSentAt: old?.lastSentAt || null, sendCount: old?.sendCount || 0, sendDay: day, sendsToday: old?.sendDay === day ? old.sendsToday || 0 : 0};
+    const escalated = !!old && hard && !isCritical(old);
+    const confirmed = hard || entry.seen >= (ALERT_POLICY.confirmSnapshotsByKey[item.key] ?? ALERT_POLICY.confirmSnapshots);
     const lastSent = time(entry.lastSentAt);
-    const cooled = lastSent === null || now - lastSent >= ALERT_POLICY.cooldownMs[item.severity];
+    const cooled = lastSent === null || now - lastSent >= ALERT_POLICY.reminderMs;
     if (confirmed && (cooled || escalated) && entry.sendsToday < ALERT_POLICY.maxPerIssuePerDay) {
-      sends.push({kind: entry.sendCount ? (escalated ? 'escalation' : 'reminder') : 'alert', key: item.key, severity: item.severity, stream: item.stream, message: item.message, firstSeenAt: entry.firstSeenAt});
+      sends.push({kind: entry.sendCount ? (escalated ? 'escalation' : 'reminder') : 'alert', key: item.key, severity: 'degraded', critical: hard, stream: item.stream, message: item.message, firstSeenAt: entry.firstSeenAt});
       entry.lastSentAt = new Date(now).toISOString();entry.sendCount++;entry.sendsToday++;
     }
     next[item.key] = entry;
