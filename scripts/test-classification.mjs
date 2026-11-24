@@ -616,6 +616,9 @@ export const FILES={
  "letterboxd-claim-provenance-d1.mjs": {
   "suite": "core"
  },
+ "letterboxd-inferred-pair-repair.mjs": {
+  "suite": "core"
+ },
  "letterboxd-view-double.mjs": {
   "suite": "core"
  },

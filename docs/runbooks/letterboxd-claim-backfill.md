@@ -6,7 +6,46 @@ Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](..
 
 The Ratings flows already offer their durable links to the claim module, which stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is changed to `true` in a reviewed change. That change is a production activation: it needs the owner's explicit GO, after the backfill preflight and after the matching tests pass, and it is separate from the backfill. Reverting that line stops new claims; claims already written stay (see Rollback). While inactive, the flows write nothing for claims and store nothing. While active, an unproved id keeps a bounded `claim_pending` entry in the Diary identity document (six attempts, then it stays visible and is no longer served); the baseline import offers verified entries only and a replay of a committed chunk re-offers it. The natural producers after activation are the Diary identity step of the Letterboxd Sync Workflow's ratings and Watchlist admission steps (only pairs that step verified itself: a verified page check, an existing trusted bridge or a confirmed `link_failed` repair, and their `claim_pending` retries) and an owner-driven archive baseline commit (verified items only); the rated-candidate identity step is deliberately not wired, and a marked inferred pair is refused by the planner whichever flow offers it. A zero cohort in the backfill `dry_run` does not by itself show that the producer path is active.
 
-**Legacy inferred pairs (owner decision before activation and before any further backfill).** The production import of 8 to 9 November 2026 ([AIR-388 evidence](../evidence/letterboxd/air-388-full-import-2026-11-10.md)) linked `inferred` pairs before the pair mark existed. A pair it linked on a Diary-first record (facts and lid, no TMDB id) carries no mark, and the planner cannot tell it from a verified pair. The import's chunk receipts were deleted by the AIR-528 cleanup, so the [read-only audit of 23 November 2026](../evidence/d1-migration/air-559-legacy-inferred-pair-audit-2026-11-23.md) reconstructed the current cohort from the fact records, the mutable `letterboxd/admissions/verified-films.json` (`identity: "inferred"` per retained admission), D1 `film_rated_admission` and the canonical claims, under the historical writer invariant. It detected **one** such pair and no claim on it or on any inferred-marked record; this is not a replay of the deleted receipts. Until the owner decides that pair's disposition, a backfill cohort must not be approved on the planner's verdict alone and the activation line must not be switched: a pair's presence in the link index or on its record is not evidence that it was verified.
+**Legacy inferred pairs (owner decision before activation and before any further backfill).** The production import of 8 to 9 November 2026 ([AIR-388 evidence](../evidence/letterboxd/air-388-full-import-2026-11-10.md)) linked `inferred` pairs before the pair mark existed. A pair it linked on a Diary-first record (facts and lid, no TMDB id) carries no mark, and the planner cannot tell it from a verified pair. The import's chunk receipts were deleted by the AIR-528 cleanup, so the [read-only audit of 23 November 2026](../evidence/d1-migration/air-559-legacy-inferred-pair-audit-2026-11-23.md) reconstructed the current cohort from the fact records, the mutable `letterboxd/admissions/verified-films.json` (`identity: "inferred"` per retained admission), D1 `film_rated_admission` and the canonical claims, under the historical writer invariant. It detected **one** such pair and no claim on it or on any inferred-marked record; this is not a replay of the deleted receipts. The owner chose on 24 November 2026 to mark that one record (the one-record repair below). Until that repair has been applied and read back, a backfill cohort must not be approved on the planner's verdict alone and the activation line must not be switched: a pair's presence in the link index or on its record is not evidence that it was verified.
+
+## One-record repair of the legacy inferred pair (AIR-559)
+
+`scripts/letterboxd-inferred-pair-repair.mjs` appends the missing `inferredPairs` entry to the ONE fact record the audit detected. The claim planner then refuses that pair (`not_proved / ratings_link_inferred`) like every other inferred pair. The script is single-purpose: it is not a generic operator, adds no runtime writer, reads no R2 object and sends no hand-written SQL write. The pair and its provenance archive are owner-private inputs taken from the audit's private output; the repository and every report hold only counts, hashes and verdicts. The owner's GO of 24 November 2026 covers the implementation, the offline tests, the PR and read-only dry runs. **The single apply needs its own owner GO on the pins of a fresh dry run.**
+
+Credentials: the D1 API token variables of the [credential conventions](../../.claude/skills/iptv-credentials/SKILL.md) (`D1_BACKFILL_*`); behind a proxy add `NODE_USE_ENV_PROXY=1`. The script checks the account and the database identity before any read.
+
+1. **Dry run** (default, read-only): `node scripts/letterboxd-inferred-pair-repair.mjs --lid <lid> --tmdb <n> --archive <sha256>`.
+   - It reads the ratings marker (`d1/open`), the link index, the record, the D1 `film_rated_admission` row and the canonical `letterboxd` claims of the lid.
+   - `decision` is one of:
+     - `eligible`: the record states exactly this pair, the index agrees and is unambiguous, and the record is settled and stored in canonical JSON; it has no `identity`, no entry for the pair, a readable list with fewer than 8 entries, exactly one admission row with this lid, movie and archive, and no canonical lid claim;
+     - `already_marked`: nothing to do;
+     - `refused` with a typed reason.
+   - `expect` holds the four pins: `generation`, `recordEtag`, `linksEtag`, `planDigest`. `planner` shows today's verdict, which is `pass` before the repair.
+2. **Owner GO** on that dry run's decision and four pins, for one apply.
+3. **Apply:** `… --apply --confirm-go --request-id <id> --expected-generation <g> --expected-record-etag <e> --expected-links-etag <l> --expected-plan-digest <d>`.
+   - It re-reads everything and refuses with zero writes (`not_attempted`) on any pin difference or on any decision other than `eligible`.
+   - It then makes ONE RatingsD1 `putOwned` call. It never uses `casOwned`, so there is no automatic rebase or retry.
+   - That call is one atomic D1 batch. It carries the existing fences (the record etag compare-and-swap with the `changes()` fence, the marker `d1/open`, the generation bump) and four guards asserted **inside** the batch: the exact ratings generation, the link-index etag, the admission row (lid, movie, archive) and the absence of any canonical `letterboxd` claim of the lid.
+4. **Outcomes** (the exit code in brackets; every apply answer also carries the connection's tracked `writeState`: `none`, `unknown` while a write is in flight or after it failed, `committed` once a write was proved):
+   - `applied` (0): the batch committed, the record reads back as planned and every readback check passed.
+   - `not_attempted` (3): a pin or the decision did not hold at the re-read; nothing was sent.
+   - `refused_in_batch` (3): a fence or guard of the batch did not hold (RatingsD1 reports `refused`); the whole batch rolled back and nothing was written.
+   - `committed_unverified` (4): the batch **committed** (one write), but a later write replaced the record before the read-back (RatingsD1 reports `committed`), the read-back threw, or a readback check failed. It is never reported as zero writes. Run the dry run, compare, and bring the result to the owner.
+   - `unknown` (5): the batch failed or its response was lost after it was sent. Run the dry run, which answers `already_marked` if the batch committed.
+   - **Never repeat apply** after any outcome other than `applied`; a new apply needs fresh pins and a new GO.
+5. **Readback** (part of the apply answer):
+   - the stored record equals the plan, and only `inferredPairs` grew, by this one entry with the archive as `sourceRef`;
+   - the ratings generation moved by exactly one;
+   - the link index, the two `ratings_view` rows and the lid's canonical claims are unchanged;
+   - the planner answers `not_proved / ratings_link_inferred`.
+
+   After the apply, run a fresh dry run (`already_marked`) as the independent read-only check.
+
+**Expected change:** one `ratings_document` record rewritten with one appended list entry, and the ratings generation +1. No fact, link, view row, admission, Film or claim changes.
+
+**Stop rules:** stop on any `refused` or `not_attempted`, on `refused_in_batch`, on `committed_unverified` and on `unknown`. Each needs a fresh dry run and a new owner decision; there is no automatic retry.
+
+**Rollback limits:** the entry is append-only by design, and a code rollback does not remove it. Removing it would be a separate, case-specific owner decision and its own compare-and-swap. The repair does not activate the producer or write any claim.
 
 ## The operator: MCP tool `letterboxd_claim_backfill`
 

@@ -214,7 +214,9 @@ function recordRatingChange(record,incoming,effective){
   try{
    await casJSON(env,recordKey(key),emptyRecord(key,{}),current=>{
     if(current.redirectTo||current.migrating)throw new FactsError('write_contention','Record started a migration during write');
-    if(statesPair(current,links)&&!(current.inferredPairs||[]).some(entry=>namesPair(entry,links)))return null;
+    // The list's shape is checked before it is read, so a malformed historical value is a typed refusal (alias_conflict), never a TypeError.
+    if(current.inferredPairs!==undefined&&!Array.isArray(current.inferredPairs))throw new FactsError('alias_conflict','Unreadable inferred pair provenance');
+    if(statesPair(current,links)&&!current.inferredPairs?.some(entry=>namesPair(entry,links)))return null;
     return addInferredPair(current,identity,links)?current:null;
    });
   }catch(error){if(error instanceof FactsError&&error.code==='alias_conflict')return false;throw error;}

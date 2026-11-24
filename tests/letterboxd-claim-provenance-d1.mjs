@@ -215,4 +215,17 @@ for (const bad of ['unreadable', 'full']) {
   assert.equal((await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value['tmdb:113'], undefined, bad + ': no alias');
 }
 
+// 13. Review of 26f28574 (hardening): a record that already states the pair but carries a malformed (non-array) provenance list is a typed conflict, not a TypeError.
+{
+  const {env, film} = setup(); film('114');
+  await diaryFirst(env, 'Sh13');
+  assert.equal((await Facts.bridgeDiaryFilm(env, {lid: 'Sh13', tmdb: '114'})).state, 'linked');
+  const links = (await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value;
+  const recKey = 'letterboxd/facts/films/' + links['letterboxd:Sh13'] + '.json';
+  const current = await RatingsD1.readOwned(env, recKey);
+  await RatingsD1.putOwned(env, recKey, current.etag, {...current.value, inferredPairs: 'x'});
+  const out = await commit(env, [inferred('Sh13', '114')]);
+  assert.equal(out.conflicts, 1, 'a malformed list on a record stating the pair is a conflict, not a crash');
+}
+
 console.log('letterboxd claim provenance (D1, end to end): ok');

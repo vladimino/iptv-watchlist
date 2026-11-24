@@ -213,6 +213,10 @@ function epochFence(env){
  return statements;
 }
 
+// `saved` keeps its meaning for every caller (the stored etag, or null). AIR-559 adds an explicit, backward-compatible account of WHY it is null, for a caller that must not
+// confuse a rollback with a write: `refused: true` when a fence or guard of the batch did not hold (the batch rolled back, nothing was written), `committed: true`
+// when the batch committed but the read-back found another etag (a later write replaced it; the write happened). A read-back that throws after a committed
+// batch is rethrown with `ratingsCommitted: true` on the error, so such a caller can tell it from a failure before or during the batch.
 export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
  if(!ratingsMutableKey(key))return {owned:false};
  const mode='d1';
@@ -225,11 +229,13 @@ export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
  const bump=statements.pop();
  try{await fenced(gate.db,[...statements,...(extra||[]),...epochFence(env),bump]);}
  catch(error){
-  if(error.code==='ratings_domain_fence')return {owned:true,saved:null};
+  if(error.code==='ratings_domain_fence')return {owned:true,saved:null,refused:true};
   throw error;
  }
- const stored=await readParts(gate.db,key);
- if(stored.etag!==etag)return {owned:true,saved:null};
+ let stored;
+ try{stored=await readParts(gate.db,key);}
+ catch(error){if(error&&typeof error==='object')error.ratingsCommitted=true;throw error;}
+ if(stored.etag!==etag)return {owned:true,saved:null,committed:true};
  return {owned:true,saved:{etag}};
 }
 
