@@ -113,8 +113,8 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  assert.ok(!text.some(line=>/всё в порядке/.test(line)));
  // discovery_stalled keeps the threshold's own diagnostic: no ALLOWED progress for max(overdue, idle) (the policy's idle still counts the record time), with
  // the allowed time and, separately, the last finished chunk.
- const stalled=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T00:00:00.000Z',readout:null,continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:7,at:'2026-11-12T03:00:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T00:30:00.000Z'}},now).issues.find(entry=>entry.key==='discovery_stalled');
- assert.deepEqual(stalled.metrics,{remainingChunks:7,stalledMs:T('2026-11-12T04:00:42Z')-T('2026-11-12T00:30:00Z'),allowedAt:'2026-11-12T00:30:00.000Z',lastChunkAt:'2026-11-12T00:00:00.000Z',executor:'workflow'});
+ const stalled=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T00:00:00.000Z',readout:null,queue:{state:'backlog',reason:'chunk_budget',owed:true,eligible:true},continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:7,at:'2026-11-12T03:00:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T00:30:00.000Z'}},now).issues.find(entry=>entry.key==='discovery_stalled');
+ assert.deepEqual(stalled.metrics,{remainingChunks:7,stalledMs:T('2026-11-12T04:00:42Z')-T('2026-11-12T00:30:00Z'),allowedAt:'2026-11-12T00:30:00.000Z',lastChunkAt:'2026-11-12T00:00:00.000Z',executor:'workflow',queueState:'backlog',queueReason:'chunk_budget'});
  const stalledText=sample('Discovery stalled (no allowed progress)',render({...stalled,kind:'alert',firstSeenAt:'2026-11-12T03:00:42.000Z',observedAt:'2026-11-12T04:00:42.000Z',id:'discovery_stalled|alert|x'},'degraded','2026-11-12T04:00:50Z')).split('\n');
  assert.ok(stalledText.includes('⏱ Без разрешённого прогресса: 3 ч 31 мин')&&stalledText.includes('Шаг разрешён с: 12.11 01:30'));
  assert.ok(stalledText.includes('Последний чанк: 12.11 01:00'));

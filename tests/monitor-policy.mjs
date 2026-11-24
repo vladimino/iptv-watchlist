@@ -44,7 +44,9 @@ const keys=result=>result.issues.map(item=>item.key);
 // 2. Discovery: a backlog follows its own backoff; the commit without a finished discovery is a state, not an alarm.
 {
  const now=T('2026-11-06T18:00:00Z');
- const base={executor:'external',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:at(now-20*MIN),readout:null};
+ // AIR-598: owed work is the shared classification's (src/discovery.js `discoveryQueueState`); these records carry a chunk budget, so it is a backlog.
+ const backlogQueue={state:'backlog',reason:'chunk_budget',owed:true,eligible:true};
+ const base={executor:'external',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:at(now-20*MIN),readout:null,queue:backlogQueue};
  const rec=extra=>({stage:'paused',reason:'chunk_budget',remainingChunks:10,at:at(now-30*MIN),programmeRunId:'r1',...extra});
  assert.equal(P.evaluateDiscovery({...base,continuation:null},now).state,'healthy','no backlog');
  assert.equal(P.evaluateDiscovery({...base,continuation:rec({nextCatchUpAt:at(now+40*MIN)})},now).state,'waiting','the next allowed progress is in the future: waiting by design');
@@ -62,8 +64,25 @@ const keys=result=>result.issues.map(item=>item.key);
  const wfStalled=P.evaluateDiscovery({...base,executor:'workflow',readout:{stalled:true,quarantined:false},continuation:rec({nextCatchUpAt:at(now-20*MIN)})},now);
  assert.equal(wfStalled.state,'degraded');assert.ok(keys(wfStalled).includes('discovery_executor_stalled'));
  // A stale continuation of another generation is named when it is stalled.
- const mismatch=P.evaluateDiscovery({...base,publishedRunId:'r2',lastChunkFinishedAt:at(now-5*H),continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},now);
+ const mismatch=P.evaluateDiscovery({...base,queue:{state:'unknown',reason:'generation_mismatch',owed:null,eligible:null},publishedRunId:'r2',lastChunkFinishedAt:at(now-5*H),continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},now);
  assert.ok(keys(mismatch).includes('discovery_generation_mismatch'));
+ assert.ok(keys(mismatch).includes('discovery_unconfirmed'),'a continuation of another generation is unconfirmed, never a backlog');
+ assert.ok(!keys(mismatch).includes('discovery_stalled'));
+ // AIR-598: the drained series of 23 Nov (stopped on backlog_empty, chunk_budget gate long past, every part of the queue zero) is proven empty: healthy, no
+ // stall from the old gate, and the recovery of a stall it had opened says why. An EPG-priority pause waits; an unconfirmed state follows the same time policy
+ // but is named as unconfirmed; a classification that is missing is never re-derived from the raw continuation reason.
+ const drained=rec({remainingChunks:0,at:at(now-21*H),nextCatchUpAt:at(now-20*H),hopId:'hop-27'});
+ const empty=P.evaluateDiscovery({...base,queue:{state:'empty',reason:'drained',owed:false,eligible:false,proof:'drained'},lastChunkFinishedAt:at(now-21*H),continuation:drained},now);
+ assert.equal(empty.state,'healthy');assert.deepEqual(keys(empty),[]);assert.equal(empty.facts.queueState,'empty');assert.equal(empty.facts.backlog,false);
+ assert.deepEqual(P.discoveryRecovery(empty.facts),{reason:'queue_empty',message:'Recovered: the Discovery queue is proven empty (drained); this is not new progress'});
+ const paused=P.evaluateDiscovery({...base,queue:{state:'paused',reason:'epg_priority',owed:true,eligible:false},lastChunkFinishedAt:at(now-6*H),continuation:rec({at:at(now-6*H),nextCatchUpAt:at(now-5*H)})},now);
+ assert.equal(paused.state,'waiting');assert.deepEqual(keys(paused),[]);assert.equal(P.discoveryRecovery(paused.facts).reason,'epg_priority');
+ const unconfirmed=P.evaluateDiscovery({...base,queue:{state:'unknown',reason:'drain_unconfirmed',owed:null,eligible:null},lastChunkFinishedAt:at(now-5*H),continuation:drained},now);
+ assert.equal(unconfirmed.state,'degraded');assert.deepEqual(keys(unconfirmed),['discovery_unconfirmed']);assert.equal(unconfirmed.issues[0].metrics.queueReason,'drain_unconfirmed');
+ assert.equal(P.evaluateDiscovery({...base,queue:{state:'unknown',reason:'drain_unconfirmed'},lastChunkFinishedAt:at(now-20*MIN),continuation:rec({remainingChunks:0,at:at(now-20*MIN),nextCatchUpAt:at(now+40*MIN)})},now).state,'waiting','a fresh unconfirmed state inside its gate is not an incident');
+ const unclassified=P.evaluateDiscovery({...base,queue:undefined,lastChunkFinishedAt:at(now-5*H),continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},now);
+ assert.deepEqual(keys(unclassified),['discovery_unconfirmed'],'facts without the shared classification are never a backlog');
+ assert.equal(P.discoveryRecovery(unclassified.facts).reason,null);
  assert.ok(keys(P.evaluateDiscovery({...base,continuation:null,resourceLimit:true},now)).includes('discovery_resource_limit'));
  assert.deepEqual(keys(P.evaluateDiscovery({error:true},now)),['discovery_unreadable']);
 }

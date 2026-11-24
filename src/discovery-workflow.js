@@ -38,9 +38,8 @@ const DISCOVERY_REPORT_BLOCKED=new Set(['authority_held','authority_loading','au
 const DISCOVERY_TICK_STATUS={complete:'finished',backlog_empty:'finished',stale_generation:'superseded',recovery_exhausted:'failed',executor_not_workflow:'stopped'};
 function discoveryHourStamp(ms){return new Date(ms).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z').slice(0,11);}
 function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
-// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
-// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
-function discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
+// The queue is empty only when every part of it is a proven numeric zero (`discoveryQueueEmpty`, `discoveryQueueProof` in src/discovery.js, AIR-598: the one
+// proof every reader shares).
 function newDiscoveryReport(since,seen=[]){
  const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,queueGeneration:null,seen,lastClosedHour:null};
  for(const name of DISCOVERY_REPORT_COUNTERS)report[name]=0;
@@ -131,23 +130,14 @@ async function discoveryReportQueue(env,report,programmeRunId,record=null){
  let stored=null;
  try{stored=programmeRunId?await readContinuation(env):null;}catch{return unreadable;}
  const continuation=stored?.record&&stored.record.programmeRunId===programmeRunId?stored.record:null;
- if(continuation?.stage==='complete')return {remaining,cheapRemaining,error,empty:discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry),incomplete:false,reason:null};
- if(continuation&&discoveryDrainedSeries(record,continuation,programmeRunId)){
-  let status;
-  try{status=await readStatus();}catch{return unreadable;}
-  if(discoveryDrainedStatus(status,continuation,programmeRunId))return {remaining:0,cheapRemaining:0,error:null,empty:true,incomplete:false,reason:null};
- }
- return {remaining,cheapRemaining,error,empty:false,incomplete:false,reason:null};
-}
-// Pure. The executor stopped for good on an empty backlog and the continuation of the same generation has no chunk left to run.
-function discoveryDrainedSeries(record,continuation,programmeRunId){
- return typeof programmeRunId==='string'&&!!programmeRunId&&record?.phase==='stopped'&&record.reason==='backlog_empty'&&record.programmeRunId===programmeRunId
-  &&continuation?.programmeRunId===programmeRunId&&continuation.stage==='paused'&&continuation.reason==='chunk_budget'&&continuation.remainingChunks===0&&typeof continuation.hopId==='string'&&!!continuation.hopId;
-}
-// Pure. The status file is the reading of that last chunk (same generation, same hop) and every part of the queue is a proven numeric zero.
-function discoveryDrainedStatus(status,continuation,programmeRunId){
- if(!status||status.programmeRunId!==programmeRunId||status.hopId!==continuation.hopId||status.error)return false;
- return ['remaining','cheapRemaining','deferred','waitingRetry'].every(name=>status[name]===0);
+ const reading={remaining,cheapRemaining,error,waitingRetry};
+ // AIR-598: the proof is the shared `discoveryQueueProof` (src/discovery.js), the same rule the footer, the Monitor and the operational status classify with.
+ // The status is read only when the drained shape of the series makes it the deciding fact.
+ let status=null;
+ if(continuation&&continuation.stage!=='complete'&&discoveryDrainedSeries(record,continuation,programmeRunId)){try{status=await readStatus();}catch{return unreadable;}}
+ const proof=discoveryQueueProof({programmeRunId,continuation,workflow:record,status,reading});
+ if(proof.proof==='drained')return {remaining:0,cheapRemaining:0,error:null,empty:true,incomplete:false,reason:null};
+ return {remaining,cheapRemaining,error,empty:proof.empty,incomplete:false,reason:null};
 }
 // Delivers every pending report: the events of the outbox and a legacy per-chain tick that was settled and not yet delivered. An entry leaves
 // the record only after its create-only put is confirmed. The record is written back with its `updatedAt` untouched, so delivery never hides a

@@ -2027,8 +2027,161 @@ async function presentContinuationDiscovery(env){
  const workflow=await noteDiscoveryWorkflow(env);
  return {discovery:delegatedContract(contract,workflow),executor:'workflow',delegated:true,workflow};
 }
+// AIR-598. ONE model of the Discovery queue for every reader: the footer row «Распознавание», the hourly Monitor, the hourly Events report, the operational
+// status (HTTP and MCP) and the admin data health. Each of them used to judge the same records with its own rule (a `chunk_budget` gate was a backlog to the
+// Monitor and the operational readout, a stale gate plus a ledger count was "no confirmed progress" to the footer, and only the Events report could prove a drained
+// queue), so the same facts read as "empty" in one place and as an incident in another. Now there is one bounded reader (`readDiscoveryEvidence`) and one pure
+// classification (`discoveryQueueState`); every consumer maps the classification to its own presentation or confirmation policy and never re-derives the facts.
+// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
+// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
+function discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
+// Pure (AIR-595). The executor stopped for good on an empty backlog and the continuation of the same generation has no chunk left to run.
+function discoveryDrainedSeries(record,continuation,programmeRunId){
+ return typeof programmeRunId==='string'&&!!programmeRunId&&record?.phase==='stopped'&&record.reason==='backlog_empty'&&record.programmeRunId===programmeRunId
+  &&continuation?.programmeRunId===programmeRunId&&continuation.stage==='paused'&&continuation.reason==='chunk_budget'&&continuation.remainingChunks===0&&typeof continuation.hopId==='string'&&!!continuation.hopId;
+}
+// Pure (AIR-595). The status file is the reading of that last chunk (same generation, same hop) and every part of the queue is a proven numeric zero.
+function discoveryDrainedStatus(status,continuation,programmeRunId){
+ if(!status||status.programmeRunId!==programmeRunId||status.hopId!==continuation.hopId||status.error)return false;
+ return ['remaining','cheapRemaining','deferred','waitingRetry'].every(name=>status[name]===0);
+}
+// Pure. The one proof that the queue of `programmeRunId` is empty, shared by the Events report (whose `reading` may be the period's own chunks) and the
+// classification (whose `reading` is the status of that generation):
+// - `complete`: the continuation of that generation says complete and the reading has every part of the queue a numeric zero and no error;
+// - `drained` (AIR-595): the executor record stopped on `backlog_empty`, the continuation paused on `chunk_budget` with no chunk left, and the status written by
+//   that very chunk (same generation, same `hopId`) with remaining, cheap-pass, deferred and waiting-retry all numeric zero and no error. The legacy alias sweep
+//   (ADR 0158) that kept the series from saying complete re-checks films already decided; it is not part of the queue.
+// No timestamp takes part: a proof of the same generation does not expire, and a stale gate never turns it into a backlog.
+function discoveryQueueProof({programmeRunId,continuation,workflow,status,reading}={}){
+ if(typeof programmeRunId!=='string'||!programmeRunId||!continuation||continuation.programmeRunId!==programmeRunId)return {empty:false,proof:null};
+ if(continuation.stage==='complete'){
+  const value=reading||{};
+  return discoveryQueueEmpty(value.remaining,value.cheapRemaining,value.error,value.waitingRetry)?{empty:true,proof:'complete'}:{empty:false,proof:null};
+ }
+ if(discoveryDrainedSeries(workflow,continuation,programmeRunId)&&discoveryDrainedStatus(status,continuation,programmeRunId))return {empty:true,proof:'drained'};
+ return {empty:false,proof:null};
+}
+const DISCOVERY_QUEUE_STATES=['empty','running','backlog','paused','failed','blocked','unknown'];
+const discoveryQueueCount=value=>Number.isInteger(value)&&value>=0?value:null;
+const discoveryQueueTime=value=>{const ms=Date.parse(typeof value==='string'?value:'');return Number.isFinite(ms)?new Date(ms).toISOString():null;};
+// The queue reading of one generation from its status file: numbers only when they are non-negative integers, the error as a flag. Another generation's status is no reading.
+function discoveryQueueReading(status,programmeRunId){
+ if(!status||typeof status!=='object'||!programmeRunId||status.programmeRunId!==programmeRunId)return null;
+ return {remaining:discoveryQueueCount(status.remaining),cheapRemaining:discoveryQueueCount(status.cheapRemaining),deferred:discoveryQueueCount(status.deferred),
+  waitingRetry:discoveryQueueCount(status.waitingRetry),error:status.error?true:null,hopId:typeof status.hopId==='string'&&status.hopId?status.hopId:null,finishedAt:discoveryQueueTime(status.finishedAt)};
+}
+// Pure. What the evidence of `readDiscoveryEvidence` (or the same fields from a caller's own consistent read) says about the queue of the published generation.
+// `state`:
+// - `empty`: proven by `discoveryQueueProof` (`reason` `complete` or `drained`); `owed` false.
+// - `running`: a live writer holds the lease (or the lease was not read: `lease_unread`).
+// - `backlog`: work is owed (a chunk budget, or a non-zero part of the reading of this generation); `eligible` says whether the policy allows progress now
+//   (a future gate or backoff waits; a `chunk_budget` with a known remaining count is renewed by the Workflow at once).
+// - `paused`: the EPG-priority pause (ADR 0135) holds new admission and the queue is not proven empty (`awaiting_certificate` while the published run is not yet
+//   certified complete, ADR 0175). Not a fault and not empty.
+// - `failed`: the continuation recorded an error; it is retried by policy, work stays owed.
+// - `blocked`: needs the owner (`quarantined`, `interrupted`, `missing_secret`).
+// - `unknown`: anything that proves neither work nor its absence: an unreadable or loading authority, no publication or continuation, a continuation of another
+//   generation or a handoff, a missing or foreign status, partial counts, or an all-zero reading whose proof is incomplete (`drain_unconfirmed`).
+// The counts and times are the stored facts of the judged generation, never computed and never filled from another generation; `observedAt` is the read time.
+function discoveryQueueState(evidence,now=Date.now()){
+ const e=evidence&&typeof evidence==='object'?evidence:{};
+ const records=e.records&&typeof e.records==='object'?e.records:{};
+ const unavailable=Array.isArray(e.unavailable)?e.unavailable:[];
+ const published=typeof e.published==='string'&&e.published?e.published:null;
+ const c=records.continuation&&typeof records.continuation==='object'?records.continuation:null;
+ const same=!!(published&&c&&c.programmeRunId===published);
+ const reading=same?discoveryQueueReading(records.status,published):null;
+ const workflow=same&&records.workflow?.programmeRunId===published?records.workflow:null;
+ const pauseIn=e.pause&&typeof e.pause==='object'?e.pause:null;
+ const pause=pauseIn?{present:pauseIn.present??null,paused:typeof pauseIn.paused==='boolean'?pauseIn.paused:null,reason:typeof pauseIn.reason==='string'?pauseIn.reason:null,detail:typeof pauseIn.detail==='string'?pauseIn.detail:null,nextCatchUpAt:discoveryQueueTime(pauseIn.nextCatchUpAt)}:null;
+ const gateAt=same?discoveryQueueTime(c.retryAt)||discoveryQueueTime(c.nextCatchUpAt):null;
+ const base={schemaVersion:1,state:'unknown',reason:null,owed:null,eligible:null,proof:null,provenAt:null,programmeRunId:published,
+  continuationProgrammeRunId:c&&typeof c.programmeRunId==='string'?c.programmeRunId:null,hopId:same&&typeof c.hopId==='string'&&c.hopId?c.hopId:null,
+  stage:c&&typeof c.stage==='string'?c.stage:null,continuationReason:c&&typeof c.reason==='string'?c.reason:null,
+  remainingChunks:same?discoveryQueueCount(c.remainingChunks):null,remaining:reading?.remaining??null,cheapRemaining:reading?.cheapRemaining??null,deferred:reading?.deferred??null,waitingRetry:reading?.waitingRetry??null,
+  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
+ const out=(state,reason,extra={})=>({...base,state,reason,...extra});
+ if(e.authority?.state==='unavailable')return out('unknown','authority_unavailable');
+ if(unavailable.some(name=>['authority','status','continuation','workflow','generation'].includes(name)))return out('unknown','records_unreadable');
+ if(e.authority?.state==='loading')return out('unknown','authority_loading');
+ if(!published)return out('unknown','no_publication');
+ if(!c)return out('unknown','no_continuation');
+ if(!same)return out('unknown','generation_mismatch');
+ if(c.reason==='programme_changed')return out('unknown','generation_handoff');
+ if(c.stage==='running'){
+  const lease=records.lease;
+  if(unavailable.includes('lease')||lease===undefined)return out('running','lease_unread',{owed:true,eligible:false});
+  if(lease&&Number(lease.expiresAt)>now)return out('running','live_lease',{owed:true,eligible:false});
+  return out('backlog','orphaned',{owed:true,eligible:true});
+ }
+ const proof=discoveryQueueProof({programmeRunId:published,continuation:c,workflow,status:records.status,reading});
+ if(proof.empty)return out('empty',proof.proof,{owed:false,eligible:false,proof:proof.proof,provenAt:proof.proof==='drained'?reading?.finishedAt??null:base.checkpointAt});
+ const parts=reading?[reading.remaining,reading.cheapRemaining,reading.deferred,reading.waitingRetry]:[];
+ const owed=base.remainingChunks>0||parts.some(value=>value>0);
+ // A live lease is a writer at work (a hop between its admission and its `running` checkpoint); it never outweighs a proof of emptiness.
+ if(records.lease&&Number(records.lease.expiresAt)>now)return out('running','live_lease',{owed:owed?true:null,eligible:false});
+ const known=owed?true:null;
+ if(workflow&&(workflow.recovery?.quarantined===true||workflow.reason==='recovery_exhausted'))return out('blocked','quarantined',{owed:known,eligible:false});
+ if(c.reason==='interrupted')return out('blocked','interrupted',{owed:known,eligible:false});
+ if(c.reason==='missing_secret')return out('blocked','missing_secret',{owed:known,eligible:false});
+ const gateMs=gateAt?Date.parse(gateAt):null,gated=gateMs!==null&&gateMs>now;
+ if(c.stage==='error')return out('failed',typeof c.reason==='string'&&c.reason?c.reason:'error',{owed:true,eligible:!gated});
+ if(c.reason==='idle')return out('unknown','awaiting_epg_discovery');
+ const pauseHolds=pause?.paused===true;
+ if(owed){
+  if(pauseHolds)return out('paused',pause.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority',{owed:true,eligible:false});
+  const renewed=c.reason==='chunk_budget'&&reading?.remaining>0;
+  const reason=c.reason==='backoff'||c.retryAt?'backoff':c.reason==='chunk_budget'?'chunk_budget':'pending';
+  return out('backlog',reason,{owed:true,eligible:renewed||!gated});
+ }
+ if(pauseHolds)return out('paused',pause.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority',{owed:null,eligible:false});
+ if(!reading)return out('unknown',records.status&&records.status.programmeRunId!==published?'status_foreign':'no_status');
+ if(parts.some(value=>value===null))return out('unknown','partial_counts');
+ return out('unknown','drain_unconfirmed');
+}
+// AIR-598. The bounded reader behind `discoveryQueueState`: the small Discovery records of one consistent snapshot (one D1 batch of single-row SELECTs under
+// D1 authority: authority, transfer, status, continuation, Workflow record, lease, projector window; the same small R2 objects, each read on its own, outside it)
+// and, under D1 authority, the EPG-priority pause as the writers would judge it now (`readDiscoveryGates`, read only). Never the ledger, the decisions, the
+// catalog or TMDB, never a write. A record that cannot be read is named in `unavailable`; it is never filled from another source.
+const DISCOVERY_EVIDENCE_NONE=()=>({status:null,continuation:null,workflow:null,lease:null,window:null});
+async function readDiscoveryEvidence(env,options={}){
+ const now=Number.isFinite(options.now)?options.now:Date.now(),unavailable=[];
+ let snapshot=null,records,authority,source;
+ if(typeof DiscoveryAuthority!=='undefined'){
+  try{snapshot=await DiscoveryAuthority.readOperationalSnapshot(env);}
+  catch(error){unavailable.push('authority');authority={state:'unavailable',cause:diagnosticErrorCode(error)};}
+ }
+ if(snapshot?.handled){
+  source='d1_snapshot';authority=snapshot.authority;records=snapshot.records||DISCOVERY_EVIDENCE_NONE();
+  for(const name of snapshot.unreadable||[])unavailable.push(name);
+ }else if(authority?.state==='unavailable'){
+  source='none';records=DISCOVERY_EVIDENCE_NONE();
+ }else{
+  // Outside D1 authority the same records are small R2 objects, each read on its own; one that fails is named, not guessed.
+  source='r2_objects';authority={state:'r2',mode:'r2',cutover:null,transfer:null,generation:null,programmeRunId:null,publishedProgrammeRunId:null};
+  const read=async(name,key)=>{try{return await loadJSON(env,key);}catch{unavailable.push(name);return null;}};
+  const [status,continuation,workflow,lease,generation]=await Promise.all([read('status','epg/discovery-status.json'),read('continuation',CONTINUATION_KEY),read('workflow','epg/discovery-workflow.json'),read('lease',DISCOVERY_LEASE_KEY),read('generation',EPG_GENERATION_KEY)]);
+  records={status,continuation,workflow,lease,window:null};
+  authority.publishedProgrammeRunId=generation?.phase==='published'?generation.programmeRunId||null:null;
+ }
+ let pause=null;
+ if(source==='d1_snapshot'&&typeof DiscoveryAuthority?.readDiscoveryGates==='function'){
+  try{pause=(await DiscoveryAuthority.readDiscoveryGates(env,now)).priority||null;}
+  catch{pause={present:null,paused:null,reason:'unknown',nextCatchUpAt:null};}
+ }
+ return {observedAt:new Date(now).toISOString(),source,authority,published:authority.publishedProgrammeRunId||null,records,unavailable:[...new Set(unavailable)],pause};
+}
+// The classification of the current generation, read once. Never throws: an evidence read that fails is the unknown state of an unreadable authority.
+async function readDiscoveryQueue(env,options={}){
+ const now=Number.isFinite(options.now)?options.now:Date.now();
+ let evidence;
+ try{evidence=await readDiscoveryEvidence(env,{now});}
+ catch(error){evidence={observedAt:new Date(now).toISOString(),source:'none',authority:{state:'unavailable',cause:diagnosticErrorCode(error)},published:null,records:DISCOVERY_EVIDENCE_NONE(),unavailable:['authority'],pause:null};}
+ return {evidence,queue:discoveryQueueState(evidence,now)};
+}
 // `options.workflow` (the record, or null for none) is the Workflow state the caller already holds as part of a consistent snapshot; without it the state is
-// read here. Only the platform liveness of that record's instance is observed anew.
+// read here. Only the platform liveness of that record's instance is observed anew. `options.queue` is the shared classification of the same snapshot
+// (AIR-598); without it the classification is read here. Whether work is pending or eligible comes only from it, never from the raw continuation reason.
 async function discoveryExecutorReadout(env,continuation,options={}){
  const configured='workflow';
  const now=Date.now();
@@ -2038,8 +2191,10 @@ async function discoveryExecutorReadout(env,continuation,options={}){
  let liveness=null;
  if(stored?.instanceId&&typeof workflowInstanceStatus==='function'&&typeof env?.DISCOVERY_WORKFLOW?.get==='function')liveness=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,stored.instanceId);
  const facts=typeof workflowReadoutFacts==='function'?workflowReadoutFacts(stored,liveness,now):{active:!!stored&&['starting','running','waiting','uncertain'].includes(stored?.phase),stalled:false,alive:false,dead:false,recoveryDue:stored?.recovery?.dueAt||null,recoveryWaiting:false,quarantined:false,updatedAt:stored?.updatedAt||null};
- const decision=continuation?continuationDecision(continuation,now):null;
- const pending=!!(continuation&&(continuation.remainingChunks>0||continuation.reason==='chunk_budget'||continuation.stage==='running'));
+ // AIR-598: pending is "not proven empty" (work owed or unknown) and eligible is the policy's "progress allowed now", both from the shared classification.
+ // A `chunk_budget` gate left on a drained series is neither: the series is proven empty and nothing is pending or degraded because of it.
+ const queue=options.queue||(await readDiscoveryQueue(env,{now})).queue;
+ const pending=queue.owed!==false;
  const terminal=stored?.phase==='stopped'&&['complete','backlog_empty','stale_generation','executor_not_workflow'].includes(stored.reason);
  const stoppedWithBacklog=stored?.phase==='stopped'&&pending&&!terminal;
  let owner='none';
@@ -2053,7 +2208,7 @@ async function discoveryExecutorReadout(env,continuation,options={}){
  const recoveryOverdueMs=recoveryOverdue?now-Date.parse(facts.recoveryDue):null;
  const recoveryState=recoveryOverdue?'overdue':facts.recoveryWaiting?'waiting':'none';
  const degraded=recoveryOverdue||stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
- return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded,recoveryOverdue,recoveryOverdueMs,recoveryState,recoveryIncident:recoveryOverdue&&recoveryOverdueMs>300000,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
+ return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:queue.eligible===true,degraded,recoveryOverdue,recoveryOverdueMs,recoveryState,recoveryIncident:recoveryOverdue&&recoveryOverdueMs>300000,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
@@ -2095,26 +2250,11 @@ function catalogFilmById(catalog,id){
 const OPERATIONAL_STALE_MS=3*3600000;
 const operationalNumber=value=>Number.isFinite(value)&&value>=0?value:null;
 async function discoveryOperationalStatus(env){
- const now=Date.now(),unavailable=[];
- let snapshot=null,records,authority;
- if(typeof DiscoveryAuthority!=='undefined'){
-  try{snapshot=await DiscoveryAuthority.readOperationalSnapshot(env);}
-  catch(error){unavailable.push('authority');authority={state:'unavailable',cause:diagnosticErrorCode(error)};}
- }
- let source;
- if(snapshot?.handled){
-  source='d1_snapshot';authority=snapshot.authority;records=snapshot.records||{status:null,continuation:null,workflow:null,lease:null,window:null};
-  for(const name of snapshot.unreadable||[])unavailable.push(name);
- }else if(authority?.state==='unavailable'){
-  source='none';records={status:null,continuation:null,workflow:null,lease:null,window:null};
- }else{
-  // Outside D1 authority the same records are small R2 objects, each read on its own; one that fails is named, not guessed.
-  source='r2_objects';authority={state:'r2',mode:'r2',cutover:null,transfer:null,generation:null,programmeRunId:null,publishedProgrammeRunId:null};
-  const read=async(name,key)=>{try{return await loadJSON(env,key);}catch{unavailable.push(name);return null;}};
-  const [status,continuation,workflow,lease,generation]=await Promise.all([read('status','epg/discovery-status.json'),read('continuation','epg/resolver-continuation.json'),read('workflow','epg/discovery-workflow.json'),read('lease',DISCOVERY_LEASE_KEY),read('generation',EPG_GENERATION_KEY)]);
-  records={status,continuation,workflow,lease,window:null};
-  authority.publishedProgrammeRunId=generation?.phase==='published'?generation.programmeRunId||null:null;
- }
+ const now=Date.now();
+ // AIR-598: the records come from the shared reader, and the queue block is the shared classification of exactly this snapshot.
+ const evidence=await readDiscoveryEvidence(env,{now});
+ const {source,authority,records}=evidence,unavailable=[...evidence.unavailable];
+ const queue=discoveryQueueState(evidence,now);
  const continuation=records.continuation,last=records.status,published=authority.publishedProgrammeRunId||null;
  const health=healthSummary(continuationHealth(continuation,records.lease,last,now,published));
  const running=continuation?.stage==='running';
@@ -2138,7 +2278,7 @@ async function discoveryOperationalStatus(env){
  };
  let executor={configured:'workflow'};
  // The executor facts come from the Workflow record of the same snapshot; only the platform liveness of that instance is observed now, and says so.
- {try{executor=await discoveryExecutorReadout(env,continuation,{workflow:records.workflow});executor={...executor,workflowSource:'snapshot'};if(executor.liveness!=null)executor.livenessObserved={at:new Date(now).toISOString(),source:'workflow_binding',atomicWithSnapshot:false};}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
+ {try{executor=await discoveryExecutorReadout(env,continuation,{workflow:records.workflow,queue});executor={...executor,workflowSource:'snapshot'};if(executor.liveness!=null)executor.livenessObserved={at:new Date(now).toISOString(),source:'workflow_binding',atomicWithSnapshot:false};}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
  const window=records.window&&records.window.expiresAt>now&&records.window.state!=='idle'?{state:records.window.state,expiresAt:new Date(records.window.expiresAt).toISOString()}:{state:'idle',expiresAt:null};
  return {view:'operational',schemaVersion:1,observedAt:new Date(now).toISOString(),source,authority:{state:authority.state,mode:authority.mode??null,cutover:authority.cutover??null,transfer:authority.transfer??null,generation:authority.generation??null,cause:authority.cause||null},
   programmeRunId:published||continuation?.programmeRunId||null,publishedProgrammeRunId:published,projectorWindow:window,
@@ -2146,7 +2286,7 @@ async function discoveryOperationalStatus(env){
   continuationHealth:health,lease:records.lease?{liveUntil:Number.isFinite(records.lease.expiresAt)&&records.lease.expiresAt>0?new Date(records.lease.expiresAt).toISOString():null,live:records.lease.expiresAt>now}:null,
   lastCheckpoint:continuation?{stage:continuation.stage||null,reason:continuation.reason??null,at:continuation.at||null,programmeRunId:continuation.programmeRunId||null,failedAt:continuation.stage==='error'?diagnosticFailedAt(continuation):null,failureKind:continuation.stage==='error'?diagnosticFailureKind(continuation):null,failureConstraint:continuation.stage==='error'?diagnosticFailureConstraint(continuation):null}:null,
   lastChunk:last?{stage:typeof last.stage==='string'?last.stage.slice(0,40):null,checked:operationalNumber(last.checked),remaining:operationalNumber(last.remaining),finishedAt:typeof last.finishedAt==='string'?last.finishedAt:null}:null,
-  backlog,executor,unavailable:[...new Set(unavailable)],
+  backlog,queue,executor,unavailable:[...new Set(unavailable)],
   detailed:{view:'detailed',note:'The detailed view reads the whole ledger under a snapshot fence and can be refused with discovery_fence while Discovery commits; that is not a failure of Discovery.'}};
 }
 async function discoveryPipelineStatus(env){
@@ -2167,6 +2307,18 @@ async function discoveryPipelineStatus(env){
  }
  const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=catalogFilmById(catalog,id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
  if(interruptedRecovery)pipeline.interruptedRecovery=interruptedRecovery;
- pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation);
+ // AIR-598: the detailed view classifies the small records it already read (under its own fence) with the shared rule, plus the Workflow record and the
+ // EPG-priority pause read on their own; it adds no snapshot batch of its own.
+ let workflowRecord=null;const unavailable=[];
+ if(typeof readWorkflowState==='function'){try{workflowRecord=(await readWorkflowState(env)).record;}catch{workflowRecord={phase:'unknown'};unavailable.push('workflow');}}
+ let pause=null;
+ if(authority?.ready&&typeof DiscoveryAuthority.readDiscoveryGates==='function'){try{pause=(await DiscoveryAuthority.readDiscoveryGates(env)).priority||null;}catch{pause={present:null,paused:null,reason:'unknown',nextCatchUpAt:null};}}
+ const evidence={observedAt:new Date().toISOString(),source:authority?.ready?'d1_detailed':'r2_objects',authority:{state:authority?.ready?(authority.transfer==='loading'?'loading':'ready'):'r2'},
+  published:(authority?.ready?authority.publishedProgrammeRunId:pinned.epgPin?.programmeRunId)||null,records:{status:last,continuation,workflow:unavailable.length?null:workflowRecord,lease,window:null},unavailable,pause};
+ const queueState=discoveryQueueState(evidence);
+ // The detailed body is a function of what is stored (it carries no read time); the operational view is the one with `observedAt`.
+ const {observedAt:_readAt,...storedQueue}=queueState;
+ pipeline.discoveryQueue=storedQueue;
+ pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation,{workflow:workflowRecord,queue:queueState});
  return pipeline;
 }

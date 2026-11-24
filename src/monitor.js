@@ -36,14 +36,19 @@ const Monitor=(()=>{
   const text=String(run?.error||'');
   return {authority,publishedRunId,publishedAt,runError:!!run?.error&&run.stage!=='complete',resourceLimit:/1102|exceeded.*(memory|cpu)|memory limit/i.test(text),stage:run?.stage||null};
  });
+ // AIR-598: one consistent read through the shared Discovery reader (src/discovery.js `readDiscoveryEvidence`) and its one classification (`queue`); the policy
+ // judges owed work, emptiness and eligibility only from that classification, never from the raw continuation reason. A record that cannot be read is unreadable.
  const discoveryFacts=(env,now,pubRunId)=>guarded(async()=>{
   const executor='workflow';
-  const [continuation,lease,last]=await Promise.all([loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'epg/resolver-lease.json'),loadJSON(env,'epg/discovery-status.json')]);
+  const evidence=await readDiscoveryEvidence(env,{now});
+  if(evidence.authority?.state==='unavailable'||evidence.unavailable.some(name=>['authority','status','continuation','workflow'].includes(name)))throw new Error('discovery_unreadable');
+  const queue=discoveryQueueState(evidence,now);
+  const {continuation,lease,status:last,workflow}=evidence.records;
   const health=typeof continuationHealth==='function'?continuationHealth(continuation,lease,last,now,pubRunId)?.status||null:null;
   let readout=null;
-  if(executor==='workflow'&&typeof discoveryExecutorReadout==='function')readout=await discoveryExecutorReadout(env,continuation).catch(()=>null);
+  if(executor==='workflow'&&typeof discoveryExecutorReadout==='function')readout=await discoveryExecutorReadout(env,continuation,{workflow,queue}).catch(()=>null);
   const reason=String(readout?.recovery?.reason||readout?.reason||'');
-  return {executor,continuation:continuation||null,health,lastChunkFinishedAt:last?.finishedAt||null,publishedRunId:pubRunId,
+  return {executor,continuation:continuation||null,queue,health,lastChunkFinishedAt:last?.finishedAt||null,publishedRunId:pubRunId,
    readout:readout?{stalled:!!readout.stalled,quarantined:!!(readout.recovery?.quarantined||readout.quarantined)}:null,resourceLimit:/1102|memory/i.test(reason)};
  });
  const ratingsFacts=(env,now)=>guarded(async()=>{
@@ -213,6 +218,8 @@ const Monitor=(()=>{
      // AIR-596: the prediction recovery names why it recovered (confirmed progress, or no eligible work), from the facts this tick evaluated.
      if(message.key==='predictions_no_progress'){const facts=evaluation.streams.find(stream=>stream.stream==='predictions')?.facts;message.message=policy().predictionRecoveryMessage(facts);
       if(['progress','no_eligible_work','retry_wait'].includes(facts?.recovery)){message.recoveryReason=facts.recovery;if(facts.recovery==='progress'&&facts.lastProgressAt)message.recoveryProgressAt=facts.lastProgressAt;}}
+     // AIR-598: a Discovery stall recovered by the shared classification names its reason (a proven empty queue, the EPG-priority pause), never progress.
+     if(message.key==='discovery_stalled'||message.key==='discovery_unconfirmed'){const facts=evaluation.streams.find(stream=>stream.stream==='discovery')?.facts,recovery=policy().discoveryRecovery(facts);message.message=recovery.message;if(recovery.reason)message.recoveryReason=recovery.reason;}
      outbox.push({...message,id:message.key+'|recovery|'+iso(now),queuedAt:iso(now)});continue;
     }
     const entry=alerts.issues[message.key],before=prior[message.key]||null;

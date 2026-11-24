@@ -1240,6 +1240,9 @@ export const FILES={
  "monitor-policy.mjs": {
   "suite": "core"
  },
+ "discovery-queue-state.mjs": {
+  "suite": "core"
+ },
  "monitor-message.mjs": {
   "suite": "core"
  },

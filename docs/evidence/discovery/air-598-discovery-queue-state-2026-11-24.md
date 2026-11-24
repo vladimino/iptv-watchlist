@@ -1,0 +1,47 @@
+# AIR-598: one Discovery queue state for the footer, the Monitor, the Events report and the operational status (24 Nov 2026)
+
+Card: [AIR-598](https://trello.com/c/76LlZPnW). Follows [AIR-595](https://trello.com/c/dPjrNIbQ) ([evidence](air-595-discovery-report-empty-and-epg-pause-2026-11-24.md)). Scope: why the footer row «Распознавание» said «требует внимания · нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage» all day on 24 Nov while the Events report showed an empty queue, and the code change that gives every reader one classification. Read-only observation (L0) and offline tests only: no production write, flag, Task, lease, retry, migration, manual run or event rewrite. Times are UTC; Europe/Madrid was UTC+1.
+
+## Observations
+
+| When (UTC) | Source | What it showed |
+| --- | --- | --- |
+| 24 Nov 12:00 and 16:00 (13:00, 17:00 Madrid) | Owner, the Events page | The hourly Discovery report of 13:00 Madrid read «Очередь Discovery пуста» (AIR-595), the 17:00 report the EPG-priority pause. The footer row «Распознавание» read «требует внимания · нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage» the whole day. |
+| 24 Nov 16:04:46 (17:04:46 Madrid) | Operational pipeline status, read by the coordinator and quoted in the card | Generation `d8dc6ec8…` (the one published on 23 Nov); executor record series 27, `phase: stopped`, `waitingReason: backlog_empty`, liveness `complete`, no lease; continuation `paused` / `chunk_budget`, `remainingChunks: 0`; last progress `remaining 0`, `cheapRemaining 0`, `deferred 0`, `waitingRetry 0`, `error: null`; yet `executor.pending`, `executor.eligible` and `executor.degraded` were all `true`. The EPG update of the day was starting (authority loading), so that read describes the old generation, not the new queue. |
+| 24 Nov 16:31:37 (17:31:37 Madrid) | MCP `epg_pipeline_status`, `view: operational` (this session, read only) | Authority `d1`/`open`, transfer `committed`; the new generation `234e3cbd…` is published; continuation `running` with a live lease of the same hop; last chunk `remaining 2640`, `cheapRemaining 0`; Workflow series 3 `running`, liveness `running`; `executor.pending` and `eligible` `true`, `degraded` `false`. A real, non-empty queue of the new generation. |
+
+The raw footer payload of 24 Nov was not read in this session (no Access login for the Worker routes here); the footer verdict is reconstructed from the code below and the records above.
+
+## Root cause (code, `main` at `c5ecc1b`)
+
+Five readers judged the same small records with their own rules:
+
+| Reader | Rule before | Effect on the drained series |
+| --- | --- | --- |
+| Footer row «Распознавание» (`integrationHealth` in `src/enrichment.js`) | Did not read the Workflow record. A `chunk_budget` continuation went to the gate rule: once `nextCatchUpAt` plus 2 h 45 min had passed and no batch of the generation finished after it, any **ledger** count `readyNow > 0` made it `degraded` / `resolver_no_recent_progress`. | The ledger count of current unresolved observations is computed at read time over a sliding airing window; it was non-zero while the executor's own reading of the generation was 0. The row read as a stall with the Usage hint. |
+| Monitor (`evaluateDiscovery` in `src/domain/monitor-policy.js`, facts from three separate reads in `src/monitor.js`) | `backlog = remainingChunks > 0 || stage running || reason chunk_budget`. | The drained continuation is a backlog; 3 h after the old gate it raises `discovery_stalled`. |
+| Operational and detailed status (`discoveryExecutorReadout` in `src/discovery.js`) | `pending = remainingChunks > 0 || reason chunk_budget || running`; `eligible = decision.run || reason chunk_budget`; `degraded` includes "instance finished and pending". | `pending`, `eligible` and `degraded` all `true` for a finished, drained series (the 17:04 read above). |
+| Events report (`discoveryReportQueue` in `src/discovery-workflow.js`) | Proved empty from `complete`, and since AIR-595 from the drained series (`discoveryDrainedSeries` + `discoveryDrainedStatus`). | Correct: «Очередь Discovery пуста». |
+| Admin data health (`src/admin/health.js` + `src/domain/data-health.js`) | Read `epg/resolver-continuation.json` straight from R2, which is frozen since Discovery became D1-authoritative; `paused` with `remainingChunks 0` and no retry yielded nothing. | Judged a frozen record; the shortcut also hid a real `chunk_budget` backlog with `remainingChunks 0`. |
+
+The execution policy is not part of the defect: a series whose last chunk drains the queue while the legacy alias sweep (ADR 0158) is open stops for good on `backlog_empty`, and nothing runs again for that generation until the next publication.
+
+## Change
+
+- `src/discovery.js`: one bounded reader `readDiscoveryEvidence` (the operational D1 snapshot, or the five small R2 objects outside D1 authority, plus `readDiscoveryGates` for the EPG-priority pause, read only) and one pure classification `discoveryQueueState` with the proof `discoveryQueueProof` (the AIR-595 drained proof and the `complete` proof, moved here from `src/discovery-workflow.js` so every reader shares them). States: `empty`, `running`, `backlog`, `paused`, `failed`, `blocked`, `unknown`; contract in the [Discovery queue state reference](../../reference/api/enrichment.md#discovery-queue-state).
+- Operational status: adds `queue`; the detailed status adds `discoveryQueue` (from the records it already read); in both `executor.pending` is "not proven empty" and `executor.eligible` comes from the classification.
+- Footer: the row maps the classification (`queue_empty` «очередь пуста · проверено …», `resolver_epg_priority`, `resolver_handoff`, `resolver_unconfirmed`); the ledger count no longer decides it.
+- Monitor: facts from the shared reader; owed work follows the existing time rule as `discovery_stalled`; an unconfirmed state follows the same rule as the new `discovery_unconfirmed`; a proven empty queue and the pause raise nothing; a recovery says why (`queue_empty`, `epg_priority`), not progress.
+- Events: `discoveryReportQueue` uses the shared proof; stored events are not rewritten.
+- Admin data health: reads the continuation through the shared reader (the D1 record at D1 authority) and judges with the attached classification.
+
+No new persisted state, authority, writer, threshold, schedule or flag. Thresholds (3 h, gate grace 2 h 45 min) are unchanged. Not an ADR: an existing source and existing proof rules are reused; the classification is computed on every read.
+
+## Tests (offline)
+
+- `tests/discovery-queue-state.mjs` (new, core): one table of eleven record sets, each read through the real routes and runtime: the classifier, `GET /api/enrichment/footer/status`, the operational and detailed `GET /api/enrichment/pipeline/status`, the admin data health model, one Monitor tick and one hourly Events close. The exact 23–24 Nov picture (series 27 stopped on `backlog_empty`, `chunk_budget` gate 16 h past, every part zero) is `empty` in all of them; the next generation's queue, a real stall, a backoff, a live writer, an incomplete proof (another hop), a generation mismatch, legacy unpinned records, partial counts, a chunk error and a quarantine stay distinct and consistent. Reads write nothing on repeat. The D1 path with the EPG-priority pause (`awaiting_certificate`), its lifting, a loading authority and an unreadable authority. A Monitor day: one `discovery_stalled` alert, the drain, exactly one recovery worded as a proven empty queue, four quiet ticks with the old gate, then a fresh new queue without an incident.
+- Updated: `tests/status-footer.mjs` (production record shapes: a published pointer, pinned records with counts; the ledger count no longer decides the row), `tests/monitor-policy.mjs`, `tests/monitor-message.mjs`, `tests/data-health.mjs`, `tests/admin-health-api.mjs` (the shared reader's reads), `tests/epg-priority-gate.mjs` (loads the shared proof). AIR-595 (`tests/discovery-events.mjs`), AIR-596 and AIR-592 coverage passes unchanged.
+
+## Acceptance still open
+
+Natural production checks after deploy, read only: the next drained series (stopped on `backlog_empty` with the `chunk_budget` gate in the past) reads «Распознавание: работает · очередь пуста · проверено …» in the footer on the main and admin pages, the Monitor keeps the Discovery stream `healthy` and opens no `discovery_stalled`, and the operational status shows `queue.state: empty` with `executor.pending: false`; during the 17:00 Madrid publication the footer shows the handoff or pause wait, not attention. Owner UI acceptance of the footer texts.
