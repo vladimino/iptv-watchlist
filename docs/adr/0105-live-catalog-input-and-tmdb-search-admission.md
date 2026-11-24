@@ -6,7 +6,7 @@
 **Approval source:** the owner's stage B2 GO comment on the [AIR-388 card](https://trello.com/c/fFvwYLjM#comment-6af09f1feb452738c7b5256d) (2026-11-08 16:11 UTC) after [PR #433](https://github.com/vladimino/iptv-watchlist/pull/433): one bounded read-only read of the live catalog and links, a bounded read-only TMDB search of at most 1,500 requests at no more than 4 per second, the implementation, and a recount. This is a decision about code and contracts. It is **not** authorization for a production validate, commit, Film admission, ratings write or mass import, nor for a Task, flag, migration, Access change or cutover. Each of those needs its own approved bounded plan.  
 **Related work:** [AIR-388](https://trello.com/c/fFvwYLjM); [ADR 0104](0104-inferred-letterboxd-identity.md); [ADR 0087](0087-rated-archive-film-admission.md); [ADR 0099](0099-canonical-film-person-d1-authority.md); [ADR 0079](0079-d1-authoritative-published-epg.md)  
 **Supersedes:** None. It extends ADR 0104 and changes no earlier Accepted record.  
-**Superseded by:** None
+**Superseded by:** [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md), Accepted 2026-11-24, in part: decision 5, the admission written to the admissions object before the link ([owner decision](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326)).
 
 ## Context
 

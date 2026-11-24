@@ -6,7 +6,7 @@
 **Approval source:** Owner chose option A in the AIR-489 working session on 17 Nov 2026 (Europe/Madrid), after the [options handoff comment](https://trello.com/c/yZigGAVc) and this record in Proposed form. Architecture only: no production run, flag, Task, migration or data write is authorized.
 **Related work:** [AIR-489](https://trello.com/c/yZigGAVc), [AIR-475](https://trello.com/c/9OniH9d9), [AIR-499](https://trello.com/c/8ifHCioP), [ADR 0087](0087-rated-archive-film-admission.md), [ADR 0090](0090-rated-identity-redirect-proof-and-retry.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0104](0104-inferred-letterboxd-identity.md), [RCA evidence](../evidence/letterboxd/air-489-rca-2026-11-17.md)
 **Supersedes:** None
-**Superseded by:** None
+**Superseded by:** [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md), Accepted 2026-11-24, in part: the "immutable receipt entry" step of the admissions object ([owner decision](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326)).
 
 ## Context
 

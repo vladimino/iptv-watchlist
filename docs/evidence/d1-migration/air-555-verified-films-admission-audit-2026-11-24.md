@@ -29,7 +29,7 @@
 6. **Recommendation at the time of the audit: option B, with conditions.**
    - Freeze the object as retained historical evidence and make D1 the only admission coordinator.
    - The conditions and the follow-up scopes below are this audit's dated analysis. They are **superseded proposals**, not an accepted or operational contract.
-   - The current design is still Proposed and under owner review in [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975) (ADR 0207 with ADR 0210 and 0211). This report does not adopt its decisions.
+   - The design was later [accepted on 24 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326) in [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975) as [ADR 0207](../../adr/0207-letterboxd-admissions-coordinated-in-d1-only.md), with [ADR 0213](../../adr/0213-film-identity-evidence-ledger.md) (numbered 0210 during review) and [ADR 0211](../../adr/0211-catalog-enrichment-producer.md). This report does not adopt its decisions; the ADRs are the contract.
    - This report decides nothing and authorizes no write.
 
 ## Method and evidence boundary
@@ -239,7 +239,7 @@ Left to others:
 
 ### Requirements that option B must meet (as analysed at the audit; superseded proposal)
 
-> **Status of this section.** This is the audit's analysis as of 24 Nov 2026, kept as history. It is **not** an accepted contract and not a delivery plan. After the owner's disposition the design is under review as Proposed ADR 0207, with ADR 0210 and 0211 ([PR #975](https://github.com/vladimino/iptv-watchlist/pull/975)), and some requirements below were not chosen:
+> **Status of this section.** This is the audit's analysis as of 24 Nov 2026, kept as history. It is **not** an accepted contract and not a delivery plan. After the owner's disposition the design was reviewed and [accepted on 24 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326) as ADR 0207, with ADR 0213 (numbered 0210 during review) and ADR 0211 ([PR #975](https://github.com/vladimino/iptv-watchlist/pull/975)). Some requirements below were not chosen:
 > - requirement 3 (persisting payloads) was replaced by the owner's choice to reacquire the source;
 > - requirement 6 is corrected below;
 > - the follow-up scopes were replaced by that PR's delivery graph.
@@ -271,7 +271,7 @@ Left to others:
    - F1 defines the fence: for example, a quiet window with no Ratings run, no Letterboxd Sync (Watchlist admission included) and no archive step in flight, verified from run state, followed by an ETag pin. It also defines how a late old-code write is detected.
 6. **Rollback boundary** (corrected after review).
    - The first D1-only admission row is **not** a safe boundary. New payloads, refused-after-link receipts, pending canonical receipts and retired enrichment state can all be durable before any such row, and the legacy code would not understand them.
-   - The boundary must be a durable, monotonic activation that precedes every incompatible effect. Before it, an ordinary revert is possible. After it, there is **no** ordinary code revert. The current Proposed design uses the one-way flip of an activation marker for this.
+   - The boundary must be a durable, monotonic activation that precedes every incompatible effect. Before it, an ordinary revert is possible. After it, there is **no** ordinary code revert. The accepted ADR 0207 uses the one-way flip of an activation marker for this.
    - After the boundary, recovery is roll-forward. Restoring legacy R2 coordination needs its own owner-approved reconciliation plan (R2 rebuilt from D1 under a fence), never an implicit rebuild.
 7. **Sequencing with F3.** F3 is a required disposition. If the rated enrichment phase is kept, its new target must exist before the R2 writes stop. Otherwise the phase is retired in the same change. B does not remove G3 by itself.
 
@@ -286,7 +286,7 @@ There is no dual authority at any point: D1 already makes the canonical decision
 
 ## Follow-up scopes (audit proposal, superseded)
 
-> These were proposed before the owner's disposition. They are superseded by the delivery graph of the still-Proposed ADR 0207 in [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975). No card is created from this list.
+> These were proposed before the owner's disposition. They are superseded by the delivery graph of ADR 0207 (decision 7), accepted on 24 Nov 2026 in [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975). No card is created from this list.
 
 
 - **F1 (option B): ADR and implementation, offline.**
