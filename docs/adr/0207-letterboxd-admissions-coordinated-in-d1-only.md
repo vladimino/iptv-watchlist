@@ -1,19 +1,19 @@
 # ADR 0207: Letterboxd Film admissions are coordinated in D1 only; `verified-films.json` is frozen as historical evidence
 
-**Status:** Proposed. The owner's disposition of 2026-11-24 kept B, 1C, 2B and 3C and asked for 4-7 to be reworked. The [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) of the same day then selected UC1 = K2, UC2 = accept, UC3 = B (one retry policy for both callers), U4 = A and U5 = A. This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
-**Original decision date:** not decided  
+**Status:** Accepted  
+**Original decision date:** 2026-11-24. That day the owner made the disposition of B, 1C, 2B and 3C, then the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124), then the [final disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326) accepting this record.  
 **Recorded at:** 2026-11-24. Revised the same day after two design reviews, after the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347), after the [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), after its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) after the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398) and after the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
-**Approval source:** not decided. The record was requested in the owner's handoff on [PR #972](https://github.com/vladimino/iptv-watchlist/pull/972#issuecomment-7127786410). The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) chose directions, and the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) selected options. Neither accepts unseen text or grants an implementation or activation GO.  
+**Approval source:** [Product Owner final disposition of 24 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326). The owner wrote «принимаю!», accepting this record as reviewed at `d1a5c2bf` in the [final technical review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045607308) (byte-identical at `d3e42960`). The selections are B, 1C, 2B and 3C, the directions 4A, 5C, 6C and 7C, U1 = K2, U2 = accept, U3 = B, U4 = A and U5 = A. This is an architecture acceptance only. It grants no implementation GO and no production GO; each card and operation keeps its own gate.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK) (audit and decision), under [AIR-546](https://trello.com/c/1dRSJEbp) and [AIR-275](https://trello.com/c/4x7hH0gI); related [AIR-559](https://trello.com/c/733sRAxu) and [AIR-547](https://trello.com/c/99faXisC).
 - The read-only audit [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md) ([PR #972](https://github.com/vladimino/iptv-watchlist/pull/972), merged at `b9616ff3`). This record uses the audit's call-site labels (W1-W6, R1-R7) and gaps (G1-G4).
-- **Companion records, both Proposed:**
+- **Companion records, both Accepted the same day:**
   - [ADR 0213](0213-film-identity-evidence-ledger.md), the source-aware identity evidence ledger (disposition 5C);
   - [ADR 0211](0211-catalog-enrichment-producer.md), the catalog-enrichment producer (disposition 6C).
 
   This record depends on both: decisions 2, 5 and 6 below.
 
-**Supersedes (only on acceptance):**
+**Supersedes:**
 - In part [ADR 0087](0087-rated-archive-film-admission.md): decision 4, the admissions object as the entry point of a verified movie. Its later metadata is superseded through ADR 0211.
 - In part [ADR 0105](0105-live-catalog-input-and-tmdb-search-admission.md): decision 5, the admission written to that object before the link.
 - In part [ADR 0166](0166-diary-rated-only-identity-bridge.md): its "immutable receipt entry" step.
@@ -35,7 +35,7 @@
 
 ## Owner choices of 2026-11-24 (on HEAD `b4807c68`)
 
-Recorded in the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124). They select options; the final disposition of this record follows the independent review of this revision.
+Recorded in the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124). They were confirmed by the owner's [final disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326) of the same day, which accepted this record.
 
 | Choice | Owner selection | In this revision |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ Recorded in the [consolidated owner choices](https://github.com/vladimino/iptv-w
 
 AIR-275 cannot report "no mutable R2 authority" for admissions while it stays.
 
-## Decision (proposed)
+## Decision
 
 **Option B: D1 is the only admission coordinator.** It is activated through its own one-way marker, after a dormant delivery. The R2 object is then frozen and retained read-only as historical evidence. The target below is not implemented. Nothing here is delivered, deployed or activated.
 
@@ -586,17 +586,16 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 
 ## Owner choices in this record
 
-The owner's selections of 2026-11-24 are listed at the top of this record ("Owner choices of 2026-11-24"). Decisions B, 1C, 2B and 3C, and the directions 4A, 5C, 6C and 7C, are not reopened. No materially different choice remains open in this record. The final disposition follows the independent review of this revision.
+The owner's selections of 2026-11-24 are listed at the top of this record ("Owner choices of 2026-11-24"). Decisions B, 1C, 2B and 3C, the directions 4A, 5C, 6C and 7C, and U1 to U5 are accepted ([final owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326)). No choice remains open.
 
 ## Follow-ups
 
 **On acceptance.**
 - Create the cards of decision 7, including the planned follow-ups (DR, PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b, E5) as roadmap cards, each with its own decision.
 - Link the AIR-275-mandatory cards as bare URLs in AIR-275's native Prerequisites checklist.
-- Mark ADR 0087, 0105 and 0166 "Superseded in part by ADR 0207", and update the registry rows.
+- ADR 0087, 0105 and 0166 are marked "Superseded in part by ADR 0207" in their headers and registry rows (done with this record).
 - Accepting this record is an architecture decision only. Each card keeps its implementation GO and each operation its production GO.
 
-**On rejection.** The record is kept as `Rejected` (docs-only), and the owner chooses A or C.
 
 **Observed, not changed here.** The admin write routes other than the new settings control check only that the Access header is present, not its signature or the owner identity (ADR 0211 Context). Hardening them is outside this record.
 

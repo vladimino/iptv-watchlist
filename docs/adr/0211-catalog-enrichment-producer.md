@@ -1,15 +1,15 @@
 # ADR 0211: Admitted Films are enriched by a canonical catalog-enrichment producer from Letterboxd, TMDB and Wikidata, independent of EPG airing
 
-**Status:** Proposed. The owner selected the direction of each choice on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124), and [0211-7 = B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861) on the transport-only fallback): 1 = A (fill-only, with per-field provenance planned as a follow-up), 2 = extended B (Letterboxd a first-class source, independent of a TMDB claim), 3 = A, 4 = A, 5 = C (shared upstream coordination across all relevant producers in one delivery scope), 6 = extended A (durable control plus an `/admin/settings` checkbox). This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
-**Original decision date:** not decided  
+**Status:** Accepted  
+**Original decision date:** 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124), [0211-7 = B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861), then the [final disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326))  
 **Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516), the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398) and the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
-**Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 6C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "не вижу смысла упускать возможность сразу начать подготовку к глобальному каталогу, даже если миграция из-за этого займет больше времени". The consolidated choices select options; they are not an acceptance of unseen text, an implementation GO or a production GO.  
+**Approval source:** [Product Owner final disposition of 24 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326). The owner wrote «принимаю!», accepting this record as reviewed at `d1a5c2bf` in the [final technical review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045607308). The selections are 1 = A (PF planned), 2 = extended B, 3 = A, 4 = A, 5 = C, 6 = extended A and 7 = B (transport-only fallback). Requested originally by disposition 6C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347). This is an architecture acceptance only. It grants no implementation, migration, activation, mode change or production GO.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI).
 - [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) retires the R2 rated enrichment and holds the delivery graph (decision 7).
 - [ADR 0213](0213-film-identity-evidence-ledger.md), a sibling record.
 
-**Supersedes (only on acceptance):** In part [ADR 0087](0087-rated-archive-film-admission.md) decision 4: metadata written onto the R2 admission entry.  
+**Supersedes:** In part [ADR 0087](0087-rated-archive-film-admission.md) decision 4: metadata written onto the R2 admission entry.  
 **Superseded by:** None
 
 ## Context
@@ -91,7 +91,7 @@ Two other upstreams each have a single caller and their own durable pause:
 - `projection_run` is a per-name lease store.
 - Producer outcomes are drained to the Events Log.
 
-## Decision (proposed)
+## Decision
 
 ### 1. A metadata-only writer contract, fill-only (0211-1 = A)
 
@@ -633,7 +633,7 @@ Every write batch of the producer asserts `state = 'active'` and its generation 
 
 ## Owner choices in this record
 
-The owner selected these on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)). The final disposition of this record follows the independent review of this revision.
+The owner selected these on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124), and [0211-7 = B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861)) and accepted the record the same day ([final disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326)).
 
 | # | Choice | Owner selection | In this revision |
 | --- | --- | --- | --- |

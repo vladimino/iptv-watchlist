@@ -1,10 +1,10 @@
 # ADR 0213: Identity evidence is a ledger of typed, source-aware propositions beside the canonical claims
 
-**Status:** Proposed. The owner selected the direction of each choice on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124): 1 = A, 2 = A, 3 = iii, 4 = A with a separate planning card for the full model, 5 = A). This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
-**Original decision date:** not decided  
+**Status:** Accepted  
+**Original decision date:** 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124), then the [final disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326))  
 **Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) and the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398). Renumbered from 0210 (#979 took that number first). Revised again after the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
-**Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That chose the direction; it does not accept this design. The consolidated choices select options; they are not an acceptance of unseen text, an implementation GO or a production GO.  
-**Related work:** [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI). [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Proposed) uses the initial slice (decision 7).  
+**Approval source:** [Product Owner final disposition of 24 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326). The owner wrote «принимаю!», accepting this record as reviewed at `d1a5c2bf` in the [final technical review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045607308). The selections are 1 = A, 2 = A, 3 = iii, 4 = A (with the full model planned on its own card) and 5 = A. Requested originally by disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347). This is an architecture acceptance only, with no implementation, migration, import or production GO.  
+**Related work:** [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI). [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Accepted) uses the initial slice (decision 7).  
 **Supersedes:** None. It amends nothing by itself. Every reader change is a separate later decision (decision 8).  
 **Superseded by:** None
 
@@ -38,7 +38,7 @@ A source can identify **different things**, and a row about one of them must not
 
 Each of these is a different proposition, and a source may support one without saying anything about the others.
 
-## Decision (proposed)
+## Decision
 
 ### 1. Evidence records typed propositions about typed subjects, not rows about a Film
 
@@ -244,7 +244,7 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenario 9 tes
 
 ## Owner choices in this record
 
-The owner selected these on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)). The final disposition of this record follows the independent review of this revision.
+The owner selected these on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)) and accepted the record the same day ([final disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141800326)).
 
 | # | Choice | Owner selection |
 | --- | --- | --- |
