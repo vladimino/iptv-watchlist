@@ -144,7 +144,11 @@ For a Letterboxd-only Film, a TMDB id on the page is recorded as an identity hin
 - The producer never resolves identity, and never applies metadata across an unverified or contradicted mapping.
 
 **Which checks finish before which writes.**
-- `core` and `credits` writes from any source need a recorded agreement for the Film's **current** anchors whenever the Film holds a Letterboxd anchor. There are two exceptions: a Letterboxd source that is `failed` (`needs_attention`), and the fallback below. In both, the fields that TMDB fills are also listed as `unconfirmed_agreement`.
+- `core` and `credits` writes from any source need a recorded agreement for the Film's **current** anchors whenever the Film holds a Letterboxd anchor. A **known disagreement always blocks**.
+- **Unresolved agreement work stays open, whatever the fields.** While the Film holds a Letterboxd anchor and no agreement is recorded for its current anchors, the Letterboxd agreement check stays due. That holds even when every field is already filled, and even after a fallback filled the last blank field, until the agreement is confirmed, a disagreement is found, or the owner resolves it.
+- **Open owner choice 0211-7, raised by the [targeted re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045305740).** Two exceptions were proposed: a Letterboxd source that is `failed` (`needs_attention`), and the 72 h fallback below. In both, TMDB would fill a field without a confirmed agreement, and the field would be listed as `unconfirmed_agreement`. Under fill-only that is a permanent lower-priority fill, and a trusted TMDB anchor is not the same as confirmed agreement with the Letterboxd anchor.
+  - This was not among the owner's earlier selections, so neither exception is part of the design submitted for acceptance until the owner decides.
+  - The alternative is that a pending or failed Letterboxd source keeps `core` and `credits` waiting indefinitely: visible, and released only by the owner.
 - A source's own localization row needs only that source's anchor, because one source's row never replaces another's.
 - Wikidata needs only the TMDB anchor.
 
@@ -170,7 +174,7 @@ For a Letterboxd-only Film, a TMDB id on the page is recorded as an identity hin
 - Nothing is stored as a candidate. When the field becomes decidable, S is fetched again. There are no proof snapshots, and fill-only is unchanged.
 - **Both completion orders give the same writes.** Letterboxd first: Letterboxd fills. TMDB first: TMDB waits, Letterboxd later fills, and TMDB is refetched only for the fields Letterboxd lacked.
 
-**Bounded fallback.** If the earlier source stays `pending` through transport for **72 h** continuously for that Film (`pending_since` on its state row), it counts as unavailable for the waiting fields, and the next source fills them.
+**Bounded fallback (proposed, pending owner choice 0211-7).** If the earlier source stays `pending` through transport for **72 h** continuously for that Film (`pending_since` on its state row), it counts as unavailable for the waiting fields, and the next source fills them.
 - Each such field is listed as `fallback_fill`, with the source that filled it and the source that was waited for. If the Film's agreement was not yet confirmed, the field is also listed as `unconfirmed_agreement`.
 - A later answer from the earlier source never overwrites it, because the producer is fill-only. A different value is recorded as `stored_differs`. If a later disagreement is found, every `unconfirmed_agreement` field is listed for owner review.
 - Card PF decides any later replacement.
@@ -227,7 +231,7 @@ Enrichment has three independent **parts**:
 - `updated_at`.
 
 **The Film row.** A row with `part = 'film'` and `source = '*'` holds the Film-level state.
-- Its `status` is `active` or `identity_disagreement`.
+- Its `status` is `active` or `identity_disagreement`, and it has its own `plan_epoch`, raised by every anchor change, retry and resume.
 - One more column, `film_json`, holds:
   - the applicable source set;
   - `anchor_digest`, `agreed_anchor_digest` and `anchor_checked_at`;
@@ -259,7 +263,7 @@ Enrichment has three independent **parts**:
   - The state row keeps its `due_since`, so the Film keeps its place in the queue.
   - `transport_streak` grows, and `pending_since` is set if it was empty.
   - `retry_at` is the later of the transport backoff and the shared cooldown. The backoff is the same as in ADR 0207 decision 4b: 15 min · 2^min(streak − 1, 5), so at most 8 h.
-  - There is no cap on transport retries. A long streak is visible (decision 5), and precedence falls back after 72 h (decision 2).
+  - There is no cap on transport retries. A long streak is visible (decision 5), and, only if owner choice 0211-7 adopts it, precedence falls back after 72 h (decision 2).
 - **Definite.** A 404 of the anchored entity, a 200 that does not parse, a missing required section of a complete response, or a check that throws **consumes one failure**. After **6** failures the row is `needs_attention`, visible, and no longer retried automatically. A 404 of a trusted TMDB id is reported as an identity hint, never as a retirement.
 - **Identity disagreement** stops the Film (decision 2) without consuming failures.
 - A part or source that succeeded is never retried because another one failed. The only exception is a field waiting for precedence, which is refetched when it becomes decidable.
@@ -273,30 +277,45 @@ Enrichment has three independent **parts**:
 | --- | --- | --- | --- | --- |
 | core | one `film_metadata`/`film_sync_state` write | the Film | `enrich:<film>:core` | one batch, ≤ 12 guards |
 | localization | one `localization_source` write per source | the Film | `enrich:<film>:localization:<source>` | ≤ 3 sources (existing cap 10) |
-| credits | one `person_mutation` unit with the missing persons | the Persons | `enrich:<film>:persons:<source>` | ≤ 30 persons (existing cap 40) |
+| credits | one `person_mutation` unit **per missing Person**, as accepted in ADR 0130 | that Person | `enrich:person:<person id>` | one Person per unit (ADR 0130's bound of 40 is external ids plus aliases of one Person); at most 30 missing Persons per Film, written over as many ticks as the budget allows |
 | credits | one add-only `film_credits` unit | the Film | `enrich:<film>:credits:<source>` | ≤ 30 credits (existing cap 50) |
 
-**Commit guards cover the exact anchors used.** Every unit asserts:
-- for each anchor its plan used or checked (its own source's anchor, and for agreement the other anchor), that the exact `(scheme, value)` is still trusted, non-conflicting and singly owned, and for TMDB not retired;
+**Commit guards: the exact anchor set and the plan epoch.** Every unit asserts these in its own fenced batch:
+- **the anchor set.** One compound guard checks the plan's anchors as a set:
+  - every anchor its plan used or checked (its own source's, and for agreement the other one) still holds by its exact `(scheme, value)`: trusted, non-conflicting, singly owned, and for TMDB not retired;
+  - **no other** trusted `letterboxd` or `tmdb` anchor of the Film exists beyond the planned ones.
+
+  So an anchor added while an old plan runs fails that plan too;
+- **the plan epoch.** The `refresh_epoch` of the unit's state row, and the Film row's `plan_epoch`, still equal the values the plan read. An owner `retry`, an anchor check or a resume that raises either epoch therefore makes every batch of an older plan fail, even with unchanged anchors, and the tick replans;
 - the `metadata` dimension's owner and reviewed locks (Film units);
 - the lease;
 - the control generation (decision 6).
 
-A changed anchor therefore fails the batch, and the planner replans (decision 3b).
+**State writes are fenced the same way.** Every write of a state row asserts the lease and the row's epoch, so a stale tick can neither commit canonical data nor overwrite the state of a newer plan.
 
 **The `core` batch** is **one** `writeFilmFacts` batch. Its guards stay within the cap of 12:
 - at most 6 per-field blank guards;
-- at most 2 exact anchors;
+- 1 anchor-set guard;
+- 1 epoch guard;
 - 1 lock guard;
 - the lease;
 - the control generation.
 
 That makes 11 in all.
 
-**Person units** carry the same exact anchor guards as the Film units of their plan (every anchor the plan used or checked), the lease and the control generation, so no Person is written for an invalidated plan.
+**Person units** are the existing per-Person `person_mutation` units: one target Person, one revision and one receipt tail (`mutatePerson`, `canonical-mutations.js:148-175`).
+- C1 adds an optional, validated `guards` input to `mutatePerson` and to its producer adapter, like the caller guards of `writeFilmFacts`. It is bounded, and it is counted inside the writer's 60-statement cap.
+- No multi-target mutation contract is introduced.
+- Each Person unit carries the plan's anchor-set guard, the epoch guard, the lease and the control generation, so no Person is written for an invalidated or stale Film plan.
+- Its key `enrich:person:<person id>` is per Person. When two Films' plans need the same new Person, the partial unique index lets one reservation through. The other is `in_flight`, then finds the Person present: a no-op, with no receipt.
+
+**Attribution survives partial success, without a provenance model.** Before each unit, the producer records a small **write intent** on its state row (in `film_json` for the Film row): the fields or credits the unit will add, the anchor digest, the epoch and the unit's `operation_key`.
+- After the unit, it settles the intent from the receipt (`applied`, or nothing written).
+- After a crash, the reconcile protocol finds the unit's receipt by key, and the intent says what it wrote and under which anchor.
+- That is the only attribution kept, and it is enough for `written_under_superseded_anchor`. It is not card PF's per-field provenance on `film_metadata`.
 
 - **Cross-origin correlation.** A Person or credit may already exist from another origin, such as the EPG chain. The person unit inserts only absent Persons, and the credits unit adds only what is missing. With the credits rule of decision 2, this never adds a second namespace.
-- **Sequencing and partial recovery.** `credits` runs its person unit first, then its credits unit. A credit whose Person is missing is refused (`film_person_reference`), so the database enforces the order. A retry recomputes the missing persons and credits from canonical state against the stored expected set.
+- **Sequencing and partial recovery.** `credits` runs its Person units first, then its credits unit. A credit whose Person is missing is refused (`film_person_reference`), so the database enforces the order. If the deadline falls after some Persons, the next tick recomputes the missing Persons and credits from canonical state against the stored expected set. A Film need not finish in one tick.
 - **Receipts per unit** follow the **reconcile-then-reserve** protocol of ADR 0207 decision 3: the history fingerprint, settling unresolved receipts, an atomic reservation, and a loser that replans. This record therefore depends on card R1 (the receipt `operation_key`).
 
 ### 3b. Identity changes and recovery
@@ -313,7 +332,7 @@ That makes 11 in all.
   - **`credits` is held** with `needs_attention` and the reason `superseded_credits` whenever this producer added credits under the old anchor. That stops the new identity's cast from being mixed into the old one in the same namespace. The owner releases it with `retry`, after correcting or accepting the listed credits.
 
 **Unchanged anchors: an explicit owner retry.** A Film blocked by `identity_disagreement`, or a part in `needs_attention`, whose anchors did not change, is retried only by an owner action. The request is `POST /api/admin/settings/catalog-enrichment` with `{action: 'retry', filmId, part?, source?, expectedRows, requestId}`, and it has the same authentication and readback as decision 6. `expectedRows` gives, for each selected state row, the `status` and `updated_at` that the owner saw. That is the retry's own compare-and-swap. A retry never changes the control row's revision, so it does not race with pause or resume.
-- It resets the selected rows to `due`, clears failures and the disagreement, and raises `refresh_epoch`.
+- It resets the selected rows to `due`, clears failures and the disagreement, and raises `refresh_epoch` and the Film's `plan_epoch`, so every batch of an older plan fails (decision 3).
 - It keeps `due_since`.
 - It writes no metadata itself.
 
@@ -352,20 +371,24 @@ That makes 11 in all.
 - **Sources and precedence:**
   - both completion orders of Letterboxd and TMDB give the same writes;
   - a Letterboxd transport failure makes TMDB fields wait, then fill when Letterboxd answers;
-  - the 72 h fallback, listed as `fallback_fill`;
-  - a Letterboxd source at `needs_attention` lets TMDB fill, listed as `unconfirmed_agreement`;
+  - depending on owner choice 0211-7: either the 72 h fallback and the failed-Letterboxd exception, listed as `fallback_fill` and `unconfirmed_agreement`, or `core` and `credits` waiting until the owner releases them;
   - the deadline falling between two sources;
   - a value conflict and a stored difference, both listed;
   - a page disagreement stops every source;
   - a Letterboxd-only Film (no TMDB claim) enriched from Letterboxd alone;
   - an inferred admission and an alias-only admission get no Letterboxd fetch;
   - name-only credits are not written;
+  - Person units: the deadline after some Persons, resumed next tick; two Films creating the same Person concurrently (one reservation, the other a no-op); a stale Film plan refused at the Person unit;
   - Films with existing credits in one namespace, and in both namespaces.
 - **Identity changes:**
   - a TMDB correction A → B on a completed Film;
   - a retirement;
   - a lid replacement L → L′;
   - a correction while a part is mid-recovery;
+  - an anchor added while an old plan runs: the old plan's batches fail;
+  - a source-set shrink or growth that resolves a previously blocked Film;
+  - an owner retry racing a live tick: the tick's later batches fail on the epoch, and no state of the newer plan is overwritten;
+  - agreement work kept open after every field is filled;
   - `credits` held as `superseded_credits` after a correction, then released by an owner retry;
   - another Film taking or releasing the same anchor value, detected by the `holds` bit;
   - a retry with stale `expectedRows`;
@@ -394,7 +417,15 @@ That makes 11 in all.
 
   So a Film makes at most 4 upstream requests, and a tick at most **8**.
 - **Sources in parallel, never two requests to one scope at once.** The sources of one Film are different upstream scopes, so they are fetched in parallel. Each fetch has the timeout `min(source timeout, deadline − reserve − now)`. A source cut by that timeout is `pending` (transport, no failure).
-- **Writes after the fetches.** A Film's writes start after all its fetches have ended, and only inside the reserve. There are at most 6 D1 batches per Film: core, up to 3 localization rows, one person unit and one credits unit. Each D1 batch is far below the 5 s reserve.
+- **Writes after the fetches, bounded by a measured unit budget.** A Film's writes start after all its fetches have ended, and only inside the reserve.
+  - Each receipted unit costs a reconcile read, a reservation, its fenced batch and a state settle, so a few D1 round trips.
+  - Each tick has a **unit budget**, initially 12 units, and stops writing when the budget or the reserve is spent. The units are:
+    - core: 1;
+    - localization: up to 3;
+    - Persons: one per missing Person, up to 30;
+    - credits: 1.
+  - The rest of a Film continues at the next tick from canonical state, so **a Film need not finish in one tick**.
+  - The budget is raised only from measured tick costs, like the Film bound.
 - **A second Film starts only with time left.** It starts only if at least 10 s remain before the reserve.
 - **Measurement before raising the bound.** The bound of 2 Films is a starting value. It is raised only by an owner decision after measurement: each tick records its wall time, its fetch times per source and its D1 statements. At 2 per hour, the 714 legacy Films (if C3a is chosen) would take at least 15 days. That is a minimum, not an ETA.
 
@@ -600,3 +631,4 @@ The owner selected these on 2026-11-24 ([consolidated owner choices](https://git
 | 0211-4 | Scope | **A**: new admissions after the cutoff only; C3a and C3b separate | decision 4 |
 | 0211-5 | Cross-producer upstream coordination | **C**: shared, adopted by all relevant producers in one delivery scope | decision 5, cards UC1-UC3 |
 | 0211-6 | Activation and control | **extended A**: the durable control plus an `/admin/settings` checkbox using the same control | decision 6, card CU |
+| 0211-7 | **Open, raised by the [targeted re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045305740):** may a lower-priority source fill a field permanently, without confirmed cross-source agreement, after a 72 h transport wait or a failed Letterboxd source? Or do `core` and `credits` wait until the owner releases them? | **not decided**; the Coordinator presents it | decision 2 |
