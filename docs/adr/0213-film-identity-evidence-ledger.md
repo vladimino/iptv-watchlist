@@ -93,7 +93,7 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 ### 4. Identity, idempotence and the evidence-only operation
 
-- **Evidence key: one row per observation route.** `evidence_key = sha256(normalized proposition, polarity, route, method, source_root, source_scope, scope_evidence_key)`. It is `UNIQUE`, so an insert of an existing key is a no-op.
+- **Evidence key: one row per observation route.** `evidence_key = sha256(normalized proposition, polarity, route, method, source_root, source_scope, scope_evidence_key)`. It is `UNIQUE`, so an insert of an existing key is a no-op. For a reconstructed row without a root, `reconstructed_from` takes the place of `source_root` (decision 6).
   - **Normalized proposition.** For the symmetric `same_work`, the two sides are ordered canonically by `kind:value` before hashing, so A–B and B–A are one proposition. The directed relations (`film_has_id`, `candidate_for`) keep their direction.
   - **Same route, same root:** the same row, so a replay writes nothing.
   - **Another route, same root:** another row. The Watchlist check of a page that the Diary check already verified is recorded as its own observation, with the common `source_root`.
@@ -135,6 +135,7 @@ The owner chose the broad direction: earlier identity history is reconstructed *
   - A route that the record does not carry is stored as `unknown`. Example: the 6 Diary or Watchlist checks, whose caller the receipt does not keep. `unknown` is allowed only on reconstructed rows.
   - An observation time that is not recorded stays null. `seq` then orders the load, not the history.
   - A missing `source_root` stays null. A row without a root is **never** counted as independent of any other row.
+  - **Deduplication without a root.** The `evidence_key` then uses the durable source record instead: `reconstructed_from` takes the place of `source_root` in the key. The reconstruction run is never part of the key. So two distinct source records with unknown roots stay two rows, and a repeated import of the same record writes nothing.
 - **Reconstruction provenance on every row.** Three nullable columns, present from the E1 schema so no later table change is needed:
   - `origin`: `live` or `reconstruction`;
   - `reconstruction_run`: the run that wrote it;
@@ -142,7 +143,7 @@ The owner chose the broad direction: earlier identity history is reconstructed *
 - **Polarity is copied, never upgraded.**
   - An inferred pair becomes `restricts`, never `asserts`.
   - No reconstructed row is a proof by itself. A later reader amendment (decision 8) decides separately whether, and how, a reconstructed row may count. **No proof is inferred from historical or inferred data.**
-- **No duplicate of a live row.** If a live row already holds the same proposition and `source_root`, reconstruction writes nothing for it and reports it as covered.
+- **No duplicate of a live row.** Reconstruction reports a source record as covered, and writes nothing for it, only if a live row has the same normalized proposition, polarity, method, `source_scope` and a known, equal `source_root`. A row that differs in any of these is written, and a null root never matches.
 
 **Procedure for each family.**
 1. **Dry run.** A read-only reconstruction writes nothing. It produces a dated coverage report under `docs/evidence/`:
@@ -205,7 +206,7 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenario 9 tes
 12. *(future)* A supersession: the new row names its predecessor; a second supersession of the same predecessor is refused.
 13. *(reconstruction)* An inferred legacy pair: one `restricts` row with `origin = reconstruction` and its `reconstructed_from`; never `asserts`.
 14. *(reconstruction)* A legacy Diary or Watchlist page check: `asserts same_work` with route `unknown` and a null time. Its `source_root` is set only if the stored record keeps the page-check digest; otherwise it is null and never counted as independent. No reader treats it as proof without an amendment.
-15. *(reconstruction)* A dry run writes nothing and reports coverage. A repeated import writes no new row, and a live row of the same proposition and root is reported as covered.
+15. *(reconstruction)* A dry run writes nothing and reports coverage. A repeated import writes no new row. Two records with unknown roots stay two rows. A live row counts as coverage only with the same proposition, polarity, method, scope and known root.
 
 ## Alternatives considered
 

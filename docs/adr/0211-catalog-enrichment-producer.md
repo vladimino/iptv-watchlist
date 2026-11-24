@@ -110,61 +110,98 @@ The producer calls `writeFilmFacts` with **only** `metadata`, `sync` and `locali
 
 **Each source may write a Film only through its own identity anchor** on that Film. There is no global TMDB guard.
 
-| Source | Anchor (all asserted in the write batch) | Not an anchor |
+| Source | Anchor (each asserted in the write batch, by its exact value) | Not an anchor |
 | --- | --- | --- |
-| `letterboxd` | **Reliable ownership of a Letterboxd entity by this Film:** a trusted, non-conflicting `film_external_id(scheme='letterboxd')` row (a lid), with no other owner of that lid | a `letterboxd_slug` row, a known URL alone, a short code alias alone, an inferred pair (`restricts`, method `title_year_search`) |
+| `letterboxd` | **Reliable ownership of a Letterboxd entity by this Film:** a trusted, non-conflicting `film_external_id(scheme='letterboxd', value=<lid>)` row, with no other owner of that lid. In this code base the lid **is** the `boxd.it` short code: the Diary check requires `shortCode === lid` (`letterboxd-diary-identity.js:30`). | the same code held only as the admission alias `film_alias kind='letterboxd_short_code'` (written for inferred admissions too); a `letterboxd_slug` row; a known URL alone; an inferred pair (`restricts`, method `title_year_search`) |
 | `tmdb` | a trusted, non-conflicting `film_external_id(scheme='tmdb')` row, no other trusted owner of that id, and the id not retired | an untrusted or conflicting row; a retired id |
 | `wikidata` | the `tmdb` anchor; the Wikidata item must name exactly that TMDB id (P4947) | anything without a TMDB anchor in this record. A lookup by Letterboxd film id is a possible later extension, not designed here |
 
 **Letterboxd needs no TMDB claim.** A Film with a reliable Letterboxd anchor is eligible for Letterboxd metadata whether or not it holds a TMDB claim. The producer neither requires nor manufactures a TMDB match.
 
 **Reliable ownership is distinct from an inferred cross-provider relation.**
-- The Letterboxd anchor says that this Film owns this Letterboxd entity. It exists before the fetch, as a trusted lid claim.
-  - Such claims come from two places:
-    - the ADR 0184 claim unit (`canonical-letterboxd-claim.js`), which writes one only from a current, unambiguous Ratings link that is **not** an inferred title-and-year link;
-    - the own lid of a legacy Watchlist Film `film:<lid>`.
-  - The Diary and Watchlist checks request that claim after a verified page check (`ensureLetterboxdClaims`).
-- An **inferred** `same_work` (`restricts`, method `title_year_search`) never creates an anchor.
-- A short code alias alone is not an anchor.
+- The Letterboxd anchor says that this Film owns this Letterboxd entity. It exists before the fetch, as a trusted lid claim. Such claims come from:
+  - the ADR 0184 claim unit (`canonical-letterboxd-claim.js`), which writes one only from a current, unambiguous Ratings link that is **not** an inferred title-and-year link. The Diary and Watchlist checks request that claim after a verified page check (`ensureLetterboxdClaims`);
+  - the own lid of a legacy Watchlist Film `film:<lid>`.
+- An **inferred** `same_work` never creates an anchor. Nor does the admission alias, because the inferred import writes it too.
 - A page fetched by the producer can only **confirm** an existing anchor. It never creates one.
 - **The anchor is a canonical claim, not an evidence row.** This producer never reads the ADR 0213 ledger to decide anything, consistent with that record's choice 5.
 
-**Page agreement at fetch time.** The fetched page must confirm the anchor: its lid, or its short code, equals the anchor's.
-- If the Film also holds a TMDB anchor and the page carries a `data-tmdb-id`, the two must agree.
-- **Disagreement** means the page names another TMDB id, the page lid differs, or the page is not a film. The producer records `identity_disagreement` on the Film's state, visibly. It then writes nothing from **any** source for that Film, until the owner or an identity writer resolves it.
+**The page agreement contract.** The rules are those of the Diary check (`verifyPage`), applied to the anchor:
+1. Request `boxd.it/<lid>`, and follow at most one redirect to a `letterboxd.com/film/<slug>/` page.
+2. If the page has a shortlink, its code equals the anchor lid. Otherwise the redirect from `boxd.it/<lid>` is the link.
+3. The canonical path equals the landing path, and the page parses as a film.
+4. **Only when the Film holds a TMDB anchor:** the page has exactly one `data-tmdb-id`, of type `movie`, and it equals that anchor.
+
+For a Letterboxd-only Film, a TMDB id on the page is recorded as an identity hint, never as a claim.
+
+**Intentional limitations of the contract:**
+- The slug comes from the landing page and is not checked against a trusted slug; no trusted slug scheme exists.
+- The title and year are not identity tests here. They are metadata, compared only as conflicts and hints.
+
+**Outcomes of the contract:**
+- **Agreement** is recorded on the Film's state as `agreed_anchor_digest`, the digest of the exact anchors it confirmed.
+- **Disagreement** is any rule failing on a 200 page. The producer records `identity_disagreement` visibly and writes nothing more from **any** source for that Film, until an anchor changes or the owner retries (decision 3b).
 - The producer never resolves identity, and never applies metadata across an unverified or contradicted mapping.
+
+**Which checks finish before which writes.**
+- `core` and `credits` writes from any source need a recorded agreement for the Film's **current** anchors whenever the Film holds a Letterboxd anchor. The one exception is the fallback below.
+- A source's own localization row needs only that source's anchor, because one source's row never replaces another's.
+- Wikidata needs only the TMDB anchor.
 
 **Applicable sources.** For each Film the producer derives the set of sources whose anchors hold. A source without an anchor is `not_applicable`. That is not a failure, and nothing is fetched from it.
 
-**Deterministic precedence.** In one tick the producer fetches every applicable source of a due part and then writes each blank field once, from the first source in this order that has a value:
+**Precedence for a blank field.** The order is fixed:
 
 | Field | Order | Note |
 | --- | --- | --- |
-| year, runtime, synopsis, poster, url | `letterboxd`, `tmdb` | year: release year; url: the canonical page of the winning source |
-| genres | the first source in the order that has genres | the vocabularies differ, so genres are not compared across sources |
-| Russian title (localization source rows) | each applicable source writes **its own** `film_localization_source` row (`letterboxd`, `tmdb`, `wikidata`) | the existing resolver order (`letterboxd`, `tmdb`, `wikidata`) chooses, with owner and reviewed values on top |
-| credits | **one** credit source per Film: `letterboxd` if anchored, else `tmdb` | so that the same people are not written twice under two source-specific ids |
+| year, runtime, synopsis, poster, url, genres | `letterboxd`, `tmdb` | url: the canonical page of the winning source. Genres are not compared across sources, because the vocabularies differ |
+| Russian title (localization source rows) | each applicable source writes **its own** `film_localization_source` row (`letterboxd`, `tmdb`, `wikidata`) | the existing resolver order (`letterboxd`, `tmdb`, `wikidata`) chooses, with owner and reviewed values on top; no waiting |
+| credits | the credit source of the credits rule below | — |
 
-The order does not depend on which response arrived first.
+**Per field, each applicable source is in one of five states:**
+- `value`: it answered with a value;
+- `absent`: it answered completely without one;
+- `pending`: due, transport, cooldown, or stopped by the deadline;
+- `failed`: `needs_attention`;
+- `not_applicable`.
 
-**Conflicts are visible, not silently resolved.** For each field the producer compares the values of the applicable sources, and the stored value, with a fixed equality rule:
+**The rule.** A blank field is written from source S only if S has `value` and every source before S in the order is `absent`, `failed` or `not_applicable`.
+- If an earlier source is `pending`, the field **waits**, and S's state stays `due` with reason `waiting_for_precedence` and the earlier source's `retry_at`.
+- Nothing is stored as a candidate. When the field becomes decidable, S is fetched again. There are no proof snapshots, and fill-only is unchanged.
+- **Both completion orders give the same writes.** Letterboxd first: Letterboxd fills. TMDB first: TMDB waits, Letterboxd later fills, and TMDB is refetched only for the fields Letterboxd lacked.
+
+**Bounded fallback.** If the earlier source stays `pending` through transport for **72 h** continuously for that Film (`pending_since` on its state row), it counts as unavailable for the waiting fields, and the next source fills them.
+- Each such field is listed as `fallback_fill`, with the source that filled it and the source that was waited for. If the Film's agreement was not yet confirmed, the field is also listed as `unconfirmed_agreement`.
+- A later answer from the earlier source never overwrites it, because the producer is fill-only. A different value is recorded as `stored_differs`. If a later disagreement is found, every `unconfirmed_agreement` field is listed for owner review.
+- Card PF decides any later replacement.
+
+**Deadline between sources.** A Film's writes start only after every applicable source of its due parts has answered or stopped in this tick. A source stopped by the deadline is `pending` (transport class, no failure), so the tick writes only the fields that are already decidable.
+
+**Source set versus anchor value.**
+- A **source-set change** means a source becomes applicable or stops being applicable, because an anchor appears or disappears.
+  - When the set grows, the new source's gaps reopen: unfilled `core` fields and its own localization row.
+  - When it shrinks, that source stops at once, because its anchor guard fails at commit. Its earlier writes remain.
+- An **anchor value change** means the same source keeps an anchor but with another value: TMDB A → B, or lid L → L′. That is an identity correction, handled by decision 3b.
+
+**Conflicts are visible, not silently resolved.** For each field the producer compares the values of the sources that answered, and the stored value, with a fixed equality rule:
 - year: exact;
 - runtime: within 5 minutes;
-- poster and url: not compared.
+- poster, url and genres: not compared.
 
 It then records:
-- `value_conflict` (field, values per source) when two sources disagree. The precedence still fills a blank field, but the conflict stays listed;
+- `value_conflict` (field, values per source) when two sources disagree. Precedence still decides, but the conflict stays listed;
 - `stored_differs` when a source disagrees with a non-blank stored value. Fill-only never overwrites it.
 
 Both are listed in the state and reported (decision 5). Neither ever changes a claim.
 
 **Metadata informs identity work but never proves it.** A year conflict, a page naming another TMDB id, or a runtime far apart is recorded as an **identity hint** on the Film's state. A later identity reader (ADR 0213 decision 8) may read hints. A hint is never proof, never evidence of `same_work`, and never modifies a claim.
 
-**Later source availability reopens only what it can fill.** The state records the applicable source set it last planned with.
-- When that set grows (for example, a trusted Letterboxd claim appears later, or a TMDB claim is added to a Letterboxd-only Film), only the parts with gaps become due again, and only for the new source: unfilled `core` fields, and the new source's localization row.
-- **`credits` is never reopened for another source.** The credit source is fixed when `credits` is first planned and recorded on its state row, so the same people are never written twice under two ids. A later change of credit source is part of the separate refresh decision.
-- Filled fields are not refetched under fill-only.
-- A shrinking set (a claim untrusted, retired or conflicted) stops that source at once, because its anchor guard fails at commit.
+**The credits rule: one namespace per Film, including what other producers wrote.** People are identified per source (`actor/<slug>` or `tmdb_actor/<id>`), so the producer must not add a second namespace to a Film.
+- **The Film already has credits in one namespace** (for example, Letterboxd credits from the EPG chain). The credit source is that namespace's source, if it is applicable, and only missing credits are added. If that source is not applicable, no credits are written.
+- **The Film has credits in both namespaces.** No credits are written, and the part records `credits_other_namespace` (`complete_with_gaps`) for owner review.
+- **The Film has no credits.** The source is `letterboxd` if anchored, otherwise `tmdb`.
+- The credit source is fixed when `credits` is first planned and is never reopened for another source.
+- No person is merged on name, and no credit is deleted.
 
 **Persons.**
 - **Letterboxd credits** are written only for credits with a real person slug, as `actor/<slug>` and `director/<slug>`. A credit whose id would fall back to the display name is **not written**; it is a gap (`name_only_credit`).
@@ -182,21 +219,26 @@ Enrichment has three independent **parts**:
 **State lives in its own minimal store**, an additive table `catalog_enrichment_state`, with primary key `(film_id, part, source)`. No other writer touches it. It has these columns:
 - `film_id`, `part`, `source`;
 - `status`: `due`, `complete`, `complete_with_gaps`, `not_applicable`, `needs_attention` or `identity_disagreement`;
-- `anchor`: the scheme and value it was planned with;
+- `reason`;
+- `anchor`: the exact scheme and value it was planned with;
 - `source_version`, `refresh_epoch`;
-- `failures`, `transport_streak`, `retry_at`, `due_since`;
+- `failures`, `transport_streak`, `pending_since`, `retry_at`, `due_since`;
 - `expected_json`, `gaps_json`, `conflicts_json`, `hints_json`;
 - `updated_at`.
 
-A Film-level summary (applicable source set, disagreement) is a row with `part = 'film'`.
+**The Film row.** A row with `part = 'film'` holds the Film-level state:
+- the applicable source set;
+- `anchor_digest`, `agreed_anchor_digest` and `anchor_checked_at`;
+- the disagreement;
+- the lists `fallback_fill`, `unconfirmed_agreement` and `written_under_superseded_anchor`.
 
 **Completion comes from canonical state plus the state rows.**
-- **`core` is complete** when every field is non-blank, or when every applicable source has answered completely: `complete_with_gaps` lists the fields that no applicable source had.
-- **`credits` is complete** when every credit of the **expected set** exists. The expected set comes from the chosen credit source's complete response:
+- **`core` is complete** when every field is non-blank, or when every applicable source is settled (`absent`, `failed` or `not_applicable` for the missing fields): `complete_with_gaps` lists the fields that no applicable source had.
+- **`credits` is complete** when every credit of the **expected set** exists. The expected set comes from the credit source's complete response:
   - at most **10 actors** and at most **20 directors**, in source order;
   - so at most 30 credits, within the unit cap of 50.
 
-  It is stored in `expected_json` when the part is planned. A Film with more than 20 directors records the gap `directors_truncated`. One bound now applies everywhere in this record.
+  It is stored in `expected_json` when the part is planned. A Film with more than 20 directors records the gap `directors_truncated`. One bound applies everywhere in this record.
 - **`localization` is complete per applicable source.** Each applicable source (`letterboxd`, `tmdb`, `wikidata`) has its own state row:
   - `complete`: its `film_localization_source` row exists;
   - `complete_with_gaps`: the source answered completely and has no Russian title. This is a legitimate absence, and it is recorded here because a source row cannot hold an empty value;
@@ -210,38 +252,70 @@ A Film-level summary (applicable source set, disagreement) is a row with `part =
 - A legitimate refresh is an explicit, separately decided action. It raises the part's `refresh_epoch`, and the epoch is part of the request identity.
 
 **Retry semantics, consistent with ADR 0207 decision 4b:**
-- **Transport.** A 403, a Cloudflare challenge, a 429, a timeout, a network error, a 5xx, or an active shared cooldown (decision 5) **does not consume a failure**.
+- **Transport.** A 403, a Cloudflare challenge, a 429, a timeout, a network error, a 5xx, an active shared cooldown (decision 5) or the tick deadline **does not consume a failure**.
   - The state row keeps its `due_since`, so the Film keeps its place in the queue.
-  - `transport_streak` grows, and `retry_at` is the later of the transport backoff and the shared cooldown. The backoff is the same as in ADR 0207 decision 4b: 15 min · 2^min(streak − 1, 5), so at most 8 h.
-  - There is no cap on transport retries. A long streak is visible (decision 5).
+  - `transport_streak` grows, and `pending_since` is set if it was empty.
+  - `retry_at` is the later of the transport backoff and the shared cooldown. The backoff is the same as in ADR 0207 decision 4b: 15 min · 2^min(streak − 1, 5), so at most 8 h.
+  - There is no cap on transport retries. A long streak is visible (decision 5), and precedence falls back after 72 h (decision 2).
 - **Definite.** A 404 of the anchored entity, a 200 that does not parse, a missing required section of a complete response, or a check that throws **consumes one failure**. After **6** failures the row is `needs_attention`, visible, and no longer retried automatically. A 404 of a trusted TMDB id is reported as an identity hint, never as a retirement.
 - **Identity disagreement** stops the Film (decision 2) without consuming failures.
-- A part or source that succeeded is never retried because another one failed.
+- A part or source that succeeded is never retried because another one failed. The only exception is a field waiting for precedence, which is refetched when it becomes decidable.
 
-**Unit identities.** Every canonical write is one receipted unit with a deterministic identity. The event carries the part's `refresh_epoch`. The digest carries the `sourceVersion`: SHA-256 of the canonical JSON of the source fields used, with no clocks.
+**Unit identities.** Every canonical write is one receipted unit with a deterministic identity.
+- The `operation_key` names the unit, not the plan. The event carries the part's `refresh_epoch` and the `anchor_digest`.
+- The digest carries the `sourceVersion`: SHA-256 of the canonical JSON of the source fields used, with no clocks.
+- **A replan therefore keeps the key and changes the digest**, so the reconcile protocol abandons any unresolved receipt of the old plan before reserving a new one.
 
 | Part | Unit | Target | `operation_key` | Bound |
 | --- | --- | --- | --- | --- |
 | core | one `film_metadata`/`film_sync_state` write | the Film | `enrich:<film>:core` | one batch, ≤ 12 guards |
 | localization | one `localization_source` write per source | the Film | `enrich:<film>:localization:<source>` | ≤ 3 sources (existing cap 10) |
-| credits | one `person_mutation` per missing person | the Person | `enrich:person:<role>/<id>` (`tmdb_actor/<n>`, `actor/<slug>`, …) | ≤ 30 persons (existing cap 40) |
+| credits | one `person_mutation` unit with the missing persons | the Persons | `enrich:<film>:persons:<source>` | ≤ 30 persons (existing cap 40) |
 | credits | one add-only `film_credits` unit | the Film | `enrich:<film>:credits:<source>` | ≤ 30 credits (existing cap 50) |
 
-**The `core` batch and its guards.** The `core` part is **one** `writeFilmFacts` batch. Its guards stay within the cap of 12:
-- at most 6 per-field blank guards;
-- the anchor of each source that contributed a value: at most 2, `letterboxd` and `tmdb`;
+**Commit guards cover the exact anchors used.** Every unit asserts:
+- for each anchor its plan used or checked (its own source's anchor, and for agreement the other anchor), that the exact `(scheme, value)` is still trusted, non-conflicting and singly owned, and for TMDB not retired;
+- the `metadata` dimension's owner and reviewed locks (Film units);
 - the lease;
 - the control generation (decision 6).
 
-The no-retirement predicate is folded into the `tmdb` anchor guard.
+A changed anchor therefore fails the batch, and the planner replans (decision 3b).
 
-- **Cross-origin correlation.** A Person or credit may already exist from another origin, such as the EPG chain. The person unit is insert-if-absent, so it is then a no-op and opens no receipt. The credits unit adds only what is missing.
-- **Sequencing and partial recovery.** `credits` runs its person units first, then its credits unit. A credit whose Person is missing is refused (`film_person_reference`), so the database enforces the order. A retry recomputes the missing persons and credits from canonical state against the stored expected set.
+**The `core` batch** is **one** `writeFilmFacts` batch. Its guards stay within the cap of 12:
+- at most 6 per-field blank guards;
+- at most 2 exact anchors;
+- 1 lock guard;
+- the lease;
+- the control generation.
+
+That makes 11 in all.
+
+**Person units** carry the exact anchor guards of the credit source, the lease and the control generation, so no Person is written for an invalidated plan.
+
+- **Cross-origin correlation.** A Person or credit may already exist from another origin, such as the EPG chain. The person unit inserts only absent Persons, and the credits unit adds only what is missing. With the credits rule of decision 2, this never adds a second namespace.
+- **Sequencing and partial recovery.** `credits` runs its person unit first, then its credits unit. A credit whose Person is missing is refused (`film_person_reference`), so the database enforces the order. A retry recomputes the missing persons and credits from canonical state against the stored expected set.
 - **Receipts per unit** follow the **reconcile-then-reserve** protocol of ADR 0207 decision 3: the history fingerprint, settling unresolved receipts, an atomic reservation, and a loser that replans. This record therefore depends on card R1 (the receipt `operation_key`).
+
+### 3b. Identity changes and recovery
+
+**Anchor check before filtering due work.** Before it selects due work, each tick recomputes the anchor digest for every Film it is about to plan. It also does so for up to **20** further in-scope Films with the oldest `anchor_checked_at`, whatever their status, including `complete`, `needs_attention` and `identity_disagreement`. The digest is SHA-256 of the sorted anchors `(scheme, value, trusted, conflicting, retired)`, and computing it is a bounded read of `film_external_id` and `tmdb_retirement_decision`.
+
+**On a change:**
+- **The source set grew:** the new source's gaps reopen (decision 2).
+- **The source set shrank:** that source's rows become `not_applicable`, and its earlier writes remain.
+- **An anchor value changed (an identity correction):**
+  - Every state row of the Film is invalidated. Its status becomes `due`, with failures and streak at 0 and `expected_json` cleared. `refresh_epoch` rises by 1, `agreed_anchor_digest` is cleared, and `identity_disagreement` is lifted.
+  - Unresolved receipts of the old plan are abandoned by the reconcile protocol (same key, different digest) before any new reservation, so no stale unit lands.
+  - **Values written under the old anchor are neither overwritten nor deleted**, because the producer is fill-only and credits are add-only. They are listed as `written_under_superseded_anchor`, each field or credit with its old anchor. They are visible in `/admin/settings` and to the Monitor, for correction through the existing owner routes or card PF.
+
+**Unchanged anchors: an explicit owner retry.** A Film blocked by `identity_disagreement`, or a part in `needs_attention`, whose anchors did not change, is retried only by an owner action. The request is `POST /api/admin/settings/catalog-enrichment` with `{action: 'retry', filmId, part?, source?, expectedRevision, requestId}`, and it has the same authentication and readback as decision 6.
+- It resets the selected rows to `due`, clears failures and the disagreement, and raises `refresh_epoch`.
+- It keeps `due_since`.
+- It writes no metadata itself.
 
 ### 4. Eligibility, scope and fairness (0211-4 = A)
 
-**A Film is due for a part and source when all of these hold:**
+**A Film is due for a part and source when all of these hold, after the anchor check of decision 3b:**
 - it is in the activated **scope**: initially, Films whose `film_rated_admission.verified_at` is at or after the control's `cutoff_at`;
 - it exists and is not redirected;
 - the source is applicable (its anchor holds), and the Film is not in `identity_disagreement`;
@@ -255,13 +329,48 @@ The no-retirement predicate is folded into the `tmdb` anchor guard.
 **The initial scope is honest about what it reaches.**
 - Every new admission carries a trusted TMDB claim, because admission requires a TMDB id (Context). So the initial scope always has the `tmdb` and `wikidata` anchors.
 - It has the `letterboxd` anchor once a trusted lid claim exists. That is normally the case after a Diary or Watchlist check, which requests the claim.
-- A rated-archive admission that holds only a short code, and an inferred import admission, have no Letterboxd anchor. Letterboxd becomes applicable for them only when a trusted lid claim appears later, and then reopens only their gaps.
-- **Letterboxd-only Films** (a trusted lid, no TMDB claim, such as the legacy `film:<lid>` Watchlist Films) are **designed and tested** in this record. Card C1's tests run such a Film through Letterboxd-only enrichment. They are **not in the initial production scope**: they enter only through scope C3b (Watchlist members) or a future Letterboxd-only admission path.
+- A rated-archive admission whose code is held only as the admission alias, and an inferred import admission, have no Letterboxd anchor. Letterboxd becomes applicable for them only when a trusted lid claim appears later, and then reopens only their gaps.
+- **Letterboxd-only Films** (a trusted lid, no TMDB claim, such as the legacy `film:<lid>` Watchlist Films) are **designed and tested** in this record. They are **not in the initial production scope**: they enter only through scope C3b (Watchlist members) or a future Letterboxd-only admission path.
 - **Scope widening is a separate decision each:**
   - C3a: the 714 existing admitted Films;
   - C3b: Watchlist members, which closes the pinned-run gap of the Context and changes the Watchlist metadata path.
 
   Neither is included silently.
+
+**Tests (C1 acceptance).**
+- **Units:**
+  - a lost response of each unit kind;
+  - a partially applied `core` or `credits` part (persons applied, credits not);
+  - a changed source with an unresolved receipt of the same unit;
+  - a cross-origin no-op (Persons and credits already written by the EPG chain);
+  - a stale lease writing nothing;
+  - complete-but-empty answers for each part and source.
+- **Sources and precedence:**
+  - both completion orders of Letterboxd and TMDB give the same writes;
+  - a Letterboxd transport failure makes TMDB fields wait, then fill when Letterboxd answers;
+  - the 72 h fallback, listed as `fallback_fill`;
+  - the deadline falling between two sources;
+  - a value conflict and a stored difference, both listed;
+  - a page disagreement stops every source;
+  - a Letterboxd-only Film (no TMDB claim) enriched from Letterboxd alone;
+  - an inferred admission and an alias-only admission get no Letterboxd fetch;
+  - name-only credits are not written;
+  - Films with existing credits in one namespace, and in both namespaces.
+- **Identity changes:**
+  - a TMDB correction A → B on a completed Film;
+  - a retirement;
+  - a lid replacement L → L′;
+  - a correction while a part is mid-recovery;
+  - a correction during a pause;
+  - a blocked Film recovering after its claim fix;
+  - an owner retry with unchanged anchors;
+  - a Person unit refused for an invalidated plan.
+- **Control and pause:**
+  - a pause between the check and the request (a residual request, no write);
+  - resume keeping the cutoff, scope and pending work;
+  - activation not reachable from the checkbox;
+  - the applied, rejected and uncertain readbacks;
+  - a stale `expectedRevision`.
 
 ### 5. Operational contract and shared upstream coordination (0211-5 = C)
 
@@ -269,13 +378,17 @@ The no-retirement predicate is folded into the `tmdb` anchor guard.
 
 **Deadline.** Each tick has an absolute deadline of **25 s** from its start, with a 5 s write reserve. Every fetch timeout is `min(source timeout, deadline − reserve − now)`. The source timeouts are 12 s for TMDB, 15 s for Letterboxd and 15 s for Wikidata. No write starts without the reserve.
 
-**Per-tick bounds.** At most **2 Films**, serially.
-- Each Film makes at most one request per applicable source:
+**Per-tick bounds and fit to the deadline.** At most **2 Films**, one after the other.
+- **Requests per Film.** At most one request per applicable source:
   - Letterboxd: `boxd.it/<lid>` with at most one redirect to the film page, so at most 2 requests;
   - TMDB: `movie/<id>?append_to_response=credits,translations`;
   - Wikidata: one SPARQL query.
-- So a Film makes at most 4 upstream requests, and a tick at most **8 upstream subrequests**, plus a small fixed number of D1 statements.
-- The bound of 2 Films is a starting value. It is raised only by an owner decision after measurement: each tick records its wall time, its fetch times per source and its D1 statements. At 2 per hour, the 714 legacy Films (if C3a is chosen) would take at least 15 days. That is a minimum, not an ETA.
+
+  So a Film makes at most 4 upstream requests, and a tick at most **8**.
+- **Sources in parallel, never two requests to one scope at once.** The sources of one Film are different upstream scopes, so they are fetched in parallel. Each fetch has the timeout `min(source timeout, deadline − reserve − now)`. A source cut by that timeout is `pending` (transport, no failure).
+- **Writes after the fetches.** A Film's writes start after all its fetches have ended, and only inside the reserve. There are at most 6 D1 batches per Film: core, up to 3 localization rows, one person unit and one credits unit. Each D1 batch is far below the 5 s reserve.
+- **A second Film starts only with time left.** It starts only if at least 10 s remain before the reserve.
+- **Measurement before raising the bound.** The bound of 2 Films is a starting value. It is raised only by an owner decision after measurement: each tick records its wall time, its fetch times per source and its D1 statements. At 2 per hour, the 714 legacy Films (if C3a is chosen) would take at least 15 days. That is a minimum, not an ETA.
 
 **Shared upstream coordination.** One durable cooldown per upstream scope, adopted by **all** relevant producers **in the same delivery scope** (cards UC1-UC3 of ADR 0207 decision 7), not by this producer alone.
 
@@ -285,15 +398,15 @@ The no-retirement predicate is folded into the `tmdb` anchor guard.
   - `wikidata`, `query.wikidata.org`.
 
   The EPG XMLTV source and the Monitor's Telegram and webhooks each have a single caller and their own durable pause, so they are out of scope. The Cloudflare Access certificate fetch is infrastructure, also out of scope. A cooldown of one scope never blocks another scope, so there is no false cross-source blocking.
-- **Adopting callers** (the inventory of the Context):
+- **The callers of the inventory (the Context), by kind:**
 
-  | Scope | Callers |
-  | --- | --- |
-  | TMDB | Discovery chunks; the catalog poster route and weekly cron; `movieDetail` in the Diary check, the Watchlist admission and the archive step; this producer |
-  | Letterboxd | the Watchlist scan; the Diary page; the identity checks (Diary, Watchlist admission, archive step); the removal-phase rating refresh; metadata-sync film pages; this producer |
-  | Wikidata | metadata sync; EPG localization; the archive enrich step; this producer |
+  | Scope | Writer paths: they read the cooldown, skip, and write it on a signal | Read-only paths: they read the cooldown and never write it |
+  | --- | --- | --- |
+  | TMDB | Discovery Workflow chunks; the owner poster route `POST /api/enrichment/catalog/posters` and the poster weekly cron; `movieDetail` in the Diary check, the Watchlist admission and the owner archive step; this producer | `GET /api/integrations/tmdb/status`, the one registered outbound read of the read-side-effect baseline (`tmdb-status-probe`). If the cooldown is active it answers from the cooldown without a request; otherwise it requests as today, and on a 429 it reports the status without writing the cooldown |
+  | Letterboxd | the Letterboxd Sync Watchlist scan and Diary page; the identity checks (Diary, Watchlist admission, archive step); the removal-phase rating refresh; metadata-sync film pages; this producer | none |
+  | Wikidata | metadata sync; EPG localization; the archive enrich step; this producer | none |
 
-  The TMDB status probe route and every GET or MCP read **read** the cooldown but **never write** it. That keeps the read-side-effect baseline (ADR 0107) unchanged.
+  Every MCP read tool and every other GET makes no request to these scopes today, and stays that way. The read-side-effect baseline (ADR 0107) is therefore unchanged: the probe stays a registered outbound read with no storage write.
 - **Table.** An additive single table `upstream_cooldown(scope PRIMARY KEY, until_at, reason, retry_after_s, set_by, updated_at)`.
 - **Which signals set a cooldown:**
   - a **429** from that scope;
@@ -390,10 +503,11 @@ Every write batch of the producer asserts `state = 'active'` and its generation 
   - the stored `state`, `generation`, `revision`, `cutoff_at` and `scope`;
   - the last tick's outbox state;
   - whether a tick is still draining after a pause (`stopped` not yet written), with its deadline;
-  - the counts of decision 5 and the active upstream cooldowns.
+  - the counts of decision 5 and the active upstream cooldowns;
+  - the Films in `identity_disagreement` or `needs_attention`, with their lists `fallback_fill`, `unconfirmed_agreement` and `written_under_superseded_anchor`, each with a retry action.
 
   It is a pure read and registered in the GET write baseline.
-- **Write route.** `POST /api/admin/settings/catalog-enrichment` with `{action: 'pause'|'resume', expectedRevision, requestId}`. It is registered as POST-only in the read-side-effect audit. It requires:
+- **Write route.** `POST /api/admin/settings/catalog-enrichment` with `{action: 'pause'|'resume'|'retry', expectedRevision, requestId}`; `retry` also takes `filmId` and optionally `part` and `source` (decision 3b). It is registered as POST-only in the read-side-effect audit. It requires:
   - an Access JWT **verified in the Worker**: signature against the team JWKS, issuer, audience and expiry, through the verifier that `/mcp` already uses (`mcpVerifyAccess`);
   - an owner identity check against a configured owner subject;
   - the existing admin conditions: the Worker's own `Origin`, the action header `X-IPTV-Admin-Action` and a JSON content type.
@@ -423,7 +537,7 @@ Every write batch of the producer asserts `state = 'active'` and its generation 
 - **TMDB only, with a global trusted-TMDB eligibility guard** (the previous revision).
   - Against: it made Letterboxd metadata depend on a TMDB claim, which the owner rejected (0211-2).
 - **A Letterboxd page as an anchor through `data-tmdb-id` alone.**
-  - Against: that would let the producer's own fetch create the ownership it is supposed to check. Ownership must exist beforehand, from a trusted lid or a page-proven short code.
+  - Against: that would let the producer's own fetch create the ownership it is supposed to check. Ownership must exist beforehand, as a trusted lid claim.
 - **Credits from every applicable source.**
   - Against: the same people would be written twice under two source-specific ids, with no safe merge. One credit source per Film by precedence instead.
 - **A cooldown table used only by this producer, with adoption by the other producers as later cards** (the previous option 5a/5b).

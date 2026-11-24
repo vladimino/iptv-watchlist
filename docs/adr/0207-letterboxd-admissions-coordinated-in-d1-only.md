@@ -302,6 +302,11 @@ The owner's rule (0207-U3 = B): "временные транспортные о�
 - **The attempt cap is 6 and counts only `gone` and `definite` outcomes.** At the cap an entry or row is **terminal and visible** (`needs_owner_review`). It is never dropped silently.
 - **Transport and not-now outcomes have no cap.** A long transport streak is visible instead (below).
 - **A real check resets the streak.** Any `gone`, `definite` or settled outcome sets `transport_streak` back to 0.
+- **One check budget for both callers.** The attempt count lives only in the shared Diary entry.
+  - `resolve` charges it once per real check, in the same write that records that check's outcome, together with a fresh `check_id`.
+  - The Watchlist ledger **copies** the entry's `attempts` and `nextAttemptAt` from the outcome. It never adds to them.
+  - Both callers apply the cap to the entry's count, so changing callers neither charges a check twice nor bypasses the cap.
+  - Copying is idempotent, so a restart between the check and the ledger settle changes nothing. The no-slug case is charged on the entry too, once.
 
 **Retention: nothing defeats a retained item.**
 - **The Watchlist age bound no longer ends a row.** `age_exceeded` is removed as a terminal reason. A row ends only in one of three ways:
@@ -314,7 +319,10 @@ The owner's rule (0207-U3 = B): "временные транспортные о�
   - It never evicts `linking`, `link_failed` or `claim_pending` entries.
   - It never evicts transport-retained, not-now or below-cap entries.
   - It never evicts an entry at the attempt cap: that entry stays in the `diary_identity` lane until the owner resolves it.
-- **If the cap is full of entries it may not evict**, the step starts **no new check** for an id without an entry. That id is counted as `cap_refused` in the run's identity counts and reported. It is never recorded and then dropped.
+- **Refused ids stay recoverable.** If the cap is full of entries it may not evict, the step starts **no new check** for an id without an entry. It records the id (lid, slug and `queued_at` only) in a second bounded document, `diary-identity-backlog`. That document sits in the same Ratings document store, so it needs no migration, and it holds at most 2,000 ids.
+  - When capacity returns, backlog ids enter the main document before new page ids, oldest first, so an id that has left Diary page 1 is not lost.
+  - A full backlog reports `backlog_full`. The ids are then still recoverable from the durable Ratings fact records of the Diary rows: a bounded, read-only owner report lists Diary facts without a verified link and without an entry, so they can be requeued.
+  - Each refusal is counted as `cap_refused` and reported.
 - **The Watchlist ledger cap is unchanged.** Above 500 rows, the promotion is refused with `admission_ledger_full`. That is already visible, and nothing is evicted.
 
 **Fairness and queue order.** Both callers take due ids in one stable order:
@@ -325,11 +333,29 @@ A transport retry keeps its queue position, so when it is due again it runs ahea
 
 **Visibility.**
 - **Run records.** The Diary run record and the Watchlist slot record carry per-class counts: checked, transport-retained, not now, gone, definite, at the cap and `cap_refused`. Today the slot record drops the admission result (`letterboxd-sync.js:163-181`).
-- **Admin.** The identity-work lane `watchlist_admission` shows each row's class, streak and next retry. A read-only `diary_identity` lane lists the Diary entries, which no surface shows today.
+- **Admin.** The identity-work lane `watchlist_admission` shows each row's class, streak and next retry. A new `diary_identity` lane lists the Diary entries and the backlog, which no surface shows today.
+- **Owner actions on both lanes.** One authenticated owner route performs both actions:
+  - `requeue` resets an entry's `attempts` and `transport_streak` to 0, keeps its `queued_at`, and records who requeued it, when and why on the shared entry. It sets a ledger row back to `pending` with `last_reason = owner_requeued`, using existing columns only. It applies to entries and rows at the cap, to `age_exceeded` rows still on the Watchlist, and to backlog ids;
+  - `dismiss` settles an entry as `owner_dismissed`, which makes it evictable.
+
+  Each request names one id, or at most 50 listed ids, with the document or row revision it saw, and it answers with a readback. The route verifies the Access JWT in the Worker plus the owner, as the ADR 0211 settings route does.
 - **Monitor.** One fact reader reports three conditions:
   - no successful check by either caller for 24 h while due ids exist;
   - a ledger row pending for more than 14 days;
-  - any `cap_refused`.
+  - any `cap_refused` or `backlog_full`.
+
+**Legacy entries from the old rules.** Entries that the old rules exhausted or aged out stay as they are. There is no blind reset.
+- **D0 ships a read-only report**, recorded as dated evidence from an L0 production read. It lists:
+  - Diary entries at the attempt cap, by last reason;
+  - ledger rows that are terminal as `age_exceeded`;
+  - ledger rows exhausted with a transport last reason.
+
+  The stored state keeps only the last reason, not each attempt's, so the report says which rows **may** have been exhausted by transport. It does not claim to know.
+- **Recovery is bounded and owner-approved.** It requeues only:
+  - `age_exceeded` rows whose id is still on the Watchlist;
+  - entries and rows whose last reason is transport.
+
+  It uses the owner `requeue` action in batches of at most 50, under an L2 contract that names the listed ids. Every other legacy entry stays for owner review, one at a time.
 
 **Fence.** The admission batch and its receipt transitions bind the Letterboxd producer fence (`bindProducerFence`: kind `letterboxd`, the Sync epoch) whenever the call arrives through the Sync's fenced env, so a stale Sync epoch cannot admit. Today they do not: `admitRatedFilm` and the receipt writes use only the Film/Person marker. This contradicts `letterboxd-sync.js:53-54` and is a pre-existing defect (card D0).
 
@@ -355,7 +381,10 @@ Watchlist ledger rows may stay `pending`: they hold no intent.
   - the removal of the age termination;
   - the Diary eviction rule and `cap_refused`;
   - the transport streak stored in the shared Diary entry (no migration);
-  - the counts, the admin lanes and the Monitor reader;
+  - the counts, the admin lanes, the backlog and the Monitor reader;
+  - the shared check budget;
+  - the owner `requeue` and `dismiss` route;
+  - the legacy report;
   - the producer fence on the admission batch.
 - **A1 keeps the policy.** The reasons that exist only on the new path come with A1:
   - `admission_closed`, `admission_unavailable` and `in_flight` are not now;
@@ -377,6 +406,11 @@ Watchlist ledger rows may stay `pending`: they hold no intent.
 - the Diary cap at 200 evicts no `linking`, `link_failed`, `claim_pending` or retained entry, and reports `cap_refused`;
 - new page ids do not overtake an older retained id;
 - a stale Sync epoch is refused at the admission batch;
+- one real check charged once, whichever caller runs it, and the cap applied to the shared count;
+- a restart between the check and the ledger settle charges nothing twice;
+- a legacy entry with old transport charges keeps its count until the owner requeues it;
+- a full cap sends new ids to the backlog, which drains first when capacity returns;
+- `requeue` and `dismiss`, with a stale revision refused;
 - under `closed`: no attempt and no termination.
 
 ### 5. Readers and the proof contract
@@ -405,7 +439,8 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 
 | Card | Outcome | Depends on | Boundary | Gate | AIR-275 closure | A2 activation |
 | --- | --- | --- | --- | --- | --- | --- |
-| **D0** | Today's paths, per decision 4b: the unified retry policy in both callers (classifier split, explicit per-id outcome, no-charge transport, stable queue order, no age termination, Diary eviction rule, counts, admin lanes, Monitor reader) and the Letterboxd producer fence on the admission batch | — (**independent of accepting this ADR**: it corrects current production behaviour, 0207-U4 = A) | active change of today's paths; no migration | its own implementation GO | required | required |
+| **D0** | Today's paths, per decision 4b: the unified retry policy in both callers (classifier split, explicit per-id outcome, no-charge transport, one shared check budget, stable queue order, no age termination, the Diary eviction rule with its backlog, counts, admin lanes with the owner `requeue` and `dismiss` route, Monitor reader, the read-only legacy report) and the Letterboxd producer fence on the admission batch | — (**independent of accepting this ADR**: it corrects current production behaviour, 0207-U4 = A) | active change of today's paths; no migration | its own implementation GO | required | required |
+| **DR** | Bounded recovery of legacy entries that the old rules exhausted or aged out: an owner `requeue` of the listed ids only (decision 4b) | D0 and its legacy report reviewed | L2 operation naming the listed ids; batches of at most 50 | owner L2 contract | — | — |
 | **R1** | Receipt `operation_key` with its partial unique index (an additive migration file), writer support, lookup and the reconcile-and-reserve protocol of decision 3. A **mandatory shared foundation** of A1 and C1 (0207-U1 = K2) | ADR 0207 accepted | dormant | implementation GO | required | required |
 | **E1** | ADR 0213 initial slice: table (with its nullable reconstruction columns), triggers, `identity_evidence` operation, writer helper | ADR 0213 accepted | dormant (no writer calls it) | implementation GO | required | required |
 | **A1** | Admission coordination behind the marker (decisions 1-6), using R1 and E1 at `d1` | D0, R1, E1 | dormant (`r2` legacy byte-identical; migrations absent is safe) | implementation GO | required | required |
@@ -415,9 +450,9 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | **C1** | ADR 0211 producer, dormant: writer contract, anchors and precedence (Letterboxd, TMDB, Wikidata), state, units, lease, deadline, outbox, Monitor reader, the control function and its authenticated `/api/admin/settings` routes, the offline cost harness, and the Letterboxd-only test path | ADR 0211 accepted; R1; UC1 | dormant (no control row) | implementation GO | required | required |
 | **CM** | Apply the C1 and UC1 tables (state, tick outbox, control, `upstream_cooldown`, `upstream_coordination` at `off`). C2 refuses to activate unless every required table is present (fail closed) | C1 and UC1 merged and deployed | no behaviour change (mode `off`, no control row) | production GO | required | required |
 | **C2** | Activate enrichment for Films admitted after the cutoff, at the measured bound. The cutoff is no later than the A2 flip, so new admissions are **eligible from day one** and enriched at the following ticks, not instantly (0207-U5 = A) | CM; M1 (R1's `operation_key` applied) | durable control; pause stops new work | production GO | required | required |
-| **UC2** | Upstream mode `off → observe`, then a dated report of would-be skips per scope and caller | CM | writes cooldowns, skips nothing | production GO | — | — |
-| **UC3** | Upstream mode `observe → enforce` after the UC2 report; rollback is `off` | UC2 report reviewed | callers skip during a cooldown | production GO | — | — |
-| **CU** | `/admin/settings` page: the enrichment checkbox on the same control, effective state, drain display, cooldowns; independent visual QA | C1 (control contract) | UI only; no new control | implementation GO; owner visual check | — | — |
+| **UC2** | Upstream mode `off → observe`, then a dated report of would-be skips per scope and caller | CM | writes cooldowns, skips nothing | production GO | required | — |
+| **UC3** | Upstream mode `observe → enforce` after the UC2 report; rollback is `off` | UC2 report reviewed | callers skip during a cooldown | production GO | required | — |
+| **CU** | `/admin/settings` page: the enrichment checkbox on the same control, effective state, drain display, cooldowns; independent visual QA | C1 (control contract) | UI only; no new control | implementation GO; owner visual check | required | — |
 | **C3a** | Widen enrichment to the 714 existing admitted Films | C2 results reviewed | scope change | owner decision + production GO | no | no |
 | **C3b** | Widen enrichment to Watchlist members (the pinned-run gap), including Letterboxd-only Films | C2; its own decision | changes the Watchlist metadata path | owner decision (possibly its own ADR) + production GO | no | no |
 | **PF** | Plan per-field provenance and a safe refresh and overwrite rule for `film_metadata` (ADR 0211 choice 1 = B), as its own record | ADR 0211 accepted | planning; then its own cards | owner decision | no | no |
@@ -432,11 +467,16 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | **E4b** | ADR 0184 planner also reads `restricts` rows | as above | reader switch | owner decision (ADR amendment) | no | no |
 | **E5** | Retire the unused 0001 assertion tables | — | schema cleanup | owner decision | no | no |
 
-- **Mandatory for AIR-275:** D0, R1, E1, A1, M1, UC1, C1, CM, C2 and A2. After A2's acceptance no mutable R2 authority remains for admissions, and new admissions are enriched from the start.
+- **Mandatory for AIR-275 closure:** D0, R1, E1, A1, M1, UC1, C1, CM, C2 and A2, and also UC2, UC3 and CU. After A2's acceptance no mutable R2 authority remains for admissions, and new admissions are enriched from the start. AIR-275 closes only when the selected upstream switch reaches `enforce` (UC3) and the `/admin/settings` control is accepted (CU), so these outcomes are tracked to completion, not left as optional future scope.
 - **Mandatory before the A2 flip:** D0, R1, E1, A1, M1, UC1, C1, CM and C2. A2 also verifies that every migration it depends on is applied and that the enrichment control is `active`.
-- **One coherent upstream scope (ADR 0211 choice 5 = C).** UC1 adopts the shared cooldown in every relevant producer at once. UC2 and UC3 move the single mode. There are no per-producer adoption cards. UC2 and UC3 are not prerequisites of A2: enrichment runs safely at mode `off`, with its local transport rule.
-- **Part of the selected design, but not a blocker:** CU. It needs only C1's control contract and does not gate C2 or A2.
-- **Planned follow-ups, each with its own decision:** PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b and E5.
+- **A2 readiness is narrower than AIR-275 closure.** UC2, UC3 and CU are **mandatory outcomes of the selected design**, but they are not prerequisites of the A2 flip. Enrichment runs safely at upstream mode `off` with its local transport rule, and the durable control is usable without the page. So the A2 flip may come before them, and AIR-275 then stays open until they are done.
+- **One coherent upstream scope (ADR 0211 choice 5 = C).** UC1 adopts the shared cooldown in every relevant producer at once. UC2 and UC3 move the single mode for all of them. There are no per-producer adoption cards.
+- **Migration apply order.** D1 applies every pending migration file in number order, so an apply operation cannot skip a lower-numbered file.
+  - Files are numbered in merge order. Each apply card states the exact files it applies.
+  - If C1's or UC1's files merge before A1's, they are lower-numbered, and M1 applies them too. That is safe, because every table is inert until its writer is activated (dormant code, mode `off`, no control row), and C2 checks every table it needs.
+  - CM then applies whatever remains. M1 and CM may also be a single apply operation.
+  - C2 always follows both, because it needs R1's `operation_key` (M1) and its own tables (CM).
+- **Planned follow-ups, each with its own decision:** DR, PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b and E5.
 - **No dual writer at any point.** R2 coordination ends only at the A2 flip. The D1 writer was already canonical. Every C and E card adds a writer under existing authorities. UC1 changes only when callers wait, never what they write.
 
 **Tests (A1 acceptance):**
@@ -546,7 +586,7 @@ The owner's selections of 2026-11-24 are listed at the top of this record ("Owne
 ## Follow-ups
 
 **On acceptance.**
-- Create the cards of decision 7, including the planned follow-ups (PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b, E5) as roadmap cards, each with its own decision.
+- Create the cards of decision 7, including the planned follow-ups (DR, PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b, E5) as roadmap cards, each with its own decision.
 - Link the AIR-275-mandatory cards as bare URLs in AIR-275's native Prerequisites checklist.
 - Mark ADR 0087, 0105 and 0166 "Superseded in part by ADR 0207", and update the registry rows.
 - Accepting this record is an architecture decision only. Each card keeps its implementation GO and each operation its production GO.
