@@ -1,8 +1,10 @@
-# Predictions auxiliary-state cutover: run sheet (proposal for owner review, nothing is authorized by this page)
+# Predictions auxiliary-state cutover: run sheet (executed on 24 Nov 2026; the page grants nothing for any later operation)
 
 This is the minute-by-minute sequence of the bounded L3 operation behind [ADR 0194](../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) and [ADR 0196](../adr/0196-prediction-aux-admission-closed-state.md). It describes who does what, what is read before each step and when to stop. **Every row marked GO needs its own explicit owner decision; none is granted by this page.** The commands are those of [the operator](prediction-aux-state-cutover.md#the-owner-only-cutover-operator-dormant-nothing-here-is-authorized-by-merging-it) and [the export runbook](r2-snapshot-export.md). The live readback behind the gates is in the [readiness evidence](../evidence/prediction/air-554-cutover-readiness-readback-2026-11-22.md).
 
 Actors: **Owner** (GO, flip release, extensions), **Coordinator** (the Predictions coordinator: Task registry snapshot, disable and enable, and nothing else), **Migration** (the executor: schema, marker, export, import, verification, integrity evidence). Times are minutes from **T0**, the moment the coordinator reads back four of four Tasks disabled; the checkpoint and the limit are anchored at T0. Steps after the close are timed from **C**, the readback of the closed marker, and C is reached when the drain is verified, not at a fixed minute. `T-` rows are done before the window and outside any freeze.
+
+**Execution record.** The sequence ran on 24 Nov 2026 between 07:54 and 08:23 UTC and ended with the marker at `d1`, generation 2 ([cutover evidence](../evidence/prediction/air-554-cutover-2026-11-24.md)). The record names the deviations: the time checkpoints T+30 and T+45 were exceeded under an indefinite Task freeze, the first import attempt failed before sending (a `?` inside a data literal, fixed in PR 970), and reader parity on the D1 branch and a natural run after the flip are still to be observed. The production schema was 37 at that time (`0036` and `0037` came from other streams), which the operator accepts for every command except `--apply`.
 
 ## Preconditions (a window is not scheduled until all hold)
 
