@@ -98,41 +98,18 @@ const Monitor=(()=>{
   if(result.checkpointStatus==='absent'&&!next.seenAt&&!next.baselineAt)next.baselineAt=iso(now);
   return {...result,markers:next};
  });
- // AIR-572. The canonical Producer, from bounded READ-ONLY D1: ONE reader (`CanonicalProducerWorkflow.readProducerMonitorFacts`, exactly three SQL
+ // AIR-572 / AIR-593. The canonical Producer, from bounded READ-ONLY D1: ONE reader (`CanonicalProducerWorkflow.readProducerMonitorFacts`, exactly three SQL
  // statements: the published (P,g) with its publication time, the chain by primary key, the run of that generation by index). No join over a catalog, no scan, no
  // write. The streak start (`noProgressSince`) survives a rollover of the published generation and is cleared only by proven progress. While the delivery hold is
  // on nothing is read and the clock is cleared, so lifting the hold gives the live Producer a full no-progress window (never an instant alert).
- // PROVEN progress only: units finished in the SAME run row and the SAME pass (n_applied + n_noop + n_kept grew) or its cursor moved. A new pass number, a
- // new pass state, a new run row or a new generation changes nothing by itself: restarts and rollovers with zero finished units never reset the clock, and a
- // counter that falls (a replay) is never progress. The first sighting of a pass is evidence only if it already finished units or holds a cursor, and then
- // only at its own stored update time. Failures (n_failed) and strikes are not progress.
- const producerClock=(previous,run,publishedAt,now)=>{
-  const prior=previous&&typeof previous==='object'?previous:{};
-  const stamp=value=>Number.isFinite(Date.parse(value||''))?Date.parse(value):null;
-  const live=stamp(prior.liveSince)??now;
-  const done=run?Number(run.n_applied||0)+Number(run.n_noop||0)+Number(run.n_kept||0):null;
-  const cursor=run?(run.cursor_id??null):null;
-  const samePass=!!run&&prior.runKey===run.run_key&&prior.passNo===run.pass_no;
-  const moved=samePass&&(done>Number(prior.done||0)||(cursor!==null&&cursor!==(prior.cursor??null)));
-  const seeded=!!run&&!samePass&&(done>0||cursor!==null)?stamp(run.updated_at):null;
-  const progress=moved?now:(seeded!==null?Math.min(seeded,now):stamp(prior.progressAt));
-  const published=stamp(publishedAt)??now;
-  const streak=moved?null:(stamp(prior.noProgressSince)??Math.max(published,live));
-  const since=moved?now:(Math.max(progress??0,streak??0)||null);
-  const at=value=>value===null||value===undefined?null:iso(value);
-  return {liveSince:iso(live),runKey:run?run.run_key:(prior.runKey??null),passNo:run?run.pass_no:(prior.passNo??null),done:run?done:(prior.done??null),cursor:run?cursor:(prior.cursor??null),
-   progressAt:at(progress),noProgressSince:at(streak),sinceAt:at(since)};
- };
- const canonicalProducerFacts=(env,now,previous)=>guarded(async()=>{
+ // The clock and the facts are the pure `MonitorPolicy.canonicalProducerFacts`; the Footer calls this same reader with the stored clock and never writes it.
+ // Failures (n_failed) and strikes are not progress. Answers null when the module is not bundled, {error:true} when a read fails.
+ // `readOnly` (the Footer): the reader clock, which never dates progress by the read itself, and `clockState` of the stored clock it was given.
+ const canonicalProducerFacts=(env,now,previous,{readOnly=false,previousReadable=true}={})=>guarded(async()=>{
   if(typeof CanonicalProducerWorkflow==='undefined'||!env?.DB)return null;
-  if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return {held:true,readable:true,clock:null};
+  if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return policy().canonicalProducerFacts({held:true,now});
   const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env);
-  if(!read.ready)return {held:false,readable:true,label:null,clock:producerClock(previous,null,null,now)};
-  const clock=producerClock(previous,read.run,read.publishedAt,now);
-  const {run,chain}=read;
-  return {held:false,readable:true,label:read.label,publishedAt:read.publishedAt,sinceAt:clock.sinceAt,progressAt:clock.progressAt,clock,
-   chain:chain?{ownerState:chain.owner_state,stoppedBy:chain.stopped_by||null,recoveryClass:chain.recovery_class||null}:null,
-   run:run?{passState:run.pass_state,sourceGeneration:run.source_generation,appliedGeneration:run.applied_generation||null,stoppedBy:run.stopped_by||null}:null};
+  return policy().canonicalProducerFacts({read,previous,now,readOnly,previousReadable});
  });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);
@@ -311,5 +288,5 @@ const Monitor=(()=>{
   if(!result.ok){await writeState(env,claimed,{...base,lastTestAt:doc?.lastTestAt||null,holdUntil:result.retryAfterMs?iso(now+result.retryAfterMs):base.holdUntil||null}).catch(()=>null);return {sent:false,reason:'delivery_failed'};}
   return {sent:true,at:iso(now)};
  }
- return {STATE_KEY,mode,run,status,test,collect,internals:{telegramText}};
+ return {STATE_KEY,mode,run,status,test,collect,canonicalProducerFacts,internals:{telegramText}};
 })();
