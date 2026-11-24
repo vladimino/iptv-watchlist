@@ -351,7 +351,7 @@ const operatorOf=({held=true,now=NOW,...rest}={})=>producerChainOperator({held:(
  const made=await seed(world());
  made.env.PRODUCER_WORKFLOW={create:async()=>{throw new Error('must not be called');}};
  const before=dump(made.file);
- assert.deepEqual(await reconcileProducerChain(made.env,{now:NOW}),{ran:false,reason:HELD_BY_DELIVERY});
+ assert.deepEqual(await reconcileProducerChain(made.env,{now:NOW,hold:true}),{ran:false,reason:HELD_BY_DELIVERY});
  sameExcept(before,dump(made.file));
  assert.equal(chainRow(made.file,OLD).owner_state,'pending','the stale chain stays open under the hold');
 }
