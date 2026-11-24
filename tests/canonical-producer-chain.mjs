@@ -265,31 +265,35 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
 }
 
-// AIR-572 delivery hold: default-DENY on both Producer entrypoints, zero I/O, no effect on anything else.
+// AIR-572 delivery hold: when on, both Producer entrypoints do zero I/O and affect nothing else. The shipped default is now lifted
+// (owner-approved, after the Watchlist membership switch to the Letterboxd Sync); the guard itself stays and is exercised explicitly.
 {
- assert.equal(PRODUCER_DELIVERY_HOLD,true,'the code ships held');
+ assert.equal(PRODUCER_DELIVERY_HOLD,false,'the hold is lifted in code (AIR-572, after the ADR 0203 switch)');
  const touched=[];
  const trap=new Proxy({},{get:(_t,prop)=>{touched.push(String(prop));throw new Error('held entrypoint touched env.'+String(prop));}});
- const cron=await reconcileProducerChain(trap,{now:Date.parse(AT)});
+ const cron=await reconcileProducerChain(trap,{now:Date.parse(AT),hold:true});
  assert.deepEqual(cron,{ran:false,reason:HELD_BY_DELIVERY});
- const instance=await runProducerWorkflow(trap,{programmeRunId:P,epoch:1},{do:()=>{touched.push('step');throw new Error('step used');}});
+ const instance=await runProducerWorkflow(trap,{programmeRunId:P,epoch:1},{do:()=>{touched.push('step');throw new Error('step used');}},{hold:true});
  assert.deepEqual(instance,{state:HELD_BY_DELIVERY});
  assert.deepEqual(touched,[],'no env property, D1 statement, Workflow create or step is reached while held');
  // Only an explicit hold:false lifts it; truthy or unknown values keep it closed.
- for(const value of [undefined,true,1,'false',null]){
+ for(const value of [true,1,'false',null]){
   const out=await reconcileProducerChain(trap,{now:Date.parse(AT),hold:value});
-  assert.equal(out.reason,value===undefined||value===true||value===1||value==='false'||value===null?HELD_BY_DELIVERY:out.reason);
+  assert.equal(out.reason,HELD_BY_DELIVERY);
  }
- // A held cron tick on a real open database changes no row and creates no instance (the deployed code, as the hourly EPG path calls it).
+ // A held cron tick on a real open database changes no row and creates no instance.
  const file=database();
  const created=[];
  const before=one(file,'SELECT COUNT(*) FROM canonical_producer_chain')+':'+one(file,'SELECT COUNT(*) FROM canonical_producer_run');
- const held=await reconcileProducerChain({...envOf(file),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT)});
+ const held=await reconcileProducerChain({...envOf(file),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT),hold:true});
  assert.equal(held.reason,HELD_BY_DELIVERY);
  assert.equal(created.length,0);
  assert.equal(one(file,'SELECT COUNT(*) FROM canonical_producer_chain')+':'+one(file,'SELECT COUNT(*) FROM canonical_producer_run'),before);
- // The hourly EPG caller passes no `hold`, so the default applies.
- assert.doesNotMatch(fs.readFileSync('src/epg-orchestration.js','utf8'),/hold\s*:/,'the cron path cannot lift the hold');
+ // The hourly EPG caller passes no `hold`, so the shipped default (lifted) applies; the cron path cannot override it either way.
+ assert.doesNotMatch(fs.readFileSync('src/epg-orchestration.js','utf8'),/hold\s*:/,'the cron path passes no hold');
+ // With the default, the cron tick on an open database is no longer held: it proceeds into the real reconcile.
+ const live=await reconcileProducerChain({...envOf(database()),PRODUCER_WORKFLOW:{create:async()=>{}}},{now:Date.parse(AT)});
+ assert.notEqual(live.reason,HELD_BY_DELIVERY,'the shipped default does not hold');
 }
 
 // AIR-572: a Cloudflare Workflow `step` is an RPC stub whose methods have no `.bind`. The stub below is function-shaped but refuses

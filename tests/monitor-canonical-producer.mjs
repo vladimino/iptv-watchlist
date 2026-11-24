@@ -35,7 +35,7 @@ const producer=async(M,env,now)=>plain((await M.status(env,now)).streams).find(s
 const run=(over={})=>({run_key:'epg:run-p:10',pass_state:'passing',source_generation:'run-p:10',applied_generation:null,stopped_by:null,cursor_id:'film:tmdb:1',n_applied:0,n_noop:0,n_kept:0,n_failed:0,pass_no:1,updated_at:at(T0),...over});
 const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:null,...over});
 
-// 1. Delivery hold (the shipped default): visible, never healthy, no alert, and not a single D1 read.
+// 1. Delivery hold (re-imposed in code; lifted by default since AIR-572): visible, never healthy, no alert, and not a single D1 read.
 {
  const {bucket,env,M,calls,world}=setup({hold:true});epgHealthy(bucket);
  const r=plain(await M.run(env,{now:T0}));

@@ -16,12 +16,13 @@ import {
 import {epgRunForGeneration} from './canonical-producer-store.js';
 
 const iso=ms=>new Date(ms).toISOString();
-// AIR-572 delivery hold: a static, default-DENY guard in code. While true, neither Producer entrypoint performs any I/O: the hourly
+// AIR-572 delivery hold: a static guard in code. While true, neither Producer entrypoint performs any I/O: the hourly
 // `reconcileProducerChain` reads nothing, writes nothing and creates no Workflow instance, and an already existing instance entering
 // `runProducerWorkflow` returns before its nonce, claim or any D1 access. It depends on no secret, env, D1 state or Cloudflare setting.
-// Production callers never pass `hold`, so the default applies. Lifting it is a separate owner-approved code change (a follow-up PR),
-// never a flag. It does not touch EPG publication or any other canonical writer.
-export const PRODUCER_DELIVERY_HOLD=true;
+// Production callers never pass `hold`, so the default applies. LIFTED (false) by the owner-approved AIR-572 PR after the Watchlist
+// membership writer switched to the Letterboxd Sync (ADR 0203, marker `sync` generation 1, 23 Nov 2026): the Producer now plans and
+// writes Film/Person facts without membership. Re-imposing it is a code change too, never a flag. Only an explicit `false` runs.
+export const PRODUCER_DELIVERY_HOLD=false;
 export const HELD_BY_DELIVERY='held_by_delivery';
 function meterD1(db,meter){
  if(!db||typeof db.prepare!=='function')return db;

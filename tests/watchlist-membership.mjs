@@ -523,8 +523,8 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  // the Producer plans no membership under the marker, and its reads of the membership table are gone in that mode
  const pw=read('src/canonical-producer-workflow.js');
  assert.match(pw,/membershipOwned\?undefined:true/);assert.match(pw,/departed=membershipOwned\?\[\]/);
- // the delivery hold is untouched by this change
- assert.match(pw,/export const PRODUCER_DELIVERY_HOLD=true;/);
+ // the delivery hold was lifted only after the switch (AIR-572); in mode `sync` the Producer still plans no membership (asserted above)
+ assert.match(pw,/export const PRODUCER_DELIVERY_HOLD=false;/);
 }
 // ===== 10. AIR-572: the owner-only operator (MCP tool watchlist_membership_operator) over the REAL ports and the REAL Letterboxd Sync epoch fence =====
 {
