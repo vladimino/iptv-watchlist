@@ -2994,36 +2994,65 @@ async function predictionRunnerBusy(env,now=Date.now()){
  if(!(lease?.runId&&Number(lease.expiresAt)>now))return false;
  return lease.phase==='claim'||(!!lease.submitGate&&Number(lease.submitGate.expiresAt)>now);
 }
-class OrderingWriterBusy extends Error{constructor(){super('ordering writer busy');this.code='ordering_busy';}}
-// The writer, called once per hourly tick. Writes nothing unless the stored queue is current for its generation and owes an ordering re-rank; then at most one rebuild, through the ordinary
-// refresh (the same build and compare-and-swap as every other queue writer), re-checking the lease just before its write. One sanitized log line per call.
-async function reconcilePredictionOrdering(env,{now=Date.now(),waitMs=ORDERING_WAIT_MS,pollMs=ORDERING_POLL_MS,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}){
+// The admission of the ordering writer, decided on ONE snapshot: the stored queue head and the profile and programme read for it. Null when admitted (with the drift cause in `out`), otherwise
+// the outcome and reason to report. Only a queue that passes the advance gate, is ranked on this completed generation with a verified signature and owes ordering drift is admitted.
+async function orderingAdmission(env,stored,programme,profile,now){
+ if(!profile||!programme?.runId)return {outcome:'skipped',reason:'inputs'};
+ if(!stored)return {outcome:'skipped',reason:'no_queue'};
+ // A queue that fails the advance gate, or one not ranked on this completed generation, is the start's to refresh (or refuse): never this writer's.
+ if(queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision))return {outcome:'skipped',reason:'not_current'};
+ if(stored.priorityBasis!=='completed'||stored.programmeRunId!==programme.runId)return {outcome:'skipped',reason:'not_same_generation'};
+ if(typeof stored.showsSignature!=='string'||!stored.showsSignature)return {outcome:'skipped',reason:'unverified_basis'};
+ const drift=await sameGenerationPriority(env,stored,programme,now);
+ if(!drift.cause)return {outcome:'current',...(drift.deferred?{deferred:true}:{})};
+ if(!ORDERING_DRIFT_CAUSES.has(drift.cause))return {outcome:'skipped',reason:drift.cause};
+ return {admitted:true,cause:drift.cause};
+}
+// A rebuilt candidate is written only when it is again a current, verified ranking of the SAME completed generation as the head it replaces: a build whose signature read failed (stored
+// `showsSignature: null`) or whose basis or generation moved is refused, never published.
+function orderingCandidateRefusal(candidate,stored,programme,profile,registry,recoveryRevision){
+ if(!candidate)return 'no_candidate';
+ if(queueAdvanceGate(candidate,programme,profile,registry,recoveryRevision))return 'candidate_not_current';
+ if(candidate.priorityBasis!=='completed'||candidate.programmeRunId!==programme.runId||candidate.programmeRunId!==stored.programmeRunId)return 'candidate_basis_changed';
+ if(typeof candidate.showsSignature!=='string'||!candidate.showsSignature)return 'candidate_unverified';
+ return null;
+}
+// The writer, called once per hourly tick. Writes nothing unless the stored queue is current for its generation and owes an ordering re-rank. Every attempt (the first and each retry after a lost
+// compare-and-swap) reads the queue head, the profile and the programme afresh and decides the admission on that snapshot, builds from the same inputs, refuses a candidate that is not a verified
+// ranking of the same generation, re-checks the runner lease and only then writes against that head. A repair by another writer in the meantime ends the tick as `current`. One sanitized log line.
+async function reconcilePredictionOrdering(env,{now=Date.now(),waitMs=ORDERING_WAIT_MS,pollMs=ORDERING_POLL_MS,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),hooks=null}={}){
  const started=Date.now();
  const done=(outcome,extra={})=>{const line={event:'prediction_ordering_reconcile',outcome,...extra,ms:Date.now()-started};try{console.log(JSON.stringify(line));}catch{/* a log line never changes the outcome */}return line;};
  try{
   const authority=typeof PredictionD1==='undefined'?null:await PredictionD1.readPredictionAuthority(env?.DB??null,env);
   if(authority?.mode!=='d1')return done('skipped',{reason:'authority'});
-  const [profile,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);
-  const programme=report&&Array.isArray(report.films)?report:null;
-  if(!profile||!programme?.runId)return done('skipped',{reason:'inputs'});
-  const stored=(await readQueueHead(env)).current;
-  if(!stored)return done('skipped',{reason:'no_queue'});
-  // A queue that fails the advance gate, or one not ranked on this completed generation, is the start's to refresh (or refuse): never this writer's.
-  if(queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision))return done('skipped',{reason:'not_current'});
-  if(stored.priorityBasis!=='completed'||stored.programmeRunId!==programme.runId)return done('skipped',{reason:'not_same_generation'});
-  if(typeof stored.showsSignature!=='string'||!stored.showsSignature)return done('skipped',{reason:'unverified_basis'});
-  const drift=await sameGenerationPriority(env,stored,programme,now);
-  if(!drift.cause)return done('current',drift.deferred?{deferred:true}:{});
-  if(!ORDERING_DRIFT_CAUSES.has(drift.cause))return done('skipped',{reason:drift.cause});
+  const snapshot=async()=>{
+   const head=await PredictionD1.openQueue(env);
+   const [profile,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);
+   return {head,stored:head?.queue??null,profile,programme:report&&Array.isArray(report.films)?report:null};
+  };
+  // A first admission before any wait: a tick with nothing to do ends here.
+  {const first=await snapshot(),admission=await orderingAdmission(env,first.stored,first.programme,first.profile,now);if(!admission.admitted){const {outcome,...rest}=admission;return done(outcome,rest);}}
   for(let waited=0;;waited+=pollMs){
    if(!await predictionRunnerBusy(env))break;
-   if(waited+pollMs>waitMs)return done('skipped',{reason:'busy',cause:drift.cause});
+   if(waited+pollMs>waitMs)return done('skipped',{reason:'busy'});
    await sleep(pollMs);
   }
-  await refreshPredictionQueue(env,programme,'ordering_reconcile',{beforeWrite:async()=>{if(await predictionRunnerBusy(env))throw new OrderingWriterBusy();}});
-  return done('rebuilt',{cause:drift.cause});
+  for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
+   await predictionQueuePause(attempt);
+   const {head,stored,profile,programme}=await snapshot();
+   const admission=await orderingAdmission(env,stored,programme,profile,Date.now());
+   if(!admission.admitted){const {outcome,...rest}=admission;return done(outcome,{...rest,...(attempt?{attempts:attempt+1}:{})});}
+   if(hooks?.beforeBuild)await hooks.beforeBuild(attempt);
+   const candidate=await buildPredictionQueue(env,programme,'ordering_reconcile',stored);
+   const refused=orderingCandidateRefusal(candidate,stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
+   if(refused)return done('skipped',{reason:refused,cause:admission.cause});
+   if(await predictionRunnerBusy(env))return done('skipped',{reason:'busy_at_write',cause:admission.cause});
+   if(hooks?.beforeWrite)await hooks.beforeWrite(attempt);
+   if(await PredictionD1.writeQueue(env,head,candidate)!==null)return done('rebuilt',{cause:admission.cause,...(attempt?{attempts:attempt+1}:{})});
+  }
+  return done('skipped',{reason:'contended'});
  }catch(error){
-  if(error instanceof OrderingWriterBusy)return done('skipped',{reason:'busy_at_write'});
   const code=typeof error?.code==='string'&&/^[a-z][a-z0-9_]{1,63}$/.test(error.code)?error.code:'error';
   return done('failed',{code});
  }

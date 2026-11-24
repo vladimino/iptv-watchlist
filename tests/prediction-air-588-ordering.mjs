@@ -118,4 +118,39 @@ const lanes=r=>r.data.films.map(f=>f.filmId+':'+f.lane);
  await t.w.ctx.worker.scheduled({cron:'1-59/2 * * * *',scheduledTime:Date.now()},t.w.env,execution);await Promise.allSettled(pending);
  assert.ok(!t.w.logs.some(l=>/prediction_ordering_reconcile/.test(l)),'the Discovery fast cron does not run the writer');
 }
+// 6. Review P1: the admission is decided on the snapshot each rebuild attempt actually uses, and a candidate that is not a verified ranking of the same generation is never published.
+const rebuiltLines=t=>t.w.logs.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(l=>l?.event==='prediction_ordering_reconcile'&&l.outcome==='rebuilt').length;
+{
+ // (a) the signature read fails DURING the build (it was readable and changed at admission): the candidate would store no signature, so nothing is written
+ const t=await make();t.assign(4,'s1');t.release();const before=await t.queue();t.w.logs.length=0;
+ const o=await t.ordering({hooks:{beforeBuild:()=>{t.state.down=true;}}});t.state.down=false;
+ assert.equal(o.outcome,'skipped',JSON.stringify(o));assert.equal(o.reason,'candidate_unverified');
+ const after=await t.queue();assert.equal(after.refreshedAt,before.refreshedAt,'no queue written');assert.equal(after.showsSignature,'s0','the stored signature is kept, not replaced by null');
+ assert.equal(rebuiltLines(t),0,'no rebuilt line');
+}
+{
+ // (b) another writer repairs the drift while the writer waits for a busy lease: the attempt re-admits on the fresh head and ends `current`, writing nothing
+ const t=await make();t.assign(4,'s1');t.release();
+ const claim={owner:'r1',runId:'r1',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+180000,epoch:5,phase:'claim',taskId:'task15'};
+ await t.start();t.setLease(claim);let repairedAt=null;
+ const o=await t.ordering({waitMs:60000,pollMs:15000,sleep:async()=>{if(repairedAt)return;t.setLease({...claim,expiresAt:1});assert.equal((await t.w.api('queue/reconcile',{})).status,200);repairedAt=(await t.queue()).refreshedAt;}});
+ assert.equal(o.outcome,'current',JSON.stringify(o));const q=await t.queue();assert.equal(q.showsSignature,'s1');assert.equal(q.refreshedAt,repairedAt,'the writer did not rebuild over the repair');
+}
+{
+ // (c) a new generation is published while the writer waits: changed basis, skipped, nothing written
+ const t=await make();t.assign(4,'s1');t.release();const before=await t.queue();
+ const claim={owner:'r1',runId:'r1',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+180000,epoch:5,phase:'claim',taskId:'task15'};
+ await t.start();t.setLease(claim);let moved=false;
+ const o=await t.ordering({waitMs:60000,pollMs:15000,sleep:async()=>{if(moved)return;moved=true;t.setLease({...claim,expiresAt:1});t.w.records.set('programme.json',{runId:'p2',films:[],catalogFilms:[]});t.w.records.set('sync.json',{runId:'p2',stage:'complete'});}});
+ assert.equal(o.outcome,'skipped',JSON.stringify(o));assert.equal(o.reason,'not_same_generation');assert.equal((await t.queue()).refreshedAt,before.refreshedAt,'nothing written for the new generation');
+}
+{
+ // (d) a lost compare-and-swap: another writer moves the head between the build and the write. The retry re-reads the head, re-admits and rebuilds once; if that writer had repaired the drift, the retry ends `current`
+ const t=await make();t.assign(4,'s1');t.release();
+ const o=await t.ordering({hooks:{beforeWrite:async attempt=>{if(attempt===0){const head=await PredictionD1.openQueue(t.w.env);head.queue.lastBatch={note:'concurrent'};assert.ok(await PredictionD1.writeQueue(t.w.env,head,head.queue));}}}});
+ assert.equal(o.outcome,'rebuilt',JSON.stringify(o));assert.equal(o.attempts,2,'one retry on the changed head');assert.equal((await t.queue()).showsSignature,'s1');
+ const u=await make();u.assign(4,'s1');u.release();u.w.logs.length=0;
+ const r=await u.ordering({hooks:{beforeWrite:async attempt=>{if(attempt===0)assert.equal((await u.w.api('queue/reconcile',{})).status,200);}}});
+ assert.equal(r.outcome,'current',JSON.stringify(r));assert.equal(r.attempts,2);assert.equal(rebuiltLines(u),0,'no rebuilt line when another writer already repaired it');
+}
 console.log('AIR-588 A2: ordering drift deferred by the start, rebuilt by the hourly writer; claim and gate respected; unreadable, stale, overdue, unverified and idle queues unchanged');

@@ -38,6 +38,29 @@ import {flowWorld,sql,migrated} from './prediction-d1-flow-lib.mjs';
   const before=seen.length;await db.prepare(text).bind().all().catch(()=>null);await db.prepare(text).bind().all().catch(()=>null);
   assert.equal(seen.length-before,2,'not a probe, read twice: '+text);
  }
+ // Review P2: a marker read that hides behind a quoted, qualified or table-valued source is never a probe, and a marker change is visible between two such reads in one scope
+ {
+  const mixed='SELECT (SELECT generation FROM "discovery_authority" WHERE id=1) AS generation, (SELECT version FROM schema_contract WHERE id=1) AS version';
+  const g1=(await db.prepare(mixed).bind().first()).generation;
+  sql(file,'UPDATE discovery_authority SET generation=generation+7 WHERE id=1');
+  const g2=(await db.prepare(mixed).bind().first()).generation;
+  assert.equal(g2,g1+7,'the marker change is visible: the mixed statement was read twice, not reused');
+  for(const text of [
+   'SELECT name FROM "sqlite_master"',
+   "SELECT name FROM main.sqlite_master WHERE type='table'",
+   'SELECT name FROM `sqlite_master`',
+   'SELECT name FROM [sqlite_master]',
+   "SELECT name FROM pragma_table_list WHERE name='prediction_run'",
+   'SELECT (SELECT mode FROM discovery_authority WHERE id=1) AS mode,(SELECT version FROM schema_contract WHERE id=1) AS version',
+   "SELECT version FROM schema_contract WHERE id=1 AND (SELECT COUNT(*) FROM \"prediction_run\")>=0",
+  ]){
+   const before=seen.length;await db.prepare(text).bind().all().catch(()=>null);await db.prepare(text).bind().all().catch(()=>null);
+   assert.equal(seen.length-before,2,'not a probe, read twice: '+text);
+  }
+  // a literal that merely contains a quote or a table name does not hide a source: still recognized
+  const literal="SELECT name FROM sqlite_master WHERE type='table' AND name IN ('a\"b','discovery_authority')";
+  {const before=seen.length;await db.prepare(literal).bind().all();await db.prepare(literal).bind().all();assert.equal(seen.length-before,1,'string literals are values, not sources');}
+ }
  // a probe made only of the two schema tables (subqueries included) is one
  const pair="SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prediction_run') AS present";
  {const before=seen.length;await db.prepare(pair).bind().first();await db.prepare(pair).bind().first();assert.equal(seen.length-before,1,'a pure schema statement is one probe');}

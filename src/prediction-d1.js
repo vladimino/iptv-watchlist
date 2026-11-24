@@ -194,18 +194,23 @@ const REQUEST_SCOPE_KEY=Symbol.for('iptv.requestScope');
 // (with RETURNING it can be run through first() or all()), a PRAGMA can set as well as read, and a comment can hide either; every other shape, and every statement the
 // scope did not prepare itself, is treated as a write and drops the held answer.
 const READ_ONLY_SQL=/^select\b[^;]*;?\s*$/i;
-// AIR-588 (A1). A schema-shape probe: a plain read whose every named table is the schema catalogue (`sqlite_master`) or the migration contract row (`schema_contract`).
+// AIR-588 (A1). A schema-shape probe: a plain read whose every table source is the schema catalogue (`sqlite_master`) or the migration contract row (`schema_contract`).
 // Each domain module asks it before its own marker, so one start repeated it about a hundred times. Inside one request scope its answer is reused until the next
 // authority boundary (`forgetRequestAuthority`), an `exec`, a DDL statement or a batch the scope cannot classify; the schema changes only by an owner-run migration,
 // never by a request's own reads and writes. It never covers a domain marker row: every authority marker (this domain's through `scope.read`, every other domain's
-// own) is read as before, and every fenced write still carries the generation it read. A statement with a comment, a comma-joined FROM list or any other table is not a probe.
-const SCHEMA_PROBE_TABLES=new Set(['sqlite_master','schema_contract']);
+// own) is read as before, and every fenced write still carries the generation it read.
+// Recognition is positive and conservative, not a SQL parser: after string literals are blanked, the text must hold no comment, no quoted or bracketed identifier and
+// no comma-joined FROM list, and EVERY `FROM`/`JOIN` must be followed directly by the bare name `sqlite_master` or `schema_contract` (not qualified, not called). Anything
+// else, a quoted, schema-qualified or table-valued source included, is not a probe and is read every time.
+const SCHEMA_PROBE_SOURCE=/\b(?:from|join)\s+(?:sqlite_master|schema_contract)\b(?!\s*[.(])/gi;
 const DDL_SQL=/^\s*(?:create|drop|alter)\b/i;
 function schemaProbe(sql){
- if(typeof sql!=='string'||!READ_ONLY_SQL.test(sql.trimStart())||/--|\/\*/.test(sql))return false;
- if(/\b(?:from|join)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:as\s+)?[A-Za-z_][A-Za-z0-9_]*)?\s*,/i.test(sql))return false;
- const named=[...sql.matchAll(/\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)/gi)].map(match=>match[1].toLowerCase());
- return named.length>0&&named.every(name=>SCHEMA_PROBE_TABLES.has(name));
+ if(typeof sql!=='string'||!READ_ONLY_SQL.test(sql.trimStart()))return false;
+ const bare=sql.replace(/'(?:[^']|'')*'/g,"''");
+ if(/--|\/\*|["`\[\]]/.test(bare))return false;
+ if(/\b(?:from|join)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:as\s+)?[A-Za-z_][A-Za-z0-9_]*)?\s*,/i.test(bare))return false;
+ const sources=(bare.match(/\b(?:from|join)\b/gi)||[]).length;
+ return sources>0&&(bare.match(SCHEMA_PROBE_SOURCE)||[]).length===sources;
 }
 function scopedDatabase(database,scope){
  const statements=new WeakMap();

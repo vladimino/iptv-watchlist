@@ -57,6 +57,11 @@ sequenceDiagram
             else Unchanged
                 MCP->>Store: Drain transferable stage onto this run (commit fresh, drop stale)
                 MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch, or with answer envelope its compact ready envelope (ADR 0205)
+                opt The start was called with answer envelope (ADR 0205)
+                    Client->>MCP: prediction_batch_manifest for the profile, the contract and every film part
+                    MCP-->>Client: The stored parts, each with the same runId and manifestHash
+                    Note over Client: Check every part against the envelope and assemble the whole manifest before any research or submit
+                end
                 loop Until every selected manifest film is settled
                     opt Model call may be long
                         Client->>MCP: prediction_heartbeat, before the call and at least every 5 minutes
