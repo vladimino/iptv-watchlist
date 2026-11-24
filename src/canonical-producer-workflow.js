@@ -6,7 +6,7 @@ import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFre
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
 import {
  CHAIN_BOUNDARY_MARGIN_MS,CHAIN_CREATE_ATTEMPTS,CHAIN_FLOOR_D1_CALLS,CHAIN_FLOOR_D1_STATEMENTS,CHAIN_LEASE_MS,
- CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,operationCost,admitOperation,
+ CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_RECOVERY_ATTEMPT_CAP,CHAIN_RECOVERY_WINDOW_MS,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,operationCost,admitOperation,
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
@@ -14,6 +14,7 @@ import {
  readChain,rebaseChain,recoverChain,relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
 } from './canonical-producer-chain.js';
 import {epgRunForGeneration} from './canonical-producer-store.js';
+import {chainOutcome,producerEvent,producerEventSession} from './canonical-producer-events.js';
 
 const iso=ms=>new Date(ms).toISOString();
 // AIR-572 delivery hold: a static guard in code. While true, neither Producer entrypoint performs any I/O: the hourly
@@ -290,8 +291,30 @@ export async function readProducerMonitorFacts(env){
  return {ready:true,programmeRunId:row.programmeRunId,generation:Number(row.generation),label,publishedAt:row.publishedAt||null,chain,run};
 }
 
+// AIR-594: the Events Log reporter of Producer outcomes (src/canonical-producer-events.js). Every chain this tick reads is offered BEFORE the reconcile moves
+// it (a recovery, a reopen or a supersede ends the evidence of a stop or a pass), and a chain the tick itself supersedes in flight is reported after that
+// commit. It only reads the run row of an outcome that still needs its event, writes R2 only (the journal and its outbox) and never changes a decision below.
+const PRODUCER_EVENT_CAPS={attempts:CHAIN_RECOVERY_ATTEMPT_CAP,windowMs:CHAIN_RECOVERY_WINDOW_MS};
+const producerEventLog=line=>{try{console.log(JSON.stringify(line));}catch{/* a log line is never part of the reconcile */}};
+async function reportOutcome(env,events,chain){
+ try{
+  const outcome=chainOutcome(chain);
+  if(!outcome||!(await events.wanted(chain,outcome)))return;
+  const run=await epgRunForGeneration(env,{sourceGeneration:snapshotLabel(chain.programme_run_id,Number(chain.input_generation))}).catch(()=>null);
+  await events.record(producerEvent({chain,run,outcome,caps:PRODUCER_EVENT_CAPS}));
+ }catch{/* reporting never fails the reconcile */}
+}
+async function reportSuperseded(env,events,before,after){
+ try{
+  if(!['pending','active','released'].includes(before?.owner_state)||after?.owner_state!=='superseded')return;
+  const run=await epgRunForGeneration(env,{sourceGeneration:snapshotLabel(after.programme_run_id,Number(after.input_generation))}).catch(()=>null);
+  await events.record(producerEvent({chain:after,run,outcome:'superseded',priorState:before.owner_state,caps:PRODUCER_EVENT_CAPS}));
+ }catch{/* reporting never fails the reconcile */}
+}
+
 export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_DELIVERY_HOLD}={}){
  if(hold!==false)return {ran:false,reason:HELD_BY_DELIVERY};
+ let events=null;
  try{
   if(typeof env?.PRODUCER_WORKFLOW?.create!=='function')return {ran:false,reason:'workflow_unavailable'};
   let marker;
@@ -305,9 +328,14 @@ export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_D
   const chain=await readChain(env,P).catch(()=>null);
   const passed=await epgRunForGeneration(env,{sourceGeneration:snapshotLabel(P,g)}).catch(()=>null);
   const rows=await listNonterminalChains(env).catch(()=>[]);
+  events=producerEventSession(env,{nowMs:now,log:producerEventLog});
+  for(const row of [...(chain?[chain]:[]),...rows.filter(row=>row.programme_run_id!==P)])await reportOutcome(env,events,row);
   for(const row of rows){
    if(row.programme_run_id===P)continue;
-   try{await supersedeChain(env,{chain:row,at});counts.supersede++;}catch{counts.skipped++;}
+   try{
+    const out=await supersedeChain(env,{chain:row,at});counts.supersede++;
+    await reportSuperseded(env,events,row,out?.chain);
+   }catch{counts.skipped++;}
   }
   const start=async(result)=>{
    if(!result||result.state==='skipped'||result.state==='skip'||result.state==='live'||result.state==='wait'||result.state==='held')return;
@@ -339,6 +367,9 @@ export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_D
   return {ran:true,reason:'reconciled',...counts};
  }catch(error){
   return {ran:false,reason:error?.code||'error'};
+ }finally{
+  // The outbox drain and the ledger save, after every decision of the tick (a stop or pass that needed it is already durable by now).
+  if(events)await events.finish().catch(()=>null);
  }
 }
 
