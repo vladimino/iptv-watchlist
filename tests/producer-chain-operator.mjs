@@ -258,7 +258,7 @@ const operatorOf=({held=true,now=NOW,...rest}={})=>producerChainOperator({held:(
  plain.batchSizes.length=0;
  const out=await reconcileProducerChain(plain.env,{now:NOW,hold:false});
  assert.equal(out.supersede,1,JSON.stringify(out));assert.equal(chainRow(plain.file,OLD).owner_state,'superseded');
- assert.equal(plain.batchSizes[0],3,'the reconcile supersedes with the marker fence, the update and changes() only');
+ assert.equal(plain.batchSizes[0],5,'the reconcile supersedes an in-flight chain with the marker fence, the update and changes(), then (ADR 0208) its asserted outcome row: no published guard');
 }
 // Ambiguous outcomes are never reported as zero writes and never retried.
 {

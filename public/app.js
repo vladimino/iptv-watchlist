@@ -543,6 +543,7 @@ const EVENT_TYPE_FILTERS=[
  {id:'enrichment',label:'Прогнозы',types:['enrichment']},
  {id:'taste_profile',label:'Модель вкуса',types:['taste_profile']},
  {id:'catalog_posters',label:'Постеры',types:['catalog_posters']},
+ {id:'canonical_producer',label:'Обогащение каталога',types:['canonical_producer']},
 ];
 function eventTypeFrom(search){
  let params;try{params=new URLSearchParams(String(search||''));}catch{return 'all';}
@@ -638,6 +639,15 @@ function eventPresentationStatus(event){
    if(event.state==='error')return 'error';
    return null;
   }
+  // AIR-594 / ADR 0208: one logical Producer pass (P:g), one recorded stop, one in-flight pass cut by a newer publication, or one held automatic recovery.
+  // `passed` is a success only with zero failed units AND zero unclosed results; a stop eligible for the automatic retry is an interruption (eligibility, not a
+  // promise), a stop or a held recovery that needs the owner an error, a superseded pass an interruption.
+  case 'canonical_producer':
+   if(event.outcome==='passed')return event.failed===0&&event.openResults===0?'success':'warning';
+   if(event.outcome==='stopped')return event.recovery==='eligible'?'interrupted':event.recovery==='owner'?'error':'warning';
+   if(event.outcome==='held')return 'error';
+   if(event.outcome==='superseded')return 'interrupted';
+   return null;
   case 'catalog_posters':
    if(event.outcome==='completed')return 'success';
    if(event.outcome==='failed')return 'error';
@@ -2841,6 +2851,37 @@ function epgPolicyDetails(event){
  const classified=degraded?'':row('discover',channels.discover)+row('deny_all',channels.denyAll)+row('Новых каналов (найдено)',channels.new)+row('Новых каналов (зарегистрировано)',channels.registered)+row('Без категории',channels.unclassified);
  return `${warning}<p>${heading}${link}</p><dl>${row('Каналов в эфире',channels.total)}${classified}${row('known_only',channels.knownOnly)}${programmes?(degraded?'':row('Показов отфильтровано (deny_all)',programmes.filteredDenyAll))+row('Показов пропущено (known_only)',programmes.skippedKnownOnly)+(degraded?'':row('Показов для Discovery',programmes.discoveryEligible)+row('Показов на каналах без категории',programmes.unclassified)):''}</dl>`;
 }
+// AIR-594: the Canonical Producer («Обогащение каталога») card. Fixed sentences chosen by `outcome`, `recovery` and the counts; every number goes through a
+// strict integer check («неизвестно» otherwise, never 0); the units are plan units, not films; codes are printed only when they are lowercase codes. The
+// technical part (stop code, recovery, chain counts) is a closed group, so the compact feed stays short.
+const PRODUCER_RECOVERY_CLASSES=['transient','receipt','authority','terminal','fail_closed','exhausted'];
+function canonicalProducerEventHTML(event){
+ const int=v=>Number.isInteger(v)&&v>=0,num=v=>int(v)?String(v):'неизвестно',code=v=>typeof v==='string'&&/^[a-z][a-z_0-9]{0,79}$/.test(v)?v:null;
+ const outcome=event.outcome,failed=int(event.failed)?event.failed:null,open=int(event.openResults)?event.openResults:null;
+ const title=outcome==='passed'?(failed===0&&open===0?'Обогащение каталога завершено':failed>0?'Обогащение каталога завершено с ошибками':open>0?'Обогащение каталога завершено, остались незакрытые результаты':'Обогащение каталога завершено, итог не подтверждён')
+  :outcome==='stopped'?(event.recovery==='eligible'?'Обогащение каталога остановлено, допускает автоматический повтор':event.recovery==='owner'?'Обогащение каталога остановлено, нужно решение владельца':'Обогащение каталога остановлено')
+  :outcome==='held'?'Автоматический повтор обогащения каталога не состоялся, нужно решение владельца'
+  :outcome==='superseded'?'Обогащение каталога прервано: вышла новая программа':'Отчёт обогащения каталога';
+ const rows=[['Единиц в плане',num(event.unitCount)],['Обработано',num(event.processed)],['Применено',num(event.applied)],['Без изменений',num(event.noop)],['Оставлено как есть',num(event.kept)],['Ошибки',num(event.failed)],['Осталось',num(event.remaining)]];
+ if(outcome==='passed')rows.push(['Незакрытых результатов',num(event.openResults)]);
+ const notes=[];
+ if(event.runRecorded===false)notes.push('Проход остановился до записи прогона: числа неизвестны.');
+ if(int(event.inputGeneration))notes.push(`Поколение программы: ${event.inputGeneration}${int(event.passNo)?` · проход ${event.passNo}`:''}.`);
+ if(int(event.passNo)&&event.passNo>1)notes.push('Счётчики включают более ранние проходы этого поколения.');
+ if(int(event.durationMs)){const minutes=Math.round(event.durationMs/60000),hours=Math.floor(minutes/60);notes.push(`Длительность: ${hours?`${hours} ч `:''}${minutes%60} мин.`);}
+ const reason=code(event.reason),klass=PRODUCER_RECOVERY_CLASSES.includes(event.recoveryClass)?event.recoveryClass:null,chain=event.chain&&typeof event.chain==='object'?event.chain:{};
+ const tech=[];
+ if(outcome==='stopped'){
+  tech.push(`<p class="event-note">Код остановки: ${reason?`<code>${reason}</code>`:'не указан'}${klass?` · класс: <code>${klass}</code>`:''}.</p>`);
+  tech.push(`<p class="event-note">${event.recovery==='eligible'?'На момент остановки допускала автоматический повтор с сохранённого места (в пределах лимита попыток и окна повторов). Это не обещание: если часовой запуск откажет в повторе этой программы, будет отдельное событие; программа, вытесненная новой публикацией, не повторяется и отдельного события не получает.':event.recovery==='owner'?'Автоматически не продолжится: нужно решение владельца.':'Возможность восстановления не определена.'}</p>`);
+ }
+ if(outcome==='held'){
+  tech.push(`<p class="event-note">Остановка ${reason?`<code>${reason}</code> `:''}больше не повторяется автоматически: лимит попыток или окно повторов исчерпаны.${klass?` Класс: <code>${klass}</code>.`:''}</p>`);
+ }
+ if(outcome==='superseded')tech.push('<p class="event-note">Цепочка этой программы закрыта; работу продолжит цепочка новой программы.</p>');
+ tech.push(`<p class="event-note">Эпоха: ${num(chain.epoch)} · передачи: ${num(chain.handoffs)} · перехваты: ${num(chain.takeovers)} · перезапуски: ${num(chain.relaunches)} · переоткрытия: ${num(chain.reopens)} · попытки восстановления: ${num(chain.recoveryAttempts)}.</p>`);
+ return `<p>${title}</p><dl>${rows.map(([label,value])=>`<div><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl>${notes.map(text=>`<p class="event-note">${text}</p>`).join('')}<details class="event-group"><summary><h3>Технические подробности</h3></summary>${tech.join('')}</details>`;
+}
 function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=eventFilmHTML;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
  if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>${epgPolicyDetails(event)}`;
@@ -2910,6 +2951,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   body=`<p>${title}</p><dl><div><dt>Проверено</dt><dd>${num(event.checked)}</dd></div><div><dt>Постеров добавлено</dt><dd>${num(event.hydrated)}</dd></div><div><dt>Нет постера на TMDB</dt><dd>${num(event.noPoster)}</dd></div><div><dt>Повторить позже</dt><dd>${num(event.retryable)}</dd></div><div><dt>Отложено (занято)</dt><dd>${num(event.deferredBusy)}</dd></div><div><dt>Ещё в очереди</dt><dd>${num(event.pending)}</dd></div></dl>`
    +(deferred?`<p class="event-note">Проверка не закончена, это не итог недели.${retry?` Следующая попытка не раньше ${retry}.`:''}</p>`:failed?'<p class="event-note">Автоматические попытки исчерпаны, нужно внимание владельца.</p>':'<p class="event-note">«Нет постера на TMDB» — обычный ответ, а не ошибка.</p>');
  }
+ if(event.type==='canonical_producer')body=canonicalProducerEventHTML(event);
  if(event.type==='taste_profile'){const labels={ratingScale:'Изменена шкала оценок',positiveSignals:'Изменены положительные сигналы',negativeSignals:'Изменены отрицательные сигналы',characterLogic:'Изменена логика персонажей',pace:'Изменён темп',payoffEnding:'Изменены развязка и финал',genrePreferences:'Изменены жанровые предпочтения',comedyPreferences:'Изменены предпочтения для комедий',horrorPreferences:'Изменены предпочтения для хорроров',scifiAdventurePreferences:'Изменены предпочтения для фантастики и приключений',actionPreferences:'Изменены предпочтения для боевиков',anchorFilms:'Изменены опорные фильмы',hardSkips:'Изменены жёсткие исключения',calibration:'Изменена калибровка'},known=Array.isArray(event.changedFields)?event.changedFields.filter(field=>Object.hasOwn(labels,field)):[],phrase=event.scope==='identity'&&!known.length?'Содержание модели не изменилось':known.length===1?labels[known[0]]:known.length>1?'Изменены несколько разделов модели вкуса':'',impact=event.scope==='selective'?'Влияние: выборочное':event.scope==='global'?'Влияние: глобальное':'',from=Number.isInteger(event.fromVersion)?event.fromVersion:null,to=Number.isInteger(event.toVersion)?event.toVersion:null,version=from!==null&&to!==null?`Версия ${from} → ${to}`:to!==null?`Версия ${to}`:'';body=`<p>Модель вкуса обновлена</p>${version?`<p class="event-note">${version}</p>`:''}${phrase?`<p class="event-note">${phrase}</p>`:''}${impact?`<p class="event-note">${impact}</p>`:''}`;}
  return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><div class="event-head"><time datetime="${escapeHTML(event.at)}">${date}</time>${eventStatusBadgeHTML(event)}</div>${body}</li>`;}
 function rememberActivityAnchor(scroll){

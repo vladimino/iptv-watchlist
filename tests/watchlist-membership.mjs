@@ -47,8 +47,9 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
 // ===== 1. migration 0037 =====
 {
  const m='0037_watchlist_membership_projection.sql';
- assert.equal(names[names.length-1],m,'0037 is the newest migration');
- assert.equal(names[names.length-2],'0036_epg_discovery_lookup_indexes.sql','0037 follows 0036');
+ assert.ok(names.includes(m),'0037 is in the chain');
+ assert.equal(names[names.indexOf(m)-1],'0036_epg_discovery_lookup_indexes.sql','0037 follows 0036');
+ assert.deepEqual(names.slice(names.indexOf(m)+1),['0038_canonical_producer_outcome.sql'],'only 0038 (ADR 0208, Producer outcome outbox) follows it');
  const v36=path.join(root,'v36.sqlite');sqlite(v36,chain('0036_epg_discovery_lookup_indexes.sql'));
  const v35=path.join(root,'v35.sqlite');sqlite(v35,chain('0035_prediction_aux_import_receipts.sql'));
  refuses(v35,fs.readFileSync('migrations/'+m,'utf8'),/CHECK|constraint|NOT NULL/i);
