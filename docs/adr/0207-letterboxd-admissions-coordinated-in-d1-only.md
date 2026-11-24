@@ -6,7 +6,7 @@
 **Approval source:** not decided. The record was requested in the owner's handoff on [PR #972](https://github.com/vladimino/iptv-watchlist/pull/972#issuecomment-7127786410). The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) chose directions; it accepts no design and grants no implementation or activation GO.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK) (audit and decision), under [AIR-546](https://trello.com/c/1dRSJEbp) and [AIR-275](https://trello.com/c/4x7hH0gI); related [AIR-559](https://trello.com/c/733sRAxu) and [AIR-547](https://trello.com/c/99faXisC).
-- The read-only audit [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md) ([PR #972](https://github.com/vladimino/iptv-watchlist/pull/972)). That relative link resolves only once #972 has merged. This record uses the audit's call-site labels (W1-W6, R1-R7) and gaps (G1-G4).
+- The read-only audit [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md) ([PR #972](https://github.com/vladimino/iptv-watchlist/pull/972), merged at `b9616ff3`). This record uses the audit's call-site labels (W1-W6, R1-R7) and gaps (G1-G4).
 - **Companion records, both Proposed:**
   - [ADR 0210](0210-film-identity-evidence-ledger.md), the source-aware identity evidence ledger (disposition 5C);
   - [ADR 0211](0211-catalog-enrichment-producer.md), the catalog-enrichment producer (disposition 6C).
@@ -414,7 +414,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 
 ## Evidence
 
-- The audit ledger: [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md). It resolves once #972 has merged.
+- The audit ledger: [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md).
 - The review of the audit: [PR #972 review](https://github.com/vladimino/iptv-watchlist/pull/972#pullrequestreview-6036874290).
 - The design reviews of this record:
   - [first](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6037101145);
