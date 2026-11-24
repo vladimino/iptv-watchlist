@@ -363,7 +363,7 @@ await raced('the record becomes an inferred link after the plan',file=>{const re
 // 13. Producer wiring (ADR 0184 decision 5): the gate is off in code, `ensureLetterboxdClaims` writes nothing until it is on, never throws into a flow, is bounded and idempotent.
 // ACTIVATION DIFF (runbook activation plan): the activation PR changes this one assertion together with the constant and the literal check in
 // tests/canonical-film-external-ids-producer.mjs. Everything else in this file follows the constant or passes `enabled` explicitly.
-assert.equal(LETTERBOXD_CLAIM_ACTIVATED,false,'the activation constant ships off');
+assert.equal(LETTERBOXD_CLAIM_ACTIVATED,true,'the activation constant ships on');
 {
  // The default gate follows the shipped constant: off, the default call writes nothing; on, the default call is the active producer (covered with `enabled:true`
  // below and end to end in tests/letterboxd-claim-activation-rehearsal.mjs). The explicit `enabled:false` stays inactive whatever the constant says.

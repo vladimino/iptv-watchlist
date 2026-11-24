@@ -1,4 +1,4 @@
-// AIR-559 (ADR 0184, Accepted; this module remains dormant until separately delivered producer activation). The trusted `letterboxd` external-id claim of a canonical Film that the Ratings domain has already tied to one TMDB movie.
+// AIR-559 (ADR 0184, Accepted; the producer is ACTIVE from the activation PR on, see LETTERBOXD_CLAIM_ACTIVATED below). The trusted `letterboxd` external-id claim of a canonical Film that the Ratings domain has already tied to one TMDB movie.
 // WHY. `admitRatedFilm` keeps the verified Letterboxd short code only as the historical alias `letterboxd_short_code`, never as a trusted `letterboxd` claim (ADR 0166 option B was deferred), so
 // `catalogFilmIdentityBridge` / `catalogStartedFilm` answer `absent` for a published lid whose Film exists and whose Ratings alias is unambiguous (the AIR-549 acceptance 404 `Unknown film`).
 // WHAT. ONE targeted, fenced claim for an EXISTING Film, and nothing else: no Film is created, no alias, title, rating, membership or Started mark is touched, and no title/year/slug is ever used.
@@ -211,9 +211,10 @@ export async function applyLetterboxdClaims(env,{event,items=[],now,dryRun=false
 }
 
 // ---- Producer wiring (ADR 0184 decision 5) ----
-// ACTIVATION GATE. The call sites of the Ratings flows hand their proven pairs to `ensureLetterboxdClaims`, which does NOTHING until this constant is true. It is an in-code constant, not a Cloudflare variable or flag: turning it on is
-// ONE reviewed line in a separate activation change that needs the owner's explicit GO, so a merge of the wiring writes nothing in production. Tests pass `enabled` explicitly.
-export const LETTERBOXD_CLAIM_ACTIVATED=false;
+// ACTIVATION GATE. The call sites of the Ratings flows hand their proven pairs to `ensureLetterboxdClaims`, which does NOTHING while this constant is false. It is an in-code constant, not a Cloudflare variable or flag:
+// it was switched on by ONE reviewed line in the AIR-559 activation PR after the owner's explicit GO (runbook docs/runbooks/letterboxd-claim-backfill.md, activation plan). Rollback is the same line set back to
+// false in a reviewed PR: it stops new offers; claims already written stay. Tests that are not about the gate pass `enabled` explicitly.
+export const LETTERBOXD_CLAIM_ACTIVATED=true;
 
 // The pairs a flow has JUST made durable on the Ratings side (the fact record and the link index) and, for an admitted Film, the D1 admission. Never throws into the caller: the rating fact, the Diary fact and the Event do not wait
 // for the claim and never fail because of it. {state:'inactive'|'complete'|'incomplete'|'skipped', requested, written, already, refused, unknown, deferred, overflow, failed, results?}. At most LETTERBOXD_CLAIM_UNIT_CAP pairs are

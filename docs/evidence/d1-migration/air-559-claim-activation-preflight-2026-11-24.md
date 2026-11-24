@@ -19,6 +19,19 @@ Date: **24 November 2026, 05:52 to 05:53 UTC** (06:52 Madrid). Scope: read-only.
 | MCP `ratings_sync_status` | Letterboxd Sync mode `cloudflare`, epoch 1, health `healthy`, `missedRecent` 0, `eventsPending` 0. The last slot, `2026-11-24T0430`, finished: ratings finished, watchlist committed, reconciliation done. The next slot is due 2026-11-24 09:30 UTC; four slots a day. Ratings run: Diary `recent_window`, 1 page, 1 film added; identity step considered 0 ids, so it offered no claim |
 | MCP `letterboxd_claim_backfill` `dry_run` | `already_current`, `sideEffects: none`, cohort 0, blockers none. Publication `d1`/`open`, generation 518, watchlist generation 21; ratings generation 4371 |
 
+## Refresh before the activation GO (07:13 UTC)
+
+The same four read-only checks were repeated from the activation PR's branch. The status tool's `checkoutGate` reads `true` there because the branch carries the activation line; the deployed code is still gate off.
+
+| Check | Reading |
+| --- | --- |
+| Status `--baseline` | Ratings `d1`/`open` generation 4371; Film/Person `open` generation 2. Receipts: `applied` 9, every other state 0. Claims: 415, all trusted, 9 `ratings_alias_bridge`. `claim_pending`: 0 |
+| `feature_flags` | Unchanged: 25 registered, 2 set (`MONITOR=on`, `MONITOR_TRANSPORT=telegram`), 0 invalid |
+| `ratings_sync_status` | Letterboxd Sync `cloudflare`, epoch 1, healthy. Slot `2026-11-24T0430` finished; the next slot `2026-11-24T1030` is due 09:30 UTC. `missedRecent` 0, `overdueSlots` none |
+| Backfill `dry_run` | `already_current`, cohort 0, blockers none; publication generation 518, watchlist generation 21 |
+
+Nothing changed against 05:52 UTC. No blocker was found and no write was made.
+
 ## What the activation would change, and how it is measured
 
 - **The change:** three lines (the constant and the two literal test assertions, see the runbook) in a reviewed PR merged only after the owner's GO.
