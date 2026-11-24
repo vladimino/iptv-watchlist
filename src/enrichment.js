@@ -2179,17 +2179,22 @@ const PREDICTION_ORPHAN_MIN_IDLE_MS=20*60000;
 const PREDICTION_ORPHAN_WINDOW_MS=2*60*60000;
 // The pure verdict both surfaces rely on. `sinceMs` is the last confirmed progress (a productive batch, or a drained run that proved an empty
 // queue); heartbeat, `already_running`, a queue recount and a noop wake-up are never passed as progress. Unknown input is `unknown`, never healthy.
+// AIR-596 (ADR 0210): a proven verdict (the 60-minute limit or repeated orphan starts, both measured from the last confirmed progress) is decided BEFORE the live
+// run. A current lease, a start, a manifest read, a heartbeat, `already_running` or a new runId is not progress, so a young live run never hides a silence that is
+// already proven; it only keeps `running` while nothing is proven (fresh progress, or no evidence at all yet). `orphanStarts` is reported with every verdict.
 function predictionStallAssessment({now,sinceMs=null,eligibleNow=null,nextRetryAtMs=null,activeStartedAtMs=null,activeRun=false,observedSinceMs=null,orphanStarts=0}){
  if(!Number.isInteger(eligibleNow))return {state:'unknown',reason:'queue_unreadable',idleMs:null};
  if(eligibleNow===0)return {state:Number.isFinite(nextRetryAtMs)&&nextRetryAtMs>now?'waiting':'idle',reason:eligibleNow===0?'no_eligible_work':null,idleMs:null};
  // An unknown start is not trusted as young: a lease without a provable start never hides a long silence.
- if(activeRun&&Number.isFinite(activeStartedAtMs)&&now-activeStartedAtMs<PREDICTION_ACTIVE_RUN_MAX_MS)return {state:'running',reason:'active_run',idleMs:null};
+ const young=activeRun&&Number.isFinite(activeStartedAtMs)&&now-activeStartedAtMs<PREDICTION_ACTIVE_RUN_MAX_MS;
  const known=Number.isFinite(sinceMs);
  const base=known?sinceMs:Number.isFinite(observedSinceMs)?observedSinceMs:null;
- if(base===null)return {state:'unknown',reason:'no_progress_evidence',idleMs:null};
+ const orphans=Number.isInteger(orphanStarts)&&orphanStarts>0?orphanStarts:0;
+ if(base===null)return young?{state:'running',reason:'active_run',idleMs:null}:{state:'unknown',reason:'no_progress_evidence',idleMs:null};
  const idleMs=Math.max(0,now-base);
- if(Number.isInteger(orphanStarts)&&orphanStarts>=PREDICTION_ORPHAN_START_LIMIT&&idleMs>=PREDICTION_ORPHAN_MIN_IDLE_MS)return {state:'no_progress',reason:'repeated_orphan_starts',idleMs,sinceKnown:known,orphanStarts};
- if(predictionProgressStalled(idleMs))return {state:'no_progress',reason:known?'no_productive_batch':'no_progress_evidence',idleMs,sinceKnown:known};
+ if(orphans>=PREDICTION_ORPHAN_START_LIMIT&&idleMs>=PREDICTION_ORPHAN_MIN_IDLE_MS)return {state:'no_progress',reason:'repeated_orphan_starts',idleMs,sinceKnown:known,orphanStarts:orphans,activeRun:!!activeRun};
+ if(predictionProgressStalled(idleMs))return {state:'no_progress',reason:known?'no_productive_batch':'no_progress_evidence',idleMs,sinceKnown:known,orphanStarts:orphans,activeRun:!!activeRun};
+ if(young)return {state:'running',reason:'active_run',idleMs,sinceKnown:known};
  return {state:known?'ok':'unknown',reason:known?null:'no_progress_evidence',idleMs,sinceKnown:known};
 }
 // AIR-556 review: only the two reasons whose completion re-read the queue and found no ready film prove an empty (or fully deferred) queue. `manifest_spent`
@@ -2198,15 +2203,28 @@ const PREDICTION_DRAINED=new Set(['queue_empty','eligible_queue_empty']);
 function predictionRunFact(row,now){
  if(!row||typeof row!=='object')return null;
  const reason=row.stopReason||row.reason||null;
- const added=Number.isInteger(row.added)?row.added:Object.values(row.results||{}).filter(value=>value==='created').length;
- const updated=Number.isInteger(row.updated)?row.updated:Object.values(row.results||{}).filter(value=>value==='recalculated').length;
+ // A run record carries its counts in `counts` (created/recalculated) once completed, a diagnostic in `added`/`updated`; else they are counted from `results`.
+ const added=Number.isInteger(row.added)?row.added:Number.isInteger(row.counts?.created)?row.counts.created:Object.values(row.results||{}).filter(value=>value==='created').length;
+ const updated=Number.isInteger(row.updated)?row.updated:Number.isInteger(row.counts?.recalculated)?row.counts.recalculated:Object.values(row.results||{}).filter(value=>value==='recalculated').length;
  const failed=Number.isInteger(row.failed)?row.failed:Object.keys(row.failures||{}).length;
  const status=row.status||row.state||null;
  const startedAt=integrationTime(row.startedAt||row.createdAt||row.diagnosticStartedAt);
  const endedAt=integrationTime(row.endedAt||row.completedAt||row.finishedAt);
- return {runId:row.runId||null,status,reason,added,updated,failed,startedAt,endedAt,at:endedAt||startedAt,startResult:typeof row.startResult==='string'?row.startResult:null};
+ // AIR-596: the first committed film of a run still working dates its progress better than its start (the commit happened at or after it, never before).
+ const firstSubmitAt=integrationTime(row.firstSubmitAt);
+ return {runId:row.runId||null,status,reason,added,updated,failed,startedAt,endedAt,firstSubmitAt,at:endedAt||startedAt,startResult:typeof row.startResult==='string'?row.startResult:null};
 }
 function predictionFactMs(fact){const at=integrationTime(fact?.endedAt||fact?.startedAt||fact?.at);return at?Date.parse(at):NaN;}
+// When a progress fact proved progress, never later than a commit (AIR-596 review): a completed run at its completion (which settles its films in the
+// same write and proves the drained queue); any other productive run (still working, interrupted, expired, partial) at its first committed film, else at
+// its start, a conservative lower bound. Its end is never used: for an expired run it is the lease expiry that `projectedDiagnostic` fills in, not a commit.
+function predictionProgressTime(fact){
+ if(!fact)return null;
+ const complete=fact.status==='complete'||fact.status==='completed';
+ return integrationTime((complete&&fact.endedAt)||fact.firstSubmitAt||fact.startedAt);
+}
+// A valid progress time: parseable and not in the future beyond the clock skew every reader allows (5 minutes).
+const predictionValidProgressMs=(value,now)=>{const ms=Date.parse(value||'');return Number.isFinite(ms)&&ms<=now+300000?ms:null;};
 // The run history as the Footer and the Monitor both read it: normalized facts newest first and the classifiers that decide what counts as progress.
 // Progress is a productive batch (films created or recalculated) or a drained run (a complete run that found nothing eligible, which proves the queue
 // was empty at that time). A heartbeat, `already_running`, a noop wake-up, a failed-only run and a queue recount are not progress.
@@ -2225,6 +2243,7 @@ function predictionRunEvidence({run,recentRuns,now}){
   if(!known.reason&&fact.reason)known.reason=fact.reason;
   if(!known.status&&fact.status)known.status=fact.status;
   if(!known.startResult&&fact.startResult)known.startResult=fact.startResult;
+  if(!known.firstSubmitAt&&fact.firstSubmitAt)known.firstSubmitAt=fact.firstSubmitAt;
  };
  for(const row of recentRuns||[])push(row);
  push(run);
@@ -2240,12 +2259,46 @@ function predictionRunEvidence({run,recentRuns,now}){
   if(fact.status==='running')return true;
   return ['external_termination','lease_expired','lease_lost','time_budget','already_running','runner_aborted'].includes(fact.reason);
  };
- const lastProgress=facts.find(isProgress)||null;
+ // The latest progress by its own progress time (not by the run order, which sorts on the end or start): invalid and future times are left out.
+ let lastProgress=null,lastProgressMs=null;
+ for(const fact of facts){if(!isProgress(fact))continue;const ms=predictionValidProgressMs(predictionProgressTime(fact),now);if(ms!==null&&(lastProgressMs===null||ms>lastProgressMs)){lastProgress=fact;lastProgressMs=ms;}}
  // Ownerless starts since the last confirmed progress, inside a bounded window: a start turned away with `already_running`, or a run abandoned without a film (a run still `running` is working, not abandoned).
- const progressMs=lastProgress?predictionFactMs(lastProgress):-Infinity;
- const orphanStarts=facts.filter(fact=>{const at=predictionFactMs(fact);return Number.isFinite(at)&&at>progressMs&&now-at<=PREDICTION_ORPHAN_WINDOW_MS&&!isProgress(fact)&&(fact.startResult==='already_running'||(isInterrupt(fact)&&fact.status!=='running'&&(fact.added||0)===0&&(fact.updated||0)===0));}).length;
- return {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt,lastProgress,orphanStarts,lastProgressAt:lastProgress?integrationTime(lastProgress.endedAt||lastProgress.startedAt):null};
+ const orphanStarts=predictionOrphansAfter({facts,isProgress,isInterrupt},lastProgressMs??-Infinity,now);
+ return {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt,lastProgress,orphanStarts,lastProgressAt:predictionProgressTime(lastProgress)};
 }
+// AIR-596 (ADR 0210). The durable progress clock, independent of the bounded run history (the Footer reads 8 diagnostics, the Monitor 20: a series of
+// ownerless starts evicts the last productive run within hours). Two stored facts, both written at the commit itself and never by a read:
+// - `queue.lastBatch`, written by the completion of a run in the same conditional write that settles its films and carried unchanged by every queue
+//   rebuild, recount or import. It counts only when it names a run that created or recalculated films (its own `finishedAt`), or a completion or empty-queue
+//   check that left nothing pending. A noop or retry-backoff wake-up (`runId: null`, nothing saved), `manifest_spent` with nothing saved and a failed-only batch are not progress.
+// - the Monitor's stored clock (`monitor/state.json` `predictions.progressAt` with `progressBasis: evidence`): the last progress time the hourly tick derived
+//   from these same facts, so a success evicted from the history is not forgotten. It is a past event time, so an old value only makes the verdict stricter.
+// The moved `hotProcessedTotal` counter is not a progress time: it says a run completed since the previous tick, not when.
+function predictionLastBatchProgressAt(queue,now=Date.now()){
+ const batch=queue&&typeof queue==='object'?queue.lastBatch:null;
+ if(!batch||typeof batch!=='object')return null;
+ const at=integrationTime(batch.finishedAt),ms=Date.parse(at||'');
+ if(!Number.isFinite(ms)||ms>now+300000)return null;
+ const saved=(Number.isInteger(batch.added)?batch.added:0)+(Number.isInteger(batch.updated)?batch.updated:0);
+ if(batch.runId&&saved>0)return at;
+ const drained=Number.isInteger(batch.remaining)&&batch.remaining===0&&!(batch.failed>0)&&(batch.stage==='noop'||(!!batch.runId&&batch.stage==='complete'));
+ return drained?at:null;
+}
+function predictionStoredClockAt(clock,now=Date.now()){
+ if(!clock||typeof clock!=='object'||clock.progressBasis!=='evidence')return null;
+ const at=integrationTime(clock.progressAt),ms=Date.parse(at||'');
+ return Number.isFinite(ms)&&ms<=now+300000?at:null;
+}
+// The Monitor's persisted start of an unknown-age silence (`unknownSince`, ADR 0182 decision 3): the one observation basis both surfaces use when no
+// progress time is known. The Footer falls back to its own oldest recorded attempt only when the Monitor has none.
+function predictionStoredUnknownSince(clock,now=Date.now()){const at=integrationTime(clock&&typeof clock==='object'?clock.unknownSince:null);return predictionValidProgressMs(at,now)===null?null:at;}
+// Eligible work as both surfaces judge it: the runner's lane rule (`predictionQueueSlices`), and zero only when it is proven. A queue whose lanes cannot be
+// read is unknown (null), never healthy, unless its `pending` list itself is an empty array (nothing outstanding at all).
+function predictionEligibleNow(queue,slices){
+ if(Number.isInteger(slices?.eligibleNow))return slices.eligibleNow;
+ return Array.isArray(queue?.pending)&&queue.pending.length===0?0:null;
+}
+function predictionLatestAt(...values){return values.filter(value=>Number.isFinite(Date.parse(value||''))).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;}
 // What the Monitor needs from the queue, the lease and the run history, read through the same helpers the Footer uses (queue slices, retry budget).
 function predictionProgressFacts({queue,runs,latestRun,lease,now}){
  const slices=predictionQueueSlices(queue,now);
@@ -2254,39 +2307,53 @@ function predictionProgressFacts({queue,runs,latestRun,lease,now}){
  // The start of the run that holds the lease: its own record, else its diagnostic checkpoint; a lease for another or an unreadable run has no provable start.
  const owned=activeRun?(latestRun?.runId===lease.runId?latestRun.createdAt:(runs||[]).find(row=>row?.runId===lease.runId)?.startedAt):null;
  const startedMs=Date.parse(owned||'');
- return {slices,lastProgressAt:evidence.lastProgressAt,orphanStarts:evidence.orphanStarts,activeRun,activeStartedAtMs:Number.isFinite(startedMs)?startedMs:null,runHistoryEmpty:!evidence.facts.length};
+ // AIR-596: the queue's own last batch is durable evidence beside the bounded history; the orphan count still comes from the history after that progress.
+ const lastBatchAt=predictionLastBatchProgressAt(queue,now),lastProgressAt=predictionLatestAt(evidence.lastProgressAt,lastBatchAt);
+ const orphanStarts=predictionOrphansAfter(evidence,lastProgressAt?Date.parse(lastProgressAt):-Infinity,now);
+ return {slices,eligibleNow:predictionEligibleNow(queue,slices),lastProgressAt,historyProgressAt:evidence.lastProgressAt,lastBatchProgressAt:lastBatchAt,orphanStarts,activeRun,activeStartedAtMs:Number.isFinite(startedMs)?startedMs:null,runHistoryEmpty:!evidence.facts.length};
 }
-function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
+// The ownerless starts of the history newer than a progress time that came from outside it (the durable clock), under the same rule as predictionRunEvidence.
+function predictionOrphansAfter(evidence,progressMs,now){
+ return evidence.facts.filter(fact=>{const at=predictionFactMs(fact);return Number.isFinite(at)&&at>progressMs&&now-at<=PREDICTION_ORPHAN_WINDOW_MS&&!evidence.isProgress(fact)&&(fact.startResult==='already_running'||(evidence.isInterrupt(fact)&&fact.status!=='running'&&(fact.added||0)===0&&(fact.updated||0)===0));}).length;
+}
+// AIR-596 (ADR 0210): the Footer's verdict is the shared assessment above, fed with the same durable clock as the Monitor (the history, the queue's last batch
+// and the Monitor's stored clock). A proven no-progress verdict wins over a live lease, so «нет подтверждённого прогресса прогнозов» and the last confirmed success
+// stay visible while Tasks keep starting runs that never commit; the run line still says «выполняется» (operational state, not health).
+function predictionCapabilityHealth({run,live,now,recentRuns,queue,clock=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
- if(live){const startedMs=Date.parse(run?.createdAt||'');if(Number.isFinite(startedMs)&&now-startedMs<PREDICTION_ACTIVE_RUN_MAX_MS)return integrationEntry('predictions','capability','running','running',null,null);}
- const {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt,orphanStarts}=predictionRunEvidence({run,recentRuns,now});
- if(!facts.length)return integrationEntry('predictions','capability','unknown','no_data',null,null);
- const slices=predictionQueueSlices(queue,now);
- const queueReadable=Number.isInteger(slices.eligibleNow)||Number.isInteger(slices.outstanding);
- const workLeft=Number.isInteger(slices.eligibleNow)?slices.eligibleNow>0:false;
- const latest=facts[0];
- const lastProgress=facts.find(isProgress);
+ const evidence=predictionRunEvidence({run,recentRuns,now});
+ const {facts,isHard,isFailedOnly,isInterrupt}=evidence;
+ const slices=predictionQueueSlices(queue,now),eligibleNow=predictionEligibleNow(queue,slices);
+ const workLeft=Number.isInteger(eligibleNow)&&eligibleNow>0;
+ const lastSuccessAt=predictionLatestAt(evidence.lastProgressAt,predictionLastBatchProgressAt(queue,now),predictionStoredClockAt(clock,now));
+ const startedMs=live?Date.parse(run?.createdAt||''):NaN,liveYoung=Number.isFinite(startedMs)&&now-startedMs<PREDICTION_ACTIVE_RUN_MAX_MS;
+ const latest=facts[0]||null;
  const lastHard=facts.find(isHard);
- const lastSuccessAt=lastProgress?integrationTime(lastProgress.endedAt||lastProgress.startedAt):null;
- const lastFailureAt=integrationTime(latest.endedAt||latest.startedAt);
- const hardUnresolved=lastHard&&(!lastProgress||predictionFactMs(lastHard)>=predictionFactMs(lastProgress));
+ const lastFailureAt=latest?integrationTime(latest.endedAt||latest.startedAt):null;
+ const successMs=lastSuccessAt?Date.parse(lastSuccessAt):null;
+ const hardUnresolved=!!lastHard&&(successMs===null||predictionFactMs(lastHard)>=successMs);
+ const hardFailureAt=hardUnresolved?integrationTime(lastHard.endedAt||lastHard.startedAt)||lastFailureAt:null;
+ // No progress time at all: the same observation basis as the Monitor (its persisted `unknownSince`), else the oldest recorded attempt here.
+ const oldest=facts[facts.length-1],oldestMs=Date.parse(oldest?.startedAt||oldest?.at||'');
+ const storedSince=predictionStoredUnknownSince(clock,now);
+ const observedSinceMs=successMs!==null?null:storedSince?Date.parse(storedSince):Number.isFinite(oldestMs)?oldestMs:null;
+ const orphanStarts=predictionOrphansAfter(evidence,successMs??-Infinity,now);
+ const stall=predictionStallAssessment({now,sinceMs:successMs,eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:!!live,activeStartedAtMs:Number.isFinite(startedMs)?startedMs:null,observedSinceMs,orphanStarts});
+ // An unreadable split is unknown health (ADR 0182 decision 4), whatever the run line says: never running, never healthy from an earlier success. A proven hard stop stays proven.
+ if(stall.state==='unknown'&&stall.reason==='queue_unreadable')return hardUnresolved?integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,hardFailureAt):integrationEntry('predictions','capability','unknown','no_data',lastSuccessAt,lastFailureAt);
+ if(stall.state==='no_progress')return integrationEntry('predictions','capability','degraded',hardUnresolved?'prediction_blocked':'prediction_no_recent_progress',lastSuccessAt,hardUnresolved?hardFailureAt:lastFailureAt);
+ // Nothing is proven: a live run younger than the limit is working (one overlap or a start is not an outage).
+ if(liveYoung&&stall.state!=='unknown')return integrationEntry('predictions','capability','running','running',null,null);
+ if(!latest&&!lastSuccessAt)return integrationEntry('predictions','capability','unknown','no_data',null,null);
+ if(!latest)return integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,null);
  let consecutiveInterrupts=0;
  for(const fact of facts){if(isInterrupt(fact))consecutiveInterrupts++;else break;}
- if(hardUnresolved)return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,integrationTime(lastHard.endedAt||lastHard.startedAt)||lastFailureAt);
+ if(hardUnresolved)return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,hardFailureAt);
  if(consecutiveInterrupts>=2&&workLeft)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
- // ADR 0193: repeated orphan starts (turned-away attempts and runs abandoned without a film) after a quiet stretch are an interruption chain even when no run record is the newest fact.
- if(workLeft&&orphanStarts>=PREDICTION_ORPHAN_START_LIMIT&&lastSuccessAt&&now-Date.parse(lastSuccessAt)>=PREDICTION_ORPHAN_MIN_IDLE_MS)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
- const progressAge=lastSuccessAt?now-Date.parse(lastSuccessAt):null;
- const latestAge=latest.at?now-Date.parse(latest.at):null;
- if(workLeft&&predictionProgressStalled(progressAge)){
-  if(lastSuccessAt)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',lastSuccessAt,lastFailureAt);
-  // No progress anywhere in the history: the oldest recorded attempt bounds how long that has lasted (a failed-only batch never asserts an outage by its count).
-  const oldest=facts[facts.length-1],oldestMs=Date.parse(oldest?.startedAt||oldest?.at||''),oldestAge=Number.isFinite(oldestMs)?now-oldestMs:null;
-  if(oldestAge!=null&&predictionProgressStalled(oldestAge))return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+ if(workLeft&&!lastSuccessAt){
   if(facts.filter(fact=>isInterrupt(fact)).length>=2)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
-  if(!queueReadable)return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
-  if(isInterrupt(latest))return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
+  return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
  }
  // AIR-556: item failures of a completed batch (parse, validation, retry) are expected and live in lastRun.failed and the item diagnostics. They are not pipeline health:
  // health comes from confirmed progress (60 minutes), a hard stop, or repeated interruptions, never from a failure count alone.
@@ -2345,7 +2412,7 @@ async function footerProducerView(env,readMonitorState,now){
  if(facts===null)return undefined;
  return {facts,verdict:facts.error?null:MonitorPolicy.evaluateCanonicalProducerReader(facts,now)};
 }
-function integrationHealth({posters,producer,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
+function integrationHealth({posters,producer,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null,predictionClock=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -2432,7 +2499,7 @@ function integrationHealth({posters,producer,sync,ratings,enabled,report,continu
   if(currentResolverSuccess)return integrationEntry('resolver','source',fresh(currentResolverSuccess),freshCode(currentResolverSuccess),currentResolverSuccess,null);
   return integrationEntry('resolver','source','unknown','no_data',null,null);
  })();
- const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue});
+ const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue,clock:predictionClock});
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
  const sources=[watchlist,ratingsSource,epg,resolver,...(producer===undefined?[]:[producerIntegration(producer)]),predictions];
  // `posters` is undefined only where the module is not bundled; a failed or timed-out read is null and shows as unknown, never healthy.
@@ -2600,6 +2667,8 @@ async function footerStatus(env){
  // AIR-593: the canonical Producer, three indexed D1 statements through the Monitor's own reader; a failed read is unknown, never healthy.
  const producerBundled=typeof CanonicalProducerWorkflow!=='undefined'&&typeof Monitor!=='undefined'&&typeof MonitorPolicy!=='undefined'&&!!env?.DB;
  const producer=producerBundled?await guard('canonical_producer',()=>footerProducerView(env,readMonitorState,Date.now())):undefined;
+ // AIR-596: the Monitor's stored prediction progress clock (same document, no extra read). Unreadable is simply absent: the history and the queue still decide.
+ const predictionClock=await Promise.resolve().then(readMonitorState).then(doc=>doc?.predictions&&typeof doc.predictions==='object'?doc.predictions:null,()=>null);
  if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
  // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
@@ -2621,7 +2690,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?footerCompute(degraded,'run',()=>runSummary(run),null):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({posters,producer,sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({posters,producer,sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue,predictionClock}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue,exclude=new Set()){
  const skip=id=>exclude.has(id)||retryBudgetExhausted(queue.retries?.[id]);
