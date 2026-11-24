@@ -4,6 +4,7 @@ import fs from 'node:fs';import os from 'node:os';import path from 'node:path';i
 import {spawnSync} from 'node:child_process';
 import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';
 import * as Op from '../scripts/epg-checkpoint-production.mjs';
+import {isolatedGitEnv} from '../scripts/git-env.mjs';
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
 import {createD1Adapter} from '../scripts/d1-backfill.mjs';import {createPublishedBinding,trackProductionWrites} from '../scripts/published-epg-production.mjs';
 
@@ -565,9 +566,11 @@ for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority
 }
 
 // ===== 12. the git proof of the deployed commit, on a temporary repository =====
-{
+const gitProof=()=>{
  const repo=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-git-proof-'));
- const env={...process.env,GIT_AUTHOR_NAME:'t',GIT_AUTHOR_EMAIL:'t@example.com',GIT_COMMITTER_NAME:'t',GIT_COMMITTER_EMAIL:'t@example.com'};
+ // Every inherited GIT_* is dropped (a pre-push hook exports GIT_DIR, absolute from a worktree), and the user's global and system config are not read, so the temporary
+ // repository is the only repository these commands can touch.
+ const env=isolatedGitEnv({GIT_CONFIG_GLOBAL:os.devNull,GIT_CONFIG_NOSYSTEM:'1',GIT_AUTHOR_NAME:'t',GIT_AUTHOR_EMAIL:'t@example.com',GIT_COMMITTER_NAME:'t',GIT_COMMITTER_EMAIL:'t@example.com'});
  const git=(...args)=>{const result=spawnSync('git',args,{cwd:repo,encoding:'utf8',env});assert.equal(result.status,0,result.stderr);return result.stdout.trim();};
  git('init','-q','-b','main');
  const commit=text=>{fs.writeFileSync(path.join(repo,'f.txt'),text);git('add','f.txt');git('commit','-q','-m',text);return git('rev-parse','HEAD');};
@@ -581,6 +584,28 @@ for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority
  assert.equal(Op.commitContains('f'.repeat(40),A,repo).reason,'commit_unknown_locally','a commit that is not in the local history is unknown, not compatible');
  assert.equal(Op.commitContains(B,'e'.repeat(40),repo).reason,'routing_commit_unknown_locally');
  for(const bad of ['','abc',undefined,null,A.toUpperCase(),A+'0',A.slice(0,39),'--all',B+'\n'])assert.equal(Op.commitContains(bad,A,repo).reason,'commit_invalid',String(bad));
+ fs.rmSync(repo,{recursive:true,force:true});
+};
+{
+ gitProof();
+ // Regression (24 Nov 2026): the pre-push hook runs this suite with GIT_DIR exported, absolute from a linked worktree. The proof must then still act on its temporary
+ // repository only. A decoy repository stands in for the real one: with its GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_COMMON_DIR inherited, its config, refs, HEAD
+ // and index are byte-identical afterwards (before the fix `git init` set core.bare=true there, commits a and b landed on its branch and `checkout -b side` moved it).
+ const decoy=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-git-decoy-'));
+ const decoyGit=(...args)=>{const result=spawnSync('git',args,{cwd:decoy,encoding:'utf8',env:isolatedGitEnv({GIT_CONFIG_GLOBAL:os.devNull,GIT_CONFIG_NOSYSTEM:'1',GIT_AUTHOR_NAME:'d',GIT_AUTHOR_EMAIL:'d@example.com',GIT_COMMITTER_NAME:'d',GIT_COMMITTER_EMAIL:'d@example.com'})});assert.equal(result.status,0,result.stderr);return result.stdout;};
+ decoyGit('init','-q','-b','work');fs.writeFileSync(path.join(decoy,'d.txt'),'decoy');decoyGit('add','d.txt');decoyGit('commit','-q','-m','decoy');
+ const gitDir=path.join(decoy,'.git');
+ const snapshot=()=>({config:fs.readFileSync(path.join(gitDir,'config'),'utf8'),head:fs.readFileSync(path.join(gitDir,'HEAD'),'utf8'),index:sha(fs.readFileSync(path.join(gitDir,'index'))),refs:decoyGit('for-each-ref','--format=%(refname) %(objectname)'),log:decoyGit('log','--all','--format=%H %an %s'),status:decoyGit('status','--porcelain=v1','--branch')});
+ const before=snapshot();
+ assert.match(before.head,/refs\/heads\/work/);assert.equal(/bare\s*=\s*true/.test(before.config),false);
+ const poison={GIT_DIR:gitDir,GIT_WORK_TREE:decoy,GIT_INDEX_FILE:path.join(gitDir,'index'),GIT_COMMON_DIR:gitDir,GIT_OBJECT_DIRECTORY:path.join(gitDir,'objects'),GIT_PREFIX:''};
+ const saved=Object.fromEntries(Object.keys(poison).map(key=>[key,process.env[key]]));
+ Object.assign(process.env,poison);
+ try{gitProof();}
+ finally{for(const [key,value] of Object.entries(saved))if(value===undefined)delete process.env[key];else process.env[key]=value;}
+ assert.deepEqual(snapshot(),before,'an inherited git environment does not touch another repository');
+ assert.deepEqual(Object.keys(isolatedGitEnv({GIT_AUTHOR_NAME:'t'},{PATH:'/bin',GIT_DIR:'/x',GIT_WORK_TREE:'/y',git_index_file:'/z'})).sort(),['GIT_AUTHOR_NAME','PATH'],'every inherited GIT_* is dropped, then only the explicit ones are set');
+ fs.rmSync(decoy,{recursive:true,force:true});
  assert.match(Op.ROUTING_COMMIT,/^[0-9a-f]{40}$/);
  assert.deepEqual([...Op.WORKFLOW_STATUSES],['paused','queued','rollingBack','running','waiting','waitingForPause'],'the six non-terminal statuses the inventory must list');
 }
