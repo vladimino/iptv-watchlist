@@ -104,11 +104,12 @@ const Monitor=(()=>{
  // on nothing is read and the clock is cleared, so lifting the hold gives the live Producer a full no-progress window (never an instant alert).
  // The clock and the facts are the pure `MonitorPolicy.canonicalProducerFacts`; the Footer calls this same reader with the stored clock and never writes it.
  // Failures (n_failed) and strikes are not progress. Answers null when the module is not bundled, {error:true} when a read fails.
- const canonicalProducerFacts=(env,now,previous,{startAtPublication=false}={})=>guarded(async()=>{
+ // `readOnly` (the Footer): the reader clock, which never dates progress by the read itself, and `clockState` of the stored clock it was given.
+ const canonicalProducerFacts=(env,now,previous,{readOnly=false,previousReadable=true}={})=>guarded(async()=>{
   if(typeof CanonicalProducerWorkflow==='undefined'||!env?.DB)return null;
   if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return policy().canonicalProducerFacts({held:true,now});
   const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env);
-  return policy().canonicalProducerFacts({read,previous,now,startAtPublication});
+  return policy().canonicalProducerFacts({read,previous,now,readOnly,previousReadable});
  });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);

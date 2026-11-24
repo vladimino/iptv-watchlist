@@ -221,4 +221,110 @@ async function agree(t,now,expected){
  assert.deepEqual(order.slice(0,6),['letterboxd_watchlist','letterboxd_ratings','epg','resolver','canonical_producer','predictions'],'«Обогащение каталога» sits after «Распознавание» and before «Прогнозы»');
  assert.match(list,/<dt[^>]*>Обогащение каталога<\/dt><dd id="integration-producer">/);
 }
+// 15. Review P1: a read-only footer never renews the no-progress window. The Monitor ticks once (done=10); D1 moves once more at +5 min (done=11) and then
+//     stays identical; no Monitor tick follows. Footer reads 3 h and 4 h later see the same row: progress stays dated by the row (+5 min), both reads are stalled.
+{
+ const t=setup(),w=t.world;
+ w.chain=chain();w.run=run(w,{n_applied:10,updated_at:at(T0)});
+ await agree(t,T0,'waiting');
+ w.run=run(w,{n_applied:11,updated_at:at(T0+5*MIN)});
+ for(const offset of [3*H,4*H,4*H+1]){
+  t.clock.now=T0+offset;
+  const {source,body,log}=await t.footer();
+  assert.equal(source.status,'stalled','unchanged durable evidence must reach stalled at +'+offset/MIN+' min');
+  assert.equal(source.progressAt,at(T0+5*MIN),'progress is dated by the row, not by the read');
+  assert.notEqual(body.integrations.aggregate,'healthy');
+  assert.equal(log.filter(item=>item.op==='put').length,0);
+ }
+ // Inside the freshness window the same moved row is dated by the row too, so two reads 30 min apart give the same time.
+ const u=setup(),v=u.world;
+ v.chain=chain();v.run=run(v,{n_applied:10,updated_at:at(T0)});
+ await agree(u,T0,'waiting');
+ v.run=run(v,{n_applied:11,updated_at:at(T0+5*MIN)});
+ u.clock.now=T0+40*MIN;const a=(await u.footer()).source;
+ u.clock.now=T0+70*MIN;const b=(await u.footer()).source;
+ assert.deepEqual([a.status,b.status,a.progressAt,b.progressAt],['waiting','waiting',at(T0+5*MIN),at(T0+5*MIN)]);
+}
+
+// 16. No stored clock while MONITOR=on (the Monitor never ticked): no first-tick grace on any read. Unchanged evidence older than 2 h is stalled on every
+//     read; a recently updated row cannot prove finished units without a fresh Monitor baseline, so «lagging» becomes `unconfirmed` (unknown, never green).
+{
+ const t=setup(),w=t.world;
+ w.chain=chain({owner_state:'pending'});w.run=null;
+ for(const offset of [3*H,3*H+30*MIN]){t.clock.now=T0+offset;const {source}=await t.footer();assert.deepEqual([source.status,source.clockState],['stalled','missing'],'no grace without a clock');}
+ w.chain=chain();w.run=run(w,{n_applied:40,updated_at:at(T0+10*MIN)});
+ t.clock.now=T0+3*H;assert.equal((await t.footer()).source.status,'stalled','a row last updated 2 h 50 min ago is stalled');
+ w.run=run(w,{n_applied:90,updated_at:at(T0+2*H+50*MIN)});
+ for(const offset of [3*H,3*H+20*MIN]){
+  t.clock.now=T0+offset;
+  const {source,body}=await t.footer();
+  assert.deepEqual([source.status,source.state,source.code,source.clockState],['unconfirmed','unknown','producer_unconfirmed','missing']);
+  assert.notEqual(body.integrations.aggregate,'healthy','an unconfirmed Producer is never counted as healthy');
+  assert.match(render(body).integrations.canonical_producer,/^нет данных · движение не подтверждено: монитор давно не обновлял отметку прогресса · EPG от .* · обработано 90 из 400 единиц$/);
+ }
+ // Inside the window after the publication, «waiting» needs no clock.
+ t.clock.now=T0+40*MIN;w.run=run(w,{n_applied:5,updated_at:at(T0+30*MIN)});
+ assert.equal((await t.footer()).source.status,'waiting');
+}
+
+// 17. A stale clock (the Monitor stopped ticking) and an unreadable state document behave like a missing clock; the stale baseline is never renewed.
+{
+ const t=setup(),w=t.world;
+ w.chain=chain();w.run=run(w,{n_applied:10,updated_at:at(T0)});
+ await agree(t,T0,'waiting');
+ w.run=run(w,{n_applied:200,updated_at:at(T0+2*H+55*MIN)});
+ t.clock.now=T0+3*H;
+ let {source}=await t.footer();
+ assert.deepEqual([source.status,source.clockState],['unconfirmed','stale'],'a clock older than 90 min cannot confirm movement');
+ t.bucket.hooks.beforeGet=async key=>{if(key==='monitor/state.json')throw new Error('r2 down');};
+ ({source}=await t.footer());
+ assert.deepEqual([source.status,source.clockState],['unconfirmed','unreadable']);
+ w.run=run(w,{n_applied:200,updated_at:at(T0+20*MIN)});
+ ({source}=await t.footer());
+ assert.deepEqual([source.status,source.clockState],['stalled','unreadable'],'an unreadable clock does not restore a grace');
+ t.bucket.hooks.beforeGet=null;
+ // 18. Recovery: the Monitor ticks again; at the same instant the footer has a fresh clock and agrees with the Monitor once more.
+ w.run=run(w,{n_applied:260,updated_at:at(T0+3*H+5*MIN)});
+ const r=await agree(t,T0+3*H+10*MIN,'lagging');
+ assert.equal(r.source.clockState,'fresh');
+ w.run=run(w,{n_applied:300,updated_at:at(T0+3*H+40*MIN)});
+ const next=await agree(t,T0+4*H,'lagging');
+ assert.equal(next.source.clockState,'fresh');
+}
+
+// 19. Authoritative D1 facts are never masked by a missing, stale or unreadable clock: current and a stop are shown as they are.
+{
+ const t=setup(),w=t.world;
+ t.bucket.hooks.beforeGet=async key=>{if(key==='monitor/state.json')throw new Error('r2 down');};
+ t.clock.now=T0+5*H;
+ w.chain=chain({owner_state:'complete'});w.run=run(w,{pass_state:'passed',applied_generation:label(w),n_applied:400,completed_at:at(T0+H),updated_at:at(T0+H)});
+ let {source}=await t.footer();
+ assert.deepEqual([source.status,source.state,source.clockState],['current','healthy','unreadable']);
+ w.run=run(w,{pass_state:'stopped',stopped_by:'producer_timeout',n_applied:30});w.chain=chain({owner_state:'stopped',stopped_by:'producer_timeout',recovery_class:'transient',next_attempt_at:at(T0+6*H)});
+ ({source}=await t.footer());
+ assert.deepEqual([source.status,source.state,source.reason],['failed','failed','transient']);
+}
+
+// 20. Review P2: null, empty or missing counters are unknown, never 0; a genuine zero stays a measured zero.
+{
+ const t=setup(),w=t.world;
+ w.chain=chain();
+ const check=async(over,processed,unitCount,failedUnits,pattern)=>{
+  w.run={...run(w,{updated_at:at(T0+5*MIN)}),...over};
+  t.clock.now=T0+10*MIN;
+  const {source,body}=await t.footer();
+  assert.deepEqual([source.processed,source.unitCount,source.failedUnits],[processed,unitCount,failedUnits],JSON.stringify(over));
+  assert.match(render(body).integrations.canonical_producer,pattern);
+ };
+ await check({n_applied:null},null,400,0,/обработано: нет данных$/);
+ await check({n_noop:''},null,400,0,/обработано: нет данных$/);
+ const missing=run(w,{updated_at:at(T0+5*MIN)});delete missing.n_kept;
+ await check({...missing,n_kept:undefined},null,400,0,/обработано: нет данных$/);
+ await check({unit_count:null},null,null,0,/обработано: нет данных$/);
+ await check({unit_count:''},null,null,0,/обработано: нет данных$/);
+ await check({n_failed:null},0,400,null,/обработано 0 из 400 единиц$/);
+ await check({n_applied:0,n_noop:0,n_kept:0,n_failed:0},0,400,0,/обработано 0 из 400 единиц$/);
+ await check({n_applied:'12',n_noop:'3',n_kept:'0'},15,400,0,/обработано 15 из 400 единиц$/);
+ await check({n_applied:-1},null,400,0,/обработано: нет данных$/);
+}
 console.log('footer canonical_producer source: ok');

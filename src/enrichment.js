@@ -2324,23 +2324,26 @@ function producerIntegration(view){
  const passing=run?.passState==='passing';
  const mapped={current:['healthy','producer_current'],waiting:[passing?'running':'waiting',facts?.label?(passing?'producer_running':'producer_waiting'):'producer_no_publication'],
   lagging:[passing?'running':'waiting','producer_lagging'],stalled:['degraded','producer_stalled'],failed:['failed','producer_failed'],blocked:['failed','producer_blocked'],
-  held_by_delivery:['degraded','producer_held'],unreadable:['unknown','producer_unreadable']}[status]||['unknown','producer_unreadable'];
+  held_by_delivery:['degraded','producer_held'],unconfirmed:['unknown','producer_unconfirmed'],unreadable:['unknown','producer_unreadable']}[status]||['unknown','producer_unreadable'];
  const readable=status!=='unreadable'&&status!=='held_by_delivery';
  const lastSuccessAt=status==='current'?integrationTime(run?.completedAt):null;
  const reason=readable?reasonOf():null;
  return {...integrationEntry('canonical_producer','capability',mapped[0],mapped[1],lastSuccessAt,null),status,
   generation:readable&&Number.isInteger(facts?.generation)?facts.generation:null,publishedAt:readable?integrationTime(facts?.publishedAt):null,
   progressAt:readable?integrationTime(facts?.progressAt):null,processed:readable?count(run?.processed):null,unitCount:readable?count(run?.unitCount):null,failedUnits:readable?count(run?.failed):null,
+  clockState:facts&&!facts.error&&typeof facts.clockState==='string'?facts.clockState:null,
   reason,nextAttemptAt:reason&&status==='failed'?integrationTime(chain?.nextAttemptAt):null,noProgressHours:status==='stalled'&&Number.isFinite(verdict?.facts?.noProgressHours)?verdict.facts.noProgressHours:null};
 }
 // The footer's one Producer read: the shared Monitor reader (three indexed D1 statements, nothing while the delivery hold is on) with the clock the Monitor
-// stored in monitor/state.json. The clock is only read, never written. Without a stored clock and without a running Monitor the streak starts at the
-// publication. Answers undefined where the Producer, the Monitor or D1 is not part of this Worker (the row is then absent, as for posters).
+// stored in monitor/state.json, judged by the reader verdict of the same policy. The clock is only read, never written, and a read never dates progress by
+// itself: a missing, stale or unreadable clock cannot renew the no-progress window or restore a first-tick grace (MonitorPolicy.canonicalProducerClock,
+// readOnly). Answers undefined where the Producer, the Monitor or D1 is not part of this Worker (the row is then absent, as for posters).
 async function footerProducerView(env,readMonitorState,now){
- const stored=await Promise.resolve().then(readMonitorState).then(state=>state?.canonicalProducer&&typeof state.canonicalProducer==='object'?state.canonicalProducer:null,()=>null);
- const facts=await Monitor.canonicalProducerFacts(env,now,stored,{startAtPublication:env?.MONITOR!=='on'});
+ const state=await Promise.resolve().then(readMonitorState).then(doc=>({readable:true,doc}),()=>({readable:false,doc:null}));
+ const stored=state.doc?.canonicalProducer&&typeof state.doc.canonicalProducer==='object'?state.doc.canonicalProducer:null;
+ const facts=await Monitor.canonicalProducerFacts(env,now,stored,{readOnly:true,previousReadable:state.readable});
  if(facts===null)return undefined;
- return {facts,verdict:facts.error?null:MonitorPolicy.evaluateCanonicalProducer(facts,now)};
+ return {facts,verdict:facts.error?null:MonitorPolicy.evaluateCanonicalProducerReader(facts,now)};
 }
 function integrationHealth({posters,producer,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
