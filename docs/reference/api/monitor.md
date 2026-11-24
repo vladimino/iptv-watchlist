@@ -1,6 +1,6 @@
 # Monitor status and synthetic test
 
-Contract of [AIR-349](https://trello.com/c/VUyampoh) and [ADR 0095](../../adr/0095-cloudflare-native-production-monitor.md). Both routes sit behind the Worker's Cloudflare Access like every other route.
+Contract of [AIR-349](https://trello.com/c/VUyampoh) and [ADR 0095](../../adr/0095-cloudflare-native-production-monitor.md), with the four states, the `critical` property and the one reminder interval of [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) (AIR-592). Both routes sit behind the Worker's Cloudflare Access like every other route.
 
 ## `GET /api/monitor/status`
 
@@ -11,9 +11,9 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 | `mode` | `off` or `on` (the `MONITOR` flag as the Worker sees it; any value other than `on` is `off`) |
 | `stored` | Whether a snapshot document exists |
 | `heartbeatAt`, `heartbeatAgeMs` | Time of the last saved snapshot and its age at read time. An external dead-man check can poll this |
-| `overall` | The worst stream state: `healthy`, `waiting`, `delayed`, `degraded` or `needs_owner` |
-| `streams[]` | `epg`, `discovery`, `ratings`, `predictions`, `catalog_posters` (see [Catalog poster stream](#catalog-poster-stream)) and `canonical_producer` (see [Canonical Producer stream](#canonical-producer-stream)), each with `state`, a few non-private `facts` and its issue keys |
-| `openIssues[]` | Alertable issues with `key`, `severity`, `firstSeenAt`, `sendCount` |
+| `overall` | The worst stream state: `healthy`, `waiting`, `delayed` or `degraded`. A document stored before ADR 0206 may still hold the retired `needs_owner` until the next tick rewrites it; the read shows it as `degraded` |
+| `streams[]` | `epg`, `discovery`, `ratings`, `predictions`, `catalog_posters` (see [Catalog poster stream](#catalog-poster-stream)) and `canonical_producer` (see [Canonical Producer stream](#canonical-producer-stream)), each with `state`, a few non-private `facts` and its issues (`key`, `severity`, `critical`) |
+| `openIssues[]` | Alertable issues with `key`, `severity` (always `degraded`), `critical` (a proven hard failure, see [Alert policy](#alert-policy)), `firstSeenAt`, `sendCount` |
 | `outbox`, `outboxOldestAt` | Number of undelivered notifications and the queue time of the oldest; a growing value means the channel is failing |
 | `cancelledUndelivered` | Alerts cancelled because their issue cleared before they were ever delivered |
 | `alerting`, `deadman` | Whether the selected transport (webhook or Telegram) is configured and well-formed, and whether a heartbeat URL is set (never the URLs, token or chat id) |
@@ -29,7 +29,7 @@ Sends one synthetic message (`kind: test`, key `monitor_test`) through the confi
 
 ## Alert message (webhook transport)
 
-A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-monitor`), `id` (a stable idempotency id, repeated on a retry of the same message), `at`, `kind` (`alert`, `reminder`, `escalation`, `recovery`, `test`), `severity`, `stream`, `key`, `message`, `overall`. No titles, ratings, credentials or private records.
+A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-monitor`), `id` (a stable idempotency id, repeated on a retry of the same message), `at`, `kind` (`alert`, `reminder`, `escalation`, `recovery`, `test`), `severity` (`degraded`, `healthy` for a recovery, `test`), `critical` (boolean, ADR 0206), `stream`, `key`, `message`, `overall`. A recovery names the stream stored with its issue (since ADR 0206; an issue stored before it keeps the key prefix, for example `canonical`). The webhook carries no presentation field: `metrics`, the Russian text and the durations are Telegram-only. No titles, ratings, credentials or private records.
 
 ## Issue keys
 
@@ -37,17 +37,49 @@ A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-m
 
 ## Thresholds
 
-EPG: delayed 2 hours and degraded 5 hours after the Madrid 17:00 due time without a new publication. Discovery: waiting inside its own `nextCatchUpAt`/`retryAt`, degraded after 3 hours without allowed progress. Ratings: the orchestration read model's own health (stalled two hours after its 17:00 Madrid due time (ADR 0101; 17:30 before)). Predictions ([ADR 0182](../../adr/0182-prediction-progress-policy-shared-by-footer-and-monitor.md)): degraded when eligible work exists and there is no confirmed progress for 60 minutes (the same limit and predicate the Footer uses; four Tasks are expected per hour with about 7 minutes of drift); `waiting` while all work is deferred by its own retry time; `healthy` when nothing is eligible; `delayed` (no alert) while the progress time or the eligible split is unknown. Confirmed progress is a productive batch, a drained run or a moved processed counter, never a heartbeat, `already_running` or a noop wake-up. Alerts: a degraded issue is confirmed by a second snapshot (`predictions_no_progress` by one, because it is computed from stored run times; with the hourly tick it alerts 60 to about 120 minutes after the last confirmed progress, plus Cron and Telegram latency and with no absolute SLA if either fails), a needs-owner issue alerts at once, cooldown 6 hours or 2 hours, at most eight messages per issue per day.
+EPG: delayed 2 hours and degraded 5 hours after the Madrid 17:00 due time without a new publication. Discovery: waiting inside its own `nextCatchUpAt`/`retryAt`, degraded after 3 hours without allowed progress. Ratings: the orchestration read model's own health (stalled two hours after its 17:00 Madrid due time (ADR 0101; 17:30 before)). Predictions ([ADR 0182](../../adr/0182-prediction-progress-policy-shared-by-footer-and-monitor.md)): degraded when eligible work exists and there is no confirmed progress for 60 minutes (the same limit and predicate the Footer uses; four Tasks are expected per hour with about 7 minutes of drift); `waiting` while all work is deferred by its own retry time; `healthy` when nothing is eligible; `delayed` (no alert) while the progress time or the eligible split is unknown. Confirmed progress is a productive batch, a drained run or a moved processed counter, never a heartbeat, `already_running` or a noop wake-up. Alerts follow the [alert policy](#alert-policy): `predictions_no_progress` is confirmed by one snapshot because it is computed from stored run times; with the hourly tick it alerts 60 to about 120 minutes after the last confirmed progress, plus Cron and Telegram latency and with no absolute SLA if either fails.
+
+## Alert policy
+
+[ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) (superseding ADR 0095 decisions 4 and 5 in part):
+
+- Only `degraded` issues alert; `waiting` and `delayed` never do.
+- A **critical** issue (`critical: true`) is a proven hard failure: `epg_authority`, `discovery_quarantined`, `ratings_quarantined`, `ratings_failed_permanent`, `letterboxd_quarantined`, `catalog_posters_failed` and a `blocked` `canonical_producer_failed`. It alerts on its first snapshot.
+- An ordinary issue alerts after two consecutive snapshots, or one for `predictions_no_progress`, `canonical_producer_no_progress` and `canonical_producer_failed`.
+- Every open issue sends at most one `REMINDER` per 6 hours after its last delivered message, critical or not. A message delivered late (failing channel, 429 hold) is settled at the tick that delivered it: `lastSentAt` is that tick and the send counts on that tick's UTC day, not on the day it was queued.
+- An issue that turns from ordinary to critical sends one `ESCALATION` inside that interval; critical to ordinary sends nothing.
+- At most eight messages per issue per UTC day; one `RECOVERED` for an issue whose alert was delivered, none for one that never was.
+- A stored entry or outbox message with the retired `needs_owner` (written before ADR 0206) is read as `degraded`, critical: its key, history, counters and message id are kept, it does not escalate or recover because of the rename, and its next reminder is due 6 hours after its last delivery.
 
 Delivery is at-least-once. Webhook receivers should drop a message whose `id` they have already handled.
 
 ## Telegram transport (`MONITOR_TRANSPORT=telegram`)
 
-Configured only through the Worker bindings `MONITOR_TELEGRAM_BOT_TOKEN` (a Worker secret) and `MONITOR_TELEGRAM_CHAT_ID` (a plain Worker variable that identifies the destination; the code reads both as environment strings; see [ADR 0097](../../adr/0097-monitor-telegram-bot-api-transport.md) decision 3); a missing or malformed value makes `alerting` false and nothing is sent (the outbox is kept). Each message is one `POST https://api.telegram.org/bot<token>/sendMessage` (a fixed endpoint, 10 second timeout) with `chat_id`, `text` and `disable_web_page_preview: true`; no `parse_mode`, so the text is plain. The text is, in order: `IPTV monitor: <ALERT|REMINDER|ESCALATION|RECOVERED|TEST> (<severity>)`, `Stream: <stream>`, `Issue: <key>`, the short diagnostic, `Overall: <state>`, `At: <UTC time>` and `Ref: <outbox id>`. Fields are limited to printable ASCII and a fixed length. No title, rating, personal datum or secret is sent.
+Configured only through the Worker bindings `MONITOR_TELEGRAM_BOT_TOKEN` (a Worker secret) and `MONITOR_TELEGRAM_CHAT_ID` (a plain Worker variable that identifies the destination; the code reads both as environment strings; see [ADR 0097](../../adr/0097-monitor-telegram-bot-api-transport.md) decision 3); a missing or malformed value makes `alerting` false and nothing is sent (the outbox is kept). Each message is one `POST https://api.telegram.org/bot<token>/sendMessage` (a fixed endpoint, 10 second timeout) with `chat_id`, `text` and `disable_web_page_preview: true`; no `parse_mode`, so the text is plain. The text is the human-facing rendering of [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) decision 9, described under [Telegram text](#telegram-text). No title, rating, personal datum or secret is sent.
 
 A delivery counts only when the HTTP status is successful **and** the body says `ok: true`. Every other answer leaves the message queued and uncounted, with a fixed reason in `lastDeliveryFailure` (`telegram_not_ok`, `http_<status>`, `malformed_response`, `timeout`, `network`, `rate_limited`, `config_invalid`, `transport_invalid`); the AIR-349 budget (five attempts per tick, stop after two consecutive failures, rotation to the tail) is unchanged. On a 429 the answer's `retry_after` (or the `Retry-After` header; one minute when absent; capped at one hour) is stored as `holdUntil`: ticks before it make no attempt, `POST /api/monitor/test` answers `rate_limited`, and nothing sleeps. Telegram has no idempotency key, so `Ref` helps a reader but cannot deduplicate; a crash after Telegram accepted a message and before the state commit can repeat it. Exactly-once is not claimed.
 
 The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `outbox`, `outboxOldestAt` and `cancelledUndelivered`.
+
+## Telegram text
+
+ADR 0206 decision 9 (Accepted); rendered by the pure `MonitorMessage.telegramText` (`src/domain/monitor-message.js`) from the message's own fields. Samples: [rendered offline samples](../../evidence/monitoring/telegram-format-air-592-2026-11-24.md).
+
+| Line | Content |
+| --- | --- |
+| Header | Marker, kind and subsystem: `🚨 Сбой` (critical alert), `⚠️ Проблема` (ordinary alert), `🔁 Напоминание`, `⛔ Ухудшение`, `✅ Проблема снята`, `🧪 Тест`, then `·` and the subsystem (`Программа`, `Находки`, `Оценки`, `Прогнозы`, `Постеры`, `Letterboxd Sync`, `Обогащение каталога`, `Монитор`) |
+| Problem | A fixed Russian title per issue key (`Больше не наблюдается: …` on a recovery); an unknown key shows its sanitized code. A legacy recovery with the stream `canonical` or `catalog` is named by its issue key |
+| Severity | `🔴 критично` or `🟠 деградация`; on a recovery `Была критичной` when it was |
+| Statistics | `• label: value` lines from the issue's typed `metrics` (for example eligible and queued predictions, ownerless starts, remaining Discovery chunks, the EPG due time and last publication, the quarantine or stop reason, the poster detail, the Letterboxd backlog). Left out when unknown; never on a recovery |
+| `⏱ Без …` | The domain's own stall at the observation, labelled by what it measures: Predictions without confirmed progress (with the last confirmed progress); Discovery without allowed progress (`max(overdue, idle)`, with the allowed time) and, as a statistic, the last finished chunk; the Producer without confirmed progress counted from its reference (`отсчёт с`, possibly the publication) beside the last confirmed progress or `не было в этом окне`. `⏱ Опоздание` for EPG |
+| `🕒 Инцидент открыт` | The monitor's observed lifetime: from `firstSeenAt` (first snapshot, possibly before the confirmation) to the observation that planned the message (`observedAt`, else the queue time) |
+| `🕒 Длительность инцидента по наблюдениям монитора` | Recovery only: `firstSeenAt` to the detection (`endedAt`, frozen when planned; legacy: queue time). A late delivery never lengthens it. About the domain a recovery repeats only the last measured stall as `было не меньше X (на последнем наблюдении …)`; it never claims the domain recovered at the noticing tick |
+| `📨 Отправлено с задержкой` | Only when the send is more than 15 minutes after the observation or detection |
+| `🌐 В целом` | The overall state at the send. On a recovery while the site is still degraded: `остаются другие проблемы (восстановлена только эта)` |
+| `Время` | The send time in Europe/Madrid, labelled; all times in the text are Madrid |
+| `Ref` | Always the last line: the stable outbox id (UTC inside), the key to drop a repeat |
+
+Unknown or malformed times read `неизвестно`, never 0. Dynamic values are numbers, times or printable ASCII; control, zero-width and direction characters are removed; no markup mode is sent; the text is at most 1800 characters. A message written before ADR 0206 (no `metrics`, no `observedAt`, `severity: needs_owner`) renders as critical with its bounded English detail.
 
 ## Catalog poster stream
 
@@ -63,14 +95,14 @@ The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `
 | --- | --- | --- | --- |
 | 1 | `unknown` | checkpoint unreadable, corrupt, wrong `schemaVersion` or incomplete for its status; or the Monitor is off | `degraded` |
 | 1a | `lost` | no checkpoint and `catalogPostersSeenAt` is set | `degraded` |
-| 2 | `failed` | `status=failed`, or `retryAttempts` at the cap of 6, or `rateLimitStreak` of 2 or more | `needs_owner` |
+| 2 | `failed` | `status=failed`, or `retryAttempts` at the cap of 6, or `rateLimitStreak` of 2 or more | `degraded`, `critical: true` |
 | 3 | `stalled` | the outbox holds 8 undelivered entries, or an undelivered entry is older than 52 h; or `status=running` and `now - lastAttemptAt` is above 2 h; or `status=pending` and `now > D + 26 h` | `degraded` |
 | 4 | `grace` | no checkpoint, no `SeenAt`, and `now` is not later than the first 03:24 UTC after the baseline plus 26 h | `healthy` |
 | 5 | `overdue` | no checkpoint after that grace; or the checkpoint's `weekStart` is older than `W` and `now > W + 03:24 UTC + 26 h` | `delayed`, and `degraded` once 2 h more have passed |
 | 6 | `waiting` | `status=pending` (retry scheduled) or `status=running` (in progress), not stalled | `waiting` |
 | 7 | `healthy_idle` | `status=completed` with a receipt for the current week, or for the previous week before the current week's grace expires; includes zero due films and normal 90-day holds | `healthy` |
 
-Only `degraded` and `needs_owner` raise an issue (`catalog_posters_<state>`); `waiting`, `delayed`, `grace` and `healthy_idle` never alert. An empty due set, a no-poster verdict and a legitimate retry wait are not faults. The stream `facts` carry `state`, `detail`, `freshnessAt` (the newest of `lastScheduledAt`, `lastAttemptAt`, `lastCompletedAt`) and `nextExpectedAt`.
+Only `degraded` raises an issue (`catalog_posters_<state>`; `catalog_posters_failed` is critical and alerts at once); `waiting`, `delayed`, `grace` and `healthy_idle` never alert. An empty due set, a no-poster verdict and a legitimate retry wait are not faults. The stream `facts` carry `state`, `detail`, `freshnessAt` (the newest of `lastScheduledAt`, `lastAttemptAt`, `lastCompletedAt`) and `nextExpectedAt`.
 
 **Detectability limit.** An idle daily firing writes nothing and is therefore not detectable. The Sunday sweep is monitored from its persisted weekly receipt, and daily firings only when an unfinished run was due. The constants (26 h grace, 2 h, 52 h, retry cap 6, outbox 8) live in the implementation and are measured on the first natural weeks, not proven. The stream is implemented and tested offline only; the cron it judges is not activated by this documentation.
 
@@ -89,7 +121,7 @@ AIR-572. `canonical_producer` judges the EPG to canonical Film/Person Producer (
 | `lagging` | `waiting` | Published more than 2 h ago, but the run is still moving. A late, moving pass is not stalled. | no |
 | `stalled` | `degraded` | No durable progress for more than 2 h (`producerNoProgressMs`), whatever the chain state (pending, active, expired takeover, missing chain or run). Key `canonical_producer_no_progress`. | first snapshot |
 | `failed` | `degraded` | The chain or run is `stopped` with a recoverable class (`transient`, `receipt`, `authority`). Key `canonical_producer_failed`. | first snapshot |
-| `blocked` | `needs_owner` | `stopped` with an identity code (`producer_identity_*`) or a `terminal`, `fail_closed` or `exhausted` class. Key `canonical_producer_failed`. | at once |
+| `blocked` | `degraded`, `critical: true` | `stopped` with an identity code (`producer_identity_*`) or a `terminal`, `fail_closed` or `exhausted` class. Key `canonical_producer_failed`; a `failed` stop of the same key that turns `blocked` escalates once. | at once |
 | `held_by_delivery` | `delayed` | The static delivery hold is on (below). Visible, never `healthy`, never a success. | no (deliberate) |
 | `unreadable` | `degraded` | A read failed. The streak is kept. Key `canonical_producer_unreadable`. | two snapshots |
 

@@ -150,19 +150,19 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
  await M.run(env,{now:T0+8*H});assert.equal((await producer(M,env,T0+8*H)).facts.status,'waiting');
 }
 
-// 6. A stop alerts at once: an identity or terminal stop needs the owner, a recoverable stop is degraded; both on the first snapshot.
+// 6. A stop alerts at once: an identity or terminal stop is critical (ADR 0206), a recoverable stop is an ordinary degraded issue; both on the first snapshot.
 {
  const a=setup();epgHealthy(a.bucket);
  a.world.chain=chain({owner_state:'stopped',stopped_by:'producer_identity_unresolved',recovery_class:'fail_closed'});
  await a.M.run(a.env,{now:T0});
  const hard=(await producer(a.M,a.env,T0));
- assert.equal(hard.facts.status,'blocked');assert.equal(hard.state,'needs_owner');
- assert.equal(posts(a.calls).filter(item=>item.body.key==='canonical_producer_failed'&&item.body.severity==='needs_owner').length,1);
+ assert.equal(hard.facts.status,'blocked');assert.equal(hard.state,'degraded');
+ assert.equal(posts(a.calls).filter(item=>item.body.key==='canonical_producer_failed'&&item.body.severity==='degraded'&&item.body.critical===true).length,1);
  const b=setup();epgHealthy(b.bucket);
  b.world.chain=chain({owner_state:'stopped',stopped_by:'producer_transport',recovery_class:'transient'});
  await b.M.run(b.env,{now:T0});
  assert.equal((await producer(b.M,b.env,T0)).facts.status,'failed');
- assert.equal(posts(b.calls).filter(item=>item.body.key==='canonical_producer_failed'&&item.body.severity==='degraded').length,1,'alert on the first snapshot');
+ assert.equal(posts(b.calls).filter(item=>item.body.key==='canonical_producer_failed'&&item.body.severity==='degraded'&&item.body.critical===false).length,1,'alert on the first snapshot');
 }
 
 // 7. Alert/recovery dedup through the existing outbox, and recovery once the exact generation passes.

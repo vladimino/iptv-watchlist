@@ -79,6 +79,7 @@ export function plan(checkpoint,nowMs){
 }
 
 // ---- The one projection behind the Monitor stream, the owner health read and the footer source (ADR 0179, predicate table) ----
+// ADR 0206 (AIR-592): a failed run is `degraded` with `critical: true` (it alerts at once); the Monitor vocabulary has no `needs_owner` any more.
 // `read` is {status:'absent'|'ok'|'invalid'|'unreadable', checkpoint}. `markers` are the Monitor's write-once fields. First true predicate wins.
 export function project({read,markers={},monitorOn=true,nowMs}){
  const baselineAt=markers.baselineAt??null,seenAt=markers.seenAt??null;
@@ -96,7 +97,7 @@ export function project({read,markers={},monitorOn=true,nowMs}){
  const freshnessAt=times.length?iso(Math.max(...times)):null;
  const unsent=undelivered(checkpoint);
  const common={freshnessAt};
- if(checkpoint.status==='failed'||checkpoint.retryAttempts>=RETRY_CAP||checkpoint.rateLimitStreak>=2)return out('failed','needs_owner',{...common,detail:checkpoint.status==='failed'?'run_failed':checkpoint.retryAttempts>=RETRY_CAP?'retry_exhausted':'rate_limited_repeatedly'});
+ if(checkpoint.status==='failed'||checkpoint.retryAttempts>=RETRY_CAP||checkpoint.rateLimitStreak>=2)return out('failed','degraded',{...common,critical:true,detail:checkpoint.status==='failed'?'run_failed':checkpoint.retryAttempts>=RETRY_CAP?'retry_exhausted':'rate_limited_repeatedly'});
  const stuckOutbox=unsent.length>=OUTBOX_MAX||unsent.some(entry=>nowMs-Date.parse(entry.at)>OUTBOX_STALE_MS);
  const stuckRunning=checkpoint.status==='running'&&nowMs-Date.parse(checkpoint.lastAttemptAt)>RUN_BUDGET_MS;
  const stuckPending=checkpoint.status==='pending'&&nowMs>Date.parse(checkpoint.nextRetryAt)+GRACE_MS;

@@ -67,7 +67,7 @@ The decision is [ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md)
 | `stalled` | degraded | An undelivered event or a stuck run or retry. The next firing replays owed events without TMDB; if it persists, report it to the owner |
 | `lost` | degraded | A checkpoint existed and is now absent. Report it; do not recreate it |
 | `unknown` | degraded | The checkpoint is unreadable or invalid, or the Monitor is off. Report it; never treat it as healthy |
-| `failed` | needs_owner | The run failed, the retry cap of six was reached or the rate limit persisted over two due firings. Owner decision needed |
+| `failed` | degraded, critical | The run failed, the retry cap of six was reached or the rate limit persisted over two due firings. Owner decision needed |
 
 **Do not.** Run the cron by hand, trigger a firing, call TMDB or POST the owner route to "make the week green"; edit, delete or recreate `epg/catalog-poster-weekly.json` or the Monitor markers in `monitor/state.json`; reset a lease; or create a Scheduled Task for it. A deploy does not run the sweep and grants no permission for a data operation. Activating the cron needs the owner's explicit GO on the Cloudflare schedule, with a read-only readback of the live schedule afterwards.
 
