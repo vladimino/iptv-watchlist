@@ -18,6 +18,10 @@ const stop=async(promise,reason)=>{try{await promise;}catch(error){assert.equal(
 const tracker=()=>{const states=[];return {states,track:state=>states.push(state)};};
 const A=(...args)=>['node','op',...args];
 const MID=Date.parse('2026-11-24T13:30:00.000Z'),AT='2026-11-24T13:00:00.000Z';
+const at=ms=>()=>ms;
+// A clock that answers each call in turn (the last value repeats): the start, the decision, the write boundary.
+const steps=(...values)=>{let i=0;return ()=>values[Math.min(i++,values.length-1)];};
+const T=text=>Date.parse('2026-11-24T'+text+'Z');
 
 // ---- arguments ----
 assert.deepEqual(Op.parseArgs(A()),{report:{configured:false,writes:false,writeState:'none'}},'default is a read-only no-op report');
@@ -45,7 +49,7 @@ const chain=(file,state,lease)=>sql(file,"INSERT INTO canonical_producer_chain (
 {
  const {file,db}=world();
  const before=sql(file,"SELECT group_concat(name) n FROM sqlite_master")[0].n;
- const out=await Op.execute('status',{binding:db,nowMs:MID});
+ const out=await Op.execute('status',{binding:db,clock:at(MID)});
  assert.equal(out.decision,'apply');assert.equal(out.writes,false);assert.equal(out.migrationSha256,sha);assert.equal(out.statements,11);
  assert.equal(out.schemaVersion,37);assert.equal(out.runtimeProbe,'absent');assert.deepEqual(out.outboxObjects,[]);assert.equal(out.neededTables,'6/6');
  assert.deepEqual(out.filmPersonAuthority,{mode:'d1',cutover:'open',generation:2});assert.equal(out.publishedAuthority.generation,518);
@@ -55,31 +59,52 @@ const chain=(file,state,lease)=>sql(file,"INSERT INTO canonical_producer_chain (
 // Decisions that refuse the apply.
 {
  let w=world();chain(w.file,'active','2026-11-24T13:34:00.000Z');
- assert.equal((await Op.execute('status',{binding:w.db,nowMs:MID})).decision,'producer_busy','a live owner lease: an instance may be mid-invocation');
- w=world();chain(w.file,'active','2026-11-24T13:10:00.000Z');
- const lapsed=await Op.execute('status',{binding:w.db,nowMs:MID});
- assert.equal(lapsed.decision,'apply','an expired lease is no running instance');assert.equal(lapsed.producer.liveLeases,0);assert.equal(lapsed.producer.openChains,1);
+ assert.equal((await Op.execute('status',{binding:w.db,clock:at(MID)})).decision,'producer_busy','a live owner lease: an instance may be mid-invocation');
+ // The Producer's own boundary margin: an active lease that ended 10 s ago is still live (the reconcile would not take it over yet); one 20 s past it is not.
+ w=world();chain(w.file,'active','2026-11-24T13:29:50.000Z');
+ assert.equal((await Op.execute('status',{binding:w.db,clock:at(MID)})).decision,'producer_busy','inside the 15 s boundary margin');
+ w=world();chain(w.file,'active','2026-11-24T13:29:40.000Z');
+ const lapsed=await Op.execute('status',{binding:w.db,clock:at(MID)});
+ assert.equal(lapsed.decision,'apply','an active lease past lease + margin is no running instance');assert.equal(lapsed.producer.liveLeases,0);assert.equal(lapsed.producer.openChains,1);
+ // A pending chain is busy whatever its lease: its instance may claim it at any moment, and a lapsed one is taken over into a new pending one.
+ w=world();chain(w.file,'pending','2026-11-24T12:00:00.000Z');
+ assert.equal((await Op.execute('status',{binding:w.db,clock:at(MID)})).decision,'producer_busy','an expired pending claim is not proof that nothing can start');
+ // The tick guard is inclusive on both sides, to the millisecond.
  w=world();
- for(const minute of ['13:57:00','14:00:00','14:04:30'])assert.equal((await Op.execute('status',{binding:w.db,nowMs:Date.parse('2026-11-24T'+minute+'.000Z')})).decision,'hourly_tick_window',minute);
- assert.equal((await Op.execute('status',{binding:w.db,nowMs:Date.parse('2026-11-24T14:05:30.000Z')})).decision,'apply');
+ for(const t of ['13:55:00.000','13:57:00.000','14:00:00.000','14:04:30.000','14:05:00.000'])assert.equal((await Op.execute('status',{binding:w.db,clock:at(T(t))})).decision,'hourly_tick_window',t);
+ for(const t of ['13:54:59.999','14:05:00.001'])assert.equal((await Op.execute('status',{binding:w.db,clock:at(T(t))})).decision,'apply',t);
  w=world();sql(w.file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
- assert.equal((await Op.execute('status',{binding:w.db,nowMs:MID})).decision,'film_person_not_open');
+ assert.equal((await Op.execute('status',{binding:w.db,clock:at(MID)})).decision,'film_person_not_open');
  w=world();sql(w.file,'CREATE TABLE canonical_producer_outcome_scratch (x INTEGER)');
- const partial=await Op.execute('status',{binding:w.db,nowMs:MID});
+ const partial=await Op.execute('status',{binding:w.db,clock:at(MID)});
  assert.equal(partial.decision,'partial_schema','any outbox object at v37');assert.deepEqual(partial.outboxObjects,['table:canonical_producer_outcome_scratch']);
  w=world({upTo:36});
- assert.equal((await Op.execute('status',{binding:w.db,nowMs:MID})).decision,'schema_unexpected');
+ assert.equal((await Op.execute('status',{binding:w.db,clock:at(MID)})).decision,'schema_unexpected');
  w=world();sql(w.file,'DELETE FROM schema_contract');
- assert.equal((await Op.execute('status',{binding:w.db,nowMs:MID})).decision,'schema_contract_unexpected','no contract row is never an old version');
+ assert.equal((await Op.execute('status',{binding:w.db,clock:at(MID)})).decision,'schema_contract_unexpected','no contract row is never an old version');
  for(const reason of ['producer_busy','hourly_tick_window']){
   const v=world();if(reason==='producer_busy')chain(v.file,'active','2026-11-24T13:34:00.000Z');
   const ctx=tracker();
-  await stop(Op.execute('apply',{binding:v.db,ctx,params:{migrationSha256:sha},nowMs:reason==='producer_busy'?MID:Date.parse('2026-11-24T14:01:00.000Z')}),reason);
+  await stop(Op.execute('apply',{binding:v.db,ctx,params:{migrationSha256:sha},clock:at(reason==='producer_busy'?MID:T('14:01:00.000'))}),reason);
   assert.equal(version(v.file),37);assert.deepEqual(objects(v.file),[]);assert.deepEqual(ctx.states,[],'nothing was sent');
  }
  const v=world();
- await stop(Op.execute('apply',{binding:v.db,params:{migrationSha256:'0'.repeat(64)},nowMs:MID}),'migration_sha256_mismatch');
+ await stop(Op.execute('apply',{binding:v.db,params:{migrationSha256:'0'.repeat(64)},clock:at(MID)}),'migration_sha256_mismatch');
  assert.equal(version(v.file),37);
+}
+// The quiet window is re-read at the write boundary: a preflight that crossed into the guard, or took longer than PREFLIGHT_MAX_MS, sends nothing.
+{
+ for(const [clock,reason] of [[steps(T('13:54:58.000'),T('13:54:59.000'),T('13:55:00.000')),'hourly_tick_window'],[steps(T('13:30:00.000'),T('13:30:01.000'),T('13:31:01.000')),'preflight_stale']]){
+  const v=world();
+  let batches=0;const counted={...v.db,prepare:text=>v.db.prepare(text),batch:statements=>{batches++;return v.db.batch(statements);}};
+  const ctx=tracker();
+  await stop(Op.execute('apply',{binding:counted,ctx,params:{migrationSha256:sha},clock}),reason);
+  assert.equal(batches,0,reason+': nothing sent');assert.deepEqual(ctx.states,[]);assert.equal(version(v.file),37);
+ }
+ // Exactly at the limit is still fresh.
+ const v=world();
+ const ok=await Op.execute('apply',{binding:v.db,params:{migrationSha256:sha},clock:steps(T('13:30:00.000'),T('13:30:30.000'),T('13:31:00.000'))});
+ assert.equal(ok.writeState,'committed');
 }
 // The apply: one atomic batch, never retried, then the readback; a second status reads already_applied.
 {
@@ -87,32 +112,55 @@ const chain=(file,state,lease)=>sql(file,"INSERT INTO canonical_producer_chain (
  const before=sql(file,"SELECT (SELECT COUNT(*) FROM canonical_producer_chain) c,(SELECT mode||'/'||cutover||'/'||generation FROM film_person_authority) f,(SELECT mode||'/'||generation FROM watchlist_membership_authority) m")[0];
  let batches=0;const counted={...db,prepare:text=>db.prepare(text),batch:statements=>{batches++;return db.batch(statements);}};
  const ctx=tracker();
- const out=await Op.execute('apply',{binding:counted,ctx,params:{migrationSha256:sha},nowMs:MID});
+ const out=await Op.execute('apply',{binding:counted,ctx,params:{migrationSha256:sha},clock:at(MID)});
  assert.equal(out.writeState,'committed');assert.equal(out.statements,11);assert.equal(batches,1,'one batch, never retried');assert.deepEqual(ctx.states,['unknown','committed']);
  assert.equal(out.after.schemaVersion,38);assert.equal(out.after.runtimeProbe,'active','the Worker probe reads the result as active');assert.equal(out.outboxRows,0);
  assert.deepEqual(out.after.outboxObjects,[...OUTCOME_TRIGGERS.map(name=>'trigger:'+name),'index:'+Op.INDEX,'table:'+Op.TABLE].sort());
  assert.equal(version(file),38);
  assert.deepEqual(sql(file,"SELECT (SELECT COUNT(*) FROM canonical_producer_chain) c,(SELECT mode||'/'||cutover||'/'||generation FROM film_person_authority) f,(SELECT mode||'/'||generation FROM watchlist_membership_authority) m")[0],before,'markers and counts unchanged');
- const again=await Op.execute('status',{binding:db,nowMs:MID});
+ const again=await Op.execute('status',{binding:db,clock:at(MID)});
  assert.equal(again.decision,'already_applied');
- await stop(Op.execute('apply',{binding:db,params:{migrationSha256:sha},nowMs:MID}),'already_applied');
+ await stop(Op.execute('apply',{binding:db,params:{migrationSha256:sha},clock:at(MID)}),'already_applied');
+ // A populated outbox is a valid applied schema: natural Producer rows never turn the status into anything else.
+ sql(file,"INSERT INTO canonical_producer_outcome (id,programme_run_id,input_generation,outcome,owner_epoch,at,run_recorded,state,attempts,next_attempt_at,created_at) VALUES ('canonical_producer-x-e1-stopped','run-p',518,'stopped',1,'"+AT+"',0,'pending',0,'"+AT+"','"+AT+"')");
+ assert.equal((await Op.execute('status',{binding:db,clock:at(MID)})).decision,'already_applied','rows are legitimate after the apply');
  // A version-38 database whose outbox lost a trigger is partial, never applied.
  sql(file,'DROP TRIGGER canonical_producer_outcome_no_delete');
- assert.equal((await Op.execute('status',{binding:db,nowMs:MID})).decision,'partial_schema');
+ assert.equal((await Op.execute('status',{binding:db,clock:at(MID)})).decision,'partial_schema');
+}
+{
+ // Same-name objects with another body pass the runtime probe (it checks names and columns) but never the exact CREATE comparison of the status.
+ for(const damage of [
+  "DROP TRIGGER canonical_producer_outcome_no_delete;CREATE TRIGGER canonical_producer_outcome_no_delete BEFORE DELETE ON canonical_producer_outcome BEGIN SELECT 1; END",
+  "DROP INDEX canonical_producer_outcome_pending;CREATE INDEX canonical_producer_outcome_pending ON canonical_producer_outcome (at) WHERE state = 'pending'",
+ ]){
+  const {file,db}=world();
+  await Op.execute('apply',{binding:db,params:{migrationSha256:sha},clock:at(MID)});
+  sql(file,damage);
+  const out=await Op.execute('status',{binding:db,clock:at(MID)});
+  assert.equal(out.runtimeProbe,'active','the probe alone would pass');
+  assert.equal(out.decision,'partial_schema',damage);assert.equal(out.outboxMismatches.length,1);
+ }
 }
 // A refused statement with the state proven unchanged is statement_failed; anything unclear is write_uncertain. Neither is retried.
 {
  const {file,db}=world();
  const refused={...db,prepare:text=>db.prepare(text),batch:async()=>{throw new D1Error('statement','refused');}};
  const ctx=tracker();
- await stop(Op.execute('apply',{binding:refused,ctx,params:{migrationSha256:sha},nowMs:MID}),'statement_failed');
+ await stop(Op.execute('apply',{binding:refused,ctx,params:{migrationSha256:sha},clock:at(MID)}),'statement_failed');
  assert.deepEqual(ctx.states,['unknown','none']);assert.equal(version(file),37);
+}
+{
+ // A refused statement, but a marker moved meanwhile: the read-back state is not the recorded before-state, so it is not proof of nothing written.
+ const {file,db}=world();
+ const refused={...db,prepare:text=>db.prepare(text),batch:async()=>{sql(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");throw new D1Error('statement','refused');}};
+ await stop(Op.execute('apply',{binding:refused,params:{migrationSha256:sha},clock:at(MID)}),'write_uncertain');
 }
 {
  const {file,db}=world();
  const lost={...db,prepare:text=>db.prepare(text),batch:async statements=>{await db.batch(statements);throw new D1Error('write_uncertain','lost');}};
  const ctx=tracker();
- const error=await stop(Op.execute('apply',{binding:lost,ctx,params:{migrationSha256:sha},nowMs:MID}),'write_uncertain');
+ const error=await stop(Op.execute('apply',{binding:lost,ctx,params:{migrationSha256:sha},clock:at(MID)}),'write_uncertain');
  assert.deepEqual(ctx.states,['unknown','unknown']);assert.equal(version(file),38,'the batch did commit: the uncertainty is about the reply');
  assert.equal(error.details.state.schemaVersion,38);
 }
@@ -120,14 +168,14 @@ const chain=(file,state,lease)=>sql(file,"INSERT INTO canonical_producer_chain (
  // The batch commits, but the readback finds a marker moved under it (another writer): write_uncertain with the named problem, never a clean success.
  const {file,db}=world();
  const racing={...db,prepare:text=>db.prepare(text),batch:async statements=>{const out=await db.batch(statements);sql(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");return out;}};
- const error=await stop(Op.execute('apply',{binding:racing,params:{migrationSha256:sha},nowMs:MID}),'write_uncertain');
+ const error=await stop(Op.execute('apply',{binding:racing,params:{migrationSha256:sha},clock:at(MID)}),'write_uncertain');
  assert.ok(error.details.problems.includes('changed:filmPerson'));
 }
 // The CLI wrapper: a report without a target, and the outcome shape of a stop.
 {
  assert.deepEqual(await Op.runProducerOutcome0038Production({argv:A()}),{exit:0,result:{configured:false,writes:false,writeState:'none'}});
  const w=world();chain(w.file,'active','2026-11-24T13:34:00.000Z');
- const out=await Op.runProducerOutcome0038Production({argv:A('--target','iptv','--apply','--confirm','apply','--migration-sha256',sha),deps:{binding:w.db},nowMs:MID});
+ const out=await Op.runProducerOutcome0038Production({argv:A('--target','iptv','--apply','--confirm','apply','--migration-sha256',sha),deps:{binding:w.db},clock:at(MID)});
  assert.equal(out.result.reason,'producer_busy');assert.equal(out.result.writes,false);assert.equal(out.result.writeState,'none');
 }
 console.log('producer-outcome-0038-production: pinned bytes and shape, read-only status with the runtime probe, refusals (live lease, hourly tick window, partial or unexpected schema, marker not open, digest mismatch), one atomic never-retried apply with readback, statement_failed only when proven, write_uncertain otherwise');

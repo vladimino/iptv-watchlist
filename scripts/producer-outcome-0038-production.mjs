@@ -19,6 +19,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {OUTCOME_TRIGGERS,readOutcomeSchema} from '../src/canonical-producer-events.js';
+import {CHAIN_BOUNDARY_MARGIN_MS} from '../src/canonical-producer-fence.js';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const MIGRATION_PATH=path.join(ROOT,'migrations/0038_canonical_producer_outcome.sql');
@@ -33,6 +34,9 @@ export const EXPECTED_STATEMENTS=11;
 // The hourly cron fires at :00 UTC and runs the Producer reconcile, which probes the schema once per tick. The apply stays out of the minutes around it, so no
 // tick probes `absent` and then acts after the commit (ADR 0208: outcomes of an inactive moment are not reported; the window keeps that moment empty).
 export const TICK_GUARD_MINUTES=5;
+// The status reads take a few REST round trips; the quiet-window observation they make is valid only for a short time. The apply re-reads the real clock at the
+// write boundary and refuses when the preflight took longer than this, or when the write boundary falls inside the tick guard.
+export const PREFLIGHT_MAX_MS=60000;
 const OPTIONS={'--target':'target','--confirm':'confirm','--migration-sha256':'migrationSha256'};
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const gitBlob=bytes=>createHash('sha1').update(Buffer.concat([Buffer.from('blob '+bytes.length+'\0'),bytes])).digest('hex');
@@ -69,7 +73,7 @@ const num=value=>value===null||value===undefined?null:Number(value);
 // The exact runtime probe of the Worker, over the operator's binding (whose statements are prepared then bound).
 const probeEnv=binding=>({DB:{prepare:sql=>{const statement=binding.prepare(sql).bind();return {first:()=>statement.first()};}}});
 
-export async function readState(binding,{nowMs=Date.now()}={}){
+export async function readState(binding,{clock=Date.now,bytes=migrationBytes()}={}){
  try{
   const contract=(await rowsOf(binding,'SELECT id, version, typeof(version) AS kind FROM schema_contract ORDER BY id, version')).map(row=>({id:num(row.id),version:num(row.version),kind:row.kind}));
   const master=await rowsOf(binding,"SELECT type, name, tbl_name AS tbl, sql FROM sqlite_master WHERE type IN ('table','index','trigger')");
@@ -86,13 +90,19 @@ export async function readState(binding,{nowMs=Date.now()}={}){
   if(tables.has('watchlist_membership_authority')){const row=await one('SELECT mode, generation FROM watchlist_membership_authority WHERE id=1');state.membership=row?{mode:row.mode,generation:num(row.generation)}:null;}
   if(tables.has('canonical_producer_chain')&&tables.has('canonical_producer_run')){
    const chains=await rowsOf(binding,"SELECT owner_state AS state, owner_epoch AS epoch, lease_expires_at AS lease, revision FROM canonical_producer_chain WHERE owner_state IN ('pending','active','released') ORDER BY programme_run_id");
-   const now=new Date(nowMs).toISOString();
-   const live=chains.filter(row=>(row.state==='pending'||row.state==='active')&&String(row.lease)>now);
+   // Read the clock AFTER the chain rows. A `pending` chain is busy whatever its lease says: its Workflow instance may claim it at any moment, and a lapsed pending
+   // lease is taken over by the next reconcile into a new pending one. An `active` lease counts as live until it is past the Producer's own boundary margin
+   // (the reconcile takes a chain over only when lease + CHAIN_BOUNDARY_MARGIN_MS is before now).
+   const nowMs=clock();
+   const live=chains.filter(row=>row.state==='pending'||(row.state==='active'&&!(Date.parse(row.lease)+CHAIN_BOUNDARY_MARGIN_MS<nowMs)));
    state.producer={openChains:chains.length,liveLeases:live.length,openStates:chains.map(row=>row.state).sort()};
    const row=await one('SELECT (SELECT COUNT(*) FROM canonical_producer_chain) AS chains, (SELECT COALESCE(SUM(revision),0) FROM canonical_producer_chain) AS chainRevisions, (SELECT COUNT(*) FROM canonical_producer_run) AS runs, (SELECT COALESCE(SUM(revision),0) FROM canonical_producer_run) AS runRevisions');
    state.counts={chains:num(row.chains),chainRevisions:num(row.chainRevisions),runs:num(row.runs),runRevisions:num(row.runRevisions)};
   }
   try{state.probe=await readOutcomeSchema(probeEnv(binding));}catch(error){state.probe=error?.code||'producer_outcome_schema_unreadable';}
+  // The stored CREATE text of every outbox object against the file (whitespace-normalized): the same check the apply readback makes, so a later `--status` after an
+  // uncertain apply can never call a same-name object with another body `already_applied`.
+  state.outboxMismatches=outbox.length&&approved(bytes)?Object.entries(expectedObjects(bytes)).filter(([name,sql])=>squash(state.outboxSql[name])!==squash(sql)).map(([name])=>name):[];
   return state;
  }catch(error){
   if(error instanceof OperatorStop)throw error;
@@ -100,10 +110,11 @@ export async function readState(binding,{nowMs=Date.now()}={}){
  }
 }
 // Minutes since the last full UTC hour; the apply waits while it is within TICK_GUARD_MINUTES of a tick (either side).
-export const nearHourlyTick=nowMs=>{const minute=new Date(nowMs).getUTCMinutes()+new Date(nowMs).getUTCSeconds()/60;return minute<TICK_GUARD_MINUTES||minute>60-TICK_GUARD_MINUTES;};
+// Inclusive on both sides: from :55:00.000 to :05:00.000 UTC (milliseconds included) the window is closed.
+export const nearHourlyTick=nowMs=>{const date=new Date(nowMs);const intoHour=(date.getUTCMinutes()*60+date.getUTCSeconds())*1000+date.getUTCMilliseconds();return intoHour<=TICK_GUARD_MINUTES*60000||intoHour>=(60-TICK_GUARD_MINUTES)*60000;};
 export function applyDecision(state,{nowMs=Date.now()}={}){
  if(state.schemaVersion===null)return 'schema_contract_unexpected';
- if(state.schemaVersion>=38)return state.schemaVersion===38&&state.probe==='active'&&state.outboxObjects.length===2+OUTCOME_TRIGGERS.length?'already_applied':'partial_schema';
+ if(state.schemaVersion>=38)return state.schemaVersion===38&&state.contract.length===1&&state.probe==='active'&&state.outboxObjects.length===2+OUTCOME_TRIGGERS.length&&state.outboxMismatches.length===0?'already_applied':'partial_schema';
  if(state.schemaVersion!==37)return 'schema_unexpected';
  if(state.outboxObjects.length)return 'partial_schema';
  if(state.probe!=='absent')return 'probe_not_absent';
@@ -115,40 +126,50 @@ export function applyDecision(state,{nowMs=Date.now()}={}){
  if(nearHourlyTick(nowMs))return 'hourly_tick_window';
  return 'apply';
 }
-export const view=state=>state?({schemaVersion:state.schemaVersion,schemaContractRows:state.contract.length,neededTables:state.neededTables.length+'/'+NEEDED_TABLES.length,outboxObjects:state.outboxObjects,
+export const view=state=>state?({schemaVersion:state.schemaVersion,schemaContractRows:state.contract.length,neededTables:state.neededTables.length+'/'+NEEDED_TABLES.length,outboxObjects:state.outboxObjects,outboxMismatches:state.outboxMismatches,
  runtimeProbe:state.probe,filmPersonAuthority:state.filmPerson,publishedAuthority:state.published,membershipAuthority:state.membership,producer:state.producer,counts:state.counts}):null;
 
-async function write(binding,statements,ctx){
+// The facts of the before-state a proven rejection must leave unchanged: not only "still v37 without an outbox object" but every recorded marker and count.
+const FACTS=state=>JSON.stringify({contract:state.contract,needed:state.neededTables,outbox:state.outboxObjects,probe:state.probe,filmPerson:state.filmPerson,published:state.published,membership:state.membership,counts:state.counts});
+async function write(binding,statements,ctx,before,{clock,bytes}){
  ctx.track('unknown');
  try{await binding.batch(statements);}
  catch(error){
   if(error instanceof OperatorStop){ctx.track('none');throw error;}
-  let after=null;try{after=await readState(binding);}catch{after=null;}
-  // Only a PROVEN statement rejection with the state read back unchanged (still v37, no outbox object) may end as "not applied". Everything else stays write_uncertain.
-  const clean=error instanceof D1Error&&error.kind==='statement'&&Boolean(after)&&after.schemaVersion===37&&after.outboxObjects.length===0;
+  let after=null;try{after=await readState(binding,{clock,bytes});}catch{after=null;}
+  // Only a PROVEN statement rejection whose read-back state equals the recorded before-state in every fact may end as "not applied". Everything else stays
+  // write_uncertain (a fact that moved may be another writer, but it is not proof that this batch wrote nothing).
+  const clean=error instanceof D1Error&&error.kind==='statement'&&Boolean(after)&&after.schemaVersion===37&&after.outboxObjects.length===0&&FACTS(after)===FACTS(before);
   ctx.track(clean?'none':'unknown');
   throw new OperatorStop(clean?'statement_failed':'write_uncertain',3,{state:view(after)});
  }
 }
 
-export async function execute(command,{binding,ctx={track:()=>{}},params={},bytes=migrationBytes(),nowMs=Date.now()}){
- const before=await readState(binding,{nowMs});
+export async function execute(command,{binding,ctx={track:()=>{}},params={},bytes=migrationBytes(),clock=Date.now}){
+ const startedMs=clock();
+ const before=await readState(binding,{clock,bytes});
  const digest=migrationSha256(bytes);
- const decision=approved(bytes)?applyDecision(before,{nowMs}):'migration_not_approved';
+ const decidedMs=clock();
+ const decision=approved(bytes)?applyDecision(before,{nowMs:decidedMs}):'migration_not_approved';
  if(command==='status')return {operation:'status',writes:false,writeState:'none',migrationSha256:digest,statements:approved(bytes)?migrationSql(bytes).length:null,approvedGitBlob:APPROVED_GIT_BLOB,approvedSha256Match:approved(bytes),
-  at:new Date(nowMs).toISOString(),decision,...view(before)};
+  at:new Date(decidedMs).toISOString(),decision,...view(before)};
  if(params.migrationSha256!==digest)throw new OperatorStop('migration_sha256_mismatch',3);
  if(decision!=='apply')throw new OperatorStop(decision,3);
- await write(binding,migrationSql(bytes).map(sql=>binding.prepare(sql).bind()),ctx);
+ const statements=migrationSql(bytes).map(sql=>binding.prepare(sql).bind());
+ // The write boundary: the real clock again, immediately before the batch. A preflight that crossed into the tick guard, or that took too long to stand for the
+ // quiet window, refuses with nothing sent.
+ const boundaryMs=clock();
+ if(nearHourlyTick(boundaryMs))throw new OperatorStop('hourly_tick_window',3,{at:new Date(boundaryMs).toISOString()});
+ if(boundaryMs-startedMs>PREFLIGHT_MAX_MS)throw new OperatorStop('preflight_stale',3,{elapsedMs:boundaryMs-startedMs});
+ await write(binding,statements,ctx,before,{clock,bytes});
  let after,rows;
- try{after=await readState(binding,{nowMs});rows=(await rowsOf(binding,'SELECT COUNT(*) AS n FROM '+TABLE))[0];}
+ try{after=await readState(binding,{clock,bytes});rows=(await rowsOf(binding,'SELECT COUNT(*) AS n FROM '+TABLE))[0];}
  catch{ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{reason:'readback_unreadable'});}
  const problems=[];
  if(after.schemaVersion!==38||after.contract.length!==1)problems.push('schema_version');
  if(after.probe!=='active')problems.push('runtime_probe:'+after.probe);
- const expected=expectedObjects(bytes);
- if(after.outboxObjects.length!==Object.keys(expected).length)problems.push('outbox_objects');
- for(const [name,sql] of Object.entries(expected))if(squash(after.outboxSql[name])!==squash(sql))problems.push('object_sql:'+name);
+ if(after.outboxObjects.length!==2+OUTCOME_TRIGGERS.length)problems.push('outbox_objects');
+ for(const name of after.outboxMismatches)problems.push('object_sql:'+name);
  if(Number(rows?.n)!==0)problems.push('table_not_empty');
  for(const key of ['filmPerson','published','membership','counts'])if(JSON.stringify(after[key])!==JSON.stringify(before[key]))problems.push('changed:'+key);
  if(problems.length){ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',problems,state:view(after)});}
@@ -181,7 +202,7 @@ export function parseArgs(argv){
  return {command,params:{migrationSha256:parsed.migrationSha256}};
 }
 
-export async function runProducerOutcome0038Production({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,deps=null,nowMs}={}){
+export async function runProducerOutcome0038Production({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,deps=null,clock=Date.now}={}){
  const ctx={writeState:'none',bookmark:null,track(state){ctx.writeState=state;}};
  try{
   const parsed=parseArgs(argv);
@@ -198,7 +219,7 @@ export async function runProducerOutcome0038Production({argv=process.argv,env=pr
    binding=createPublishedBinding(adapter);
    if(parsed.command==='apply')ctx.bookmark=await readBookmark(target,fetchImpl);
   }
-  const result=await execute(parsed.command,{binding,ctx,params:parsed.params,...(nowMs===undefined?{}:{nowMs})});
+  const result=await execute(parsed.command,{binding,ctx,params:parsed.params,clock});
   let after=null;
   if(parsed.command==='apply'&&target)try{after=await readBookmark(target,fetchImpl);}catch{after=null;}
   return {exit:0,result:{...result,...(ctx.bookmark?{bookmarkBefore:ctx.bookmark}:{}),...(after?{bookmarkAfter:after}:{})}};

@@ -19,27 +19,28 @@ node scripts/producer-outcome-0038-production.mjs --target iptv --status
 node scripts/producer-outcome-0038-production.mjs --target iptv --apply --confirm apply --migration-sha256 <FULL_SHA256_FROM_STATUS>
 ```
 
-- `--status` (default) only reads: the digest and pins, `schema_contract` (one row, an integer version), every object named `canonical_producer_outcome%`, the six predecessor tables, the Film/Person, published EPG and Watchlist membership markers, the open Producer chains and their live owner leases, the chain and run counts and revision sums, the **runtime schema probe** (`readOutcomeSchema`, the same code the Worker runs: `absent` before, `active` after) and the decision.
-- `--apply` re-reads the same state, requires the decision `apply` and the caller's SHA-256, and sends **one** atomic D1 batch of the 11 statements `migrationStatements()` extracts from the unchanged file, each checked against its expected shape and position. It is never split and never retried: an unclear answer is `write_uncertain`. The Time Travel bookmark is read before and after.
+- `--status` (default) only reads: the digest and pins, `schema_contract` (one row, an integer version), every object named `canonical_producer_outcome%`, the six predecessor tables, the Film/Person, published EPG and Watchlist membership markers, the open Producer chains and their live owner leases, the chain and run counts and revision sums, the **runtime schema probe** (`readOutcomeSchema`, the same code the Worker runs: `absent` before, `active` after), the stored `CREATE` text of every outbox object against the file (`outboxMismatches`) and the decision. The clock is read after the reads, and the decision is taken at that time.
+- `--apply` re-reads the same state, requires the decision `apply` and the caller's SHA-256, then reads the **real clock again at the write boundary**: it refuses `hourly_tick_window` if that instant is inside the guard and `preflight_stale` if more than 60 s passed since the status reads began, with nothing sent. Only then it sends **one** atomic D1 batch of the 11 statements `migrationStatements()` extracts from the unchanged file, each checked against its expected shape and position. It is never split and never retried. A refused statement ends as `statement_failed` only when the read-back state equals the recorded before-state in every fact (contract, tables, outbox objects, probe, markers, counts); anything else is `write_uncertain`. The Time Travel bookmark is read before and after.
 
 ## Decisions
 
 | Decision | Meaning |
 | --- | --- |
-| `apply` | Schema 37 (one integer contract row), no outbox object, the runtime probe reads `absent`, every predecessor table, Film/Person and published EPG `d1`/`open`, no Producer chain with a live owner lease, not within 5 minutes of a full UTC hour |
-| `producer_busy` | A chain is `pending` or `active` with an unexpired owner lease: an instance may be mid-invocation (it probed `absent` and would finish its terminal batches without outcome rows). Wait until no lease is live |
-| `hourly_tick_window` | Within 5 minutes before or after a full UTC hour: the hourly reconcile probes the schema once per tick. Retry the status outside the window |
-| `partial_schema` | Some outbox object exists at 37, or schema 38 without the whole outbox |
+| `apply` | Schema 37 (one integer contract row), no outbox object, the runtime probe reads `absent`, every predecessor table, Film/Person and published EPG `d1`/`open`, no live Producer chain (below), outside :55:00–:05:00 UTC inclusive |
+| `producer_busy` | A chain is `pending` (whatever its lease: its instance may claim it at any moment, and a lapsed pending claim is taken over into a new one), or `active` with a lease not yet past `CHAIN_BOUNDARY_MARGIN_MS` (15 s, the margin the reconcile itself uses before a takeover). An instance may be mid-invocation: it probed `absent` and would finish its terminal batches without outcome rows. Wait until no chain is live |
+| `hourly_tick_window` | From :55:00.000 to :05:00.000 UTC inclusive, at the decision or again at the write boundary: the hourly reconcile probes the schema once per tick. Retry the status outside the window |
+| `preflight_stale` | (apply only) More than 60 s passed between the start of the status reads and the write boundary: the quiet-window observation no longer stands. Nothing was sent; run the apply again |
+| `partial_schema` | Some outbox object exists at 37, or schema 38 without the whole outbox, or an outbox object whose stored `CREATE` text differs from the file (`outboxMismatches`, the same check as the apply readback) |
 | `probe_not_absent` / `schema_unexpected` / `schema_contract_unexpected` | The runtime probe does not prove absence, the version is not 37, or the contract row is missing, duplicated or not an integer |
 | `predecessor_incomplete` / `film_person_not_open` / `published_not_open` / `state_unreadable` | A needed table or marker is missing or not open, or a read failed |
-| `already_applied` | Schema 38 with the whole outbox and the probe `active` |
+| `already_applied` | Schema 38 with one contract row, the whole outbox, every stored `CREATE` text equal to the file and the probe `active`. Rows in the table are legitimate (natural Producer outcomes) |
 | `migration_not_approved` / `migration_sha256_mismatch` | The file bytes or the caller's pin differ from the approved file |
 
 ## Prerequisites (checked immediately before the GO is used)
 
 1. The deployed Worker is `main` at or after `26cfd115` (the code that probes the schema and writes outcomes), with post-merge CI/CD 4/4.
 2. `--status` reads `apply`, and the GO names the migration SHA-256 printed by `--status` and the production D1 id.
-3. Quiet window: no live Producer owner lease (`producer.liveLeases` 0), outside :55–:05 UTC, no EPG publication in progress (not around the 17:00 Madrid due) and no other migration, import or cutover in flight. A chain that starts between the status and the batch is not harmful to the data (the batch is schema-only and atomic), but its outcome may be missed (ADR 0208: outcomes of an inactive moment are not reported).
+3. Quiet window: no live Producer chain (`producer.liveLeases` 0: no `pending` chain, no `active` lease within its boundary margin), outside :55–:05 UTC (rechecked at the write boundary), no EPG publication in progress (not around the 17:00 Madrid due) and no other migration, import or cutover in flight. A chain that starts between the status and the batch is not harmful to the data (the batch is schema-only and atomic), but its outcome may be missed (ADR 0208: outcomes of an inactive moment are not reported).
 
 ## Readback (the operator checks all of it; record it in a dated evidence page)
 
