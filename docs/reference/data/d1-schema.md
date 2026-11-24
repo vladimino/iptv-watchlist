@@ -491,7 +491,7 @@ Compare-and-swap uses `revision`; the writer's `write_id` is read back to tell t
 
 There is no foreign key to `published_epg_show` or `discovery_observation_show`: historical shows keep their own keys. The effective policy is never stored; it is derived as owner policy override, then owner category policy, then provider category policy, then `known_only`.
 
-## Batch_v2 auxiliary prediction state (schema v34, [ADR 0194](../../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md), Accepted; dormant, marker `r2`)
+## Batch_v2 auxiliary prediction state (schema v34, [ADR 0194](../../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md), Accepted; marker `d1` since 24 Nov 2026)
 
 `migrations/0034_prediction_aux_authority.sql` (follows a complete version 33) is never applied by a deploy; it was applied to production by the operator on 23 Nov 2026 together with `0035` ([P6 evidence](../../evidence/prediction/air-554-p6-schema-apply-2026-11-23.md)), and the marker moved to `d1` at generation 2 on 24 Nov 2026, 08:22:18 UTC ([cutover evidence](../../evidence/prediction/air-554-cutover-2026-11-24.md), [runbook](../../runbooks/prediction-aux-state-cutover.md)). Before that the Worker kept the R2 objects it had always used. The marker is **its own**, not a column of `prediction_domain_authority`.
 

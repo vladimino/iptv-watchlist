@@ -170,9 +170,9 @@ The held stage, the run sources, the persisted manifest and the event outbox hav
 ```mermaid
 flowchart LR
   req["Runner request or Workflow preparation"] --> marker{"Aux marker read once per request"}
-  marker -->|"r2, or schema older than 34 (production today)"| legacy["R2 objects: stage, sources, manifest, stop and start events, event-outbox index"]
-  marker -->|"d1 (after a separate owner activation)"| rows["D1 rows: stage and head, source revisions, manifest and pieces, event outbox"]
-  marker -->|"closed (ADR 0196, pre-activation window)"| shut["Entry refused: prediction_aux_closed. Every R2 put or delete of the four families refused after a fresh marker read. Reads still from R2"]
+  marker -->|"r2, or schema older than 34 (before the cutover of 24 Nov 2026; not reachable from d1)"| legacy["R2 objects (legacy branch, frozen pre-cutover image): stage, sources, manifest, stop and start events, event-outbox index"]
+  marker -->|"d1 (production since 24 Nov 2026, generation 2)"| rows["D1 rows: stage and head, source revisions, manifest and pieces, event outbox"]
+  marker -->|"closed (ADR 0196, the window of the cutover, left on 24 Nov 2026)"| shut["Entry refused: prediction_aux_closed. Every R2 put or delete of the four families refused after a fresh marker read. Reads still from R2"]
   marker -->|"unreadable, partial or unknown"| unavail["prediction_aux_unavailable: fail closed, no R2 read or write"]
   shut -. "reads only" .-> legacy
   legacy --> journal[("Events journal in R2")]
