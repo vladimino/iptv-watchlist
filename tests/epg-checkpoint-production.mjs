@@ -566,46 +566,69 @@ for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority
 }
 
 // ===== 12. the git proof of the deployed commit, on a temporary repository =====
+// The pre-push hook runs this suite with GIT_DIR exported, absolute from a linked worktree; a git child that inherits it ignores its cwd and acts on that repository
+// (24 Nov 2026: `git init` set core.bare=true on the real repository, commits a and b landed on the pushed branch and `checkout -b side` moved the worktree).
+// Two fences do not depend on scripts/git-env.mjs, the helper under test, so a regression of the helper cannot reach the real repository either:
+//  1. before any git child of this block runs, every GIT_* variable of this process is removed (restored in `finally`); the only GIT_* values it ever carries
+//     afterwards are the poisoned ones below, which point at a disposable decoy repository;
+//  2. `checkedGit` refuses to spawn a mutating git child whose environment holds any GIT_* key other than the fixed identity and ceiling, with exactly these values.
+const GIT_IDENTITY=Object.freeze({GIT_CONFIG_GLOBAL:os.devNull,GIT_CONFIG_NOSYSTEM:'1',GIT_AUTHOR_NAME:'t',GIT_AUTHOR_EMAIL:'t@example.com',GIT_COMMITTER_NAME:'t',GIT_COMMITTER_EMAIL:'t@example.com'});
+const gitExtra=dir=>({...GIT_IDENTITY,GIT_CEILING_DIRECTORIES:path.dirname(dir)});
+const checkedGit=(cwd,env,args)=>{
+ const expected=gitExtra(cwd);
+ const actual=Object.fromEntries(Object.entries(env).filter(([key])=>/^GIT_/i.test(key)));
+ assert.deepEqual(actual,expected,'a git child carries no inherited git variable, only the fixed identity and ceiling');
+ const result=spawnSync('git',args,{cwd,encoding:'utf8',env});
+ assert.equal(result.status,0,result.stderr);
+ return result.stdout;
+};
 const gitProof=()=>{
  const repo=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-git-proof-'));
- // Every inherited GIT_* is dropped (a pre-push hook exports GIT_DIR, absolute from a worktree), and the user's global and system config are not read, so the temporary
- // repository is the only repository these commands can touch.
- const env=isolatedGitEnv({GIT_CONFIG_GLOBAL:os.devNull,GIT_CONFIG_NOSYSTEM:'1',GIT_AUTHOR_NAME:'t',GIT_AUTHOR_EMAIL:'t@example.com',GIT_COMMITTER_NAME:'t',GIT_COMMITTER_EMAIL:'t@example.com'});
- const git=(...args)=>{const result=spawnSync('git',args,{cwd:repo,encoding:'utf8',env});assert.equal(result.status,0,result.stderr);return result.stdout.trim();};
- git('init','-q','-b','main');
- const commit=text=>{fs.writeFileSync(path.join(repo,'f.txt'),text);git('add','f.txt');git('commit','-q','-m',text);return git('rev-parse','HEAD');};
- const A=commit('a'),B=commit('b');
- git('checkout','-q','-b','side',A);const C=commit('c');
- assert.deepEqual(Op.commitContains(B,A,repo),{ok:true},'a descendant contains its ancestor');
- assert.deepEqual(Op.commitContains(A,A,repo),{ok:true},'a commit contains itself');
- assert.deepEqual(Op.commitContains(C,A,repo),{ok:true},'a commit on another branch that has the ancestor');
- assert.equal(Op.commitContains(A,B,repo).reason,'not_a_descendant','an older commit does not contain a newer one');
- assert.equal(Op.commitContains(C,B,repo).reason,'not_a_descendant','an unrelated branch does not contain it');
- assert.equal(Op.commitContains('f'.repeat(40),A,repo).reason,'commit_unknown_locally','a commit that is not in the local history is unknown, not compatible');
- assert.equal(Op.commitContains(B,'e'.repeat(40),repo).reason,'routing_commit_unknown_locally');
- for(const bad of ['','abc',undefined,null,A.toUpperCase(),A+'0',A.slice(0,39),'--all',B+'\n'])assert.equal(Op.commitContains(bad,A,repo).reason,'commit_invalid',String(bad));
- fs.rmSync(repo,{recursive:true,force:true});
+ try{
+  const env=isolatedGitEnv(gitExtra(repo));// the helper under test builds the environment; checkedGit verifies it before every child
+  const git=(...args)=>checkedGit(repo,env,args).trim();
+  git('init','-q','-b','main');
+  const commit=text=>{fs.writeFileSync(path.join(repo,'f.txt'),text);git('add','f.txt');git('commit','-q','-m',text);return git('rev-parse','HEAD');};
+  const A=commit('a'),B=commit('b');
+  git('checkout','-q','-b','side',A);const C=commit('c');
+  assert.deepEqual(Op.commitContains(B,A,repo),{ok:true},'a descendant contains its ancestor');
+  assert.deepEqual(Op.commitContains(A,A,repo),{ok:true},'a commit contains itself');
+  assert.deepEqual(Op.commitContains(C,A,repo),{ok:true},'a commit on another branch that has the ancestor');
+  assert.equal(Op.commitContains(A,B,repo).reason,'not_a_descendant','an older commit does not contain a newer one');
+  assert.equal(Op.commitContains(C,B,repo).reason,'not_a_descendant','an unrelated branch does not contain it');
+  assert.equal(Op.commitContains('f'.repeat(40),A,repo).reason,'commit_unknown_locally','a commit that is not in the local history is unknown, not compatible');
+  assert.equal(Op.commitContains(B,'e'.repeat(40),repo).reason,'routing_commit_unknown_locally');
+  for(const bad of ['','abc',undefined,null,A.toUpperCase(),A+'0',A.slice(0,39),'--all',B+'\n'])assert.equal(Op.commitContains(bad,A,repo).reason,'commit_invalid',String(bad));
+ }finally{fs.rmSync(repo,{recursive:true,force:true});}
 };
 {
- gitProof();
- // Regression (24 Nov 2026): the pre-push hook runs this suite with GIT_DIR exported, absolute from a linked worktree. The proof must then still act on its temporary
- // repository only. A decoy repository stands in for the real one: with its GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_COMMON_DIR inherited, its config, refs, HEAD
- // and index are byte-identical afterwards (before the fix `git init` set core.bare=true there, commits a and b landed on its branch and `checkout -b side` moved it).
- const decoy=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-git-decoy-'));
- const decoyGit=(...args)=>{const result=spawnSync('git',args,{cwd:decoy,encoding:'utf8',env:isolatedGitEnv({GIT_CONFIG_GLOBAL:os.devNull,GIT_CONFIG_NOSYSTEM:'1',GIT_AUTHOR_NAME:'d',GIT_AUTHOR_EMAIL:'d@example.com',GIT_COMMITTER_NAME:'d',GIT_COMMITTER_EMAIL:'d@example.com'})});assert.equal(result.status,0,result.stderr);return result.stdout;};
- decoyGit('init','-q','-b','work');fs.writeFileSync(path.join(decoy,'d.txt'),'decoy');decoyGit('add','d.txt');decoyGit('commit','-q','-m','decoy');
- const gitDir=path.join(decoy,'.git');
- const snapshot=()=>({config:fs.readFileSync(path.join(gitDir,'config'),'utf8'),head:fs.readFileSync(path.join(gitDir,'HEAD'),'utf8'),index:sha(fs.readFileSync(path.join(gitDir,'index'))),refs:decoyGit('for-each-ref','--format=%(refname) %(objectname)'),log:decoyGit('log','--all','--format=%H %an %s'),status:decoyGit('status','--porcelain=v1','--branch')});
- const before=snapshot();
- assert.match(before.head,/refs\/heads\/work/);assert.equal(/bare\s*=\s*true/.test(before.config),false);
- const poison={GIT_DIR:gitDir,GIT_WORK_TREE:decoy,GIT_INDEX_FILE:path.join(gitDir,'index'),GIT_COMMON_DIR:gitDir,GIT_OBJECT_DIRECTORY:path.join(gitDir,'objects'),GIT_PREFIX:''};
- const saved=Object.fromEntries(Object.keys(poison).map(key=>[key,process.env[key]]));
- Object.assign(process.env,poison);
- try{gitProof();}
- finally{for(const [key,value] of Object.entries(saved))if(value===undefined)delete process.env[key];else process.env[key]=value;}
- assert.deepEqual(snapshot(),before,'an inherited git environment does not touch another repository');
- assert.deepEqual(Object.keys(isolatedGitEnv({GIT_AUTHOR_NAME:'t'},{PATH:'/bin',GIT_DIR:'/x',GIT_WORK_TREE:'/y',git_index_file:'/z'})).sort(),['GIT_AUTHOR_NAME','PATH'],'every inherited GIT_* is dropped, then only the explicit ones are set');
- fs.rmSync(decoy,{recursive:true,force:true});
+ const inherited=Object.fromEntries(Object.entries(process.env).filter(([key])=>/^GIT_/i.test(key)));
+ for(const key of Object.keys(inherited))delete process.env[key];
+ let decoy;
+ try{
+  assert.deepEqual(Object.keys(process.env).filter(key=>/^GIT_/i.test(key)),[],'fence 1: this process carries no git variable');
+  gitProof();
+  // Regression: the proof again, with a poisoned git environment that points only at a disposable decoy repository. The decoy is built with an environment this test
+  // sanitizes itself (not the helper), and its config, HEAD, index, refs, log and status must be byte-identical afterwards.
+  decoy=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-git-decoy-'));
+  const decoyEnv=Object.assign(Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^GIT_/i.test(key))),gitExtra(decoy));
+  const decoyGit=(...args)=>checkedGit(decoy,decoyEnv,args);
+  decoyGit('init','-q','-b','work');fs.writeFileSync(path.join(decoy,'d.txt'),'decoy');decoyGit('add','d.txt');decoyGit('commit','-q','-m','decoy');
+  const gitDir=path.join(decoy,'.git');
+  const snapshot=()=>({config:fs.readFileSync(path.join(gitDir,'config'),'utf8'),head:fs.readFileSync(path.join(gitDir,'HEAD'),'utf8'),index:sha(fs.readFileSync(path.join(gitDir,'index'))),refs:decoyGit('for-each-ref','--format=%(refname) %(objectname)'),log:decoyGit('log','--all','--format=%H %an %s'),status:decoyGit('status','--porcelain=v1','--branch')});
+  const before=snapshot();
+  assert.match(before.head,/refs\/heads\/work/);assert.equal(/bare\s*=\s*true/.test(before.config),false);
+  const poison={GIT_DIR:gitDir,GIT_WORK_TREE:decoy,GIT_INDEX_FILE:path.join(gitDir,'index'),GIT_COMMON_DIR:gitDir,GIT_OBJECT_DIRECTORY:path.join(gitDir,'objects'),GIT_ALTERNATE_OBJECT_DIRECTORIES:path.join(gitDir,'objects'),GIT_PREFIX:'',git_dir:gitDir};
+  Object.assign(process.env,poison);
+  try{gitProof();}
+  finally{for(const key of Object.keys(poison))delete process.env[key];}
+  assert.deepEqual(snapshot(),before,'an inherited git environment does not touch another repository');
+  assert.deepEqual(Object.keys(isolatedGitEnv({GIT_AUTHOR_NAME:'t'},{PATH:'/bin',GIT_DIR:'/x',GIT_WORK_TREE:'/y',git_index_file:'/z'})).sort(),['GIT_AUTHOR_NAME','PATH'],'every inherited GIT_* is dropped, then only the explicit ones are set');
+ }finally{
+  for(const key of Object.keys(process.env))if(/^GIT_/i.test(key))delete process.env[key];
+  Object.assign(process.env,inherited);
+  if(decoy)fs.rmSync(decoy,{recursive:true,force:true});
+ }
  assert.match(Op.ROUTING_COMMIT,/^[0-9a-f]{40}$/);
  assert.deepEqual([...Op.WORKFLOW_STATUSES],['paused','queued','rollingBack','running','waiting','waitingForPause'],'the six non-terminal statuses the inventory must list');
 }
