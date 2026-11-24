@@ -1313,6 +1313,9 @@ export const FILES={
  "prediction-orphan-start-signal.mjs": {
   "suite": "core"
  },
+ "prediction-no-progress-series.mjs": {
+  "suite": "core"
+ },
  "prediction-batch-start-deferred.mjs": {
   "suite": "core"
  },
