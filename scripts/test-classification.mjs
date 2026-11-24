@@ -1024,6 +1024,9 @@ export const FILES={
  "heavy-read-turns.mjs": {
   "suite": "core"
  },
+ "identity-evidence.mjs": {
+  "suite": "core"
+ },
  "identity-work-inventory.mjs": {
   "suite": "core"
  },
