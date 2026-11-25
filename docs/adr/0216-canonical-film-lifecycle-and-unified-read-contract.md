@@ -1,8 +1,8 @@
 # ADR 0216: Canonical Film lifecycle and the unified Film read contract
 
-**Status:** Proposed  
+**Status:** Proposed (owner selections A2, B3, C2, D2, E1, F1, G1 recorded; final disposition pending)  
 **Original decision date:** pending Product Owner disposition  
-**Recorded at:** 2026-11-25, from `main` `a537c9c7`. Revised the same day after the [independent technical review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156435200) of `bb1605aa` the [second review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156853568) of `cfc48c6d`, the [third review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156969487) of `c08984ee`, and the [owner's instruction adding choice G](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7157683873) from the AIR-627 audit.  
+**Recorded at:** 2026-11-25, from `main` `a537c9c7`. Revised the same day after the [independent technical review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156435200) of `bb1605aa` the [second review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156853568) of `cfc48c6d`, the [third review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156969487) of `c08984ee`, the [owner's instruction adding choice G](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7157683873) from the AIR-627 audit, the [fourth review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7159940391) of `d7ec6d22`, and the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943).  
 **Approval source:** none yet. This record must not merge while it is `Proposed` ([ADR merge gate](../process/agent-workflow.md#adr-merge-gate)).  
 **Related work:** [AIR-628](https://trello.com/c/zwJum962), companion audit [AIR-627](https://trello.com/c/IOERZ9GI). Coordinated with, and not extending, Accepted [ADR 0214](0214-film-metadata-per-field-provenance.md) (per-field metadata provenance, AIR-613) and Accepted [ADR 0215](0215-identity-evidence-full-model.md) (full identity evidence model, AIR-616).  
 **Supersedes:** None. It amends no accepted decision.  
@@ -41,7 +41,7 @@ Each domain has a safe reader of its own facts. No contract says how those facts
 
 There is also **no admission policy** for a verified Letterboxd film with no TMDB movie. The AIR-627 first census found no pure lid-only Film among the lid-owned Films: 402 carry a trusted TMDB movie id and 4 a TMDB TV identity. This is a future capability, not a live defect.
 
-## Decision (proposed)
+## Decision (proposed, with the selected options)
 
 ### 1. Lifecycle: existence is separate from facts
 
@@ -119,7 +119,7 @@ The final capture always uses the second form over the complete read-set, so a c
 
 ### 4. Identity fence across the whole aggregate
 
-The statements for the final capture are **reserved from the request budget before any section read** (decision 7). After **all** section reads, the resolver re-reads the identity read-set. If the marker generation, any revision, any claim row, any redirect or any retirement decision differs, the **whole aggregate** fails closed with `503 unavailable`, `reason: identity_moved`, and returns no section. If the final capture cannot run or cannot complete, the answer is the same `503` with no section; a partially fenced aggregate is never returned. This holds under either consistency choice E1 or E2. A lid that is revoked or reassigned while personal facts are being read therefore cannot attribute those facts to the wrong Film.
+The statements for the final capture are **reserved from the request budget before any section read** (decision 7). After **all** section reads, the resolver re-reads the identity read-set. If the marker generation, any revision, any claim row, any redirect or any retirement decision differs, the **whole aggregate** fails closed with `503 unavailable`, `reason: identity_moved`, and returns no section. If the final capture cannot run or cannot complete, the answer is the same `503` with no section; a partially fenced aggregate is never returned. This holds independently of the per-section fences (E1) and of any optional read failure. A lid that is revoked or reassigned while personal facts are being read therefore cannot attribute those facts to the wrong Film.
 
 The display section also captures the owner-review authority token (the `owner_review_entry` rows read for the survivor and its redirect ancestors) and the localization source rows read. A change of either fails the display section with `generation_moved`, not the whole aggregate.
 
@@ -127,16 +127,16 @@ The display section also captures the owner-review authority token (the `owner_r
 
 ### 5. Sections, their authority and their tokens
 
-The aggregate is computed per request over the existing safe readers. It is not a new table, writer or authority (choice B).
+The aggregate is computed per request over the existing safe readers. It is not a new table, writer or authority (B3).
 
 | Section | Alias set read | Authority | Token (required) | Negative proof |
 | --- | --- | --- | --- | --- |
 | `identity` | — | D1 Film/Person tables | identity read-set digest | verdict `absent` only from step 0 (no `film` or redirect row) or step 1 (no claim row of any trust) |
 | `display` | survivor and redirect ancestors (owner entries) | `film_metadata` with per-field provenance (ADR 0214), localization sources, `owner_review_entry` (owner > reviewed > automatic) | metadata `content_sha256` or `updated_at`, owner-review token | a field is `absent` only when its provenance records an explicit null; otherwise `unknown` |
-| `watchlist` | verified `letterboxd_lid` claims of the survivor | source: `watchlist_authority` and `watchlist_current` (ADR 0186); projection: `watchlist_membership_authority` and `watchlist_film` (ADR 0203) | `watchlist_authority.generation`, `watchlist_current.version`, `snapshot_id`, membership authority mode and generation | see "Watchlist negative proof" below |
+| `watchlist` | authorized `letterboxd_lid` claims of the survivor | source: `watchlist_authority` and `watchlist_current` (ADR 0186); projection: `watchlist_membership_authority` and `watchlist_film` (ADR 0203) | `watchlist_authority.generation`, `watchlist_current.version`, `snapshot_id`, membership authority mode and generation | see "Watchlist negative proof" below |
 | `availability` | `tmdb_<n>` of the trusted movie claim, and each verified lid, as the published document names films | published EPG generation and its pin | `programmeRunId`, `generation` | empty `current` only from the pinned generation; past generations are out of scope |
-| `personal` | verified lids and `tmdb_<n>`, through the ratings link index | ratings domain D1: `ratings_view`, `ratings_document` (fact records, Diary history and state) | ratings marker generation, each document `etag` read | `watched:false` only from a `ratings_view` row with `watched=0`; a missing Diary entry is never "unwatched" |
-| `predictions` | verified storage ids (`tmdb_<n>` and each verified lid) | prediction domain D1 `prediction_pointer`, `prediction_lineage`; bodies in immutable R2 objects | prediction marker generation, pointer row version | `none` only when the pointer is absent for every **authorized** storage id **and** candidate coverage is complete (decision 6b); never from `prediction_current` |
+| `personal` | authorized lids and `tmdb_<n>`, through the ratings link index; candidate coverage of decision 6b | ratings domain D1: `ratings_view`, `ratings_document` (fact records, Diary history and state) | ratings marker generation, each document `etag` read, coverage token | `watched:false` only from a `ratings_view` row with `watched=0` and complete coverage; a missing Diary entry is never "unwatched" |
+| `predictions` | authorized storage ids (`tmdb_<n>` and each authorized lid); candidate coverage of decision 6b | prediction domain D1 `prediction_pointer`, `prediction_lineage`; bodies in immutable R2 objects | prediction marker generation, pointer rows digest, coverage token | `none` only when the pointer is absent for every **authorized** storage id **and** candidate coverage is complete (decision 6b); never from `prediction_current` |
 | `history` | see decision 6a | the existing history route, unchanged, until the migration card | none in v1 (`token: null`, `tokenStatus: "unavailable"`) | never claimed |
 
 **Watchlist negative proof.** `watchlist.source.member` means **membership of the survivor's verified aliases**, not proven real-world membership of the work. Its values:
@@ -149,73 +149,97 @@ Under the projection writer mode `producer` the `projection` part reports the pr
 
 Rules shared by every section:
 
-- **Verified alias set.** A storage id joins a section's alias set only through a trusted, non-conflicting claim of the survivor that survived the identity fence. The raw requested key is never read as a fallback when it is not in that set.
-- **Field statuses.** The identity section carries a **verdict** (decision 3). Every other section and each field carries a **status**: `present`, `absent`, `unknown`, `unavailable`, `partial`, `conflict` or `limited` (`limited` is used only by `history`, decision 6a), plus `source` and the token above. A required token that cannot be read makes the section `unavailable`, never `present`.
-- **Coverage.** A section that read only part of its alias set, or hit a budget (decision 7), is `partial` and names what it skipped. It never reports a negative.
+- **Authorized alias set.** A storage id joins a section's alias set only through a trusted, non-conflicting claim of the survivor that survived the identity fence (decision 6b). The raw requested key is never read as a fallback when it is not in that set.
+- **Field statuses.** The identity section carries a **verdict** (decision 3). Every other section and each field carries a **status**: `present`, `absent`, `unknown`, `unavailable`, `partial`, `conflict` or `limited` (`limited` is used only by `history`, decision 6a), plus `source` and the token above. A token that could not be read is `null` with `tokenStatus: "unavailable"`. A required token that cannot be read makes the section `unavailable`, never `present`; a coverage token that cannot be read makes coverage `incomplete`.
+- **Coverage.** A section that read only part of its alias set, hit a budget (decision 7) or has incomplete candidate coverage (decision 6b) is `partial` and names what it skipped, unless a known conflict makes it `conflict`. It never reports a negative.
 - **Projection lag.** `watchlist.projection` reports the membership the projection holds, separately from `watchlist.source`. A difference is reported as `lag`, including when effects are drained but the per-Film membership write is still owed.
 
-### 6. Several aliases for one Film (choice C)
+### 6. Several aliases for one Film (selected C2)
 
-Under C2, every section reads every verified alias and:
+Every section reads every **authorized** alias (decision 6b) and:
 
 - **Deduplicates by stable event identity.** One ratings fact reachable through two aliases (the link index maps both to one `factKey`) is read and counted **once**. Two distinct events under two aliases stay two events, each with its `storageId`.
-- **Reports conflicts.** When two aliases carry different current values (two current ratings, two current predictions, two Diary links), the field is `conflict` with each value and its `storageId`. No value is chosen.
-- **Never drops silently.** Diary entries of every verified lid are included. A Diary lid candidate outside the verified set stays excluded and is named in `notes`.
+- **Reports conflicts.** When two aliases carry different current values (two current ratings, two current predictions, two Diary links), the field is `conflict` with each value and its `storageId`. No value is chosen and no storage key is renamed.
+- **Never drops silently.** Diary entries of every authorized lid are included. A Diary lid candidate outside the authorized set stays excluded and is named in `notes`.
 - **Fact redirects** of the ratings documents are followed once per alias, as the history route does, and deduplicated by the resulting `factKey`.
 
 #### 6a. History before and after its migration
 
-Until the multi-alias history migration card (delivery graph step 4) is delivered, the aggregate does **not** advertise complete history:
+Until the multi-alias history migration (delivery graph step 6) is delivered, the aggregate does **not** advertise complete history:
 
-- `history.status` is `limited` with `reason: history_migration_pending` when the survivor has exactly one verified lid, the requested id is `tmdb_<n>` or that lid, and the legacy route accepts it. `href` points to the legacy route, which answers under its own contract and its own completeness notes.
-- In every other case (several verified lids, a `film:` or `tmdb_tv:` request, a bridge the legacy route rejects) `history.status` is `unavailable` with the same reason and **no `href`**, so no raw requested key is read as a fallback.
+- `history.status` is `limited` with `reason: history_migration_pending` when the survivor has exactly one authorized lid, candidate coverage (decision 6b) is `complete`, the requested id is `tmdb_<n>` or that lid, and the legacy route accepts it. `href` points to the legacy route, which answers under its own contract and its own completeness notes.
+- In every other case (several authorized lids, incomplete candidate coverage, a `film:` or `tmdb_tv:` request, a bridge the legacy route rejects) `history.status` is `unavailable` with the same reason and **no `href`**, so no raw requested key is read as a fallback.
 - `history.status` is never `present` in v1.
 
-The migration card must deliver, before `present` may be returned: acceptance of every typed id of decision 2; a cursor bound to the canonical survivor, the verified alias set with its proof (the identity read-set digest) and the source tokens of every source read; typed invalidation (`409 history_changed` with `reason` `identity_moved`, `alias_set_changed` or `source_changed`); and stable event identities `<storageId>|<sourceEventId>` with the deduplication of decision 6.
+The migration must deliver, before `present` may be returned: acceptance of every typed id of decision 2; a cursor bound to the canonical survivor, the identity read-set digest, the candidate-coverage token of decision 6b and the source tokens of every source read; typed invalidation (`409 history_changed` with `reason` `identity_moved`, `alias_set_changed`, `coverage_changed` or `source_changed`); and stable event identities `<storageId>|<sourceEventId>` with the deduplication of decision 6.
 
-The standalone history route keeps its contract until a separately approved migration card changes it. Its strict bridge consumers keep their write authorization; nothing here broadens what `POST /api/started` or recovery may write.
+The standalone history route keeps its contract until that migration changes it. Its strict bridge consumers keep their write authorization; nothing here broadens what `POST /api/started` or recovery may write.
 
-#### 6b. Authorized aliases and candidate coverage (mandatory under G1 or G2)
+#### 6b. Authorized aliases and candidate coverage (selected G1; mandatory runtime protection)
 
 Every section that reads storage keys distinguishes two sets:
 
-- **Authorized aliases:** keys this aggregate may attribute to the Film. Under G1 these are the verified canonical claims only. Under G2 they also include bridge keys that pass the G2 proof.
-- **Candidate aliases:** keys that might belong to the Film but are not authorized, found by **bounded, indexed discovery**: the ratings link index entries for the Film's authorized `letterboxd:<lid>` and `tmdb:<n>` aliases, the other aliases that map to the **same fact key**, and fact-record redirects reached from them, followed once. Discovery reads at most 8 candidate keys and 2 fact records per Film; it is never a scan of `prediction_pointer`.
+- **Authorized aliases:** the survivor's trusted, non-conflicting canonical claims that passed the identity fence. These are the **only** keys whose values the aggregate attributes to the Film. There is no read-time bridge and no ratings-only fallback.
+- **Candidate aliases:** keys that might belong to the Film but have no canonical claim. They only affect coverage.
 
-Rules:
+**Discovery.** Candidates are found from the ratings link index, never from titles and never by scanning `prediction_pointer`:
 
-- A candidate key is **never** read as an attributed value. Its existence (or the failure to rule it out) only affects coverage.
-- `coverage` is `complete` only when discovery ran, stayed within its cap, the ratings domain was readable at `d1`/`open`, and every candidate is either authorized or proved to belong elsewhere. Otherwise `coverage` is `incomplete` with a reason: `unresolved_candidate`, `ratings_evidence_unavailable`, `discovery_cap`.
-- With incomplete coverage the section is `partial`. A value found under an authorized key is still returned, but the answer never states `none`, never states that no conflict exists, and never presents a current value as the single current value.
-- Candidate discovery adds its rows (link index entries, fact key, fact record `etag`, ratings generation) to the section's before/after tokens. Under G2 they also join the identity read-set.
-- `links.json` alone is **not** proof. Only the full ADR 0184 proof (decision G2) can authorize a candidate.
+1. **Seeds** are the authorized aliases in link-index form: `letterboxd:<lid>` and `tmdb:<n>`.
+2. The link index is the D1-owned ratings document `letterboxd/facts/links.json`, read once per request through the existing owned reader, only at ratings `d1`/`open`. Its `etag` and the ratings generation are recorded.
+3. For each seed, the `factKey` it maps to is taken. A seed absent from the index is recorded as an **absence predicate** (`seed_absent`), not as proof that no candidate exists.
+4. **Reverse traversal:** the in-memory index is walked once to collect every other alias that maps to one of those fact keys. Each fact record reached is read once, and a fact-record redirect is followed once; a mid-migration record counts both sides.
+5. Every collected alias that is not an authorized alias is a candidate. A candidate key that names another Film's trusted claim is settled as belonging elsewhere; otherwise it stays unresolved.
+
+**Work bounds.** The traversal is bounded by what it reads, not only by what it returns:
+
+| Bound | Value | On overflow |
+| --- | --- | --- |
+| link document size | at most 40 parts of `DOCUMENT_BYTES` (60 000 bytes), so 2.4 MB | coverage `incomplete`, `discovery_cap` |
+| link index entries walked | 50 000 | coverage `incomplete`, `discovery_cap` |
+| fact records read | 4 per request, one redirect hop each | coverage `incomplete`, `discovery_cap` |
+| candidate keys kept | 8 | coverage `incomplete`, `discovery_cap` |
+
+A separately delivered indexed reverse lookup may replace the walk only with proved parity against it; until then the walk is the only discovery.
+
+**Coverage verdict.** `coverage.status` is `complete` only when: the ratings domain is `d1`/`open`; the link document was read within its bounds; every seed was present in the index or the survivor has no ratings link at all **and** this absence is recorded; the traversal finished; and every candidate is settled as belonging elsewhere. Otherwise it is `incomplete` with a reason: `ratings_evidence_unavailable` (held, unreadable or missing document), `seed_absent_unproved`, `discovery_cap` or `unresolved_candidate`.
+
+**Effect on sections.** For `predictions` and `personal`:
+
+- Values under authorized keys are returned as read. A **known conflict** between authorized keys stays `conflict` even when coverage is incomplete; incomplete coverage never erases it.
+- With incomplete coverage and no known conflict, the section is `partial`. It never states `none`, never states that no conflict exists, and never presents a current value as the single current value.
+- With complete coverage, the section follows decision 5 and choice C2.
+
+**Tokens and fences.** The coverage token is the ratings generation, the link document `etag`, the fact record `etag`s read, the seed absence predicates and the candidate set digest. It joins the before/after fence of each section that uses it (E1). A change makes that section `unavailable` with `generation_moved`. Ratings evidence is **not** part of the identity read-set under G1, so a ratings change degrades only those sections. A change of canonical identity rows always fails the whole aggregate with `identity_moved`, whatever the ratings state.
+
+**Promotion.** A candidate becomes authorized only when the existing [ADR 0184](0184-ratings-confirmed-letterboxd-claim-on-existing-film.md) writer materializes a trusted claim after its entire fresh proof at write time, never on `links.json` alone. That proof includes the projection check of ADR 0184 decision 2(b) (a `ratings_view` row carrying another key is a conflict) and allows a null or exactly matching `canonical_identity`. A candidate that fails the proof stays a candidate and coverage stays incomplete. Any production promotion needs its own owner L3 GO. This ADR widens neither ADR 0184, ADR 0201, ADR 0215 nor any write authorization.
 
 ### 7. Budgets and failure on overflow
 
-Each limit is per request. Exceeding one makes the affected section `partial` with `reason: budget_exceeded` and the limit named. It never truncates to a negative.
+Each limit is per request. Overflow never truncates to a negative.
 
 | Limit | Value | On overflow |
 | --- | --- | --- |
-| identity rows read (steps 1–5) | 64 claim rows, 8 redirect hops, 16 Films | whole aggregate `409 conflict`, `reason: identity_fanout` |
-| verified aliases per scheme | 8 | affected sections `partial` |
-| D1 statements per request | 40, of which the final identity capture is reserved first | sections not yet read are `unavailable`, `reason: budget_exceeded`; the identity capture still runs |
+| identity rows read (steps 0–5) | 64 claim rows, 8 redirect hops, 16 Films | whole aggregate `409 conflict`, `reason: identity_fanout` |
+| authorized aliases per scheme | 8 | affected sections `partial`, `budget_exceeded` |
+| D1 statements per request | 40; the final identity capture is reserved first, then the coverage reads | sections not yet read are `unavailable`, `budget_exceeded`; the identity capture still runs |
+| candidate discovery | see decision 6b | coverage `incomplete`, `discovery_cap` |
 | current shows returned | 50 | `availability` `partial` |
 | credits returned | 60 | `display.credits` `partial` |
-| prediction lineage rows | current only by default; lineage via the history route | not read inline |
-| whole-document reads (ratings documents, Diary history) | only those the history route already reads, once per request, never per alias | section `unavailable` if a document is over its existing size cap |
-| batch input | not offered in v1 | a list or search projection is a separate future ADR (choice B3) |
+| prediction lineage rows | current only; lineage via the history route | not read inline |
+| other whole-document reads (fact records, Diary history) | only those the history route already reads, once per request, never per alias | section `unavailable` if a document is over its existing size cap |
+| batch input | not offered in v1 | a list or search projection is a separate future ADR (B3) |
 
-History is never inlined. The aggregate returns `history.href` to the existing paged route. Every new query must be served by an existing index; the implementation card checks `EXPLAIN QUERY PLAN` for each.
+History is never inlined. Every new query must be served by an existing index; the implementation card checks `EXPLAIN QUERY PLAN` for each.
 
 ### 8. Response example
 
-A Film with two verified lids, the ratings domain held, a lagging membership projection and history not yet migrated. Every section names its token or marks it `unavailable`:
+A Film with two authorized lids, the ratings domain held, a lagging membership projection and history not yet migrated. Every section names its token or marks it `unavailable`:
 
 ```json
 {
   "contract": "film-aggregate/v1",
   "identity": {
-    "status": "found",
+    "verdict": "found",
     "filmId": "film:tmdb:41009",
     "requested": {"scheme": "tmdb_movie", "value": "41009"},
     "redirectedFrom": [],
@@ -248,17 +272,19 @@ A Film with two verified lids, the ratings domain held, a lagging membership pro
   "predictions": {
     "status": "conflict",
     "source": "d1:prediction_pointer",
-    "token": {"generation": 4},
+    "token": {"generation": 4, "pointers": "sha256:…"},
     "current": [{"storageId": "10oS", "version": "…"}, {"storageId": "2bQx", "version": "…"}],
-    "coverage": {"status": "complete", "candidates": 0}
+    "coverage": {"status": "incomplete", "reason": "ratings_evidence_unavailable", "token": null, "tokenStatus": "unavailable"}
   },
   "history": {"status": "unavailable", "reason": "history_migration_pending", "token": null, "tokenStatus": "unavailable"}
 }
 ```
 
+The two authorized pointers disagree, so `predictions` is `conflict` even though coverage is incomplete. Had they agreed, it would be `partial`, not `present`.
+
 ### 9. Typed errors
 
-| HTTP | `status` | `reason` examples |
+| HTTP | Identity `verdict` | `reason` examples |
 | --- | --- | --- |
 | 400 | `invalid` | not a typed id |
 | 404 | `absent` | — |
@@ -268,82 +294,38 @@ A Film with two verified lids, the ratings domain held, a lagging membership pro
 
 ### 10. Side effects
 
-The route is a pure GET under [ADR 0107](0107-get-head-read-side-effect-boundary.md) and must pass `tests/get-write-audit.mjs`. It repairs, enqueues and caches nothing.
+The route is a pure GET under [ADR 0107](0107-get-head-read-side-effect-boundary.md) and must pass `tests/get-write-audit.mjs`. It repairs, enqueues, promotes and caches nothing.
 
 ### 11. Reuse of the existing consumers
 
 | Consumer | Role after this ADR |
 | --- | --- |
-| `GET /api/catalog/film/<tmdbId>` | Unchanged. A later card may embed aggregate sections. |
-| `GET /api/enrichment/history` | Unchanged route and contract. Multi-alias history needs its own migration card under C2. |
+| `GET /api/catalog/film/<tmdbId>` | Unchanged; public permalinks unchanged. A later accepted consumer migration may embed aggregate sections. |
+| `GET /api/enrichment/history` | Unchanged route and contract until its own migration. |
 | `GET /api/d1/films/<id>` | Stays an operator view. [D1 catalog views](../reference/api/d1-catalog.md) must state that it reads schema v1 `actual_rating` and `prediction_current`. |
-| `catalogFilmIdentityBridge` | Unchanged; keeps its strict callers. |
+| `catalogFilmIdentityBridge` | Unchanged; keeps its strict callers and their write authorization. |
 | `src/canonical-read-model.js` | Reused for display resolution and owner precedence. Stays inactive until an implementation card activates it. |
 
-## Owner choices
+## Selected options and alternatives
 
-Each choice is independent. Recommendations are the Executor's and need the Coordinator's own assessment under the facilitation protocol.
+The Product Owner's selections, transcribed by the Coordinator in the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943) against `d7ec6d22`: **A2, B3, C2, D2, E1, F1, G1**, with no qualifications. This is not yet the final ADR disposition.
 
-### A. Creating a Film without a TMDB movie id
+| Choice | Selected | Meaning | Alternatives not selected |
+| --- | --- | --- | --- |
+| A. Film without a TMDB movie id | **A2** | Lid-only admission is a recorded future direction only. No capability and no proof rule now; `exists` stays reserved (ADR 0215 decision 2). A later ADR, coordinated with ADR 0207 and ADR 0215 E4, decides proof, stable id minting, uniqueness and concurrent later TMDB admission, attachment and merge. | A1 not now with no direction; A3 owner-only creation |
+| B. Where the aggregate is computed | **B3** | On-demand composition for one Film, no new authority; a list and search projection is designed later from load evidence. | B1 on-demand only; B2 materialized table with its own writer |
+| C. Several lids for one Film | **C2** | All authorized aliases, stable event deduplication, explicit conflicts, no winner and no key renaming; history migration separately gated. | C1 strict single lid; C3 fixed-rule winner |
+| D. Optional domain failure | **D2** | Typed per-section degradation; canonical identity and the final fence stay fatal. | D1 any failure fails the whole answer |
+| E. Consistency | **E1** | Before/after per-section content and authority tokens, plus the mandatory coherent identity read-set and reserved final fence, independent of optional read failures. | E2 retry until all domains are stable |
+| F. Cutover | **F1** | Additive internal route; each consumer migration separately accepted; strict writer bridges and public permalinks preserved; legacy history `limited` or `unavailable` until its migration. | F2 replace `/api/d1/films/<id>` in place |
+| G. Historical storage aliases | **G1** | Canonical claims are the only identity authority; candidate discovery and coverage protection are mandatory at runtime (decision 6b); promotion only through the ADR 0184 writer with its full fresh proof and a separate owner L3 GO. | G2 read-only bridge authorized at read time with ADR 0184-grade proof |
 
-**Current capability:** none. Every admission today is proved by a TMDB movie (ADR 0207). ADR 0215 decision 2 keeps `exists` reserved and unused, and future proof policy belongs to E4.
-
-- **A1. Not now.** A verified lid with no TMDB stays a Letterboxd observation and gets no Film or page.
-- **A2. Record lid-only admission as a future direction only.** No proof rule is set here. A later ADR, coordinated with ADR 0215 E4 and ADR 0207, must decide: the evidence and proof that admit a lid without TMDB; how the Film id is minted and kept unique; and what happens when a TMDB movie for the same work is admitted or attached later, including concurrent admission and merge.
-- **A3. Owner-only creation as a future direction.** The same later ADR and the same safety questions apply.
-
-**Recommendation: A1 now, A2 as the recorded direction.** The census shows no live case. Choosing A2 here creates no capability and amends neither ADR 0207 nor ADR 0215.
-
-### B. Where the aggregate is computed
-
-- **B1. On-demand composition per request.** No new table. Fresh by construction.
-- **B2. Materialized aggregate table with its own writer.** Cheap reads, but a new writer, a new authority question and staleness.
-- **B3. Hybrid.** On-demand for one Film; a separate list and search projection later.
-
-**Recommendation: B3.**
-
-### C. Several trusted lids for one Film
-
-- **C1. Strict single lid.** A Film with several lids answers `conflict` in every section that reads lids.
-- **C2. Read every verified lid** with the rules of decision 6.
-- **C3. Read every verified lid and pick one current value by a fixed rule.**
-
-**Recommendation: C2.** It matches ADR 0203 and drops no supported fact.
-
-### D. Response contract when an optional domain fails
-
-- **D1. Strict.** Any optional domain failure fails the whole response.
-- **D2. Per-section status.** Identity and the identity fence are fatal; other sections degrade with a typed reason.
-
-**Recommendation: D2.**
-
-### E. Cross-domain consistency (beyond the mandatory identity fence)
-
-- **E1. Per-section tokens.** Each section is internally consistent and names its tokens.
-- **E2. Retry until all domain tokens are stable within one window.** Stronger, but costs extra reads and can starve.
-
-**Recommendation: E1.**
-
-### F. Migration and cutover
-
-- **F1. Additive route first.** A new internal route returns `FilmAggregateV1`; consumers switch one by one on separate cards.
-- **F2. Replace `/api/d1/films/<id>` in place.**
-
-**Recommendation: F1.**
-
-### G. Completeness with unconfirmed historical storage aliases
-
-The problem: 15 historical prediction keys are reachable only through the ratings link (Context). Decision 6b keeps them from producing a false `none` or a hidden conflict under either option. This choice decides whether they can ever be **read as the Film's values** without first becoming canonical claims.
-
-- **G1. Canonical claims stay the only identity authority.** Missing claims are identified offline and materialized only through the existing ADR 0184 writer, after its full fresh proof at write time. Until a claim exists, the key is a candidate: the section is `partial` and the key is never attributed. The offline coverage work and preflight are separate from any production claim promotion, which needs its own owner L3 GO. The existing [AIR-559](https://trello.com/c/733sRAxu) scope is checked first to avoid duplicate work.
-- **G2. A separate read-only bridge with ADR 0184-grade proof.** At read time the aggregate may authorize a bridge key when **all** of ADR 0184 decision 2 holds: both markers `d1`/`open` with unmoved generations; the link index maps the lid and the movie to the **same fact key**, no other alias carries that key, and the fact record names the same lid and movie and is neither a redirect nor mid-migration; `ratings_view` only corroborates; exactly one trusted, non-conflicting `tmdb` claim on a Film that is not a redirect source, not retired, with a matching `canonical_identity`; no competing, untrusted or conflicting claim of either value; the single-lid restriction of ADR 0184. The proof rows (link entries, fact key, fact record `etag`, ratings generation, the canonical rows and absence predicates) join the **identity read-set** and are revalidated by the final capture; under C2 history they also bind the history cursor. This extends **read** authorization only: it renames no key, writes nothing, and does not widen what recovery, `POST /api/started` or any writer may do. ADR 0201 does not authorize a ratings-only alias. A policy broader than ADR 0184 (for example several lids) is not part of G2 and would need its own explicit choice.
-
-**Recommendation: G1.** It keeps one identity authority and reuses an accepted writer. G2 duplicates the ADR 0184 proof on every read and makes the identity fence depend on ratings documents.
+**AIR-559 and the new cohort.** AIR-559 is Done and its backfill reported zero eligible candidates. The 15 keys found by AIR-627 need a distinct offline investigation that reconciles why the earlier cohort check missed or excluded them and classifies each key's ADR 0184 verdict. No key is assumed to qualify.
 
 ## Invariants
 
 1. No Film is deleted or hidden because a fact is missing.
-2. No section reports `false`, `0`, `none` or an empty list unless its authority proved it over the full verified alias set; otherwise `unknown` or `partial`.
+2. No section reports `false`, `0`, `none` or an empty list unless its authority proved it over the full authorized alias set **and** coverage is complete; otherwise `unknown` or `partial`.
 3. No title, year or slug match links data to a Film.
 4. A historical storage key is never renamed, and a TV number never reads a movie key.
 5. A `retired`, `conflict`, `unverified` or `cycle` identity returns no section.
@@ -351,58 +333,68 @@ The problem: 15 historical prediction keys are reachable only through the rating
 7. One fact reachable through several aliases is counted once.
 8. A settled retirement never vetoes a Film and its key is never read.
 9. History is never advertised as complete before its migration.
-9a. A candidate key is never attributed; unproved coverage never yields `none` or "no conflict".
-10. The read writes nothing.
+10. A candidate key is never attributed; unproved coverage never yields `none` or "no conflict"; a known conflict is never erased.
+11. The read writes nothing.
 
 ## Synthetic test plan
 
-Every case asserts no false `404`, no false rating and no false prediction.
+Every case asserts no false `404`, no false rating and no false prediction. Synthetic fixtures only.
 
-1. Prediction stored under a lid, requested by `/film/tmdb_<n>`: present with `storageId` = lid.
-2. One Film with two lids: one ratings fact reachable through both aliases is counted once in `personal`; differing current ratings and predictions are `conflict`; `history` is `unavailable` with `history_migration_pending`.
+**Aggregate acceptance (delivery graph steps 2–3):**
+
+1. Prediction stored under an authorized lid, requested by `/film/tmdb_<n>`: present with `storageId` = lid.
+2. One Film with two authorized lids: one ratings fact reachable through both is counted once in `personal`; differing current ratings and predictions are `conflict`; `history` is `unavailable` with `history_migration_pending`.
 3. Rated-only Film with no shows: `availability.current` empty, Film `found`.
 4. Film left the Watchlist and was re-added: source follows `version`; retention keeps the Film between.
-5. The four corrected TMDB TV identities, each with a retired movie claim and a verified lid: `tmdb_tv:<n>` and the lid are `found` (the retired claim is not a conflict); `tmdb_<n>` of the retired id is `retired`; no section reads the movie key; equal movie and TV numbers never read each other's keys.
+5. The four corrected TMDB TV identities, each with a retired movie claim and a verified lid: `tmdb_tv:<n>` and the lid are `found`; `tmdb_<n>` of the retired id is `retired`; no section reads the movie key; equal movie and TV numbers never read each other's keys.
 5a. `film:<id>` of an existing Film with no matching external row is `found`; of a merged Film is `redirected`; of an id with neither row is `absent`.
-6. Merge: `film:<retired id>` is `redirected`. Retirement: `410`. Competing owner: `409 conflict`. Untrusted only: `409 unverified`. Redirect cycle: `409 cycle`.
+6. Merge: `redirected`. Retirement: `410`. Competing owner: `409 conflict`. Untrusted only: `409 unverified`. Redirect cycle: `409 cycle`.
 7. Malformed ids, a lid that looks like `tmdb_<n>`, and a `letterboxd_slug` value: `400` or the typed verdict, never a guess.
-8. Concurrent reassignment: a lid is revoked or moved to another Film, a merge or a retirement commits between resolution and the last section read. The whole aggregate is `503 identity_moved`.
-9. Ratings domain held: `personal` `unavailable`, other sections present.
+8. Concurrent reassignment, merge or retirement between resolution and the last section read: `503 identity_moved` with no section.
+9. Ratings domain held: `personal` `unavailable`; `predictions` keeps its authorized values with coverage `incomplete` (`ratings_evidence_unavailable`), so `partial`, or `conflict` when authorized values disagree; sections that do not depend on ratings are unaffected.
 10. EPG generation moves during the read: `availability` `unavailable` with `generation_moved`.
 11. Owner review changes during the read: `display` `unavailable` with `generation_moved`.
 12. Partial metadata: missing fields `unknown`, explicit nulls `absent`.
 13. Stale membership projection, including drained effects with an owed per-Film write: `lag: true`, `source.member` from the source authority.
-14. Watchlist negative proof: an empty alias set, source mode `epg`, a pending admission row and a due handoff row for an unrelated listed lid each give `member: unknown` with their reason, never `false`; producer projection mode never changes `source.member`.
+14. Watchlist negative proof: an empty alias set, source mode `epg`, a pending admission row in backoff or terminal, and a handoff row of any due time for an unrelated listed lid each give `member: unknown` with their reason, never `false`; producer projection mode never changes `source.member`.
 15. Budget overflow: identity fan-out gives `409 identity_fanout` with no section; the statement limit makes unread sections `unavailable` and the identity capture still runs; alias, show and credit limits make the named section `partial`. None gives a negative.
-15a. The final identity capture cannot run (D1 error at the end): `503` with no section.
-15b. A content token changes inside one section without a marker move (a ratings document `etag`, a pointer version): that section is `unavailable` with `generation_moved`.
+15a. The final identity capture cannot run: `503` with no section.
+15b. A content token changes inside one section without a marker move: that section is `unavailable` with `generation_moved`.
 16. Missing or held domain for one alias only: the section is `partial`, the other alias's facts stay.
 17. The GET write audit passes for the new route.
 
-Choice G (synthetic fixtures only):
+**Candidate coverage (also aggregate acceptance, mandatory):**
 
-18. Direct trusted alias: the prediction is `present`, coverage `complete`.
-19. Bridge-only pointer, no authorized key: `predictions` `partial`, `unresolved_candidate`, never `none` (G1); under G2 with full proof, `present`.
-20. Authorized pointer plus an unresolved candidate with an **equal** current value: `partial`; with a **different** value: `partial`, not a silent single value.
-21. After a fully proved ADR 0184 promotion (G1) or an authorized G2 bridge: different current values give `conflict`; equal values follow choice C.
-22. Ratings evidence unavailable or held, and discovery cap overflow: coverage `incomplete`, never `none`.
-23. G2 proof failures, each giving `partial` with no attribution: missing fact record, a third alias on the fact key, a fact redirect or migration, `ratings_view` carrying another key, a conflicting, untrusted, revoked or retired claim, a second lid, a redirect source.
-24. One fact reachable through two aliases is counted once.
-25. Concurrent change of a link entry, fact record or canonical claim during the read: under G2 the whole aggregate is `identity_moved`; under G1 the section is `unavailable` `generation_moved`. No unsafe attribution.
-26. History cursor invalidation when the candidate or authorized set changes between pages (history migration gate), and unchanged writer authorization of recovery and Started.
+18. Authorized alias only, seeds present, no other alias on the fact key: prediction `present`, coverage `complete`.
+19. Bridge-only pointer with no authorized key: `predictions` `partial`, `unresolved_candidate`, never `none`; the candidate's value is not returned.
+20. Authorized pointer plus an unresolved candidate with an **equal** current value: `partial`; with a **different** value: `partial`, never a silent single value.
+21. After a fully proved ADR 0184 promotion in the fixture: the key is authorized; different current values give `conflict`, equal values follow C2. A fixture whose ADR 0184 proof fails (missing fact record, a third alias on the fact key, a fact redirect or migration, a `ratings_view` row carrying another key, a conflicting, untrusted, revoked or retired claim, a second lid, a redirect source) is never promoted and coverage stays `incomplete`.
+22. Missing link document, held or unreadable ratings domain, a seed absent from the index without a recorded absence, link document over 40 parts, more than 50 000 entries walked, more than 4 fact records or more than 8 candidates: coverage `incomplete` with the matching reason, never `none`.
+23. A known conflict between two authorized pointers while coverage is incomplete: `conflict`, not `partial`.
+24. One fact reachable through two aliases, and a fact redirect reached from two seeds: counted once.
+25. A link entry or fact record changes during the read: the dependent sections are `unavailable` `generation_moved`, other sections stay. A canonical claim changes during the read: `503 identity_moved` with no section, also under G1.
 
-Moved to the history migration gate (delivery graph step 4): complete multi-alias history across pages, alias removal between two pages (`409 history_changed`, `alias_set_changed`), and a source change between pages (`source_changed`).
+**History migration gate (delivery graph step 6):**
 
-## Delivery graph (each a separate card, none authorized by this ADR)
+26. Complete multi-alias history across pages; cursor invalidation with `alias_set_changed`, `coverage_changed`, `identity_moved` or `source_changed` when the authorized set, candidate coverage, identity or a source changes between pages; recovery and Started keep their writer authorization unchanged.
 
-1. Docs correction of `GET /api/d1/films/<id>` limits in [D1 catalog views](../reference/api/d1-catalog.md) (no code).
-2. Read-only typed resolver with the identity read-set and fence (offline code and tests 5–8).
-3. `FilmAggregateV1` internal route behind the Film/Person marker (F1), with tests 1–4 and 9–17; `history` limited or unavailable.
-4. Multi-alias history migration, if C2 is chosen (its own contract change to [film history](../reference/api/film-history.md)), with the cursor binding of decision 6a and the moved history tests. Only then may `history` be `present`.
-5. Consumer adoption, one consumer per card.
-6. Lid-only admission ADR, coordinated with ADR 0215 E4, only if A2 or A3 is chosen.
-7. List and search projection ADR, only after a load profile.
-8. Choice G: under G1, an offline candidate-coverage preflight over the AIR-627 cohort, reconciled with AIR-559, then any ADR 0184 promotion only under a separate owner L3 GO; under G2, the read-only bridge with its proof and extended read-set, after step 2.
+## Delivery graph (no card is created by this ADR)
+
+| Step | Kind | Content | Depends on | Gate |
+| --- | --- | --- | --- | --- |
+| 1 | documentation | Correct `GET /api/d1/films/<id>` limits in [D1 catalog views](../reference/api/d1-catalog.md) | accepted ADR | ordinary review |
+| 2 | offline implementation and validation | Read-only typed resolver with the coherent identity read-set and final fence; tests 5–8, 15a | accepted ADR | review, CI; no production use |
+| 3 | offline implementation and validation | `FilmAggregateV1` internal route behind the Film/Person marker, **including candidate discovery and coverage (decision 6b)**; tests 1–4, 9–25; `history` limited or unavailable | 2 | review, CI, deploy dormant; no consumer |
+| 4 | separately authorized activation | Make the internal route reachable for an approved consumer | 3 | its own card and acceptance |
+| 5 | separately accepted consumer migrations | One consumer per card; public permalinks and strict writer bridges unchanged | 4 | its own card and acceptance |
+| 6 | offline implementation and validation | Multi-alias history migration with the cursor binding of decision 6a; test 26; only then `history` may be `present` | 3 | its own contract change to [film history](../reference/api/film-history.md) |
+| 7 | offline investigation | Classify the AIR-627 cohort under ADR 0184 and reconcile it with AIR-559; no write | 3 (for coverage fixtures) | read-only evidence; any production read needs its own authorization |
+| 8 | owner-gated data operation | Promote only keys whose ADR 0184 proof passes, through the existing writer | 7 | separate owner L3 GO; may remain pending without affecting step 3 |
+| 9 | future design | Lid-only admission ADR (A2), coordinated with ADR 0207 and ADR 0215 E4 | — | owner decision |
+| 10 | future design | List and search projection ADR (B3), from load evidence | 3 in use | owner decision |
+| — | optional | Indexed reverse lookup replacing the link walk, with proved parity | 3 | its own card |
+
+False-negative protection is part of step 3 and never waits for steps 7–8.
 
 ## Rollback and fencing
 
@@ -410,12 +402,13 @@ The aggregate writes nothing, so rolling back its code restores the previous rea
 
 ## Out of scope
 
-UI and global catalog pages; new migrations or schema; identity migration or renaming of storage keys; backfill, repair or cache population; changes to ADR 0184, 0201, 0207, 0214 or 0215; any claim promotion or production read; a proof rule for lid-only admission; changing the permalink rules of AIR-387; any production reader switch, flag or Task change.
+UI and global catalog pages; new migrations or schema; identity migration or renaming of storage keys; backfill, repair, promotion or cache population; changes to ADR 0184, 0201, 0207, 0214 or 0215; any production read or write; a proof rule for lid-only admission; changing the permalink rules of AIR-387; any production reader switch, flag or Task change.
 
 ## Consequences
 
 - One documented shape answers "everything about this Film" without a new authority.
 - A concurrent identity change can no longer attribute one Film's facts to another inside one answer.
+- Historical keys without a canonical claim can no longer produce a false `none` or hide a conflict; they leave the answer `partial` until promoted.
 - Readers stop treating schema v1 `actual_rating` and `prediction_current` as complete.
 - Lid-only Films stay unsupported until a later ADR decides their proof.
 - Each section names its own freshness, so the caller sees lag instead of a false value.
