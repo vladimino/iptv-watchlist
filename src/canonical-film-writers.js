@@ -16,7 +16,7 @@
 //   exactly the rows the call would write (updated_at aside), no batch is opened. A durable per-request receipt for these writes would need a table beyond the
 //   existing ones; that is documented in ADR 0120 and NOT added here (no migration in this change).
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
-import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
+import {fenced,metadataLocked,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
 import {resolveLocalization} from './localization-sources.js';
 
 export const FILM_FACTS_SOURCE_CAP=10;
@@ -43,6 +43,14 @@ export const P6_DIFFERENTIAL_EXCEPTIONS=Object.freeze([
 const titleSourceOf=row=>{try{const value=JSON.parse(row?.provenance_json||'null')?.titleSource;return plain(value)&&typeof value.source==='string'?value.source:null;}catch{return null;}};
 const rank=source=>{const index=TITLE_SOURCE_ORDER.indexOf(source);return index<0?-1:TITLE_SOURCE_ORDER.length-index;};
 const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
+// ADR 0218 decision 5 (C1): the informational status of an identity row created on a ranked title write. It is the ADR 0216 verdict of a Film the writer just proved
+// direct (no redirect) and present: `conflict` when a tmdb/letterboxd claim of the Film is untrusted or conflicting, or another Film holds one of its trusted claims; `found` otherwise.
+// Never read for a decision (only `reviewed` and authority `owner` are control inputs of strong()).
+export function identityRowStatus(snapshot){
+ const own=claim=>Number(claim?.trusted)===1&&Number(claim?.conflicting)===0;
+ const unsettled=(snapshot?.claims||[]).some(claim=>(claim.scheme==='tmdb'||claim.scheme==='letterboxd')&&!own(claim));
+ return unsettled||Number(snapshot?.competing||0)>0?'conflict':'found';
+}
 
 // The guard of a dimension upsert, the one of the removed projector's localization write: a reviewed row is replaced only by an owner write over an owner row, or
 // by a reviewed dictionary/owner write over a reviewed one.
@@ -71,6 +79,10 @@ function metadataParams(id,m){return [id,m.schemaVersion??1,m.year??null,m.runti
 const METADATA_UPSERT='INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET schema_version=excluded.schema_version,year=excluded.year,runtime=excluded.runtime,synopsis=excluded.synopsis,poster=excluded.poster,url=excluded.url,genres_json=excluded.genres_json,people_version=excluded.people_version,payload_json=excluded.payload_json,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,updated_at=excluded.updated_at';
 const SYNC_UPSERT='INSERT INTO film_sync_state (film_id,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at) VALUES (?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET metadata_at=excluded.metadata_at,synopsis_fetched_at=excluded.synopsis_fetched_at,people_names_version=excluded.people_names_version,people_localized_at=excluded.people_localized_at';
 const SOURCE_UPSERT='INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(film_id,source) DO UPDATE SET value=excluded.value,source_version=excluded.source_version,provenance_json=excluded.provenance_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_localization_source.observed_at';
+// ADR 0218 decision 3 (D1): the localization-row pieces the projection writer (src/film-localization-projection.js) reuses, so the effective row, its guard and the
+// source upsert are ONE implementation: the same resolver inputs, the same strong() guard and SQL WHERE, the same row equality.
+export const LOCALIZATION_ROW=Object.freeze({effective:(snapshot,written)=>effectiveLocalization(snapshot,written),params:(id,state)=>dimensionParams(id,state),upsert:()=>dimensionUpsert(),same:(stored,params)=>sameDimension(stored,params),strong:row=>strong(row),sourceUpsert:SOURCE_UPSERT,sourceCap:FILM_FACTS_SOURCE_CAP});
+
 
 // Reads the stored rows of ONE Film (read-only, no gate). The planner is pure over this snapshot.
 export async function readFilmSnapshot(env,id){
@@ -89,7 +101,12 @@ export async function readFilmSnapshot(env,id){
    many(db,"SELECT value FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND trusted=1 AND conflicting=0",[filmId]),
    many(db,"SELECT source,value,source_version,provenance_json,request_id,observed_at FROM film_localization_source WHERE film_id=?",[filmId]).catch(error=>{if(/no such table/i.test(String(error?.message||error)))return [];throw error;}),
   ]);
-  return {id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources};
+  // ADR 0218 decision 5 (C1): the claims and the competing claims of the Film, read only to name the informational `status` of an identity row the writer creates.
+  const [claims,competing]=await Promise.all([
+   many(db,'SELECT scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=?',[filmId]),
+   one(db,"SELECT COUNT(*) AS n FROM film_external_id a JOIN film_external_id b ON b.scheme=a.scheme AND b.value=a.value AND b.film_id<>a.film_id WHERE a.film_id=? AND a.trusted=1 AND a.conflicting=0 AND a.scheme IN ('tmdb','letterboxd')",[filmId]),
+  ]);
+  return {id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources,claims,competing:Number(competing?.n??0)};
  }catch(error){if(error?.code)throw error;throw failed('film_person_unavailable',error);}
 }
 
@@ -135,6 +152,7 @@ export function planFilmFacts(snapshot,input){
  if(snapshot.redirect)throw failed('film_person_redirect');
  // `requireExisting` (AIR-374 P3a, ADR 0127) is an opt-in precondition of the WRITER (see writeFilmFacts); here it is only validated, so every entry point refuses a non-true value the same way.
  if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
+ if(input.reviewRoute!==undefined&&input.reviewRoute!==true)throw failed('film_person_invalid');
  const updatedAt=input.updatedAt??at;
  const statements=[],changes=[],skipped=[];
  const stored=snapshot.film;
@@ -176,6 +194,11 @@ export function planFilmFacts(snapshot,input){
   let given=state;
   if(name==='identity'){const {titleSource:_ignored,...rest}=plain(state.provenance)?state.provenance:{};const kept=plain(parse(row?.provenance_json))?parse(row.provenance_json):{};given={...state,provenance:{...kept,...rest}};if(!Object.keys(given.provenance).length)given={...state,provenance:state.provenance??null};}
   const params=dimensionParams(id,given);
+  // B1: a locked metadata row is created, changed or cleared only by a review route (ADR 0214 decision 9, ADR 0218 decision 6). Producers never pass one (ADR 0211 decision 1).
+  if(name==='metadata'&&input.reviewRoute!==true&&(metadataLocked(row)||params[2]==='reviewed'||params[7]==='owner')){
+   if(!(metadataLocked(row)&&sameDimension(row,params)))skipped.push({field:'dimension:metadata',reason:metadataLocked(row)?'metadata_locked':'metadata_lock_review_route'});
+   continue;
+  }
   if(strong(row)&&!(row.authority==='owner'?(params[2]==='reviewed'&&params[7]==='owner'):(params[2]==='reviewed'&&(params[7]==='dictionary'||params[7]==='owner'||params[3]==='dictionary')))){skipped.push({field:'dimension:'+name,reason:row.authority==='owner'?'owner_kept':'reviewed_kept'});continue;}
   if(!sameDimension(row,params))changes.push('dimension:'+name);
   statements.push([dimensionUpsert(),params]);
@@ -183,11 +206,14 @@ export function planFilmFacts(snapshot,input){
  // The provenance of the title: titleSource {source,at} inside identity.provenance_json, written only with the title it ranks, other keys untouched.
  if(titleWritten){
   const wroteIdentity=statements.some(item=>item[1]?.[1]==='identity'&&String(item[0]).startsWith('INSERT INTO film_dimension'));
-  if(!snapshot.dimensions.identity&&!wroteIdentity)skipped.push({field:'titleSource',reason:'no_identity_row'});
-  else{
-   if(titleSourceOf(identityDim)!==source)changes.push('titleSource');
-   statements.push(["UPDATE film_dimension SET provenance_json=json_set(COALESCE(provenance_json,'{}'),'$.titleSource',json(?)) WHERE film_id=? AND dimension='identity'",[JSON.stringify({source,at}),id]]);
+  // ADR 0218 decision 5 (C1): where no identity row exists, a minimal one is created in the same batch, under the same revision CAS, so the rank is never dropped
+  // (formerly `no_identity_row`). Its status is the current verdict (informational); provenance_json carries only titleSource. DO NOTHING keeps a row another batch created.
+  if(!snapshot.dimensions.identity&&!wroteIdentity){
+   changes.push('dimension:identity');
+   statements.push([`INSERT INTO film_dimension (film_id,${DIM_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO NOTHING`,[id,'identity',identityRowStatus(snapshot),null,null,'{}',null,null,null,null,null,0,'none',updatedAt]]);
   }
+  if(titleSourceOf(identityDim)!==source)changes.push('titleSource');
+  statements.push(["UPDATE film_dimension SET provenance_json=json_set(COALESCE(provenance_json,'{}'),'$.titleSource',json(?)) WHERE film_id=? AND dimension='identity'",[JSON.stringify({source,at}),id]]);
  }
  // (e) effective localization, in the same batch as the source write
  if(input.localization?.state!==undefined){
@@ -291,6 +317,7 @@ export async function filmFactsPresent(db,input){
   return !snapshot.redirect&&planFilmFacts(snapshot,input).noop;
  }catch{return false;}
 }
+
 
 
 // ---- ADR 0203 (AIR-582): the canonical membership projection of the Letterboxd Sync ------------------------------------------

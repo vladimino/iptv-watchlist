@@ -586,7 +586,7 @@ if(section('10')){
  }
  assert.ok(/recordPersonState\(/.test(adapters)&&/mutateFilm\(/.test(adapters)&&/receiptMark/.test(adapters),'the writes are the existing writers with the receipt tail');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-epg-person-producer'),'the Worker does not name it');
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const epgWiring=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epgWiring.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
  const readiness=await handoffReadiness(envOf(database('prepared')),{now:T});

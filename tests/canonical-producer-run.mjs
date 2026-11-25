@@ -30,7 +30,7 @@ const sortedEq=(actual,expected,message)=>assert.deepEqual([...actual].sort(),[.
 // ---- 1. The classification table ----
 {
  const byClass=cls=>Object.entries(R.ERROR_CLASSES).filter(([,value])=>value===cls).map(([code])=>code);
- sortedEq(byClass(CLASS.UNIT),['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history'],'unit-specific');
+ sortedEq(byClass(CLASS.UNIT),['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history','film_person_metadata_locked'],'unit-specific');
  sortedEq(byClass(CLASS.PERMANENT),['film_person_invalid','film_person_bounded','dictionary_source_ambiguous'],'permanent');
  sortedEq(byClass(CLASS.RECOVERABLE),['no_identity_row','needs_trusted_tmdb_id','film_person_reference','film_person_redirect','dictionary_identity_ambiguous','owner_review_inconsistent'],'recoverable');
  sortedEq(byClass(CLASS.KEPT),['owner_kept','reviewed_kept','unranked_kept','identity_mismatch','snapshot_already_applied','absent','credits_absent_from_source'],'kept');
@@ -565,10 +565,11 @@ const rowOf=(extra={})=>R.resultRow({...PASS,state:'open',attempts:3,...extra});
  const unit={kind:'film_facts',id:'film:1',digest:await R.dictionaryUnitDigest(plan1.units[0])};
  const fpUnit=u=>({kind:u.kind,id:u.id,unitDigest:u.digest});
  const fingerprint=await R.planFingerprint({origin:'dictionary',event:plan1.event,units:[fpUnit(unit)]});
- // (a) dictionary snapshot unchanged: no_identity_row refused; the identity row is created; the same snapshot is eventually applied
+ // (a) dictionary snapshot unchanged: no_identity_row refused; the identity row is created; the same snapshot is eventually applied.
+ // ADR 0218 C1: the planner no longer names no_identity_row (the writer creates the identity row in the same batch); a recoverable row stored before C1 keeps settling under these rules.
  const snapshotNoIdentity=buildDictionaryInput({film:{contract_version:1,original_title:null,canonical_identity:null,updated_at:AT},dimensions:{identity:null,localization:null},trustedTmdb:[]},plan1.units[0],{at:AT});
- assert.ok(snapshotNoIdentity.conflicts.some(c=>c.reason==='no_identity_row'),'the planner names no_identity_row');
- const noIdentity=snapshotNoIdentity.conflicts.find(c=>c.reason==='no_identity_row').reason;
+ assert.equal(snapshotNoIdentity.outcome,'proceed');assert.ok(!snapshotNoIdentity.conflicts.some(c=>c.reason==='no_identity_row'),'ADR 0218 C1: the planner no longer names no_identity_row');
+ const noIdentity='no_identity_row';
  assert.equal(R.classOfCode(noIdentity),CLASS.RECOVERABLE);
  const stamp0=await R.prereqStamp('no_identity_row',{film:it('film:1',4),identity:null});
  const row=R.resultRow({origin:'dictionary',runKey:'d1',passNo:1,fingerprint,unit,state:'refused_recoverable',code:noIdentity,prereqStamp:stamp0,at:AT});

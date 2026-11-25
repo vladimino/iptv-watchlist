@@ -449,7 +449,7 @@ for(const stage of ['legacy','r2','prepared']){
 // 9. Registry and readiness: the atomic `film_mutation` spec is registered, exactly its dependent producer flips, the other kinds are unchanged, and nothing else registers.
 {
  assert.ok(PRODUCER_OPERATIONS.has('film_mutation'));
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const spec=PRODUCER_OPERATIONS.get('film_mutation');
  assert.equal(spec.atomic,true);assert.equal(spec.operation,'film_mutation');
  for(const hook of ['readback','replay','revalidate'])assert.equal(typeof spec[hook],'function');
