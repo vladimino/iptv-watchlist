@@ -61,6 +61,8 @@ export function createStatementBudget(limit=REQUEST_STATEMENT_BUDGET){
   take(n=1){if(limit-used-reserved<n)return false;used+=n;return true;},
   // Spends n statements of the reservation.
   redeem(n){if(reserved<n)return false;reserved-=n;used+=n;return true;},
+  // Returns n reserved statements that will not be spent (AIR-647: a section that did not read gives back its after-statement).
+  release(n){if(reserved<n)return false;reserved-=n;return true;},
  };
 }
 

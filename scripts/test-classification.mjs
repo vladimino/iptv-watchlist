@@ -328,6 +328,9 @@ export const FILES={
  "canonical-read-model.mjs": {
   "suite": "core"
  },
+ "film-aggregate.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
