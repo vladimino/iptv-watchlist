@@ -65,5 +65,6 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Film localization reconciliation: the bounded reconciler (code only) and its operation contract](film-localization-reconciliation.md) (AIR-663, ADR 0218 stage 4; dormant, no production invocation)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 - [Identity evidence writer activation and break recording](identity-evidence-writer-activation.md) (AIR-637, ADR 0215 decision 4; the operator contract for `off -> pending -> on`, drain evidence, `deactivate` and recorded breaks; dormant, no production operation without its own GO)
+- [Identity evidence manifest import: dry run, owner GO, load, seal, chunks, resume and stop](identity-evidence-manifest-import.md) (AIR-639, ADR 0215 decision 7; the operator contract of the reconstruction import path; dormant, no production dry run or import without its own GO)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).
