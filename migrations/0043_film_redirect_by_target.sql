@@ -1,0 +1,67 @@
+-- Schema v43: one ADDITIVE, non-unique lookup index on the Film redirect table by its target, `film_redirect_by_target` on film_redirect (to_film_id) (AIR-647). It
+-- serves the owner-ancestry step of the dormant FilmAggregateV1 `display` section (src/film-aggregate.js, ADR 0216 decisions 5 and 7): the Films merged INTO a survivor,
+-- found by `film_redirect WHERE to_film_id = ?`, bounded in depth and breadth. `from_id` is the primary key, so no existing index serves a lookup by target, and an
+-- owner_review_entry link is a snapshot that a Film merge does not rewrite (ADR 0081): the owner values of a Film are those of every link in the redirect tree that ends
+-- at it. The owner decided on 25 Nov 2026 (review of PR #1004, AIR-647): this index, delivered inside AIR-647, not a full-scan exception and not a separate card.
+-- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1 is a separate owner GO, together with the other approved
+-- pending migrations in the coordinated pre-activation window (cards AIR-603 M1 and AIR-648); it is not applied on its own and not applied again.
+-- It follows a complete version 42 and refuses anything else before the index is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the
+-- file (a second apply and a missing schema_contract row included). The version becomes 43 and never goes down. It was written as 0042 and renumbered
+-- to 0043 at merge because AIR-637's 0042 (the identity evidence writer control) landed first.
+--
+-- Nothing is written to any table: no redirect row, Film, claim, marker, authority, trigger or table is touched; 0001 is NOT changed. The only new object is one index; the
+-- only row that changes is the single schema_contract row. A query returns the same rows with or without it.
+-- Identifiers only. One LIKE pattern, far below the 50-byte D1 limit (see 0021).
+
+-- The refusal inserts id 0, which CHECK (id = 1) always forbids: it aborts the file whether or not the singleton row exists. Accepted is exactly one schema_contract row at
+-- version 42 AND the objects of its immediate predecessors, by name (and, where 0042 REPLACED an object, by a marker of its 0042 text): the redirect table with the Film table it
+-- points at; the 0040 retirement-ledger index; the 0041 identity evidence ledger (its indexes, its append-only, shape, conflict and supersession triggers); the 0042 writer
+-- control (both tables, the unique writer/generation index, the transition, compare-and-swap, control and append-only triggers), the ledger's `source_order` column and its
+-- trigger, the scope index and arrival trigger, and the four ledger triggers 0042 replaced (`known_alias`, Film-bound fencing, the domain path, forward withdrawals); the shared
+-- no-downgrade trigger; and no object of the new name. These are PRESENCE checks, not a claim of full schema integrity, and 0042 itself is not touched.
+INSERT INTO schema_contract (id, version, note)
+SELECT 0, 0, 'refused'
+WHERE NOT (
+ (SELECT COUNT(*) FROM schema_contract) = 1
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 42)
+ AND (
+  SELECT COUNT(*) FROM sqlite_master
+  WHERE type = 'table' AND name IN (
+   'film', 'film_redirect', 'film_identity_evidence', 'tmdb_retirement_decision', 'identity_evidence_writer', 'identity_evidence_writer_change'
+  )
+ ) = 6
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_redirect' AND sql LIKE '%to_film_id%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_identity_evidence' AND sql LIKE '%source_order%')
+ AND (
+  SELECT COUNT(*) FROM sqlite_master
+  WHERE type = 'index' AND name IN (
+   'tmdb_retirement_decision_movie',
+   'film_identity_evidence_subject', 'film_identity_evidence_object', 'film_identity_evidence_scope', 'film_identity_evidence_superseded_once',
+   'film_identity_evidence_scope_ref', 'identity_evidence_writer_change_writer'
+  )
+ ) = 7
+ AND (
+  SELECT COUNT(*) FROM sqlite_master
+  WHERE type = 'trigger' AND name IN (
+   'film_identity_evidence_insert_open', 'film_identity_evidence_insert_conflict', 'film_identity_evidence_no_update', 'film_identity_evidence_no_delete',
+   'film_identity_evidence_insert_shape', 'film_identity_evidence_film_bound', 'film_identity_evidence_scope_target', 'film_identity_evidence_supersedes_target',
+   'film_identity_evidence_scope_arrival', 'film_identity_evidence_source_order',
+   'identity_evidence_writer_change_apply', 'identity_evidence_writer_change_conflict', 'identity_evidence_writer_change_current',
+   'identity_evidence_writer_change_no_delete', 'identity_evidence_writer_change_no_update',
+   'identity_evidence_writer_insert', 'identity_evidence_writer_update', 'identity_evidence_writer_no_delete',
+   'schema_contract_no_downgrade'
+  )
+ ) = 19
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_insert_shape' AND sql LIKE '%known_alias%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_insert_open' AND sql LIKE '%NEW.film_id IS NOT NULL%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_film_bound' AND sql LIKE '%discovery_observation%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_scope_target' AND sql LIKE '%owner_action%')
+ AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'film_redirect_by_target')
+);
+
+CREATE INDEX film_redirect_by_target ON film_redirect (to_film_id);
+
+UPDATE schema_contract
+SET version = 43,
+    note = 'Schema v43: lookup index film_redirect_by_target on film_redirect (to_film_id), no data change. Version 43 follows a complete version 42.'
+WHERE id = 1 AND version = 42;

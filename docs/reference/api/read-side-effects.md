@@ -77,3 +77,7 @@ AIR-374 P4b (slice 2) gates `GET /api/programme` and `GET /api/watchlist` by the
 ## Auxiliary prediction state reads (ADR 0194, dormant)
 
 The manifest part readback and the outbox status read the auxiliary D1 tables only (pieces by run, rows by identity or by an index) and write nothing: no row, no object, no lease. The marker read is held for the request. They add no writing read to the baseline.
+
+## FilmAggregateV1 (ADR 0216, dormant)
+
+The internal `GET`/`HEAD /api/internal/film-aggregate` handler ([contract](film-aggregate.md), AIR-647) is not in the bundle, so the bundle audit does not see it. `tests/film-aggregate.mjs` audits it directly (ADR 0216 test 17): every verdict, GET and HEAD, leaves the database byte-identical, runs only single plain `SELECT` statements, touches no R2 and no network, and other methods are `405`. The sections' D1 binding refuses any other statement before it runs. Activation (AIR-648) must register the route with the bundle audit, with no effect.

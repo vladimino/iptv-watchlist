@@ -1,4 +1,4 @@
-// AIR-639 / ADR 0215 (Accepted), card ER: migration 0043 (a file only) and the manifest-bound reconstruction import path (src/identity-evidence-import.js), on the sqlite3-CLI D1
+// AIR-639 / ADR 0215 (Accepted), card ER: migration 0044 (a file only) and the manifest-bound reconstruction import path (src/identity-evidence-import.js), on the sqlite3-CLI D1
 // stand-in. No Worker, R2, network or production access.
 // Covered (ADR 0215 Tables 6 and 10, decision 7): the migration's refusal and replay; the immutable staging and the atomic seal (tampering before and after the seal, a late
 // load, a post-seal insert, counts); the dry run (digest, duplicates, conflicts with `source_order`, bounds, R2 eligibility); the digest bound to the GO; the chunk batch (guards for
@@ -17,10 +17,10 @@ import * as Import from '../src/identity-evidence-import.js';
 
 const {planManifest,loadManifest,sealRun,loadAndSealManifest,importRun,readImportRun,readImportReport,readStagedManifest,manifestDigest,chunkStatements,guardCondition,identityEvidenceImportStatus,GUARD_TABLES}=Import;
 
-const NEW='0043_identity_evidence_reconstruction_import.sql',PREVIOUS='0042_identity_evidence_writer_control.sql';
+const NEW='0044_identity_evidence_reconstruction_import.sql',PREVIOUS='0043_film_redirect_by_target.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
-assert.ok(files.includes(NEW),'0043 exists');
-assert.equal(files[files.indexOf(NEW)-1],PREVIOUS,'0043 follows 0042');
+assert.ok(files.includes(NEW),'0044 exists');
+assert.equal(files[files.indexOf(NEW)-1],PREVIOUS,'0044 follows 0043');
 const chain=files.slice(0,files.indexOf(NEW));
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-identity-import-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -33,9 +33,9 @@ const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.
 const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stack||error));return true;};
 const lit=value=>value===null||value===undefined?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";
 
-const template41=path.join(root,'t42.sqlite'),template=path.join(root,'t43.sqlite');
-ok(template41,chain.map(read).join('\n'));
-fs.copyFileSync(template41,template);
+const templatePrev=path.join(root,'tprev.sqlite'),template=path.join(root,'tnew.sqlite');
+ok(templatePrev,chain.map(read).join('\n'));
+fs.copyFileSync(templatePrev,template);
 ok(template,read(NEW));
 let n=0;
 const copy=source=>{const file=path.join(root,'w-'+(n++)+'.sqlite');fs.copyFileSync(source,file);return file;};
@@ -73,35 +73,37 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
 // ===== 1. the migration: it follows a complete 42, creates nothing otherwise and leaves the ledger and every other object untouched =====
 {
  const objects=file=>one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','trigger','index')");
- const t41=path.join(root,'t41.sqlite');
- ok(t41,chain.slice(0,-1).map(read).join('\n'));
- const before=objects(t41);
- refused(t41,read(NEW));
- assert.equal(objects(t41),before,'a refused file creates nothing (schema 41)');
- const damaged=copy(template41);
+ const t42=path.join(root,'t42.sqlite');
+ ok(t42,chain.slice(0,-1).map(read).join('\n'));
+ const before=objects(t42);
+ refused(t42,read(NEW));
+ assert.equal(objects(t42),before,'a refused file creates nothing (schema 42, 0043 missing)');
+ const damaged=copy(templatePrev);
  ok(damaged,'DROP TRIGGER identity_evidence_writer_update');
  const beforeDamaged=objects(damaged);
  refused(damaged,read(NEW));
- assert.equal(objects(damaged),beforeDamaged,'a refused file creates nothing (42 without a 0042 trigger)');
+ assert.equal(objects(damaged),beforeDamaged,'a refused file creates nothing (43 without a 0042 trigger)');
  refused(template,read(NEW),/UNIQUE|PRIMARY/);
- assert.equal(one(template,'SELECT version FROM schema_contract WHERE id=1'),43);
+ // The redirect index of 0043 is part of a complete 43.
+ const noIndex=copy(templatePrev);ok(noIndex,'DROP INDEX film_redirect_by_target');refused(noIndex,read(NEW));
+ assert.equal(one(template,'SELECT version FROM schema_contract WHERE id=1'),44);
  assert.equal(one(template,'SELECT COUNT(*) FROM schema_contract'),1);
  for(const table of ['run','chunk','source','row','seal','receipt'])assert.equal(one(template,'SELECT COUNT(*) FROM identity_evidence_import_'+table),0,table+' starts empty');
  assert.equal(one(template,'SELECT COUNT(*) FROM film_identity_evidence'),0,'the ledger is untouched');
  const names=file=>rows(file,"SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").map(row=>row.type+':'+row.name).sort();
- const added=names(template).filter(name=>!names(template41).includes(name));
+ const added=names(template).filter(name=>!names(templatePrev).includes(name));
  assert.ok(added.length>0&&added.every(name=>/identity_evidence_import|sqlite_autoindex/.test(name)),'only import objects are added: '+added.filter(name=>!/identity_evidence_import/.test(name)));
- assert.deepEqual(names(template41).filter(name=>!names(template).includes(name)),[],'0043 removes no object');
+ assert.deepEqual(names(templatePrev).filter(name=>!names(template).includes(name)),[],'0044 removes no object');
  assert.equal(await identityEvidenceImportStatus(envOf(template)),'ready');
- assert.equal(await identityEvidenceImportStatus(envOf(template41)),'absent');
+ assert.equal(await identityEvidenceImportStatus(envOf(templatePrev)),'absent');
  const downgrade=copy(template);
- refused(downgrade,'UPDATE schema_contract SET version=42 WHERE id=1',/schema_contract_downgrade/);
+ refused(downgrade,'UPDATE schema_contract SET version=43 WHERE id=1',/schema_contract_downgrade/);
  // Version 43 with an import table missing is a damaged schema, never "no run".
  const missing=copy(template);
  ok(missing,'DROP TABLE identity_evidence_import_receipt');
  await assert.rejects(()=>identityEvidenceImportStatus(envOf(missing)),code('identity_evidence_import_unavailable'));
  // Absent tables: every operator refuses, nothing is read as "no run".
- await assert.rejects(()=>readImportRun(envOf(template41),'run-1'),code('identity_evidence_import_unavailable'));
+ await assert.rejects(()=>readImportRun(envOf(templatePrev),'run-1'),code('identity_evidence_import_unavailable'));
 }
 
 // ===== 2. the dry run: manifest, digest, duplicates, conflicts, bounds, R2 =====
@@ -570,7 +572,7 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  assert.deepEqual(importers,[],'nothing imports the import path: no route, Workflow, cron or producer calls it');
  assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
  for(const workflow of fs.readdirSync('.github/workflows')){
-  assert.ok(!/migrations\s+apply|d1\s+execute|0043_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0043');
+  assert.ok(!/migrations\s+apply|d1\s+execute|0044_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0044');
  }
  const text=fs.readFileSync('src/identity-evidence-import.js','utf8');
  assert.ok(!/\bfetch\(|\bR2\b.*\.put\(|crypto\.randomUUID/.test(text),'no network, R2 write or random id');

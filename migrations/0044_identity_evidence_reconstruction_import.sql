@@ -1,4 +1,4 @@
--- Schema v43: the reconstruction import path of card ER (AIR-639; ADR 0215 Accepted, decision 7 and Tables 6 and 10; follows EC, AIR-637, migration 0042).
+-- Schema v44: the reconstruction import path of card ER (AIR-639; ADR 0215 Accepted, decision 7 and Tables 6 and 10; follows EC, AIR-637, migration 0042, and AIR-647's 0043). It was written as 0043 and renumbered to 0044 at merge because AIR-647's 0043 landed first.
 -- One forward migration that ADDS tables, triggers and indexes and changes no existing object and no row (the ledger is untouched):
 --  1. `identity_evidence_import_run`: one row per import run (family, the manifest's SHA-256, the frozen cohort time, the declared counts, the writers whose `pending` state
 --     blocks it) with a small state machine enforced by triggers: staging -> sealed -> running (a lease with an attempt number) -> complete, or stopped (terminal).
@@ -13,8 +13,8 @@
 --  5. `identity_evidence_import_cas`: the import's own assertion table (the chunk batch rolls back whole when an assertion proves false).
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy (applying it is card ERM, a separate production GO). Nothing writes these tables:
 -- no run exists, no manifest is staged, nothing imports, and the ledger is not touched. The code (src/identity-evidence-import.js) is not bundled.
--- It follows a complete version 42 (0042) and refuses anything else before an object is created: the first statement inserts a second schema_contract row and so aborts the
--- file. The version becomes 43 and never goes down.
+-- It follows a complete version 43 (0043, which follows 0042) and refuses anything else before an object is created: the first statement inserts a second schema_contract row and so aborts the
+-- file. The version becomes 44 and never goes down.
 -- Identifiers, digests, versions, typed evidence values and ISO-8601 UTC times only: no payload or personal data.
 -- D1 evaluates a LIKE or GLOB pattern of at most 50 bytes, so every time CHECK is split into short GLOB and substr() tests.
 
@@ -22,7 +22,8 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version = 42
+ WHERE id = 1 AND version = 43
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'film_redirect_by_target')
  AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('film_identity_evidence', 'identity_evidence_writer', 'identity_evidence_writer_change')) = 3
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_identity_evidence' AND sql LIKE '%source_order%')
  AND (
@@ -274,6 +275,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 43,
-    note = 'Schema v43: the reconstruction import path (run, immutable manifest staging with seal, chunk receipts; inert until a run is staged). Follows a complete version 42.'
-WHERE id = 1 AND version = 42;
+SET version = 44,
+    note = 'Schema v44: the reconstruction import path (run, immutable manifest staging with seal, chunk receipts; inert until a run is staged). Follows a complete version 43.'
+WHERE id = 1 AND version = 43;

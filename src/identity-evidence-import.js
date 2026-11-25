@@ -19,7 +19,7 @@
 import {database,failed,many,one} from './film-person-authority.js';
 import {evidenceKeyOf,normalizeEvidence} from './identity-evidence.js';
 
-export const IMPORT_SCHEMA=43;
+export const IMPORT_SCHEMA=44;
 export const FAMILIES=Object.freeze(['a','b','c']);
 export const MAX_SOURCES_PER_CHUNK=50;
 export const MAX_ROWS_PER_CHUNK=200;
@@ -282,7 +282,7 @@ async function verifyManifest(manifest){
 }
 
 // ---- the schema ----
-// `absent` (no import tables and a version below 43: the legitimate state before migration 0043), `ready`, or `identity_evidence_import_unavailable` for anything else.
+// `absent` (no import tables and a version below 44: the legitimate state before migration 0044), `ready`, or `identity_evidence_import_unavailable` for anything else.
 const TABLES="SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'identity_evidence_import_%') AS tables,(SELECT version FROM schema_contract WHERE id=1) AS version";
 export async function identityEvidenceImportStatus(env){
  const db=database(env);

@@ -1,6 +1,6 @@
 # Identity evidence manifest import (ADR 0215 decision 7; operator contract of card ER, AIR-639)
 
-**Status:** the operators and migration `0043_identity_evidence_reconstruction_import.sql` are delivered **dormant**. The migration is **not applied** (card ERM is a separate production GO), and no family has a dry run yet (cards E3a-E3c). Nothing here authorizes a production operation: **every step below that touches production needs its own owner-approved GO** (a dry run that reads production needs a production read approval; an import is L3 and names the manifest digest). A deploy never applies the migration, runs a dry run or starts an import.
+**Status:** the operators and migration `0044_identity_evidence_reconstruction_import.sql` are delivered **dormant**. The migration is **not applied** (card ERM is a separate production GO), and no family has a dry run yet (cards E3a-E3c). Nothing here authorizes a production operation: **every step below that touches production needs its own owner-approved GO** (a dry run that reads production needs a production read approval; an import is L3 and names the manifest digest). A deploy never applies the migration, runs a dry run or starts an import.
 
 ## What the path is
 
@@ -38,7 +38,7 @@ The import moves no Film revision, writes no canonical receipt and never changes
 
 ## Rollback and recovery
 
-A code rollback does not revert D1 rows. Before use, undoing 0043 is a forward migration. After a run exists, the run is `stopped` (or left `complete`), staging and receipts are kept, and a wrong imported row is answered by a scoped withdrawal in a later row, never by an edit or delete (the ledger is append-only).
+A code rollback does not revert D1 rows. Before use, undoing 0044 is a forward migration. After a run exists, the run is `stopped` (or left `complete`), staging and receipts are kept, and a wrong imported row is answered by a scoped withdrawal in a later row, never by an edit or delete (the ledger is append-only).
 
 ## Readback
 
