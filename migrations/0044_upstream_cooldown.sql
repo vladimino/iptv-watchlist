@@ -26,7 +26,7 @@ CREATE TABLE upstream_cooldown (
  retry_after_s INTEGER CHECK (retry_after_s IS NULL OR retry_after_s >= 0),
  set_by TEXT NOT NULL,
  updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE upstream_coordination (
  id INTEGER PRIMARY KEY CHECK (id = 1),
