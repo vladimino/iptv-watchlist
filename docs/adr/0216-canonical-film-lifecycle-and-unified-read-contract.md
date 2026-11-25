@@ -4,7 +4,7 @@
 **Original decision date:** pending Product Owner disposition  
 **Recorded at:** 2026-11-25, from `main` `a537c9c7`  
 **Approval source:** none yet. This record must not merge while it is `Proposed` ([ADR merge gate](../process/agent-workflow.md#adr-merge-gate)).  
-**Related work:** [AIR-628](https://trello.com/c/zwJum962), companion audit [AIR-627](https://trello.com/c/IOERZ9GI). Coordinated with, and not extending, Proposed [ADR 0214](https://github.com/vladimino/iptv-watchlist/pull/988) (per-field metadata provenance, AIR-613) and Proposed [ADR 0215](https://github.com/vladimino/iptv-watchlist/pull/989) (full identity evidence model, AIR-616).  
+**Related work:** [AIR-628](https://trello.com/c/zwJum962), companion audit [AIR-627](https://trello.com/c/IOERZ9GI). Coordinated with, and not extending, Accepted [ADR 0214](0214-film-metadata-per-field-provenance.md) (per-field metadata provenance, AIR-613) and Proposed [ADR 0215](https://github.com/vladimino/iptv-watchlist/pull/989) (full identity evidence model, AIR-616).  
 **Supersedes:** None. It amends no accepted decision.  
 **Superseded by:** None
 
@@ -48,7 +48,7 @@ source observation / candidate        (its own domain; no Film exists)
 canonical Film  (permanent film.id; never deleted for lack of a fact)
         │
         ├── identity claims, aliases, redirects, retirements
-        ├── metadata, localization, credits        (PF, ADR 0214 proposed)
+        ├── metadata, localization, credits        (PF, ADR 0214)        
         ├── Watchlist membership                   (ADR 0203)
         ├── availability: shows of the published EPG generation
         ├── personal facts: watched, rating, Diary (ratings domain)
@@ -67,7 +67,7 @@ The aggregate is computed per request over the existing safe readers. It is not 
 | Section | Authority read | Freshness token | Absent means |
 | --- | --- | --- | --- |
 | `identity` | D1 `film`, `film_external_id`, `film_redirect`, `tmdb_retirement_decision` | Film/Person marker generation | the typed id names no Film (`404`) |
-| `display` | D1 `film_metadata`, localization sources, credits; per-field provenance once ADR 0214 is decided | metadata row `updated_at`, PF version | field `absent` with provenance, never guessed |
+| `display` | D1 `film_metadata`, localization sources, credits; per-field provenance of ADR 0214 once delivered | metadata row `updated_at`, PF version | field `absent` with provenance, never guessed |
 | `watchlist` | ADR 0203 authority: `watchlist_current.version` and `watchlist_member`, or the EPG generation while the marker is `epg` | membership version and projection lag | `member:false` only from a complete snapshot; otherwise `unknown` |
 | `availability` | published EPG generation and its pin | `programmeRunId`, `generation` | no current show; the Film still exists |
 | `personal` | ratings domain D1 (`ratings_view`, `ratings_document` facts, Diary history) | ratings generation and document etags | `unknown`; a missing Diary entry is not "unwatched" |
