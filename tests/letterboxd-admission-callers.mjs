@@ -207,6 +207,95 @@ const file=fresh('d1'),env=world(file);
  assert.equal(rowOf('rt3').enrichment,'pending','r2: enrichment is still pending (legacy)');
 }
 
+// ===== E2. review of PR #1018 (P1): an `admitting` row is recovered from DURABLE STATE and a REAL reacquisition, never from its stored intent =====
+{
+ const SHA='e'.repeat(64),KEY='letterboxd/imports/'+SHA+'/rated-candidates.json';
+ const row=(code,tmdb,path,name,year,extra={})=>({code,state:'admitting',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name,year,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:'pending',intendedTmdb:tmdb,filmPath:path,...extra});
+ const seedRow=r=>{r2.set(KEY,{schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[r.code]:r},checkpoint:{cursor:null,stopped:null}});etags.set(KEY,String(++rev));};
+ const rowOf=code=>r2.get(KEY).candidates[code];
+ const boxdCalls=()=>calls.filter(url=>url.includes('boxd.it')||url.includes('api.themoviedb.org')).length;
+ const hasPending=(code,id,future)=>sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('"+id+"','film_admission','rated_admission_retention','film','film:tmdb:900070','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()+(future?3600000:-3600000)).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:"+code+"')");
+ const step=(e=env,code=undefined)=>Candidates.identityStep(e,{sha:SHA,fetchImpl,...(code?{code}:{})});
+
+ // (1) CHANGED source: the intent says 900070, the page now names 900071: needs_review source_changed. Nothing is admitted, no rating, no evidence
+ reset();
+ seedRow(row('rc1','900070','/film/fixture-rc-70/','Fixture RC',2012));add('rc1','fixture-rc-70','900071','Fixture RC',2012);
+ const before=JSON.stringify([admissionRows(file),evidence(file)]);
+ const changed=await step();
+ assert.deepEqual([changed.verified,changed.state,changed.reason],[false,'needs_review','source_changed'],JSON.stringify(changed));
+ assert.equal(JSON.stringify([admissionRows(file),evidence(file)]),before,'nothing is admitted from a changed source');
+
+ // (2) UNAVAILABLE source (404): the row stays admitting and is retried; the cap makes it needs_review. Nothing is admitted from the intent
+ reset();
+ seedRow(row('rc2','900072','/film/fixture-rc-72/','Fixture RD',2011));
+ for(let n=1;n<=5;n++){
+  const out=await step();
+  assert.deepEqual([out.state,out.reason],['admitting','source_unavailable'],'attempt '+n+' '+JSON.stringify(out));
+  assert.equal(rowOf('rc2').sourceAttempts,n);
+ }
+ const capped=await step();
+ assert.deepEqual([capped.state,capped.reason],['needs_review','source_unavailable'],JSON.stringify(capped));
+ assert.equal(admissionRows(file).some(item=>item.source_code==='rc2'),false,'no admission from an intent whose source never answered');
+
+ // (3) an APPLIED attempt that matches the intent (a lost response): the row finishes WITHOUT a fetch and without fresh evidence
+ reset();
+ const lost=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3',receipt:{tmdb:'900073',archiveSha256:SHA,title:'Fixture RE',year:2010},now:()=>new Date(NOW).toISOString()});
+ assert.equal(lost.outcome,'admitted');
+ seedRow(row('rc3','900073','/film/fixture-rc-73/','Fixture RE',2010));
+ const evBefore=evidence(file).length;calls.length=0;
+ const finished=await step();
+ assert.equal(finished.verified,true,JSON.stringify(finished));
+ assert.equal(boxdCalls(),0,'no fetch: the applied attempt proves the admission');
+ assert.equal(evidence(file).length,evBefore,'no evidence is manufactured for a recovery that made no check');
+ assert.equal(rowOf('rc3').state,'verified');
+
+ // (4) a LIVE attempt of the key: the row waits, no fetch, nothing changes
+ reset();
+ seedRow(row('rc4','900074','/film/fixture-rc-74/','Fixture RF',2009));hasPending('rc4','live-r4',true);
+ calls.length=0;
+ const waiting=await step();
+ assert.deepEqual([waiting.verified,waiting.state,waiting.reason],[false,'admitting','in_flight'],JSON.stringify(waiting));
+ assert.equal(boxdCalls(),0);
+
+ // (5) a GENUINE second check of an admitted pair (a later archive): one keyed evidence-only row with the archive scope
+ reset();
+ const p5=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc5',receipt:{tmdb:'900075',archiveSha256:'a'.repeat(64),title:'Fixture RG',year:2008},now:()=>new Date(NOW).toISOString()});
+ assert.equal(p5.outcome,'admitted');
+ seedRow({...row('rc5',null,null,'Fixture RG',2008),state:'pending',intendedTmdb:null,filmPath:null});add('rc5','fixture-rc-75','900075','Fixture RG',2008);
+ const second=await step();
+ assert.equal(second.verified,true,JSON.stringify(second));
+ const ev5=rows(file,"SELECT route,source_scope FROM film_identity_evidence WHERE subject_value='rc5'");
+ assert.deepEqual(ev5.map(item=>[item.route,item.source_scope]),[['letterboxd_rated_archive',SHA]],'the genuine second check is one row with this archive as its scope');
+
+ // (6) an evidence write that FAILS keeps the row admitting with the evidence to record; the retry records it without a fetch and finishes
+ reset();
+ const p6=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc6',receipt:{tmdb:'900076',archiveSha256:'a'.repeat(64),title:'Fixture RH',year:2007},now:()=>new Date(NOW).toISOString()});
+ assert.equal(p6.outcome,'admitted');
+ seedRow({...row('rc6',null,null,'Fixture RH',2007),state:'pending',intendedTmdb:null,filmPath:null});add('rc6','fixture-rc-76','900076','Fixture RH',2007);
+ const realDb=env.DB;let failing=true;
+ const lossy={...env,DB:{prepare:sql=>realDb.prepare(sql),batch:async statements=>{if(failing&&statements.some(item=>/INSERT INTO film_identity_evidence/.test(item.text||'')))throw new Error('D1_ERROR: evidence batch lost');return realDb.batch(statements);}}};
+ const lostEvidence=await step(lossy);
+ assert.deepEqual([lostEvidence.verified,lostEvidence.state,lostEvidence.reason],[false,'admitting','evidence_unrecorded'],JSON.stringify(lostEvidence));
+ assert.ok(rowOf('rc6').pendingEvidence,'the evidence to record is kept');
+ failing=false;calls.length=0;
+ const healed=await step();
+ assert.equal(healed.verified,true,JSON.stringify(healed));
+ assert.equal(boxdCalls(),0,'recorded from the kept evidence without a fetch');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film_identity_evidence WHERE subject_value='rc6'")[0].n,1,'the evidence of the genuine check is not lost');
+
+ // (7) the terminal review of a changed source is written only while the history is the one the reconcile observed: another attempt appears under the key first -> the row stays admitting
+ reset();
+ seedRow(row('rc7','900077','/film/fixture-rc-77/','Fixture RI',2006));add('rc7','fixture-rc-77','900078','Fixture RI',2006);
+ let moved=0;
+ const watching={...env,DB:d1Standin(file,{onQuery:async text=>{
+  if(!moved&&/CASE WHEN/.test(text)&&/operation_key/.test(text)&&/admission:lid:rc7/.test(text)){moved++;hasPending('rc7','late-r7',false);}
+ }})};
+ const held=await step(watching);
+ assert.equal(moved,1,'the history moved between the reconcile and the terminal write');
+ assert.deepEqual([held.state,held.reason],['admitting','in_flight'],JSON.stringify(held));
+ assert.equal(rowOf('rc7').state,'admitting','not terminal on a moved history');
+}
+
 // ===== F. the inferred baseline import at d1: no R2 entry; the pair is planned BEFORE the link, admitted AFTER it with a `restricts` evidence row; the receipt records the admission; a replay offers it again idempotently =====
 {
  reset();

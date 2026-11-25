@@ -23,7 +23,7 @@
 import {database,failed,many,one} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 import {RETRY_POLICY} from './canonical-receipts.js';
-import {runOperationKey} from './receipt-operation-key.js';
+import {historyGuard,runOperationKey} from './receipt-operation-key.js';
 import {admitRatedFilm,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN,admissionDigestD1} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,readAdmissionAuthority} from './letterboxd-admission-authority.js';
@@ -63,7 +63,7 @@ export async function planAdmissionD1(env,{tmdb,sourceCode}){
  return {outcome:'admit',id:target.id,revision:target.revision};
 }
 
-const NON_TERMINAL=Object.freeze({wait:true,held:true,redirect:true,failed:true,unknown:true,deferred:true,source_unavailable:true});
+const NON_TERMINAL=Object.freeze({wait:true,held:true,redirect:true,failed:true,unknown:true,deferred:true,source_unavailable:true,needs_check:true});
 const result=(outcome,extra={})=>({outcome,terminal:!NON_TERMINAL[outcome],...extra});
 
 // The coordinator. input:
@@ -114,8 +114,10 @@ export async function admitVerifiedFilm(env,input={}){
    receipt:{tmdb:admission.tmdb,sourceCode:code,archiveSha256:admission.archiveSha256,title:admission.title,year:admission.year,filmPath:got.receipt?.filmPath??null,verifiedAt:at}};
   return src;
  };
- // A call that is GIVEN its check validates it up front (an invalid item is refused before any read of a Film); a call that must reacquire does so only inside the protocol.
- if(typeof input.reacquire!=='function')await acquire();
+ // A call that is GIVEN its check validates it up front (an invalid item is refused before any read of a Film); a call that must reacquire does so only inside the protocol. `settleOnly` makes the call a pure
+ // reconcile: it needs no source, settles an applied attempt that matches the intent (`present`, `fromIntent`), waits on a live one, and otherwise answers `needs_check` with the history guard of the clear history it
+ // observed, so the caller reacquires its source itself and still fences any terminal write of its own.
+ if(input.settleOnly!==true&&typeof input.reacquire!=='function')await acquire();
 
  // Step 3 of the protocol: an applied attempt is settled only when the CURRENT admission row of the code names the work's movie on the Film that holds it now. The work's movie is the writer's own durable
  // intent when there is one and no check contradicts it (a settled attempt then needs no fetch), else the movie of the check itself.
@@ -138,7 +140,8 @@ export async function admitVerifiedFilm(env,input={}){
   if(typeof input.finalize!=='function')return {kind:'none',result:terminal};
   return {kind:'finalize',write:async guard=>{const out=await input.finalize(terminal,guardOf(guard));return out?.refused===true?{refused:true}:{...terminal,finalized:out??null};}};
  };
- const decide=async()=>{
+ const decide=async ctx=>{
+  if(input.settleOnly===true)return {kind:'none',result:result('needs_check',{guardInput:{fingerprint:ctx.fingerprint}})};
   const a=await acquire();
   // The source could not be reacquired now. History is clear (reconciled above), nothing is written; the caller classifies `reason` (transport keeps its place, a 404 costs one attempt).
   if(a.fail)return {kind:'none',result:result('source_unavailable',{reason:a.fail.reason??'source_unavailable',detail:a.fail})};
@@ -173,6 +176,10 @@ export async function admitVerifiedFilm(env,input={}){
   throw error;
  }
  const base={operationKey,replans:ran.replans??0,fingerprint:ran.fingerprint??null};
+ if(ran.status==='none'&&ran.result?.outcome==='needs_check'){
+  const cond=historyGuard({origin:RATED_ADMISSION_ORIGIN,operationKey,fingerprint:ran.result.guardInput.fingerprint});
+  return {...ran.result,...base,guard:guardOf(cond)};
+ }
  let out;
  switch(ran.status){
   case 'wait':out=result('wait',{reason:ran.reason??'in_flight',dueAt:ran.dueAt??null});break;

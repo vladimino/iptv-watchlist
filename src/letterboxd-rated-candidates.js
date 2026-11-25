@@ -279,6 +279,31 @@ const LetterboxdRatedCandidates = (() => {
     });
     return {...payload, changed: saved.changed === true};
   }
+  // AIR-602 (review of PR #1018), at `d1`: an `admitting` row whose source cannot be reacquired NOW stays `admitting` (retried); each such answer costs one attempt and the sixth makes the row `needs_review`
+  // (ADR 0207 decision 3 table, rated step). Nothing is marked for review on a first transport-like answer, and nothing is admitted from the stored intent.
+  const SOURCE_ATTEMPT_CAP = 6;
+  async function retryAdmitting(env, key, code, reason) {
+    let attempts = 0;
+    await casDoc(env, key, null, current => {
+      const row = current.candidates[code];
+      if (!row || row.state !== 'admitting') return null;
+      attempts = (Number.isInteger(row.sourceAttempts) ? row.sourceAttempts : 0) + 1;
+      current.candidates[code] = {...row, sourceAttempts: attempts, sourceReason: String(reason).slice(0, 60)};
+      return current;
+    });
+    if (attempts >= SOURCE_ATTEMPT_CAP) {
+      const review = await markReview(env, key, code, 'source_unavailable');
+      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity', writes: review.changed === true};
+    }
+    return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: attempts > 0};
+  }
+  // A terminal review of an `admitting` row at `d1` is written only while the operation history still is the one the reconcile observed (`guard.holds()`, checked immediately before the write; the candidate
+  // document lives in R2, which cannot carry the assertion, so the window between that check and the write is this writer's documented limit). A moved history is not terminal: the row stays `admitting`.
+  async function reviewBehindGuard(env, key, code, reason, guard, claim) {
+    if (guard && !(await guard.holds())) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'in_flight', phase: 'identity', writes: false};
+    const review = await markReview(env, key, code, reason, claim);
+    return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity', writes: review.changed === true};
+  }
   async function park(env, key, doc, stopped) {
     return casDoc(env, key, doc, current => {current.checkpoint = {...(current.checkpoint || {}), stopped}; return current;});
   }
@@ -304,18 +329,22 @@ const LetterboxdRatedCandidates = (() => {
   // AIR-602 / ADR 0207 decisions 2 and 3, at the marker mode `d1`: the admission of this verified code goes through the D1 coordinator (one key `admission:lid:<code>`, keep-first, the evidence row of THIS archive's
   // page check in the same batch), not the R2 entry. The typed outcome is mapped onto the legacy refusal vocabulary of this step: a settled pair is `ok`; another code on the Film is `duplicate_tmdb`; a code held by
   // another Film is `historical_alias_conflict` (both `needs_review`); everything non-terminal (an identity held or redirected, a live attempt, a failed or deferred attempt) keeps the row `admitting` and is retried.
-  async function admitRatedAtD1(env, film, code, sha, evidence) {
+  async function admitRatedAtD1(env, film, code, sha, evidence, {intended = null} = {}) {
     const root = await digestHex({code, path: film.filmPath || null, tmdb: film.tmdb, title: film.title, year: film.year, source: 'letterboxd_rated_archive_page'});
     const at = new Date().toISOString();
-    const out = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, receipt: {tmdb: film.tmdb, archiveSha256: sha, title: film.title, year: film.year, filmPath: film.filmPath || null},
+    const out = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: intended ? {tmdb: intended} : null, receipt: {tmdb: film.tmdb, archiveSha256: sha, title: film.title, year: film.year, filmPath: film.filmPath || null},
       evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12), sourceScope: sha, observedAt: at},
+      // The row's state lives in an R2 document, which cannot carry the history assertion: the guard is re-checked immediately before the terminal write (the writer's documented limit).
+      finalize: async (result, guard) => ({refused: !(await guard.holds())}),
       now: () => new Date().toISOString()});
     if (out.outcome === 'admitted' || out.outcome === 'present') return {ok: true};
     if (out.outcome === 'other_code') return {ok: false, reason: 'duplicate_tmdb'};
     if (out.outcome === 'conflict') return {ok: false, reason: 'historical_alias_conflict'};
+    if (out.outcome === 'source_changed') return {ok: false, sourceChanged: true, reason: 'source_changed'};
+    if (out.outcome === 'deferred' && out.reason === 'evidence_unrecorded') return {ok: false, retry: true, reason: 'evidence_unrecorded', pendingEvidence: out.pendingEvidence};
     return {ok: false, retry: true, reason: out.outcome === 'held' || out.outcome === 'redirect' ? 'admission_held' : out.outcome === 'wait' ? 'in_flight' : 'deferred'};
   }
-  async function commitVerified(env, sha, code, item, tmdb, evidence, generatedAt, atD1 = false) {
+  async function commitVerified(env, sha, code, item, tmdb, evidence, generatedAt, atD1 = false, recover = {}) {
     const key = CANDIDATES(sha);
     const film = LetterboxdRatedAdmission.admissionFilm({tmdb, sourceCode: code, archiveSha256: sha, title: evidence.title || item.name, year: (evidence.years && evidence.years[0]) || item.year});
     if (!film) return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: 'invalid_identity', phase: 'identity'};
@@ -347,17 +376,26 @@ const LetterboxdRatedCandidates = (() => {
       }
       return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), filmId: film.filmId, phase: 'identity'};
     }
+    // At `d1` a recovering row whose reacquired movie or page path differs from its intent is a CHANGED source (not a stale intent_conflict): needs_review `source_changed`, behind the history guard.
+    if (atD1 && outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
     if (outcome !== 'claimed' && outcome !== 'held') return refusedClaim(code, outcome);
     const held = await readClaim(env, key, code, tmdb, film.filmPath);
     if (!held.ok) return refusedClaim(code, held.reason);
     let admitted;
-    if (atD1) admitted = await admitRatedAtD1(env, film, code, sha, evidence);
+    // A row finished from its applied attempt (`recover.settled`) made no check: it records no evidence and needs no admission.
+    if (atD1 && recover.settled) admitted = {ok: true};
+    else if (atD1) admitted = await admitRatedAtD1(env, film, code, sha, evidence, {intended: recover.intended || null});
     else {
       admitted = await writeAdmission(env, film);
       if (admitted.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, admitted.film);
     }
     // A non-terminal answer of the coordinator keeps the row `admitting`: the same identity is repeated by a later step, nothing is marked for review.
-    if (admitted.retry) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: admitted.reason, phase: 'identity'};
+    if (admitted.sourceChanged) return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
+    if (admitted.retry) {
+      // The pair is admitted but the evidence of THIS check is not proven recorded: the row stays `admitting` and keeps the evidence to record, so a retry records it without a fetch and only then finishes.
+      if (admitted.pendingEvidence) await casDoc(env, key, null, current => {const row = current.candidates[code]; if (!row || row.state !== 'admitting') return null; current.candidates[code] = {...row, pendingEvidence: admitted.pendingEvidence}; return current;});
+      return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: admitted.reason, phase: 'identity'};
+    }
     if (!admitted.ok) {
       const still = await readClaim(env, key, code, tmdb, film.filmPath);
       if (still.ok) await markReview(env, key, code, admitted.reason, {tmdb, filmPath: film.filmPath});
@@ -638,7 +676,22 @@ const LetterboxdRatedCandidates = (() => {
       const enriched = await enrichOne(env, sha, code, fetchImpl);
       return withWrites(enriched, enriched.writes === true, enriched.persisted || 'none');
     }
-    if (item.state === 'admitting' && item.intendedTmdb) {
+    // AIR-602 / ADR 0207 decision 4 (4A), review of PR #1018: at `d1` a recovering `admitting` row is NEVER admitted from its stored intent. The operation key is reconciled first: an applied attempt that matches the
+    // intent finishes the row WITHOUT a fetch and without fresh evidence (the admission is already proven); a live attempt waits (the row stays `admitting`); otherwise both sources are really reacquired below
+    // (the same bounded check a pending row gets) and compared with the intent, and only a check that was made can write evidence.
+    let recoverGuard = null;
+    const recovering = atD1 && item.state === 'admitting' && !!item.intendedTmdb;
+    if (recovering) {
+      const settled = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: {tmdb: item.intendedTmdb}, settleOnly: true, pendingEvidence: item.pendingEvidence || null, now: () => new Date().toISOString()})
+        .catch(error => ({outcome: 'deferred', reason: error && error.code || 'admission_unavailable'}));
+      if (settled.outcome === 'present' && settled.fromIntent) {
+        const committed = await commitVerified(env, sha, code, item, item.intendedTmdb, {title: item.name, years: Number.isInteger(item.year) ? [item.year] : [], path: item.filmPath}, doc.generatedAt, atD1, {settled: true});
+        return withWrites(committed, committed.verified === true || committed.state === 'needs_review', committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
+      }
+      if (settled.outcome !== 'needs_check') return withWrites({pending: true, fetched: false, verified: false, code, state: 'admitting', reason: settled.reason === 'evidence_unrecorded' ? 'evidence_unrecorded' : 'in_flight', phase: 'identity'}, false, 'none');
+      recoverGuard = settled.guard || null;
+    }
+    if (item.state === 'admitting' && item.intendedTmdb && !atD1) {
       const committed = await commitVerified(env, sha, code, item, item.intendedTmdb, {title: item.name, years: Number.isInteger(item.year) ? [item.year] : [], path: item.filmPath}, doc.generatedAt, atD1);
       return withWrites(committed, committed.verified === true || committed.state === 'needs_review', committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
     }
@@ -653,6 +706,10 @@ const LetterboxdRatedCandidates = (() => {
       const parked = await park(env, key, doc, stopped);
       return withWrites({pending: true, fetched: false, stop: stopped, code, verified: false, phase: 'identity'}, parked.changed === true, parked.changed ? 'stop' : 'none');
     }
+    if (page.review && recovering) {
+      const kept = await retryAdmitting(env, key, code, page.review);
+      return withWrites(kept, kept.writes === true, kept.writes ? 'review' : 'none');
+    }
     if (page.review) {
       const review = await markReview(env, key, code, page.review);
       return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
@@ -666,6 +723,10 @@ const LetterboxdRatedCandidates = (() => {
       return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
     const decision = LetterboxdIdentity.decide(queued.queue, queued.observations, {importedTmdb: imported})[queued.queue.length - 1];
+    if (recovering && (!decision || decision.decision !== 'accepted' || !decision.tmdbId)) {
+      const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard);
+      return withWrites(changed, changed.writes === true, changed.writes ? 'review' : 'none');
+    }
     if (!decision || decision.decision !== 'accepted' || !decision.tmdbId) {
       const extra = decision && decision.reasons || [];
       const reason = extra[0] || (decision && decision.decision) || 'not_accepted';
@@ -679,12 +740,20 @@ const LetterboxdRatedCandidates = (() => {
       return withWrites({pending: true, fetched: true, verified: false, stop: stopped, code, phase: 'identity'}, parked.changed === true, parked.changed ? 'stop' : 'none');
     }
     const agree = detail.review ? {ok: false, reason: detail.review} : LetterboxdRatedAdmission.movieDetailAgrees(detail.detail, decision.tmdbId, evidence.title || item.name, (evidence.years && evidence.years[0]) || item.year);
+    if (recovering && detail.review) {
+      const kept = await retryAdmitting(env, key, code, detail.review);
+      return withWrites(kept, kept.writes === true, kept.writes ? 'review' : 'none');
+    }
+    if (recovering && !agree.ok) {
+      const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard);
+      return withWrites(changed, changed.writes === true, changed.writes ? 'review' : 'none');
+    }
     if (!agree.ok || (item.historicalTmdb && item.historicalTmdb !== String(decision.tmdbId))) {
       const reason = item.historicalTmdb && item.historicalTmdb !== String(decision.tmdbId) ? 'historical_alias_conflict' : agree.reason;
       const review = await markReview(env, key, code, reason);
       return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
-    const committed = await commitVerified(env, sha, code, item, decision.tmdbId, evidence, doc.generatedAt, atD1);
+    const committed = await commitVerified(env, sha, code, item, decision.tmdbId, evidence, doc.generatedAt, atD1, {guard: recoverGuard, intended: recovering ? String(item.intendedTmdb) : null, intendedPath: recovering ? item.filmPath : null});
     return withWrites(committed, committed.verified === true || committed.state === 'needs_review' || clearedStop, committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
   }
 
