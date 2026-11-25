@@ -19,10 +19,11 @@
 // (an abandoned id is terminal and can never be reused).
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
-import {RETRY_POLICY,assertOperationKeyReady,errorClassOf,normalizeFingerprint,normalizeOperationKey,operationHistoryCondition,receiptedWrite,requestIdOf} from './canonical-receipts.js';
+import {OPERATION_KEY_HISTORY_CAP,RETRY_POLICY,assertOperationKeyReady,errorClassOf,normalizeFingerprint,normalizeOperationKey,operationHistoryCondition,receiptedWrite,requestIdOf} from './canonical-receipts.js';
 
-// The most receipts one key may hold before the protocol refuses to reason about it (fail closed: `operation_key_history_oversized`, for a person). Every settle-and-reserve cycle adds one.
-export const OPERATION_KEY_HISTORY_CAP=100;
+// The most receipts one key may hold (defined with the reservation in canonical-receipts.js). A reservation that would exceed it is refused before any write (`operation_key_history_exhausted`),
+// so the history read below, which accepts exactly this many, can always read every accepted attempt. More than this many can only come from outside the protocol: `operation_key_history_oversized`.
+export {OPERATION_KEY_HISTORY_CAP};
 // Bounded replans of one call: a caller that keeps losing races stops with `wait` / `contended` instead of looping.
 export const OPERATION_KEY_ROUNDS=4;
 // The class an abandon of step 2 stores. It is a supersession by the protocol, not a failure that needs repair.
@@ -163,6 +164,7 @@ export async function reserveOperationKey(env,{operationKey,fingerprint,...input
 }
 
 const LOST=new Set(['operation_key_moved','operation_key_in_flight']);
+const EXHAUSTED='operation_key_history_exhausted';
 // The whole protocol with bounded replans. spec: {origin, operationKey, now?, policy?, rounds?}. hooks:
 //   validate(receipt, ctx)  -> 'settled' | 'historical'          step 3 (see reconcileOperationKey);
 //   decide(ctx)             -> one decision, after the history is clear (ctx: {fingerprint, ordinal, historical, abandoned}); this is where the caller reacquires its source:
@@ -172,7 +174,7 @@ const LOST=new Set(['operation_key_moved','operation_key_in_flight']);
 //        a terminal outcome that reserves nothing: the caller's write carries `guard` ({sql, params}) inside its own batch and answers {refused:true} when its batch was refused;
 //     {kind:'none', result}
 //        nothing to write.
-// -> {status:'wait'|'settled'|'reserved'|'finalized'|'refused'|'none', ...}. `refused` is a finalize refused with the history unchanged (another guard of the caller's batch failed). A lost race
+// -> {status:'wait'|'settled'|'reserved'|'finalized'|'refused'|'exhausted'|'none', ...}. `exhausted`: the key holds OPERATION_KEY_HISTORY_CAP receipts, so no new attempt is reserved (for a person). `refused` is a finalize refused with the history unchanged (another guard of the caller's batch failed). A lost race
 // (the reservation's or the finalize's assertion) replans from step 1, at most `rounds` times; then `wait` / `contended`. Other errors propagate after nothing was reported.
 export async function runOperationKey(env,{origin,operationKey,now,policy=RETRY_POLICY,rounds=OPERATION_KEY_ROUNDS}={},hooks={}){
  const scope=scopeOf({origin,operationKey});
@@ -182,7 +184,8 @@ export async function runOperationKey(env,{origin,operationKey,now,policy=RETRY_
  for(let round=0;round<rounds;round++){
   const state=await reconcileOperationKey(env,{...scope,now:clock,rounds},{validate:hooks.validate});
   if(state.status!=='clear')return {...state,replans};
-  const ctx={fingerprint:state.fingerprint,ordinal:state.ordinal,historical:state.historical,abandoned:state.abandoned};
+  // `exhausted`: the key is at its history cap, so a reservation would be refused; a terminal outcome that reserves nothing is still possible.
+  const ctx={fingerprint:state.fingerprint,ordinal:state.ordinal,historical:state.historical,abandoned:state.abandoned,exhausted:state.fingerprint.count>=OPERATION_KEY_HISTORY_CAP};
   const decision=await hooks.decide(ctx);
   if(decision?.kind==='none')return {status:'none',result:decision.result,fingerprint:state.fingerprint,replans};
   if(decision?.kind==='reserve'){
@@ -194,6 +197,8 @@ export async function runOperationKey(env,{origin,operationKey,now,policy=RETRY_
     return {status:'reserved',requestId,outcome,fingerprint:state.fingerprint,replans};
    }catch(error){
     if(LOST.has(errorClassOf(error))){replans++;continue;}
+    // At the cap: a typed, fail-closed answer; no receipt was written and the writer never ran.
+    if(errorClassOf(error)===EXHAUSTED)return {status:'exhausted',fingerprint:state.fingerprint,replans};
     throw error;
    }
   }

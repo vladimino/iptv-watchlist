@@ -19,7 +19,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {mutateFilm,fenced} from '../src/canonical-mutations.js';
 import {readAuthority} from '../src/film-person-authority.js';
-import {receiptedWrite,readReceipt,listAttention,operationKeyStatus,operationHistoryCondition,normalizeOperationKey,digestOf,requestIdOf} from '../src/canonical-receipts.js';
+import {receiptedWrite,readReceipt,listAttention,reconcileReceipts,defineOperation,operationRegistry,operationKeyStatus,operationHistoryCondition,normalizeOperationKey,digestOf,requestIdOf} from '../src/canonical-receipts.js';
 import * as K from '../src/receipt-operation-key.js';
 import {migrationStatements} from '../scripts/published-epg-production.mjs';
 
@@ -450,6 +450,69 @@ const appliedIn=list=>list.some(item=>/SET state='applied'/.test(item.text));
  const out=await K.runOperationKey(env,{origin:ORIGIN,operationKey:KEY,now:clockAt(0)},{decide:reserving(env,file,MOVIE_A)});
  assert.equal(out.status,'reserved');assert.equal(keyed(file,KEY,'o_other').length,1);assert.equal(keyed(file).length,1);
  assert.equal((await readReceipt(env,out.requestId)).state,'applied','the legacy read path sees a keyed receipt as before');
+}
+
+// ---- 12. The legacy reconciler never owns a keyed attempt (PR #995 review) ---------------------------------------------------
+{
+ const file=open(),env=envOf(file);
+ // a due keyed attempt (pending past its window) and a due legacy attempt of the same origin and operation; the keyed one sorts first, so with a window of one it would take the slot
+ exec(file,receiptSql({id:'a-keyed-due',key:KEY,at:iso(-600000)})+';'+receiptSql({id:'b-legacy-due',at:iso(-600000)}));
+ const keyedBefore=rows(file,"SELECT state,attempts,next_attempt_at,error_class FROM canonical_write_receipt WHERE request_id='a-keyed-due'")[0];
+ const seen=[];
+ const op=defineOperation({operation:'film_mutation',atomic:true,
+  readback:async(e,target,receipt)=>{seen.push('readback:'+receipt.requestId);return null;},
+  replay:async(e,receipt,ctx)=>{seen.push('replay:'+receipt.requestId);return writer(env,MOVIE_A,'Legacy replay')({...ctx,requestId:receipt.requestId});}});
+ const out=await reconcileReceipts(env,{operations:operationRegistry([op]),origin:ORIGIN,now:clockAt(0),limit:1});
+ assert.deepEqual(seen,['readback:b-legacy-due','replay:b-legacy-due'],'only the legacy row is read back and replayed');
+ assert.equal(out.considered,1);assert.deepEqual(out.replayed,['b-legacy-due']);
+ assert.deepEqual(rows(file,"SELECT state,attempts,next_attempt_at,error_class FROM canonical_write_receipt WHERE request_id='a-keyed-due'")[0],keyedBefore,'the keyed attempt is untouched: no state, attempt or due-time change');
+ assert.equal(titleOf(file,MOVIE_A),'Legacy replay','the legacy writer effect is the legacy row\'s only');
+ // the keyed protocol still owns it: it abandons it and reserves anew
+ const keyedRun=await K.runOperationKey(env,{origin:ORIGIN,operationKey:KEY,now:clockAt(0)},{validate:async()=>'historical',decide:async()=>({kind:'none'})});
+ assert.equal(keyedRun.status,'none');
+ assert.deepEqual(rows(file,"SELECT state,error_class FROM canonical_write_receipt WHERE request_id='a-keyed-due'")[0],{state:'abandoned',error_class:'superseded_by_retry'});
+ // an unkeyed direct call with the exact id of a keyed attempt is refused; the row does not move and the writer never runs
+ exec(file,receiptSql({id:'c-keyed-direct',key:'admission:lid:direct',at:iso(-600000)}));
+ const direct=rows(file,"SELECT state,attempts FROM canonical_write_receipt WHERE request_id='c-keyed-direct'")[0];
+ let ran=false;
+ await assert.rejects(()=>receiptedWrite(env,{requestId:'c-keyed-direct',operation:'film_mutation',origin:ORIGIN,target:{kind:'film',id:MOVIE_A},expectedRevision:0,digest:DIGEST,now:clockAt(0)},{run:async()=>{ran=true;},readback:async()=>null,atomic:true}),code('receipt_conflict'));
+ assert.equal(ran,false);assert.deepEqual(rows(file,"SELECT state,attempts FROM canonical_write_receipt WHERE request_id='c-keyed-direct'")[0],direct);
+ // below schema 39 the legacy reconciler lists exactly what it did before
+ const old=open(before),oldEnv=envOf(old);
+ exec(old,receiptSql({id:'old-due',at:iso(-600000)}));
+ const oldSeen=[];
+ const oldOp=defineOperation({operation:'film_mutation',atomic:true,readback:async(e,t2,receipt)=>{oldSeen.push(receipt.requestId);return null;},replay:async(e,receipt,ctx)=>writer(oldEnv,MOVIE_A,'Old')({...ctx,requestId:receipt.requestId})});
+ const oldOut=await reconcileReceipts(oldEnv,{operations:operationRegistry([oldOp]),origin:ORIGIN,now:clockAt(0)});
+ assert.deepEqual(oldSeen,['old-due']);assert.deepEqual(oldOut.replayed,['old-due']);
+}
+
+// ---- 13. The history cap is enforced before a reservation, so no accepted attempt strands its own history (PR #995 review) -------
+{
+ const CAP=K.OPERATION_KEY_HISTORY_CAP,FULL='admission:lid:full';
+ const file=open();
+ const script=[];
+ for(let i=0;i<CAP-1;i++){const id='full-'+String(i).padStart(3,'0');script.push(receiptSql({id,key:FULL})+";UPDATE canonical_write_receipt SET state='abandoned',error_class='superseded_by_retry',next_attempt_at=NULL,settled_at='"+T+"' WHERE request_id='"+id+"'");}
+ exec(file,script.join(';\n'));
+ // cap-1 -> cap, with the response lost: the attempt that fills the history stays readable and is recovered from it
+ let lose=true;
+ const lossy=intercept(envOf(file),{after:async list=>{if(lose&&appliedIn(list)){lose=false;throw new Error('Network connection lost');}}});
+ await assert.rejects(()=>K.runOperationKey(lossy,{origin:ORIGIN,operationKey:FULL,now:clockAt(0)},{decide:reserving(lossy,file,MOVIE_A,'Movie A')}),code('film_person_unavailable'));
+ const env=envOf(file);
+ const atCap=await K.readOperationHistory(env,{origin:ORIGIN,operationKey:FULL});
+ assert.deepEqual(atCap.fingerprint,{count:CAP,applied:1},'a history of exactly the cap is read whole');
+ const recovered=await K.runOperationKey(env,{origin:ORIGIN,operationKey:FULL,now:clockAt(5000)},{validate:intends(file,MOVIE_A),decide:async()=>{throw new Error('no decision');}});
+ assert.equal(recovered.status,'settled','the lost response at the cap is settled from its applied attempt');
+ // cap -> a new reservation: a typed refusal, no receipt and no writer run; a terminal outcome is still possible
+ const count=receiptCount(file),revB=revisionOf(file,MOVIE_B);let exhaustedSeen=null;
+ const refusedRun=await K.runOperationKey(env,{origin:ORIGIN,operationKey:FULL,now:clockAt(6000)},{validate:async()=>'historical',decide:async ctx=>{exhaustedSeen=ctx.exhausted;return reserving(env,file,MOVIE_B,'Movie B')();}});
+ assert.deepEqual([refusedRun.status,exhaustedSeen],['exhausted',true]);
+ assert.equal(receiptCount(file),count);assert.equal(revisionOf(file,MOVIE_B),revB);
+ const untouched={DB:{prepare(){throw new Error('touched');},batch(){throw new Error('touched');}}};
+ await assert.rejects(()=>K.reserveOperationKey(untouched,{requestId:'o_test:film_mutation:over',operation:'film_mutation',origin:ORIGIN,target:{kind:'film',id:MOVIE_B},expectedRevision:0,digest:DIGEST,operationKey:FULL,fingerprint:{count:CAP,applied:1},now:clockAt(0)},{run:async()=>{throw new Error('ran');},readback:async()=>null,atomic:true}),code('operation_key_history_exhausted'),'refused before anything is read');
+ const terminal=await K.runOperationKey(env,{origin:ORIGIN,operationKey:FULL,now:clockAt(7000)},{validate:async()=>'historical',decide:async()=>({kind:'finalize',write:finalizing(env,FULL,'needs_review')})});
+ assert.equal(terminal.status,'finalized');
+ // a history over the cap can only come from outside the protocol and is still refused whole (section 9); one below it reserves normally (section 3)
+ assert.equal(receiptCount(file),count);
 }
 
 // ---- 11. Dormant: nothing calls the protocol, nothing bundles it, no network, timer or R2 -------------------------------------

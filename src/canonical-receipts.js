@@ -248,6 +248,19 @@ export async function receiptsAvailable(env){return (await receiptsStatus(env))!
 // request id, target or digest. The protocol that reads, settles and reserves under a key is src/receipt-operation-key.js; this module only writes the key with the receipt it inserts, under an
 // assertion of the key's observed history. A receipt written WITHOUT a key is exactly what it was before schema 39 (no statement, column or check of a keyed write applies to it).
 export const OPERATION_KEY_MIN_VERSION=39;
+// The most receipts one key may hold. A reservation is refused BEFORE it would exceed it (`operation_key_history_exhausted`, no row, no writer run), so every accepted reservation stays readable
+// by the protocol's history read, which accepts exactly this many and refuses more (`operation_key_history_oversized`). At the cap, reconciliation, applied validation and a terminal outcome
+// that reserves nothing still work; only a new attempt is refused, for a person to look at the item.
+export const OPERATION_KEY_HISTORY_CAP=100;
+// Whether the receipt table has the operation key column (schema 39). An unreadable catalog throws (the caller's own query would fail the same way).
+async function keyedColumn(db){
+ return Number((await one(db,"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='canonical_write_receipt' AND sql LIKE '%operation_key%'"))?.n)===1;
+}
+// The operation key of a stored receipt, or null (no key, or no such column).
+async function operationKeyOfReceipt(db,requestId){
+ if(!(await keyedColumn(db)))return null;
+ return (await one(db,'SELECT operation_key FROM canonical_write_receipt WHERE request_id=?',[requestId]))?.operation_key??null;
+}
 // A lowercase namespace, a colon, then the request id alphabet; at most 200. An identifier, never a payload (the SQL CHECK is the same rule, the namespace length aside).
 const OPERATION_KEY=/^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9:._/=+@-]+$/;
 export function normalizeOperationKey(value){
@@ -314,7 +327,9 @@ export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit
  const cap=Math.min(Math.max(Number(limit)||1,1),RECONCILE_LIMIT_MAX);
  const list=states.filter(state=>RECEIPT_STATES.includes(state));
  if(!list.length)return [];
- const where='state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'')+(origin!==null?' AND origin=?':'');
+ // AIR-600 (PR #995 review): a receipt with an operation key belongs to the keyed protocol (src/receipt-operation-key.js), which abandons and reserves anew; the legacy reconciler never selects,
+ // replays, settles or abandons one, and keyed rows never use up its bounded window. Below schema 39 there is no such column and the list is exactly what it was.
+ const where='state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'')+(origin!==null?' AND origin=?':'')+(await keyedColumn(db)?' AND operation_key IS NULL':'');
  return (await many(db,'SELECT '+COLUMNS+' FROM canonical_write_receipt WHERE '+where+' ORDER BY next_attempt_at,request_id LIMIT ?',[...list,...(dueBefore?[dueBefore]:[]),...(origin!==null?[origin]:[]),cap])).map(view);
 }
 
@@ -522,6 +537,8 @@ export async function receiptedWrite(env,input,hooks){
  const request=normalizeRequest(input);
  // AIR-600 R1: an operation key and its observed history are validated with the request, before anything is read (see the reservation below).
  const keyed=keyedOf(input);
+ // A reservation at the history cap would make the key's own history unreadable: refused before anything is read or written.
+ if(keyed&&keyed.history.count>=OPERATION_KEY_HISTORY_CAP)throw failed('operation_key_history_exhausted');
  // Atomic mode is the only mode unless the hooks carry an approved named exception (see APPROVED_EXCEPTIONS); this is checked before anything is read or written.
  const atomic=hooks?.atomic===true;
  if(!atomic)exceptionOf({exception:hooks?.exception},hooks?.approvedExceptions||APPROVED_EXCEPTIONS);
@@ -555,6 +572,8 @@ export async function receiptedWrite(env,input,hooks){
  }
  // Under a key an id that already exists is another caller's reservation of the same content at the same history: this attempt is the loser.
  if(keyed&&!created)throw failed('operation_key_moved');
+ // Without a key, an existing receipt that HAS one is never replayed, settled or abandoned here: it belongs to the keyed protocol.
+ if(!keyed&&!created&&(await operationKeyOfReceipt(database(env),row.requestId))!==null)throw failed('receipt_conflict');
  if(!sameRequest(row,request))throw failed('receipt_conflict');
  if(row.state==='applied')return {ran:false,state:'applied',already:true,receipt:row};
  if(row.state==='abandoned')return {ran:false,state:'abandoned',receipt:row};
