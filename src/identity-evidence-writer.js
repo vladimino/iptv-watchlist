@@ -109,8 +109,9 @@ const COLUMNS='evidence_key,film_id,subject_kind,subject_value,relation,object_k
 // Unbound (film_id NULL: a domain row names no Film). The row is written only while its writer is `pending` or `on`; an existing key is a no-op.
 const INSERT='INSERT INTO film_identity_evidence ('+COLUMNS+') SELECT ?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN (\'pending\',\'on\')) ON CONFLICT(evidence_key) DO NOTHING';
 // Semantic identity (ADR 0215 decision 1): proposition, polarity, route, method, root (or its substitute), `source_scope`, `scope_evidence_key`, supersession and `source_order`.
-// `IS` so a NULL equals a NULL. The substitute of an unknown root is `reconstructed_from`; a live row has a root.
-const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND reconstructed_from IS ? AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
+// `IS` so a NULL equals a NULL. `reconstructed_from` is the substitute of an UNKNOWN root only (ADR 0215 decisions 1 and 7, as the import's own `SAME_IDENTITY`): with a known root it is provenance, not identity, so a
+// reconstructed row of the same rooted key does not collide with a later live check (the existing row is left as it is, and is never read as live proof).
+const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND (source_root IS NOT NULL OR reconstructed_from IS ?) AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
 // Commit-time schema guard of a batch prepared without the control tables.
 export const ABSENT="NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('identity_evidence_writer','identity_evidence_writer_change'))";
 const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";

@@ -39,19 +39,31 @@ const EVIDENCE_SOURCES=Object.freeze({
 });
 const EVIDENCE_ASSERT=condition=>'UPDATE discovery_cas SET ok=CASE WHEN '+condition+' THEN 1 ELSE 0 END WHERE id=1';
 // Pure. The evidence input of one decision, or null when the decision states no checked identity. The root is the observation key (a re-check of one observation is one root, never
-// independent corroboration); the time is the decision's own `checkedAt`, never the write time. An owner decision, a policy exclusion and a decision without `identitySource` give null.
+// independent corroboration); the time is the decision's own `checkedAt`, never the write time. An owner decision (`identitySource: 'owner'`), a policy exclusion and a decision without
+// `identitySource` give null. A carried `ownerIdentity` / `rejectedTmdbIds` marker (discovery.js `ownerMarkerCarry`) is history, not a discriminator: an automated detail check of another id after an
+// owner rejection is an ordinary new check.
 export function decisionEvidenceInput(key,decision){
- if(typeof key!=='string'||!key||!decision||typeof decision!=='object'||decision.status!=='verified'||decision.ownerIdentity)return null;
+ if(typeof key!=='string'||!key||!decision||typeof decision!=='object'||decision.status!=='verified')return null;
  const source=Object.hasOwn(EVIDENCE_SOURCES,decision.identitySource)?EVIDENCE_SOURCES[decision.identitySource]:null;
  if(!source||decision.tmdbId==null)return null;
  return {subject:{kind:'discovery_observation',value:key},relation:'candidate_for',object:{kind:mediaKind(decision)==='tv'?'tmdb_tv':'tmdb_movie',value:String(decision.tmdbId)},polarity:'asserts',route:'discovery_scan',
   method:source.method,sourceRoot:key,sourceScope:source.scope,observedAt:decision.checkedAt};
 }
+// Pure. Whether the transition `previous -> next` records a check that was PERFORMED (ADR 0215 decision 5: a row only for a step that checked, never for an inherited verification). A new
+// decision hash is necessary but not sufficient: a revalidation that reconfirmed nothing (`revalidatedDecision` with only failed durations), a metadata or deferral rewrite and any write that
+// leaves the verified fields alone change `checkedAt` or other fields of an inherited verification without a successful check. A check is performed when the decision becomes verified
+// (from any other state), when its source, TMDB id or media kind changes (a known alias confirmed by a detail check, another id), or when the anchor gains a duration (a reconfirmed one).
+export function decisionCheckPerformed(previous,next){
+ if(!previous||typeof previous!=='object'||previous.status!=='verified')return true;
+ if(previous.identitySource!==next?.identitySource||previous.tmdbId==null||String(previous.tmdbId)!==String(next?.tmdbId)||mediaKind(previous)!==mediaKind(next))return true;
+ const known=decisionAnchor(previous);
+ return decisionAnchor(next).some(duration=>!known.includes(duration));
+}
 // The statements to place BEFORE the history insert of a batch, in the same batch (see above), or [] for a decision without evidence. A value the ledger model refuses (an id or a time
 // outside its shape) is a decision that states no recordable check: no row, the domain step is unchanged. A damaged evidence schema fails the decision write closed.
-async function decisionEvidence(env,key,decision,hash,at){
+async function decisionEvidence(env,key,decision,hash,at,previous){
  const input=decisionEvidenceInput(key,decision);
- if(!input)return [];
+ if(!input||!decisionCheckPerformed(previous,decision))return [];
  let plan;
  try{plan=await planDomainEvidence('discovery_decision',input);}
  catch(error){
@@ -555,12 +567,12 @@ async function writeDecisions(env,map,gate,context){
   if(!decision||typeof decision!=='object'||Array.isArray(decision))throw failed('discovery_conflict');
   const hash=await decisionHash(decision);
   const kind=mediaKind(decision);
-  const evidence=await decisionEvidence(env,key,decision,hash,new Date().toISOString());
+  let previous=null;
+  try{const stored=await one(db,'SELECT payload_json FROM discovery_decision WHERE observation_key=?',[key]);previous=stored?JSON.parse(stored.payload_json):null;}catch{previous=null;}
+  const evidence=await decisionEvidence(env,key,decision,hash,new Date().toISOString(),previous);
   const observation=await one(db,'SELECT evidence_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=?',[key]);
   if(!observation)throw failed('discovery_fence');
   if(decision.evidenceKey!=null&&observation.evidence_key!=null&&observation.evidence_key!==decision.evidenceKey)throw failed('discovery_fence');
-  let previous=null;
-  try{const stored=await one(db,'SELECT payload_json FROM discovery_decision WHERE observation_key=?',[key]);previous=stored?JSON.parse(stored.payload_json):null;}catch{previous=null;}
   prepared.push({key,decision,hash,kind,previous,evidence});
  }
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
@@ -1414,7 +1426,7 @@ export async function writeDecisionDelta(env,changes,context={}){
   const cas=expected==null?'NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=?)':'EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)';
   const live=' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1) AND EXISTS (SELECT 1 FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=? AND (? IS NULL OR evidence_key IS NULL OR evidence_key=?)) AND '+cas;
   const generation=gate.generation+1,at=new Date().toISOString();
-  const evidenceRows=await decisionEvidence(env,key,next,hash,at);
+  const evidenceRows=await decisionEvidence(env,key,next,hash,at,previous);
   try{
    await commit(db,[
     fence(gate,lease,live,[key,evidence,evidence,key,...(expected==null?[]:[expected])]),

@@ -78,10 +78,11 @@ const recorded=(file,statements)=>d1Standin(file,{onBatch:async batch=>{statemen
   ['an unknown identitySource',detail({identitySource:'owner_guess'})],
   ['an inherited identitySource name',detail({identitySource:'constructor'})],
   ['an owner decision',detail({identitySource:'owner'})],
-  ['an owner-reviewed marker',detail({ownerIdentity:{requestId:'r',at:CHECKED}})],
   ['a verified decision without a TMDB id',detail({tmdbId:null})],
   ['null',null],
  ])assert.equal(Authority.decisionEvidenceInput('a|2001',decision),null,name);
+ // A marker carried from an earlier owner action is history, not the check: an automated detail check keeps its row (review of AIR-617).
+ assert.ok(Authority.decisionEvidenceInput('a|2001',detail({ownerIdentity:{requestId:'r',at:CHECKED},rejectedTmdbIds:['603']})));
  assert.equal(Authority.decisionEvidenceInput('',detail()),null);
  // The model refuses what it cannot record; the writer turns that into no row (the domain step is unchanged), see section 5.
  assert.throws(()=>normalizeEvidence(Authority.decisionEvidenceInput('a|2001',detail({checkedAt:undefined}))),error=>error.reason==='unchecked_no_observed_at');
@@ -339,6 +340,96 @@ for(const state of ['pending','on']){
  assert.equal(stored(w.file,'a|2001'),null,'a damaged control schema never serves a silent gap inside a claimed interval');
  // A decision that states no evidence does not read the schema at all.
  assert.deepEqual((await delta(w,'b|2002',{status:'deferred',attempts:1})).written,['b|2002']);
+}
+
+// ===== 12. the actual caller transitions: which writes performed a check =====
+{
+ const marker={ownerIdentity:{requestId:'req-owner-9',at:CHECKED,action:'reject'},rejectedTmdbIds:['603']};
+ // An owner rejects movie A; a later automated detail check of another id B carries the markers but is a new successful check: a row, on both caller paths.
+ const w=await world(chain42);
+ await setWriter(w.env,'on');
+ const rejected={status:'unresolved',attempts:1,...marker};
+ await delta(w,'a|2001',rejected);
+ assert.equal(ledger(w.file).length,0,'the rejection itself writes no row');
+ const redone=detail({tmdbId:'604',filmId:'tmdb_604',canonicalIdentity:'tmdb:604',checkedAt:CHECKED_LATER,...marker});
+ await delta(w,'a|2001',redone,rejected);
+ assert.deepEqual(ledger(w.file).map(row=>[row.object_value,row.method,row.observed_at]),[['604','tmdb_detail_check',CHECKED_LATER]],'a carried owner marker does not hide a successful automated check');
+ await Authority.routeWrite(w.env,'epg/discovery-resolution.json',{'b|2002':{status:'unresolved',attempts:1,...marker}},{lease:w.lease});
+ await Authority.routeWrite(w.env,'epg/discovery-resolution.json',{'b|2002':detail({tmdbId:'605',filmId:'tmdb_605',...marker})},{lease:w.lease});
+ assert.deepEqual(ledger(w.file).map(row=>row.subject_value),['a|2001','b|2002'],'the document path agrees');
+ // An owner-only decision (identitySource owner) and an unchanged one write nothing.
+ const ownerOnly=detail({identitySource:'owner',tmdbId:'606',filmId:'tmdb_606',...marker});
+ await delta(w,'c|2003',ownerOnly);
+ await delta(w,'a|2001',redone,redone);
+ assert.equal(ledger(w.file).length,2);
+}
+{
+ // Inherited verifications (written before activation, so no row) and the real revalidation transitions.
+ const w=await world(chain42);
+ const ek=key=>sql(w.file,"SELECT evidence_key FROM discovery_observation WHERE observation_key='"+key+"'")[0].evidence_key;
+ const inheritedDetail=detail({anchor:[100],evidenceKey:ek('a|2001')});
+ const inheritedAlias=alias('known_epg_alias',{tmdbId:'604',filmId:'tmdb_604',evidenceKey:ek('b|2002')});
+ const legacy=detail({tmdbId:'605',filmId:'tmdb_605',evidenceKey:ek('c|2003')});
+ for(const [key,decision] of [['a|2001',inheritedDetail],['b|2002',inheritedAlias],['c|2003',legacy]])assert.deepEqual((await delta(w,key,decision)).written,[key]);
+ await setWriter(w.env,'on');
+ const revalidate=(previous,outcome,at)=>Authority.decisionAfterRevalidation(previous,outcome,{evidenceKey:previous.evidenceKey,checkedAt:at,provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(previous.tmdbId)}});
+ // A failed-only revalidation changes checkedAt and failedDurations but performed no successful check: no row, the decision commits.
+ for(const [key,previous] of [['a|2001',inheritedDetail],['b|2002',inheritedAlias],['c|2003',legacy]]){
+  const failedOnly=revalidate(previous,{failed:[90]},CHECKED_LATER);
+  assert.notEqual(await hashOf(failedOnly),await hashOf(previous),'a new hash');
+  assert.deepEqual((await delta(w,key,failedOnly,previous)).written,[key]);
+  assert.equal(JSON.parse(stored(w.file,key).payload_json).failedDurations[0],90);
+ }
+ assert.equal(ledger(w.file).length,0,'a failed-only revalidation of an inherited decision writes no row');
+ // A metadata or deferral rewrite that keeps the verified fields, and a checkedAt-only change, write none either.
+ const rewritten=[['a|2001',{...inheritedDetail,anchor:[100],failedDurations:[90],lastAttemptAt:CHECKED_LATER}],['b|2002',{...inheritedAlias,deferReason:'wall_budget',retryAt:'2026-11-22T00:00:00.000Z'}],['c|2003',{...legacy,checkedAt:CHECKED_LATER}]];
+ for(const [key,next] of rewritten){
+  const previous=JSON.parse(stored(w.file,key).payload_json);
+  assert.deepEqual((await delta(w,key,next,previous)).written,[key]);
+ }
+ assert.equal(ledger(w.file).length,0,'metadata-only rewrites of inherited decisions write no row');
+ // A successful revalidation is a check: the detail row, for an inherited detail (a reconfirmed duration), an inherited known alias (now confirmed by detail) and a legacy anchor.
+ for(const [key,previous,duration] of [['a|2001',JSON.parse(stored(w.file,'a|2001').payload_json),95],['b|2002',JSON.parse(stored(w.file,'b|2002').payload_json),95],['c|2003',JSON.parse(stored(w.file,'c|2003').payload_json),95]]){
+  const confirmed=revalidate(previous,{reconfirmed:[duration]},CHECKED_LATER);
+  assert.equal(confirmed.identitySource,'tmdb_detail');
+  assert.deepEqual((await delta(w,key,confirmed,previous)).written,[key]);
+ }
+ assert.deepEqual(ledger(w.file).map(row=>[row.subject_value,row.method,row.observed_at]),[['a|2001','tmdb_detail_check',CHECKED_LATER],['b|2002','tmdb_detail_check',CHECKED_LATER],['c|2003','tmdb_detail_check',CHECKED_LATER]]);
+ // The pure rule, on its own.
+ assert.equal(Authority.decisionCheckPerformed(null,detail()),true);
+ assert.equal(Authority.decisionCheckPerformed({status:'deferred'},detail()),true);
+ assert.equal(Authority.decisionCheckPerformed(detail(),detail({checkedAt:CHECKED_LATER})),false);
+ assert.equal(Authority.decisionCheckPerformed(detail(),detail({tmdbId:'604'})),true,'another id is a new check');
+ assert.equal(Authority.decisionCheckPerformed(alias('known_epg_alias'),detail()),true);
+}
+
+// ===== 13. a reconstructed row of the same rooted key does not stop a later live check =====
+{
+ const w=await world(chain42);
+ await setWriter(w.env,'on');
+ const next=detail();
+ const input=Authority.decisionEvidenceInput('a|2001',next);
+ const key=await evidenceKeyOf(input);
+ const insert=(file,object)=>sql(file,"INSERT INTO film_identity_evidence (evidence_key,film_id,subject_kind,subject_value,relation,object_kind,object_value,polarity,route,method,source_root,source_ref,source_scope,scope_evidence_key,supersedes_key,observed_at,origin,reconstruction_run,reconstructed_from,request_id,recorded_at,source_order) VALUES ('"+key+"',NULL,'discovery_observation','a|2001','candidate_for','tmdb_movie','"+object+"','asserts','discovery_scan','tmdb_detail_check','a|2001',NULL,NULL,NULL,NULL,'"+CHECKED+"','reconstruction','run-e3b-1','history:a|2001:7','import-1','"+CHECKED+"',NULL)");
+ insert(w.file,'603');
+ assert.deepEqual((await delta(w,'a|2001',next)).written,['a|2001'],'the decision and its history commit');
+ assert.equal(history(w.file,'a|2001'),1);
+ const rows=ledger(w.file);
+ assert.equal(rows.length,1,'one immutable ledger row');
+ assert.deepEqual([rows[0].origin,rows[0].request_id],['reconstruction','import-1'],'the reconstructed row is neither upgraded nor replaced');
+ // The document path agrees.
+ const other=await world(chain42);
+ await setWriter(other.env,'on');
+ insert(other.file,'603');
+ await Authority.routeWrite(other.env,'epg/discovery-resolution.json',{'a|2001':next},{lease:other.lease});
+ assert.equal(ledger(other.file).length,1);
+ assert.ok(stored(other.file,'a|2001'));
+ // A genuinely different identity under the same key still rolls the batch back.
+ const bad=await world(chain42);
+ await setWriter(bad.env,'on');
+ insert(bad.file,'999');
+ await rejects(delta(bad,'a|2001',next),/discovery_fence/);
+ assert.equal(stored(bad.file,'a|2001'),null);
 }
 
 // ===== 11. dormant: the bundle holds the writer but nothing activates it; no reader, no import =====
