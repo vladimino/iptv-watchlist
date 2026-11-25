@@ -147,7 +147,9 @@ export async function readReconcileIntent(env,id,{runId,at=new Date().toISOStrin
 // written (`localization_inputs_moved`, `film_person_revision_conflict`). The batch re-asserts the intent's own pre-image, the owner-review token and the revision CAS. A named refusal
 // `localization_owner_moved` (the owner token was lost between plan and commit) is retryable by a NEW intent. `held` writes nothing and opens no batch.
 // Returns {written, revision, postRevision, preImage, postImage}: the images of the INTENT, which the batch has just proved are the stored ones.
-export async function writeFilmLocalizationReconcile(env,{intent: given,receiptMark}={}){
+async function writeFilmLocalizationReconcile(env,{intent: given,receiptMark}={}){
+ // PRIVATE: reachable only through the checkpointed, receipted path. A call without the receipt mark of its own pending receipt writes nothing.
+ if(receiptMark===undefined||receiptMark===null)throw failed('film_person_invalid');
  const intent=await checkIntent(given);
  const id=intent.id,expected=intent.plannedRevision;
  const tail=fenced.receiptTail(receiptMark,{kind:'film',id});
@@ -231,11 +233,33 @@ export async function recoverLocalizationReconcile(env,{intent: given}={}){
  if(receipt?.state!=='applied'&&snapshot.revision===intent.plannedRevision&&sameImage(image,intent.preImage))return {state:'not_applied',revision:snapshot.revision,receiptState:receipt?.state??null};
  return {state:'unknown',reason:receipt?.state==='applied'?'applied_revision_mismatch':'moved',revision:snapshot.revision};
 }
-// Resumes a recorded intent that recovery found `not_applied`: the same request id and digest, so a committed effect is never written twice. Returns {state, ...} like the apply of one Film.
-export async function resumeLocalizationReconcile(env,{intent: given,now,policy}={}){
+// The ONE checkpointed commit of an intent, shared by the apply and the resume: the receipted, atomic, fenced write under the intent's request id, then the durable settlement of the outcome.
+// Returns {state:'applied'|'not_applied'|'unknown', errorClass, settleError}. `not_applied` is a definite replan refusal (the batch rolled back whole); anything else that is not an applied
+// receipt is `unknown`, never guessed. A failed durable settlement is reported (`settleError`), never swallowed: the caller stops and does not treat the Film as complete.
+const REPLAN=new Set(['localization_inputs_moved','localization_owner_moved','film_person_revision_conflict']);
+async function commitIntent(env,port,intent,{clock,policy}){
+ let state,errorClass=null,receiptState=null;
+ try{
+  const outcome=await writeIntent(env,intent,{clock,policy});
+  if(appliedOf(outcome,intent))state='applied';
+  else{state='unknown';errorClass=outcome?.errorClass||outcome?.reason||outcome?.state||'unclassified';receiptState=outcome?.state??null;}
+ }catch(error){errorClass=error?.code||'unclassified';state=REPLAN.has(errorClass)?'not_applied':'unknown';}
+ let settleError=null;
+ try{await port.settle(intent,{state,errorClass,receiptState,...(state==='applied'?{revision:intent.postRevision}:{})});}catch(error){settleError=error?.code||'localization_checkpoint_settle_failed';}
+ return {state,errorClass,settleError};
+}
+const portOf=checkpoint=>{
+ if(!plain(checkpoint)||typeof checkpoint.record!=='function'||typeof checkpoint.settle!=='function')throw failed('film_person_invalid');
+ return checkpoint;
+};
+// Resumes a recorded intent that recovery found `not_applied` (or re-issues an applied one harmlessly). It needs the SAME durable checkpoint port as the apply: the exact intent is recorded
+// (idempotently) BEFORE the write is permitted, a refusal writes nothing (`localization_checkpoint_failed`), and the outcome is settled afterwards. The same request id and digest mean a
+// committed effect is never written twice. Returns {state, errorClass, settleError, intent}; a lost reply is `unknown` with the intent, recoverable like any other.
+export async function resumeLocalizationReconcile(env,{intent: given,checkpoint,now,policy}={}){
+ const port=portOf(checkpoint);
  const intent=await checkIntent(given),clock=clockOf(now);
- const outcome=await writeIntent(env,intent,{clock,policy});
- return {state:appliedOf(outcome,intent)?'applied':outcome.state,outcome,intent};
+ try{await port.record(intent);}catch(error){throw failed(CHECKPOINT_FAILED,error);}
+ return {...await commitIntent(env,port,intent,{clock,policy}),intent};
 }
 
 const clampCap=(value,fallback,max)=>{
@@ -276,12 +300,6 @@ export async function dryRunLocalizationReconcile(env,{after,limit,writeCap,now}
  return out;
 }
 
-const REPLAN=new Set(['localization_inputs_moved','localization_owner_moved','film_person_revision_conflict']);
-const portOf=checkpoint=>{
- if(!plain(checkpoint)||typeof checkpoint.record!=='function'||typeof checkpoint.settle!=='function')throw failed('film_person_invalid');
- return checkpoint;
-};
-
 // APPLY: one bounded pass. input: {runId, checkpoint:{record(intent), settle(intent,result)}, after?, limit?, writeCap?, now?, policy?}. The checkpoint is REQUIRED (fail closed before anything is read
 // for writing). For each examined Film: a noop, held or absent Film opens no receipt; a stale one becomes an immutable intent (the plan read once, at ONE stable `at`), `checkpoint.record(intent)`
 // must resolve before the write is permitted (a throw stops the pass with nothing written for that Film), the write is ONE receipted, atomic, fenced batch under the intent's request id, and
@@ -298,11 +316,12 @@ export async function applyLocalizationReconcile(env,{runId,checkpoint,after,lim
  const page=await filmPage(env,{after:start,limit:examineCap});
  const ids=page.slice(0,examineCap);
  const out={examined:0,cursor:start,hasMore:page.length>examineCap,written:[],uncertain:[],moved:[],held:[],noop:0,absent:0,stopped:null};
- const stop=(id,code,extra={})=>{out.stopped=code;out.failedId=id;out.error={id,code,...extra};};
+ // Any stop leaves the failed Film (and the Films after it) unprocessed, so a stopped page ALWAYS reports a continuation; `cursor` stays at the last Film fully settled.
+ const stop=(id,code,extra={})=>{out.stopped=code;out.failedId=id;out.error={id,code,...extra};out.hasMore=true;};
  for(const id of ids){
   if(out.written.length>=writes){out.stopped='write_cap';out.hasMore=true;break;}
   out.examined++;
-  let intent=null,recorded=false;
+  let intent=null;
   try{
    const at=clock();
    const {plan,inputs,revision}=await readReconcilePlan(env,id,{at});
@@ -310,31 +329,17 @@ export async function applyLocalizationReconcile(env,{runId,checkpoint,after,lim
    if(plan.state==='absent'){out.absent++;out.cursor=id;continue;}
    if(plan.state!=='write'){out.noop++;out.cursor=id;continue;}
    intent=await intentOf({runId,at,revision,inputs,plan});
-   // Fail closed: nothing is written for this Film unless its intent is durably recorded.
-   try{await port.record(intent);}catch(error){stop(id,CHECKPOINT_FAILED,{cause:error?.code||null});out.examined--;break;}
-   recorded=true;
-   const outcome=await writeIntent(env,intent,{clock,policy});
-   if(appliedOf(outcome,intent)){
-    out.written.push(intent);out.cursor=id;
-    try{await port.settle(intent,{state:'applied',revision:intent.postRevision});}catch(error){stop(id,'localization_checkpoint_settle_failed',{cause:error?.code||null});break;}
-    continue;
-   }
-   // Not an applied receipt: the outcome is not proven either way. Never guessed.
-   out.uncertain.push(intent);
-   try{await port.settle(intent,{state:'unknown',receiptState:outcome?.state??null,errorClass:outcome?.errorClass??null});}catch{/* the intent is already recorded and listed as uncertain */}
-   stop(id,outcome?.errorClass||outcome?.reason||outcome?.state||'unclassified');break;
-  }catch(error){
-   const code=error?.code||'unclassified';
-   if(intent&&recorded&&REPLAN.has(code)){
-    out.moved.push({id,code});out.cursor=id;
-    try{await port.settle(intent,{state:'not_applied',errorClass:code});}catch{/* the next run replans under a new intent; the recorded one stays as not_applied-by-code */}
-    continue;
-   }
-   if(intent&&recorded)out.uncertain.push(intent);
-   if(intent&&recorded){try{await port.settle(intent,{state:'unknown',errorClass:code});}catch{/* listed as uncertain */}}
-   else if(REPLAN.has(code)){out.moved.push({id,code});out.cursor=id;continue;}
-   stop(id,code);break;
-  }
+  }catch(error){stop(id,error?.code||'unclassified');break;}
+  // Fail closed: nothing is written for this Film unless its intent is durably recorded. The Film was read, so it stays counted as examined.
+  try{await port.record(intent);}catch(error){stop(id,CHECKPOINT_FAILED,{cause:error?.code||null});break;}
+  const result=await commitIntent(env,port,intent,{clock,policy});
+  if(result.state==='applied')out.written.push(intent);
+  else if(result.state==='not_applied')out.moved.push({id,code:result.errorClass});
+  else out.uncertain.push(intent);
+  // A failed durable settlement is never completion: the pass stops and the Film is not passed over.
+  if(result.settleError){stop(id,'localization_checkpoint_settle_failed',{cause:result.settleError});break;}
+  if(result.state==='unknown'){stop(id,result.errorClass||'unclassified');break;}
+  out.cursor=id;
  }
  return out;
 }
@@ -365,15 +370,21 @@ export async function restoreLocalizationReconcile(env,{runId,token,now,policy}=
 // The fenced restore write. It applies ONLY while the Film is at exactly postRevision AND the stored row still equals postImage: any other writer since then moved the revision, so a restore
 // would erase its work and is refused (`localization_restore_moved`, nothing written). A pre-image of null deletes the row the reconciler created. It bumps the revision, so a second restore of
 // the same token is refused. The legacy source row the reconciler preserved is NOT removed (a source row is a durable resolver input, never destroyed by a restore).
-export async function restoreFilmLocalization(env,{intent: given,at,receiptMark}={}){
+async function restoreFilmLocalization(env,{intent: given,at,receiptMark}={}){
+ // PRIVATE: reachable only through restoreLocalizationReconcile, which binds the intent to its applied receipt and the owner gate before a receipt is reserved.
+ if(receiptMark===undefined||receiptMark===null)throw failed('film_person_invalid');
  const intent=await checkIntent(given);
  const id=intent.id,pre=intent.preImage,post=intent.postImage;
  fenced.text(at);
  const tail=fenced.receiptTail(receiptMark,{kind:'film',id});
  const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ // The owner-review domain is re-proved AT the mutation boundary with the CURRENT token (the existing two-fence gate; it need not equal the apply-time token): an owner move between the
+ // wrapper's read and this batch refuses the restore (`localization_owner_moved`), which the independent Film CAS would not catch.
+ const token=await readOwnerReviewToken(env,id);
  const entities=[{kind:'film',id,expected:intent.postRevision}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
+ statements.push(...ownerTokenStatements(token));
  statements.push(assertImage(post,id));
  if(pre===null)statements.push(["DELETE FROM film_dimension WHERE film_id=? AND dimension='localization'",[id]]);
  else statements.push(["UPDATE film_dimension SET "+COLUMNS.map(name=>name+'=?').join(',')+" WHERE film_id=? AND dimension='localization'",[...COLUMNS.map(name=>pre[name]),id]]);
@@ -381,6 +392,11 @@ export async function restoreFilmLocalization(env,{intent: given,at,receiptMark}
  statements.push([fenced.BUMP,['film',id,at]]);
  try{await fenced.commit(env,gate,statements,entities,tail);}
  catch(error){
+  if(error?.code==='film_person_precondition'){
+   let again=null;
+   try{again=await readOwnerReviewToken(env,id);}catch{throw failed('localization_owner_moved',error);}
+   if(again.digest!==token.digest)throw failed('localization_owner_moved',error);
+  }
   if(error?.code==='film_person_revision_conflict'||error?.code==='film_person_precondition')throw failed(RESTORE_MOVED,error);
   throw error;
  }

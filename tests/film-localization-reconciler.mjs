@@ -206,20 +206,23 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  assert.deepEqual([run.written.map(item=>item.id),run.absent,locRow(file).authority,locRow(file,OTHER)],[[FID],1,'owner',null]);
 }
 
-// ---- 8. Concurrent mutation against the INTENT: moved resolver input, moved owner decision, moved revision, changed non-resolver column; nothing is written ----
+// ---- 8. Concurrent mutation against the INTENT (through the public checkpointed path): moved input, owner decision, revision, a changed non-resolver column; nothing is written ----
 {
  const file=database();staleFilm(file,FID,'1656');addOwner(file);
  const env={DB:d1Standin(file)};
+ const resume=(env,intent,port=memory())=>R.resumeLocalizationReconcile(env,{intent,checkpoint:port,now:clock});
  const {intent}=await R.readReconcileIntent(env,FID,{runId:'w',at:T3});
- const before=snapshotRows(file);
  sourceRow(file,FID,'letterboxd','Новое',T2,'other');
- await assert.rejects(()=>R.writeFilmLocalizationReconcile(env,{intent}),code('localization_inputs_moved'));
+ const p1=memory();
+ const r1=await resume(env,intent,p1);
+ assert.deepEqual([r1.state,r1.errorClass,p1.log.records.length,p1.log.settles.map(x=>x.state)],['not_applied','localization_inputs_moved',1,['not_applied']]);
  const second=(await R.readReconcileIntent(env,FID,{runId:'w',at:T3})).intent;
  ownerCommit(file,{value:'Жара 2'});
- await assert.rejects(()=>R.writeFilmLocalizationReconcile(env,{intent:second}),code('localization_inputs_moved'));
+ const r2=await resume(env,second);
+ assert.deepEqual([r2.state,r2.errorClass],['not_applied','localization_inputs_moved']);
  const third=(await R.readReconcileIntent(env,FID,{runId:'w',at:T3})).intent;
  exec(file,"INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film',"+q(FID)+",1,'"+T+"') ON CONFLICT(kind,id) DO UPDATE SET revision=revision+1");
- await assert.rejects(()=>R.writeFilmLocalizationReconcile(env,{intent:third}),code('film_person_revision_conflict'));
+ assert.equal((await resume(env,third)).errorClass,'film_person_revision_conflict');
  assert.equal(locRow(file),null,'every refusal wrote nothing');
  // a changed NON-resolver column of the stored row (same revision): the intent's full pre-image no longer matches
  const file2=database();seedFilm(file2);
@@ -229,7 +232,7 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  const {intent: pinned}=await R.readReconcileIntent(env2,FID,{runId:'w2',at:T3});
  exec(file2,"UPDATE film_dimension SET attempts=7,last_error='x' WHERE film_id="+q(FID)+" AND dimension='localization'");
  const kept=snapshotRows(file2);
- await assert.rejects(()=>R.writeFilmLocalizationReconcile(env2,{intent:pinned}),code('localization_inputs_moved'));
+ assert.equal((await resume(env2,pinned)).errorClass,'localization_inputs_moved');
  assert.equal(snapshotRows(file2),kept);
  // inside a pass a definite replan refusal is `moved`: the pass goes on, the intent is settled as not applied, the Film is retried under a NEW intent next run
  const file3=database();staleFilm(file3,'film:tmdb:1','1');staleFilm(file3,'film:tmdb:2','2');
@@ -241,6 +244,12 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  assert.equal(locRow(file3,'film:tmdb:1'),null);
  const next=await apply({DB:d1Standin(file3)},{runId:'mv2'});
  assert.deepEqual([next.written.map(x=>x.id),next.written[0].plannedRevision],[['film:tmdb:1'],1],'the next run plans a new intent at the moved revision');
+ // a failed durable settlement of a moved Film stops the pass and does not advance the cursor
+ const file3b=database();staleFilm(file3b,'film:tmdb:1','1');staleFilm(file3b,'film:tmdb:2','2');
+ let fired2=false;
+ const db3b=d1Standin(file3b,{onBatch:async statements=>{if(!fired2&&statements.some(item=>/INSERT INTO film_dimension/.test(item.text)&&/film:tmdb:1/.test(item.text))){fired2=true;exec(file3b,"INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:tmdb:1',1,'"+T+"') ON CONFLICT(kind,id) DO UPDATE SET revision=revision+1");}}});
+ const stuck=await R.applyLocalizationReconcile({DB:db3b},{runId:'mv3',checkpoint:memory({failSettle:true}),now:clock});
+ assert.deepEqual([stuck.stopped,stuck.failedId,stuck.cursor,stuck.hasMore,stuck.written.length,stuck.moved.length],['localization_checkpoint_settle_failed','film:tmdb:1','',true,0,1],'the Film is not passed over when its settlement is not durable');
 }
 
 // ---- 9. P1-1: the pre-image survives a lost reply, a refused checkpoint and a failure on the NEXT Film ----
@@ -257,7 +266,7 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  assert.deepEqual([recovered.state,recovered.rowIsPostImage],['applied',true],'recovered from the recorded intent against the applied receipt and the revision');
  assert.deepEqual(run.uncertain[0],port.log.records[0]);
  const before=snapshotRows(file);
- const resumed=await R.resumeLocalizationReconcile({DB:d1Standin(file)},{intent:port.log.records[0],now:clock});
+ const resumed=await R.resumeLocalizationReconcile({DB:d1Standin(file)},{intent:port.log.records[0],checkpoint:memory(),now:clock});
  assert.deepEqual([resumed.state,snapshotRows(file)===before],['applied',true],'a resume of an applied intent never double-writes');
  // the token (the recorded intent) restores the row even though the reply was lost
  const back=await R.restoreLocalizationReconcile({DB:d1Standin(file)},{runId:'undo',token:port.log.records[0],now:clock});
@@ -279,9 +288,9 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  const env3={DB:d1Standin(file3)};
  const {intent}=await R.readReconcileIntent(env3,FID,{runId:'pre',at:T3});
  assert.equal((await R.recoverLocalizationReconcile(env3,{intent})).state,'not_applied');
- const done=await R.resumeLocalizationReconcile(env3,{intent,now:clock});
+ const done=await R.resumeLocalizationReconcile(env3,{intent,checkpoint:memory(),now:clock});
  assert.deepEqual([done.state,revision(file3),locRow(file3).value],['applied',1,'Схватка TMDB']);
- const twice=await R.resumeLocalizationReconcile(env3,{intent,now:clock});
+ const twice=await R.resumeLocalizationReconcile(env3,{intent,checkpoint:memory(),now:clock});
  assert.deepEqual([twice.state,revision(file3),receipts(file3).length],['applied',1,1],'the same intent is never written twice');
  assert.equal((await R.recoverLocalizationReconcile(env3,{intent})).state,'applied');
 
@@ -296,6 +305,28 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  const file5=database();staleFilm(file5,FID,'1656');
  const bad=await R.applyLocalizationReconcile({DB:d1Standin(file5)},{runId:'settle',checkpoint:memory({failSettle:true}),now:clock});
  assert.deepEqual([bad.written.length,bad.stopped],[1,'localization_checkpoint_settle_failed']);
+ // resume needs the SAME durable port: without it, or with a refused record, nothing is written
+ const file6=database();staleFilm(file6,FID,'1656');
+ const env6={DB:d1Standin(file6)};
+ const {intent: loose}=await R.readReconcileIntent(env6,FID,{runId:'loose',at:T3});
+ const b6=snapshotRows(file6);
+ await assert.rejects(()=>R.resumeLocalizationReconcile(env6,{intent:loose,now:clock}),code('film_person_invalid'),'resume without a checkpoint port');
+ await assert.rejects(()=>R.resumeLocalizationReconcile(env6,{intent:loose,checkpoint:memory({failRecord:true}),now:clock}),code(R.CHECKPOINT_FAILED),'resume with a refused record');
+ assert.deepEqual([snapshotRows(file6),receipts(file6).length],[b6,0],'an unrecorded intent is never committed');
+ // a lost reply DURING a resume: the intent was recorded first, the outcome is unknown, recovery finds the applied receipt
+ const pr=memory();
+ const lost=await R.resumeLocalizationReconcile(lossy(file6),{intent:loose,checkpoint:pr,now:clock});
+ assert.deepEqual([lost.state,pr.log.records.length,pr.log.settles.map(x=>x.state)],['unknown',1,['unknown']]);
+ assert.equal((await R.recoverLocalizationReconcile({DB:d1Standin(file6)},{intent:loose})).state,'applied');
+ assert.equal(revision(file6),1);
+ // a failure on Film 2 of a three-Film FINAL page still reports a continuation; the examined count keeps the refused-record Film
+ const file7=database();for(const [i,id] of ['film:tmdb:1','film:tmdb:2','film:tmdb:3'].entries())staleFilm(file7,id,String(i+1));
+ const db7=d1Standin(file7,{onQuery:async text=>{if(/FROM film WHERE id='film:tmdb:2'/.test(text))throw new Error('D1_ERROR: boom');}});
+ const last=await R.applyLocalizationReconcile({DB:db7},{runId:'final',checkpoint:memory(),limit:5,now:clock});
+ assert.deepEqual([last.written.map(x=>x.id),last.cursor,last.failedId,last.hasMore,last.stopped],[['film:tmdb:1'],'film:tmdb:1','film:tmdb:2',true,'film_person_unavailable'],'Film 3 is unexamined, so the page is not final');
+ const file8=database();staleFilm(file8,FID,'1656');
+ const noRecord=await R.applyLocalizationReconcile({DB:d1Standin(file8)},{runId:'cp2',checkpoint:memory({failRecord:true}),now:clock});
+ assert.deepEqual([noRecord.examined,noRecord.hasMore,noRecord.stopped],[1,true,R.CHECKPOINT_FAILED]);
 }
 
 // ---- 10. P1-2: the stable write time and the full images are bound; a real advancing clock and an owner value with no timestamp restore exactly ----
@@ -379,6 +410,15 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  // forward correction: after a moved row the same reconciler corrects it afterwards under a new receipt and a new intent
  const fwd=await apply(env5,{runId:'rs7'});
  assert.deepEqual([fwd.written.length,locRow(file5).value],[1,'Схватка TMDB']);
+ // the owner-review domain moves AFTER the restore receipt is reserved and BEFORE its batch commits: the batch re-proves the current owner token and refuses
+ const file9=database();staleFilm(file9,FID,'1656');
+ const run9=await apply({DB:d1Standin(file9)},{runId:'rs9'});
+ let moved=false;
+ const db9=d1Standin(file9,{onBatch:async statements=>{if(!moved&&statements.some(item=>/DELETE FROM film_dimension/.test(item.text))){moved=true;ownerCommit(file9,{value:null,key:'none'});}}});
+ await assert.rejects(()=>R.restoreLocalizationReconcile({DB:db9},{runId:'rs-o',token:run9.written[0],now:clock}),code('localization_owner_moved'));
+ assert.deepEqual([locRow(file9).value,rows(file9,"SELECT kind,id,revision FROM canonical_revision").map(x=>x.revision)],['Схватка TMDB',[1]],'no row or revision changed');
+ // no exported unbound or receiptless mutation primitive exists
+ assert.deepEqual([typeof R.restoreFilmLocalization,typeof R.writeFilmLocalizationReconcile],['undefined','undefined']);
 }
 
 // ---- 12. Gates: marker not open, owner domain not D1, a redirect ----
@@ -422,8 +462,8 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  const file=database();staleFilm(file,FID,'1656');
  const env={DB:d1Standin(file)};
  const {intent}=await R.readReconcileIntent(env,FID,{runId:'u',at:T3});
- await R.resumeLocalizationReconcile(env,{intent,now:clock});
+ await R.resumeLocalizationReconcile(env,{intent,checkpoint:memory(),now:clock});
  const other={...intent,runId:'v'};
- await assert.rejects(()=>R.resumeLocalizationReconcile(env,{intent:other,now:clock}),code('film_person_invalid'),'an intent whose request id does not recompute is refused');
+ await assert.rejects(()=>R.resumeLocalizationReconcile(env,{intent:other,checkpoint:memory(),now:clock}),code('film_person_invalid'),'an intent whose request id does not recompute is refused');
 }
 console.log('film-localization-reconciler: ok');
