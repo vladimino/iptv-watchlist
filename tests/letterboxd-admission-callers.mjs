@@ -262,6 +262,23 @@ const file=fresh('d1'),env=world(file);
  assert.ok(boxdCalls()>0,'the obligation is not provably fulfilled: a real check is made');
  assert.deepEqual(rows(file,"SELECT route,source_scope FROM film_identity_evidence WHERE subject_value='rc3b'").map(item=>[item.route,item.source_scope]),[['letterboxd_rated_archive',SHA]],'and its evidence is recorded');
 
+ // (3c) the CRASH GAP of the rated step: the pair is admitted by ANOTHER route; this archive's check claims the row (`admitting`, with its evidence obligation) and the process dies before the admission
+ // call: the restart is not settled from the intent, it reacquires both sources and records this archive's evidence
+ reset();
+ const p3c=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3c',receipt:{tmdb:'900085',archiveSha256:'a'.repeat(64),title:'Fixture RK',year:2004},now:()=>new Date(NOW).toISOString()});
+ assert.equal(p3c.outcome,'admitted');
+ seedRow({...row('rc3c',null,null,'Fixture RK',2004),state:'pending',intendedTmdb:null,filmPath:null});add('rc3c','fixture-rc-85','900085','Fixture RK',2004);
+ const realDb3=env.DB;
+ const dyingEnv={...env,DB:{prepare:sql=>{if(/canonical_write_receipt/.test(sql))throw new Error('D1_ERROR: process died');return realDb3.prepare(sql);},batch:statements=>realDb3.batch(statements)}};
+ await assert.rejects(()=>step(dyingEnv),error=>/film_person_unavailable|process died/.test(String(error?.message||error)),'the step dies at the first canonical call');
+ assert.equal(rowOf('rc3c').state,'admitting');assert.equal(rowOf('rc3c').evidenceDue,true,'the obligation was durable before the first effect');
+ calls.length=0;
+ const restarted3=await step();
+ assert.equal(restarted3.verified,true,JSON.stringify(restarted3));
+ assert.ok(boxdCalls()>0,'the source is really reacquired');
+ assert.deepEqual(rows(file,"SELECT route,source_scope FROM film_identity_evidence WHERE subject_value='rc3c'").map(item=>[item.route,item.source_scope]),[['letterboxd_rated_archive',SHA]],'and this archive\'s evidence is recorded');
+ assert.equal(rowOf('rc3c').evidenceDue,false,'the obligation is cleared once the row is verified');
+
  // (4) a LIVE attempt of the key: the row waits, no fetch, nothing changes
  reset();
  seedRow(row('rc4','900074','/film/fixture-rc-74/','Fixture RF',2009));hasPending('rc4','live-r4',true);
@@ -561,6 +578,29 @@ const file=fresh('d1'),env=world(file);
  assert.notEqual((await Facts.diaryLinks(env,['hw6c'])).get('hw6c').tmdb,'900081','the bridge shortcut did not link the other movie over the intent');
  assert.equal(intentOf8(await entry('hw6c'))??'900080','900080','the intent was not replaced');
  void bridged;
+
+ // (6d) the CRASH GAP: an admission of A from ANOTHER route exists; a genuine check of A writes its intent and the process dies before the evidence write. The intent was written with its evidence obligation, so
+ // the restart is NOT settled from the intent: it reacquires the source for real and records the evidence
+ reset();
+ await seed(env,'hw6d');
+ assert.equal((await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw6d',receipt:{tmdb:'900082',archiveSha256:'a'.repeat(64),title:'Fixture HO',year:2008},now:()=>new Date(NOW).toISOString()})).outcome,'admitted');
+ add('hw6d','fixture-h-900082','900082','Fixture HO',2008);
+ let dead=false;
+ const dying={...env,DB:d1Standin(file,{onBatch:async statements=>{
+  const text=statements.map(item=>item.text||'').join('\n');
+  // the process dies when the evidence-only operation starts (the first write after the intent) and nothing after it commits
+  if(dead||(/canonical_write_receipt/.test(text)&&/evidence:/.test(text))){dead=true;throw new Error('D1_ERROR: process died');}
+ }})};
+ await Identity.resolve(dying,[{lid:'hw6d',slug:'fixture-h-900082'}],opts({route:'watchlist_admission'}));
+ assert.equal(evidence(file).filter(item=>item.subject_value==='hw6d').length,0,'the process died before the evidence write');
+ const owed=await entry('hw6d');
+ assert.equal(owed.reason,'linking');assert.equal(owed.evidenceDue,true,'the obligation was durable before the first effect');
+ calls.length=0;
+ // a restart after the dead step's check reservation has expired
+ const restarted=await Identity.resolve(env,[{lid:'hw6d',slug:'fixture-h-900082'}],opts({route:'watchlist_admission',clock:()=>NOW+6*60000}));
+ assert.equal(restarted.outcomes.get('hw6d').class,'settled',JSON.stringify([...restarted.outcomes]));
+ assert.ok(boxdCalls()>0,'not settled from the intent alone: the source is really reacquired');
+ assert.deepEqual(evidence(file).filter(item=>item.subject_value==='hw6d').map(item=>item.route),['watchlist_admission'],'and the evidence of the genuine check is recorded');
 
  // (7) a TRANSPORT stop (403) after the reconcile never discards the intent: the entry keeps `intent` A, and the next check that names B is still `source_changed`
  reset();
