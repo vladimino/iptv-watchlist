@@ -93,7 +93,7 @@ A canonical Film exists independently of its facts. The proposed `FilmAggregateV
 flowchart TB
     req["GET one typed id<br/>film:id, tmdb_n, tmdb_tv:n or lid"]
     resolve["Typed resolver<br/>claims, redirects, retirements"]
-    fatal["404 absent, 409 conflict,<br/>410 retired, 503 unavailable"]
+    fatal["404 absent, 409 conflict,<br/>410 retired, 503 unavailable<br/>no section returned"]
     readset["Identity read-set<br/>generation, revisions, claims"]
     ids["Survivor Film and<br/>verified alias set per domain"]
     display["display<br/>metadata, owner review"]
@@ -101,7 +101,7 @@ flowchart TB
     avail["availability<br/>published EPG generation"]
     personal["personal<br/>ratings domain D1"]
     pred["predictions<br/>prediction_pointer"]
-    history["history<br/>link to existing paged route"]
+    history["history<br/>limited until its migration"]
     fence{"Re-read identity read-set"}
     moved["503 identity_moved<br/>no section returned"]
     agg["FilmAggregateV1<br/>per-section status and tokens"]
