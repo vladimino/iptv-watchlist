@@ -41,7 +41,7 @@ export const SUBJECT_KINDS=Object.freeze([...SOURCE_ENTITY_KINDS,'discovery_obse
 export const RELATIONS=Object.freeze(['same_work','film_has_id','candidate_for','exists']);
 export const POLARITIES=Object.freeze(['asserts','restricts','refutes']);
 export const ROUTES=Object.freeze(['epg_programme','discovery_scan','letterboxd_export_import','letterboxd_rated_archive','ratings_diary','watchlist_admission','ratings_alias_bridge','owner_action','unknown']);
-export const METHODS=Object.freeze(['title_only','title_year','title_year_search','tmdb_detail_check','page_check','alias_bridge','owner_statement']);
+export const METHODS=Object.freeze(['title_only','title_year','title_year_search','tmdb_detail_check','page_check','alias_bridge','owner_statement','known_alias']);
 export const ORIGINS=Object.freeze(['live','reconstruction']);
 // The routes of the page check in the initial slice (ADR 0213 decision 7): one method, three routes.
 export const PAGE_CHECK_ROUTES=Object.freeze(['ratings_diary','watchlist_admission','letterboxd_rated_archive']);
@@ -114,7 +114,8 @@ export function normalizeEvidence(input){
  if(polarity==='refutes'&&method!=='owner_statement'&&method!=='page_check')throw invalid('refutes_method');
  const origin=input.origin===undefined?'live':input.origin;
  if(!ORIGINS.includes(origin))throw invalid('origin');
- const sourceRoot=optional(input.sourceRoot,TOKEN,'source_root');
+ // The Discovery root is the observation key (`normalizedTitle|year`, ADR 0215 decision 5): any title script and spaces, like the subject itself. Every other root stays a token.
+ const sourceRoot=optional(input.sourceRoot,route==='discovery_scan'?VALUE.discovery_observation:TOKEN,'source_root');
  const sourceRef=optional(input.sourceRef,TOKEN,'source_ref');
  const sourceScope=optional(input.sourceScope,TOKEN,'source_scope');
  const scopeEvidenceKey=optional(input.scopeEvidenceKey,HEX64,'scope_evidence_key');
@@ -123,6 +124,9 @@ export function normalizeEvidence(input){
  const observedAt=input.observedAt===undefined||input.observedAt===null?null:instant(input.observedAt,'observed_at');
  const reconstructionRun=optional(input.reconstructionRun,RUN,'reconstruction_run');
  const reconstructedFrom=optional(input.reconstructedFrom,TOKEN,'reconstructed_from');
+ // ADR 0215 decision 6: the causal position of an owner row in its own source. Not part of the key; only an owner row carries one.
+ const sourceOrder=input.sourceOrder===undefined||input.sourceOrder===null?null:input.sourceOrder;
+ if(sourceOrder!==null&&(!Number.isSafeInteger(sourceOrder)||sourceOrder<1||route!=='owner_action'))throw invalid('source_order');
  if(origin==='live'){
   if(reconstructionRun!==null||reconstructedFrom!==null)throw invalid('live_reconstruction_fields');
   // No verification, no evidence (ADR 0213 decision 4): a live row comes only from a step that performed its method, so it carries the root that check produced and
@@ -132,7 +136,7 @@ export function normalizeEvidence(input){
   if(observedAt===null)throw invalid('unchecked_no_observed_at');
  }else if(reconstructionRun===null||reconstructedFrom===null)throw invalid('reconstruction_provenance');
  return Object.freeze({subjectKind:subject.kind,subjectValue:subject.value,relation,objectKind:object?object.kind:null,objectValue:object?object.value:null,
-  polarity,route,method,sourceRoot,sourceRef,sourceScope,scopeEvidenceKey,supersedesKey,observedAt,origin,reconstructionRun,reconstructedFrom});
+  polarity,route,method,sourceRoot,sourceRef,sourceScope,scopeEvidenceKey,supersedesKey,observedAt,origin,reconstructionRun,reconstructedFrom,sourceOrder});
 }
 
 // Pure (async only for SHA-256). The evidence key of a normalized row (ADR 0213 decisions 4-6): sha256 over the canonical JSON of the normalized proposition, polarity,
@@ -149,7 +153,24 @@ function denormalize(row){
  if(!plain(row)||row.subjectKind===undefined)return row;
  return {subject:{kind:row.subjectKind,value:row.subjectValue},relation:row.relation,object:row.objectKind===null?null:{kind:row.objectKind,value:row.objectValue},polarity:row.polarity,route:row.route,method:row.method,
   sourceRoot:row.sourceRoot,sourceRef:row.sourceRef,sourceScope:row.sourceScope,scopeEvidenceKey:row.scopeEvidenceKey,supersedesKey:row.supersedesKey,observedAt:row.observedAt,origin:row.origin,
-  reconstructionRun:row.reconstructionRun,reconstructedFrom:row.reconstructedFrom};
+  reconstructionRun:row.reconstructionRun,reconstructedFrom:row.reconstructedFrom,sourceOrder:row.sourceOrder};
+}
+
+// Pure. The strength a reader derives from a row (ADR 0213 decision 3, amended by ADR 0215 Q1-a): the ledger stores none. `known_alias` is ranked by method AND
+// `source_scope` together: `known_epg_alias` alongside `title_only`, `known_alias_year_runtime` alongside `title_year`, and a missing or unknown scope never defaults to a
+// stronger tier (it ranks with `title_only`). `title_year_search` is never proof. Neither title method nor `known_alias` is proof; only `proof` rows are.
+export const KNOWN_ALIAS_SCOPES=Object.freeze(['known_epg_alias','known_alias_year_runtime']);
+export function evidenceStrength(row){
+ if(!plain(row)||!METHODS.includes(row.method))throw invalid('method');
+ const scope=row.sourceScope===undefined?null:row.sourceScope;
+ switch(row.method){
+  case 'owner_statement':return {tier:'owner',rank:4,proof:true};
+  case 'page_check':case 'tmdb_detail_check':case 'alias_bridge':return {tier:'verified',rank:3,proof:true};
+  case 'title_year':return {tier:'title_year',rank:2,proof:false};
+  case 'known_alias':return scope==='known_alias_year_runtime'?{tier:'title_year',rank:2,proof:false}:{tier:'title_only',rank:1,proof:false};
+  case 'title_only':return {tier:'title_only',rank:1,proof:false};
+  default:return {tier:'never_proof',rank:0,proof:false};
+ }
 }
 
 // Pure. Whether a normalized row is one of the initial slice's live shapes (ADR 0213 decision 7).
