@@ -43,14 +43,10 @@ export const P6_DIFFERENTIAL_EXCEPTIONS=Object.freeze([
 const titleSourceOf=row=>{try{const value=JSON.parse(row?.provenance_json||'null')?.titleSource;return plain(value)&&typeof value.source==='string'?value.source:null;}catch{return null;}};
 const rank=source=>{const index=TITLE_SOURCE_ORDER.indexOf(source);return index<0?-1:TITLE_SOURCE_ORDER.length-index;};
 const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
-// ADR 0218 decision 5 (C1): the informational status of an identity row created on a ranked title write. It is the ADR 0216 verdict of a Film the writer just proved
-// direct (no redirect) and present: `conflict` when a tmdb/letterboxd claim of the Film is untrusted or conflicting, or another Film holds one of its trusted claims; `found` otherwise.
-// Never read for a decision (only `reviewed` and authority `owner` are control inputs of strong()).
-export function identityRowStatus(snapshot){
- const own=claim=>Number(claim?.trusted)===1&&Number(claim?.conflicting)===0;
- const unsettled=(snapshot?.claims||[]).some(claim=>(claim.scheme==='tmdb'||claim.scheme==='letterboxd')&&!own(claim));
- return unsettled||Number(snapshot?.competing||0)>0?'conflict':'found';
-}
+// ADR 0218 decision 5 (C1): the informational status of an identity row created on a ranked title write, evaluated by SQL inside the batch (no extra read): the ADR 0216
+// verdict of a Film the batch proves direct and present, `conflict` when a tmdb/letterboxd claim of the Film is untrusted or conflicting or another Film holds one of its
+// trusted claims, `found` otherwise. Never read for a decision (only `reviewed` and authority `owner` are control inputs of strong()).
+const IDENTITY_ROW_STATUS="CASE WHEN EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme IN ('tmdb','letterboxd') AND NOT (trusted=1 AND conflicting=0)) OR EXISTS (SELECT 1 FROM film_external_id a JOIN film_external_id b ON b.scheme=a.scheme AND b.value=a.value AND b.film_id<>a.film_id WHERE a.film_id=? AND a.trusted=1 AND a.conflicting=0 AND a.scheme IN ('tmdb','letterboxd')) THEN 'conflict' ELSE 'found' END";
 
 // The guard of a dimension upsert, the one of the removed projector's localization write: a reviewed row is replaced only by an owner write over an owner row, or
 // by a reviewed dictionary/owner write over a reviewed one.
@@ -101,12 +97,7 @@ export async function readFilmSnapshot(env,id){
    many(db,"SELECT value FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND trusted=1 AND conflicting=0",[filmId]),
    many(db,"SELECT source,value,source_version,provenance_json,request_id,observed_at FROM film_localization_source WHERE film_id=?",[filmId]).catch(error=>{if(/no such table/i.test(String(error?.message||error)))return [];throw error;}),
   ]);
-  // ADR 0218 decision 5 (C1): the claims and the competing claims of the Film, read only to name the informational `status` of an identity row the writer creates.
-  const [claims,competing]=await Promise.all([
-   many(db,'SELECT scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=?',[filmId]),
-   one(db,"SELECT COUNT(*) AS n FROM film_external_id a JOIN film_external_id b ON b.scheme=a.scheme AND b.value=a.value AND b.film_id<>a.film_id WHERE a.film_id=? AND a.trusted=1 AND a.conflicting=0 AND a.scheme IN ('tmdb','letterboxd')",[filmId]),
-  ]);
-  return {id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources,claims,competing:Number(competing?.n??0)};
+  return {id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources};
  }catch(error){if(error?.code)throw error;throw failed('film_person_unavailable',error);}
 }
 
@@ -210,7 +201,7 @@ export function planFilmFacts(snapshot,input){
   // (formerly `no_identity_row`). Its status is the current verdict (informational); provenance_json carries only titleSource. DO NOTHING keeps a row another batch created.
   if(!snapshot.dimensions.identity&&!wroteIdentity){
    changes.push('dimension:identity');
-   statements.push([`INSERT INTO film_dimension (film_id,${DIM_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO NOTHING`,[id,'identity',identityRowStatus(snapshot),null,null,'{}',null,null,null,null,null,0,'none',updatedAt]]);
+   statements.push([`INSERT INTO film_dimension (film_id,${DIM_COLUMNS}) SELECT ?,'identity',${IDENTITY_ROW_STATUS},NULL,NULL,'{}',NULL,NULL,NULL,NULL,NULL,0,'none',? WHERE 1 ON CONFLICT(film_id,dimension) DO NOTHING`,[id,id,id,updatedAt]]);
   }
   if(titleSourceOf(identityDim)!==source)changes.push('titleSource');
   statements.push(["UPDATE film_dimension SET provenance_json=json_set(COALESCE(provenance_json,'{}'),'$.titleSource',json(?)) WHERE film_id=? AND dimension='identity'",[JSON.stringify({source,at}),id]]);
