@@ -5,6 +5,7 @@ import {migrated, sql} from './prediction-d1-flow-lib.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as U from '../src/upstream-cooldown.js';
+import {isChallenge as identityChallenge} from '../src/letterboxd-identity.js';
 
 const readText = path => fs.readFileSync(path, 'utf8');
 const H = init => new Headers(init);
@@ -37,6 +38,10 @@ assert.equal(U.classifySignal({status: 200, headers: H({'cf-mitigated': 'challen
 assert.equal(U.classifySignal({status: 503, headers: H(), html: '<title>Just a moment...</title> cf-chl'}, NOW).reason, 'challenge');
 assert.equal(U.classifySignal({status: 403, headers: H({'cf-mitigated': 'challenge'})}, NOW).seconds, 900);
 for (const status of [200, 204, 301, 404, 410, 500, 502, 503, 504]) assert.equal(U.classifySignal({status, headers: H()}, NOW), null, `${status} sets no cooldown`);
+
+// the copied challenge test agrees with the Letterboxd identity one on every shape
+for (const status of [200, 403, 404, 429, 500, 503]) for (const headers of [H(), H({'cf-mitigated': 'challenge'}), H({'cf-mitigated': 'other'})]) for (const html of ['', '<title>Just a moment...</title>', 'cf-chl-opt', 'captcha', '/cdn-cgi/challenge-platform/h/b', '<html>ok</html>'])
+  assert.equal(U.isChallenge(status, headers, html), identityChallenge(status, headers, html), `${status} ${html}`);
 
 // ---- 2. migration 0044 --------------------------------------------------------------------------------------------------------------------------
 {

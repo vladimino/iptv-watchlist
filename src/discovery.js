@@ -336,7 +336,12 @@ async function releaseDiscoveryLease(env,lease){
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return;const current=await object.json();if(current.id===lease.id)await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:object.etag}});}
 async function tmdbRequest(env,path,options={}){
  if(env.TMDB_REQUEST_INTERVAL_MS!==0)await new Promise(resolve=>setTimeout(resolve,200));
- const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)});
+ // AIR-604 (ADR 0211 decision 5): the shared TMDB cooldown. `off` (the default) and an unavailable state send exactly the request of today; an enforced cooldown skips the request and
+ // maps to the existing not-now path (`retryAt`), which charges no attempt; a 429, a challenge or a 403 of a sent request writes the cooldown (observe and enforce).
+ let response;
+ const coordination=upstreamCoordinator(env,'discovery'),request=['https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)}];
+ try{response=coordination?await coordination.fetch(fetch,...request,{scope:'tmdb'}):await fetch(...request);}
+ catch(error){if(error?.code==='upstream_cooldown'){const skipped=new Error('TMDB upstream cooldown');skipped.retryAt=new Date(error.until).toISOString();skipped.upstreamCooldown=true;throw skipped;}throw error;}
  if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
 }
 // AIR-503 / ADR 0158: the titles the movie authority itself gives one TMDB movie. This is movie provenance; an EPG title is never part of it.

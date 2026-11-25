@@ -92,12 +92,14 @@ const LetterboxdDiaryIdentity=(()=>{
  // The end-to-end budget of a step (review of PR #720): every network request is cut at the time left in the lease minus the reserve the canonical
  // writes need, and no write starts without that reserve. A cut request is a `timeout` pending, never a partial write.
  function budgeted(fetchImpl,remaining){
-  return async(url,init={})=>{
+  const wrapped=async(url,init={})=>{
    const left=remaining()-WRITE_RESERVE_MS;
    if(!(left>1000))throw Object.assign(new Error('step budget exhausted'),{name:'TimeoutError'});
    const signals=[AbortSignal.timeout(left)];if(init&&init.signal)signals.push(init.signal);
    return fetchImpl(url,{...init,signal:typeof AbortSignal.any==='function'?AbortSignal.any(signals):signals[0]});
   };
+  wrapped.coordinator=fetchImpl.coordinator;// AIR-604: the shared upstream cooldown rides along to the bounded fetches
+  return wrapped;
  }
  // Positive evidence of one fenced admission unit. A skipped route, a no-unit answer or any failed/unknown/refused/deferred count is not an admission.
  function admissionConfirmed(out){
@@ -136,7 +138,9 @@ const LetterboxdDiaryIdentity=(()=>{
  //  - due ids run in one stable order: link repairs and pending claims first, then by queue position (`queuedAt`, oldest first);
  //  - an id without an entry is not checked while the document is full of entries it may not evict: it goes to the bounded backlog (`cap_refused`).
  // route: 'ratings_diary' | 'watchlist_admission' (the caller whose step performs the check). Returns {labels,counts,outcomes}.
- async function resolve(env,items,{clock=()=>Date.now(),remaining:callerRemaining=()=>Infinity,fetchImpl=fetch,route='ratings_diary'}={}){
+ async function resolve(env,items,{clock=()=>Date.now(),remaining:callerRemaining=()=>Infinity,fetchImpl:baseFetch=fetch,route='ratings_diary'}={}){
+  // AIR-604 (ADR 0211 decision 5): the shared Letterboxd and TMDB cooldown. `off` and an unavailable state change nothing; an enforced cooldown stops the check as a transport stop `upstream_cooldown`, which costs no attempt.
+  const fetchImpl=typeof UpstreamCooldown==='undefined'?baseFetch:UpstreamCooldown.createCoordinator(env,{caller:'letterboxd-identity:'+route}).guard(baseFetch);
   const counts={considered:0,bridged:0,verified:0,repaired:0,pending:0,deferred:0,skipped:0,checked:0,transport:0,notNow:0,gone:0,definite:0,atCap:0,capRefused:0,backlogFull:0},labels=new Map(),outcomes=new Map();
   const now=clock();
   // AIR-599 (fourth review of PR #1009): the reservation expires at now+RESERVATION_MS. No effect of this step may begin or run on after that: the time left is also bounded by the reservation (less the write reserve and a

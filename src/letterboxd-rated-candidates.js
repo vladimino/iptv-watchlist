@@ -147,6 +147,8 @@ const LetterboxdRatedCandidates = (() => {
   }
 
   function stopFrom(error) {
+    // AIR-604: an enforced shared cooldown skipped the request. It is a transport stop that costs no attempt (ADR 0207 decision 4b), not a network failure.
+    if (error && error.code === 'upstream_cooldown') return {stop: 'upstream_cooldown'};
     const name = error && error.name;
     if (name === 'TimeoutError' || name === 'AbortError') return {stop: 'timeout'};
     // AIR-599: `network` lets the Diary check classify this as `network_error`; every other caller keeps reading `fetch_failed`.
@@ -182,6 +184,8 @@ const LetterboxdRatedCandidates = (() => {
     let response;
     try {response = await fetchImpl(url, {...init, signal: AbortSignal.timeout(timeout)});} catch (error) {return stopFrom(error);}
     const read = await readBounded(response, limit);
+    // AIR-604: record a 429, a challenge or a 403 of a request that WAS sent (observe and enforce); a no-op for `off`, and when no coordinator is attached.
+    if (fetchImpl.coordinator && !read.error && !read.oversize) {try {await fetchImpl.coordinator.after(UpstreamCooldown.scopeOfUrl(url), {status: response.status, headers: response.headers, html: read.text || ''});} catch { /* coordination never fails a check */ }}
     if (read.oversize) return {stop: 'oversized'};
     if (read.error) return stopFrom(read.error);
     return {response, text: read.text || ''};
@@ -473,8 +477,10 @@ const LetterboxdRatedCandidates = (() => {
     const titles = {};
     const people = {};
     try {
-      if (typeof localizeFilmTitles === 'function') await localizeFilmTitles([base], titles, 'off');
-      if (typeof localizePeople === 'function') await localizePeople([base], people, 'off');
+      // AIR-604: the Wikidata scope of the shared cooldown (a skip is not a localization failure).
+      const wikidata = typeof UpstreamCooldown === 'undefined' ? null : UpstreamCooldown.createCoordinator(env, {caller: 'archive-enrich'});
+      if (typeof localizeFilmTitles === 'function') await localizeFilmTitles([base], titles, 'off', wikidata);
+      if (typeof localizePeople === 'function') await localizePeople([base], people, 'off', wikidata);
     } catch {
       const stopped = {reason: 'localization_unavailable', code, at: new Date().toISOString(), phase: 'enrich', part: 'localization'};
       const parked = await park(env, key, opened.value, stopped);
@@ -556,7 +562,8 @@ const LetterboxdRatedCandidates = (() => {
 
   // One pending code, or one enrichment continuation. A stop is stored and the next code is not fetched.
   // `code` selects that one pending or admitting row and does not walk the rest of the queue.
-  async function identityStep(env, {sha, resume = false, code: requested = null, fetchImpl = fetch} = {}) {
+  async function identityStep(env, {sha, resume = false, code: requested = null, fetchImpl: baseFetch = fetch} = {}) {
+    const fetchImpl = typeof UpstreamCooldown === 'undefined' ? baseFetch : UpstreamCooldown.createCoordinator(env, {caller: 'letterboxd-archive-step'}).guard(baseFetch);
     if (!HEX64.test(String(sha || ''))) return {error: 'invalid_request'};
     const key = CANDIDATES(sha);
     const opened = await readDoc(env, key);

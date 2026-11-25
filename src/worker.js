@@ -1306,10 +1306,10 @@ async function beginSync(env){
  try{
  let watchlistObservedAt=new Date().toISOString(),pages=0,total=null;const films=new Map();
  if(snapshotPin){for(const film of snapshotPin.films)films.set(film.id,film);total=films.size;watchlistObservedAt=snapshotPin.observedAt;}else{
- const sources=sourceConfig(env);let url=sources.watchlist;
- while(url){const p=parseWatchlist(await getHTML(url));pages++;if(pages>100)throw new Error('Watchlist pagination limit exceeded');if(!Number.isInteger(p.total))throw new Error('Watchlist total not found');if(total===null)total=p.total;if(total!==p.total)throw new Error('Watchlist changed during synchronization; retry');if(p.films.length===0&&total>0)throw new Error('Watchlist page has no films');for(const f of p.films){if(films.has(f.id))throw new Error('Duplicate film across pages; retry');films.set(f.id,f);}if(p.next&&!new RegExp('^/'+sources.letterboxdUsername+'/watchlist/page/\\d+/$').test(p.next))throw new Error('Unexpected pagination URL');url=p.next?'https://letterboxd.com'+p.next:null;}
+ const sources=sourceConfig(env);let url=sources.watchlist;const letterboxdScope=upstreamCoordinator(env,'watchlist-sync');
+ while(url){const p=parseWatchlist(await getHTML(url,letterboxdScope));pages++;if(pages>100)throw new Error('Watchlist pagination limit exceeded');if(!Number.isInteger(p.total))throw new Error('Watchlist total not found');if(total===null)total=p.total;if(total!==p.total)throw new Error('Watchlist changed during synchronization; retry');if(p.films.length===0&&total>0)throw new Error('Watchlist page has no films');for(const f of p.films){if(films.has(f.id))throw new Error('Duplicate film across pages; retry');films.set(f.id,f);}if(p.next&&!new RegExp('^/'+sources.letterboxdUsername+'/watchlist/page/\\d+/$').test(p.next))throw new Error('Unexpected pagination URL');url=p.next?'https://letterboxd.com'+p.next:null;}
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
- const verify=parseWatchlist(await getHTML(sources.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
+ const verify=parseWatchlist(await getHTML(sources.watchlist,letterboxdScope));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  }
  const working=await MetadataCache.loadMetadataWorkingSet(env);const cache=working.records;const now=Date.now();const all=[...films.values()].map(f=>MetadataCache.mergeWatchlistFilm(f,cache[f.id]));// ADR 0186: the metadata stage fetches every not-fresh member's Letterboxd page. A run pinned to a Watchlist snapshot never does: it starts at `epg`, and the canonical metadata and admission path belongs to the Letterboxd Sync (AIR-570).
  const pending=snapshotPin?[]:all.filter(f=>MetadataCache.metadataPending(f,now)).map(f=>f.id);
@@ -1340,14 +1340,19 @@ async function metadataSync(env,run){
 async function metadataSyncStep(env,run,marks){
  const mark=name=>{marks[name]=Date.now();};
  const working=await MetadataCache.loadMetadataWorkingSet(env);mark('loaded');const cache=working.records;const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);marks.films=ids.length;
- for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){run.failures.push({id,error:e.message});}}));
+ // AIR-604: the metadata film pages go through the shared Letterboxd cooldown; a skip is recorded (`run.upstreamCooldownSkips`), is not a failure of the film and is not retried in this step.
+ const filmPages=upstreamCoordinator(env,'metadata-sync');
+ for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url,filmPages);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){if(e?.code==='upstream_cooldown'){run.upstreamCooldownSkips=(run.upstreamCooldownSkips||0)+1;return;}run.failures.push({id,error:e.message});}}));
  mark('fetched');
  const freeze=await frozenCanonicalMirrorsLocked(env);
  const titles=freeze?{}:await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));const localizationMode=metadataLocalizationMode(env);
- try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
+ // AIR-604: one Wikidata coordinator for the step; a cooldown skip stops the step's Wikidata requests, is not an error, and is recorded.
+ const wikidata=upstreamCoordinator(env,'metadata-sync');
+ try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode,wikidata));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  await saveCanonicalMirror(env,'titles.json',titles);
  const people=freeze?{}:await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
- try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode,wikidata));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ if(wikidata?.stats.skipped)run.upstreamCooldownSkips=(run.upstreamCooldownSkips||0)+wikidata.stats.skipped;
  for(const f of batch)cache[f.id]=f;
  await saveCanonicalMirror(env,'people.json',people);
  mark('localized');
@@ -2642,9 +2647,11 @@ async function epgSync(env,run){
  await epgWindowPrecheck(env);
  const freeze=await frozenCanonicalMirrorsLocked(env);
  const titles=freeze?{}:await loadJSON(env,'titles.json')||{};
- try{await localizeFilmTitles(run.watchlist,titles,'on');await saveCanonicalMirror(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
+ const wikidata=upstreamCoordinator(env,'epg-localization');
+ try{await localizeFilmTitles(run.watchlist,titles,'on',wikidata);await saveCanonicalMirror(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  const people=freeze?{}:await loadJSON(env,'people.json')||{};
- try{await localizeByLetterboxd(run.watchlist,people);await saveCanonicalMirror(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ try{await localizeByLetterboxd(run.watchlist,people,wikidata);await saveCanonicalMirror(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ if(wikidata?.stats.skipped)run.upstreamCooldownSkips=(run.upstreamCooldownSkips||0)+wikidata.stats.skipped;
  applyEpgLocalization(run.watchlist,people);
  // AIR-263: the source fetch and the scan are one traced phase; an error logs `error` and rethrows unchanged.
  const sources=sourceConfig(env);
@@ -2770,7 +2777,7 @@ function letterboxdPorts(env){
   const rated=await storedRemovalRatings(e,{type:'watchlist',removed:removed.map(film=>eventRemovedFilm(known(film)))}).catch(()=>null);
   return {added:added.map(film=>eventFilm(known(film))),removed:rated?.event?.removed||removed.map(film=>eventRemovedFilm(known(film)))};
  };
- return {mirror:{reconcile:(e,arg)=>WatchlistMirror.reconcileMirror(e||env,{...arg,deps:{WatchlistD1,PublishedEpg}})},handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,scanOpen:e=>LetterboxdSync.scanOpen(e),fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
+ return {mirror:{reconcile:(e,arg)=>WatchlistMirror.reconcileMirror(e||env,{...arg,deps:{WatchlistD1,PublishedEpg}})},handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,scanOpen:e=>LetterboxdSync.scanOpen(e),fetchPage:(coordination=>url=>getHTML(url,coordination))(upstreamCoordinator(env,'letterboxd-watchlist-scan')),parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
 }
 // AIR-572 / ADR 0203: the owner-only operator of the membership baseline and the writer switch (MCP tool watchlist_membership_operator). The same ports as the `membership` effect (identity resolver, version-fenced
 // Film writer, Letterboxd Sync epoch fence), plus bounded reads of the Sync epoch and of the Producer's non-terminal chains. Nothing calls it but the owner's tool call.
@@ -2901,6 +2908,9 @@ async function routeRequest(request,env,execution){
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
   if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
    if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({connected:false,stage:'missing_secret'},503);
+   // AIR-604 (ADR 0211 decision 5): a READ-ONLY caller of the shared TMDB cooldown. `peek` never writes: with an enforced active cooldown the probe answers from it without a request;
+   // otherwise it requests as today, and a 429 is reported as before without writing the cooldown (this route is a GET; ADR 0107).
+   {const gate=await upstreamCoordinator(env,'tmdb-status-probe')?.peek('tmdb');if(gate?.skip)return json({connected:false,stage:'upstream_cooldown',reason:gate.reason,until:new Date(gate.until).toISOString()},503);}
    const response=await fetch('https://api.themoviedb.org/3/movie/11?language=en-US',{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(10000)});
    if(!response.ok)return json({connected:false,stage:'tmdb_http',status:response.status},502);
    const movie=await response.json();return json({connected:movie.id===11,stage:movie.id===11?'ready':'unexpected_response'});

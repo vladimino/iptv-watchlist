@@ -325,7 +325,13 @@ function canonicalizeDiscoveryLedger(source,decisions){
  return {items,decisions:next,duplicatesRemoved:(source.items||[]).length-items.length,carriedVerified,retried};
 }
 const GENRE_MAP={Action:'Боевик',Thriller:'Триллер',Crime:'Криминал','Science Fiction':'Фантастика',Horror:'Ужасы',Adventure:'Приключения',Comedy:'Комедия',Drama:'Драма',Fantasy:'Фэнтези',Animation:'Мультфильм',History:'Исторический',War:'Военный',Mystery:'Детектив',Romance:'Мелодрама',Family:'Семейный',Documentary:'Документальный',Western:'Вестерн',Music:'Музыкальный','TV Movie':'Телефильм'};
-async function getHTML(url){const r=await fetch(url,{signal:AbortSignal.timeout(25000)});if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);const h=await r.text();if(h.length>3000000)throw new Error('Unexpected page size');return h;}
+// AIR-604 (ADR 0211 decision 5): `coordination` is a coordinator or null (today's request). An enforced Letterboxd cooldown sends no request and throws a typed `upstream_cooldown`
+// error, which each caller maps to its own not-now path; it is never a failure of the page.
+async function getHTML(url,coordination=null){
+ let r;
+ try{r=coordination?await coordination.fetch(fetch,url,{signal:AbortSignal.timeout(25000)}):await fetch(url,{signal:AbortSignal.timeout(25000)});}
+ catch(error){if(error?.code==='upstream_cooldown')throw Object.assign(new Error(`Upstream cooldown: ${new URL(url).pathname}`),{code:'upstream_cooldown',until:error.until});throw error;}
+ if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);const h=await r.text();if(h.length>3000000)throw new Error('Unexpected page size');return h;}
 function parseWatchlist(html){
  const films=[];for(const m of html.matchAll(/<div\b[^>]*data-component-class="LazyPoster"[^>]*>/g)){const tag=m[0],display=attr(tag,'data-item-name'),path=attr(tag,'data-item-link');if(!/^\/film\/[a-z0-9-]+\/$/.test(path))continue;const identity=JSON.parse(attr(tag,'data-postered-identifier'));films.push({id:identity.lid,title:cleanTitle(display),original:cleanTitle(display),year:extractYear(display),url:'https://letterboxd.com'+path});}
  const total=Number(html.match(/js-watchlist-count[^>]*>([\d,]+)/)?.[1]?.replaceAll(',',''));const next=html.match(/<a\b[^>]*class="next"[^>]*href="([^"]+)"/)?.[1];return {films,total,next};
@@ -477,32 +483,42 @@ function channelPolicyCounts(coverage,declared,policies,degraded,boundaryDeclare
  counts.lateDeclared=lateDeclared;
  return counts;
 }
-async function loadPeopleNameIndex(films){
+// AIR-604: the shared upstream cooldown coordinator of one caller run, or null where the cooldown module is not in scope (a test that loads a single file). Null is today's behaviour.
+function upstreamCoordinator(env,caller){return typeof UpstreamCooldown==='undefined'?null:UpstreamCooldown.createCoordinator(env,{caller});}
+// AIR-604 (ADR 0211 decision 5): one Wikidata request through the shared cooldown. `coordination` is a coordinator or null; null (and the `off` mode) sends exactly the request of today.
+// An enforced cooldown skips the request: the answer is null, and the caller stops asking Wikidata in its step without counting an error (the skip is `coordination.stats.skipped`).
+async function wikidataRequest(coordination,url,init){
+ if(!coordination)return fetch(url,init);
+ try{return await coordination.fetch(fetch,url,init,{scope:'wikidata'});}catch(error){if(error?.code==='upstream_cooldown')return null;throw error;}
+}
+async function loadPeopleNameIndex(films,coordination=null){
  const ids=[...new Set(films.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
  if(!ids.length)return null;
  const query=`SELECT ?tmdb ?en ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; (wdt:P161|wdt:P57|wdt:P725) ?person. ?person (rdfs:label|skos:altLabel) ?en; rdfs:label ?ru. FILTER(LANG(?en)="en" && LANG(?ru)="ru") }`;
- const response=await fetch('https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(45000)});
+ const response=await wikidataRequest(coordination,'https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(45000)});
+ if(!response)return null;
  if(!response.ok)throw new Error('Russian names HTTP '+response.status);
  const data=await response.json();const index=new Map();
  for(const row of data.results.bindings){const key=row.tmdb.value+':'+norm(row.en.value);const names=index.get(key)||new Set();names.add(row.ru.value);index.set(key,names);}
  return index;
 }
 function applyPeopleNames(films,cache,index,mode){for(const f of films)for(const p of [...f.directors,...f.actors]){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p,mode==='on'?'on':'off');cache[p.id]={...p};continue;}if(index){const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}}if(!cache[p.id])continue;if(mode==='on')applyCachedPersonName(p,cache[p.id],'on');else p.name=cache[p.id].name;}}
-async function localizePeople(films,cache,mode){
- if(mode==='on'||mode==='shadow'){const index=await loadPeopleNameIndex(films);return branchState(films,cache,mode,(list,store)=>applyPeopleNames(list,store,index,'off'),(list,store)=>applyPeopleNames(list,store,index,'on'));}
+async function localizePeople(films,cache,mode,coordination=null){
+ if(mode==='on'||mode==='shadow'){const index=await loadPeopleNameIndex(films,coordination);return branchState(films,cache,mode,(list,store)=>applyPeopleNames(list,store,index,'off'),(list,store)=>applyPeopleNames(list,store,index,'on'));}
  for(const f of films)for(const p of [...f.directors,...f.actors])if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);cache[p.id]={...p};}
- const index=await loadPeopleNameIndex(films);
+ const index=await loadPeopleNameIndex(films,coordination);
  if(!index)return {compared:0,mismatched:0};
  for(const f of films)for(const p of [...f.directors,...f.actors]){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);continue;}const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
  return {compared:0,mismatched:0};
 }
 function peopleCatalog(films){const collect=key=>[...new Map(films.flatMap(f=>f[key]||[]).map(p=>[p.id,p])).values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));return {directors:collect('directors'),actors:collect('actors')};}
-async function localizeByLetterboxd(films,cache){
+async function localizeByLetterboxd(films,cache,coordination=null){
  const missing=[...new Map(films.flatMap(f=>[...(f.directors||[]),...(f.actors||[])]).filter(p=>!cache[p.id]&&!REVIEWED_PEOPLE[p.id]).map(p=>[p.id,p])).values()];
  for(let offset=0;offset<missing.length;offset+=80){
   const batch=missing.slice(offset,offset+80);const slugs=[...new Set(batch.map(p=>p.id.split('/')[1]).filter(s=>/^[a-z0-9-]+$/.test(s)))];if(!slugs.length)continue;
   const query=`SELECT ?slug ?ru WHERE { VALUES ?slug { ${slugs.map(s=>JSON.stringify(s)).join(' ')} } ?person (wdt:P6119|wdt:P12383) ?slug; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
-  const response=await fetch('https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0'},signal:AbortSignal.timeout(15000)});
+  const response=await wikidataRequest(coordination,'https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0'},signal:AbortSignal.timeout(15000)});
+  if(!response)break;
   if(!response.ok)continue;const data=await response.json();const labels=new Map();for(const r of data.results.bindings){const names=labels.get(r.slug.value)||new Set();names.add(r.ru.value);labels.set(r.slug.value,names);}
   for(const p of batch){const names=labels.get(p.id.split('/')[1]);if(names?.size===1){const raw=[...names][0];cache[p.id]={name:raw.includes(', ')?raw.split(', ').reverse().join(' '):raw,original:p.original};}}
  }
@@ -611,15 +627,15 @@ function presentLocalized(data,titles,reviews=null){applyOwnerReviewedTitles(dat
 function applyEpgLocalization(films,people){for(const film of films){for(const person of [...(film.directors||[]),...(film.actors||[])]){if(REVIEWED_PEOPLE[person.id])applyReviewedPerson(person,'on');else if(people[person.id])applyCachedPersonName(person,people[person.id],'on');}applyReviewedTitle(film,'on');}return films;}
 
 // Newly added films use an exact TMDB film identifier; reviewed titles always win.
-async function localizeFilmTitles(films,cache,mode){
+async function localizeFilmTitles(films,cache,mode,coordination=null){
  const pending=films.filter(f=>!reviewedTitle(f)&&f.tmdbId&&!((cache[f.id]?.tmdbId===f.tmdbId)&&cache[f.id]?.title));
  const ids=[...new Set(pending.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
  if(ids.length){
   const query=`SELECT ?tmdb ?film ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
-  const response=await fetch('https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(30000)});
-  if(!response.ok)throw new Error('Russian film titles HTTP '+response.status);
-  const data=await response.json(),byId=new Map();
-  for(const row of data.results.bindings){const id=row.tmdb.value,ru=row.ru.value,source=row.film.value;if(!/[а-яё]/i.test(ru))continue;const labels=byId.get(id)||new Map();labels.set(ru,source);byId.set(id,labels);}
+  const response=await wikidataRequest(coordination,'https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(30000)});
+  if(response&&!response.ok)throw new Error('Russian film titles HTTP '+response.status);
+  const data=response?await response.json():null,byId=new Map();
+  for(const row of data?.results.bindings||[]){const id=row.tmdb.value,ru=row.ru.value,source=row.film.value;if(!/[а-яё]/i.test(ru))continue;const labels=byId.get(id)||new Map();labels.set(ru,source);byId.set(id,labels);}
   for(const f of pending){const labels=byId.get(f.tmdbId);if(labels?.size===1){const [title,source]=[...labels][0];cache[f.id]={tmdbId:f.tmdbId,title,status:'provisional',sources:[source.replace('http:','https:').replace('/entity/','/wiki/')]};}}
  }
  const legacy=(list,store)=>{for(const f of list){if(reviewedTitle(f)){applyReviewedTitle(f);continue;}const match=store[f.id];if(match&&match.tmdbId===f.tmdbId&&match.title){f.aliases=uniqueStrings([...(f.aliases||[]),f.original,f.title,match.title]);f.title=match.title;f.titleRu=match.title;f.titleStatus=match.status;f.titleSources=match.sources;}}};

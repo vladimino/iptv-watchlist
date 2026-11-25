@@ -12,7 +12,13 @@
 // local backoff still applies. Coordination never blocks production work and never makes a caller more aggressive than today.
 //
 // READ-ONLY CALLERS (the TMDB status probe) call `peek`, which never writes; only `after` writes, and only a writer path calls it.
-import {isChallenge} from './letterboxd-identity.js';
+// The module imports nothing: the Worker bundle scopes it as `UpstreamCooldown` (build.mjs), and a bundled caller cannot import. The challenge test is therefore a
+// COPY of `isChallenge` in src/letterboxd-identity.js; tests/upstream-cooldown.mjs asserts the two agree on every shape.
+export function isChallenge(status, headers, html = '') {
+  if (String(headers?.get?.('cf-mitigated') ?? '').toLowerCase() === 'challenge') return true;
+  if (status !== 200 && status !== 404 && /cf-chl|challenge-platform|just a moment\.\.\.|attention required|captcha/i.test(html)) return true;
+  return status === 200 && /\/cdn-cgi\/challenge-platform\/|cf-chl-opt|<title>\s*just a moment/i.test(html);
+}
 
 export const SCOPES = Object.freeze(['tmdb', 'letterboxd', 'wikidata']);
 export const MODES = Object.freeze(['off', 'observe', 'enforce']);
@@ -143,6 +149,21 @@ export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
       const ok = await writeCooldown(env, scope, signal, caller, now());
       if (ok) stats.written++; else stats.writeFailed++;
       return signal;
+    },
+    // For callers that read the body themselves (the bounded Letterboxd/TMDB fetches): a fetch that only PEEKS (a skip throws UpstreamCooldownSkip) and carries the coordinator,
+    // so the caller records the response with `after` once it has the body (a challenge page is detected from the body). The write belongs to that caller.
+    guard(fetchImpl) {
+      const self = this;
+      const guarded = async (url, init) => {
+        const scope = scopeOfUrl(url);
+        if (scope) {
+          const gate = await self.peek(scope);
+          if (gate.skip) throw new UpstreamCooldownSkip(scope, gate.until, gate.reason);
+        }
+        return fetchImpl(url, init);
+      };
+      guarded.coordinator = self;
+      return guarded;
     },
     // A guarded fetch for a writer path. `fetchImpl` is the caller's own (tests inject one). A skip throws UpstreamCooldownSkip; nothing else changes about the response.
     async fetch(fetchImpl, url, init, {scope = scopeOfUrl(url)} = {}) {
