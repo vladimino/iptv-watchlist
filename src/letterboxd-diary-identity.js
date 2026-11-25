@@ -120,11 +120,14 @@ const LetterboxdDiaryIdentity=(()=>{
   if(found.stop||found.review)return answer(found);
   const verdict=verify({lid,slug,page,detail:found.detail},letterboxdPageTools());
   if(verdict.state!=='verified')return {state:'pending',reason:verdict.reason};
-  return {state:'verified',verdict};
+  return {state:'verified',verdict,pageDigest:await pageCheckDigest({lid,slug},verdict)};
  }
+ // The page-check digest (ADR 0213 decision 2): the identity of the checked page content, the same for the Diary and the Watchlist caller checking the same page. It is the admission receipt's `evidenceSha256` and, handed over with
+ // the link (AIR-618, ADR 0215 choice 0215-8b = C), the causal root of the claim's bridge evidence row. Only a check this very step performed has one: the bridge, repair and claim-retry paths below hand over none.
+ const pageCheckDigest=({lid,slug},verdict)=>sha256({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,source:'letterboxd_diary_page'});
  // The receipt entry, written only after the link intent is durable.
- async function writeReceipt(env,{lid,slug},verdict,clock){
-  const verifiedAt=iso(clock()),evidenceSha256=await sha256({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,source:'letterboxd_diary_page'});
+ async function writeReceipt(env,{lid,slug},verdict,clock,pageDigest){
+  const verifiedAt=iso(clock()),evidenceSha256=pageDigest||await pageCheckDigest({lid,slug},verdict);
   return LetterboxdFacts.admitDiaryFilm(env,{lid,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath,verifiedAt,evidenceSha256});
  }
 
@@ -232,8 +235,9 @@ const LetterboxdDiaryIdentity=(()=>{
   // therefore leaves either the link intent (repaired below into the same handoff) or the pending claim, never nothing. Inactive: the entry is cleared as before
   // and nothing about claims is stored.
   const claimLive=typeof CanonicalLetterboxdClaim!=='undefined'&&CanonicalLetterboxdClaim.LETTERBOXD_CLAIM_ACTIVATED===true;
-  const handoff=(lid,tmdb)=>{
-   claimPairs.push({lid,tmdb:String(tmdb)});
+  // `root` (AIR-618): the page-check digest of a check THIS step performed and verified for this pair, handed over with the link; the other callers of `handoff` made no check here and pass none (rootless).
+  const handoff=(lid,tmdb,root=null)=>{
+   claimPairs.push({lid,tmdb:String(tmdb),...(root?{root}:{})});
    const cur=stored.films[lid];
    if(claimLive)set[lid]={reason:CLAIM_REASON,class:'intent',slug:null,tmdb:String(tmdb),attempts:0,streak:0,queuedAt:(cur&&queuePos(cur))||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now)};
    else clear.push(lid);
@@ -353,7 +357,7 @@ const LetterboxdDiaryIdentity=(()=>{
     try{
      if(remaining()<WRITE_RESERVE_MS)throw Object.assign(new Error('budget'),{code:'budget'});
      if(!(await intend(item,outcome.verdict.tmdb)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});
-     const admitted=await writeReceipt(guarded(lid)||(()=>{throw Object.assign(new Error('late'),{code:'late'});})(),item,outcome.verdict,clock);
+     const admitted=await writeReceipt(guarded(lid)||(()=>{throw Object.assign(new Error('late'),{code:'late'});})(),item,outcome.verdict,clock,outcome.pageDigest);
      if(admitted==='conflict'||admitted==='other_code')throw Object.assign(new Error('admission_conflict'),{code:'admission_conflict'});
      const receiptKey='tmdb_'+outcome.verdict.tmdb,{value:receipts}=await LetterboxdFacts.readAdmissionReceipts(env);
      const receipt=receipts?.films?.[receiptKey];
@@ -364,7 +368,7 @@ const LetterboxdDiaryIdentity=(()=>{
     }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||error?.code||(error?.message==='receipt_missing'?'receipt_missing':'admission_failed')};}
     if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
-     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,outcome.verdict.tmdb);labels.set(lid,label(outcome.verdict));continue;}
+     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,outcome.verdict.tmdb,outcome.pageDigest);labels.set(lid,label(outcome.verdict));continue;}
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }

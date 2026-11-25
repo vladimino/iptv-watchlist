@@ -329,7 +329,11 @@ ctx.CanonicalLetterboxdClaim = claimStub;
 reset(); claimCalls.length = 0; claimStub.mode = 'complete'; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
 out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
 assert.equal(out.counts.verified, 1); assert.equal(out.counts.claim, 'complete');
-assert.equal(claimCalls.length, 1); assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001'}]);
+assert.equal(claimCalls.length, 1);
+// AIR-618 (ADR 0215 choice 0215-8b = C): a pair THIS step verified by a page check is handed over WITH that check's digest (the admission receipt's own digest of the same page), as the causal root of the bridge evidence row.
+const handedRoot = claimCalls[0].pairs[0].root; assert.match(handedRoot, /^[0-9a-f]{64}$/);
+assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001', root: handedRoot}]);
+assert.equal(handedRoot, records.get('letterboxd/admissions/verified-films.json').films.tmdb_900001.archiveSha256, 'the root is the digest of the very check that produced the link, never a guess');
 assert.deepEqual(claimCalls[0].linked, ['900001'], 'the Ratings link is durable before the claim is requested'); assert.deepEqual(claimCalls[0].pendingKeys, ['vMEO'], 'the verified pair is handed off: its durable claim_pending entry exists BEFORE the claim is requested (AIR-559, review of #966)');
 assert.deepEqual(Object.keys(pending()), [], 'a proved claim leaves no pending state');
 // AIR-559: the next ordinary run does NOT re-offer an already-linked id without its own pending claim: the link index alone does not say how the pair was made (an inferred
@@ -351,7 +355,7 @@ assert.equal(claimCalls.length, 0, 'a pending claim for another movie than the c
 // an existing trusted bridge is offered too
 reset(); claimCalls.length = 0; await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
 out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts()); assert.equal(out.counts.bridged, 1); assert.deepEqual(claimCalls.map(call => call.pairs), [[{lid: 'Brg1', tmdb: '900020'}]]);
-// a repaired link_failed bridge is offered
+// a repaired link_failed bridge is offered (AIR-618: rootless; no page was checked by this step, so nothing is handed over)
 reset(); claimCalls.length = 0; await seed('Itr9', 3); await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Itr9: {reason: 'link_failed', slug: 'fixture-itr-2009', tmdb: '900030', attempts: 1, lastAttemptAt: new Date(NOW - 7200000).toISOString(), nextAttemptAt: new Date(NOW - 3600000).toISOString()}}}), {});
 out = await Identity.resolve(env, items(['Itr9', 'fixture-itr-2009']), opts()); assert.equal(out.counts.repaired, 1); assert.deepEqual(claimCalls.map(call => call.pairs), [[{lid: 'Itr9', tmdb: '900030'}]]);
 // no proven link, no claim request: a 403 pending never reaches the claim step

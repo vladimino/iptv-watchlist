@@ -532,6 +532,9 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  assert.deepEqual(mentions,['src/identity-evidence-import.js','src/identity-evidence-writer.js','src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader); the dormant import path of card ER (AIR-639) is the third');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence\.js['"]/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(importers,['src/identity-evidence-import.js','src/identity-evidence-writer.js'],'only the dormant writer-control (card EC) and import (card ER) modules import the writer: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ // AIR-618 (card E2b): the claim unit's bridge row rides in the claim's own batch, so the two ledger modules are scoped into the Worker bundle (dormant: no control row means no row); the import path is not.
+ const build=fs.readFileSync('build.mjs','utf8');
+ assert.ok(build.includes("'src/identity-evidence.js','IdentityEvidence'")&&build.includes("'src/identity-evidence-writer.js','IdentityEvidenceWriter'"),'the Worker bundle scopes the ledger helper and the writer control for the claim unit');
+ assert.ok(!build.includes('identity-evidence-import'),'the Worker bundle does not include the import path');
 }
 console.log('identity evidence ledger: ok');

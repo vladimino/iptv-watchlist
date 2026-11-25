@@ -1076,6 +1076,9 @@ export const FILES={
  "identity-evidence.mjs": {
   "suite": "core"
  },
+ "identity-evidence-claim-bridge.mjs": {
+  "suite": "core"
+ },
  "identity-evidence-import.mjs": {
   "suite": "core"
  },

@@ -570,8 +570,12 @@ const setWriter=async(env,writer,target)=>{
  const mentions=sources.filter(name=>/identity_evidence_writer/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(mentions,['src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,[],'nothing imports the writer control: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ // AIR-618 (card E2b): the ADR 0184 claim unit is the ONE importer (its canonical-path bridge row); no Discovery writer, route, Workflow or cron calls the control, and `changeWriter` has no caller.
+ assert.deepEqual(importers,['src/canonical-letterboxd-claim.js'],'only the claim unit imports the writer control');
+ assert.match(fs.readFileSync('src/canonical-letterboxd-claim.js','utf8'),/import \{claimBridgeEvidence\} from '\.\/identity-evidence-writer\.js';/,'and only for the bridge row helper');
+ const callers=sources.filter(name=>name!=='src/identity-evidence-writer.js'&&/\bchangeWriter\b/.test(fs.readFileSync(name,'utf8')));
+ assert.deepEqual(callers,[],'nothing in the Worker changes a writer state: activation is an owner-approved operation');
+ assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence-import'),'the Worker bundle does not include the import path');
  // The migration is a file only: no code applies it, and the deploy workflow never applies a migration.
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0042_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0042');
