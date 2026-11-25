@@ -13,6 +13,7 @@ import {createEpgRepository} from '../src/epg-repository.js';
 import {PUBLISH_BUDGET_MS,DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,STAGE_TABLES,StageStop,discardStage,publishStaged} from '../src/generation-stage.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {importBatch,refusal} from '../src/offline-importer.js';
+import {openImportSession,verifyImportFence} from '../src/film-dimension-import-fence.js';
 import {ExportError} from './migration-export.mjs';
 import {openSqlite,prepareImport} from './offline-import.mjs';
 import {STATUS_CONSISTENT,verifyProductionSnapshot} from './r2-snapshot-export.mjs';
@@ -220,6 +221,11 @@ export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggr
  const version=(await adapter.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
  findings.schema.version=version;
  if(version!==SCHEMA_VERSION)throw new BackfillStop('schema_version_mismatch',{expected:SCHEMA_VERSION,actual:version});
+ // AIR-661 / ADR 0218 decision 7: the frozen schema-4 target must also carry the offline import contract, read here, before the identity receipt
+ // or any other write. A target without it is refused; installing the contract on a real D1 database is its own owner GO.
+ const fence=await verifyImportFence(adapter,{schemaVersions:[SCHEMA_VERSION]});
+ findings.schema.importContract=fence.ok?fence.version:null;
+ if(!fence.ok)throw new BackfillStop(fence.reason,{missing:fence.missing?.slice(0,20)??null,version:fence.version??null});
  const receipts=await adapter.all('SELECT source_key,source_sha256,target_id,imported_at FROM import_receipt WHERE target_table=? ORDER BY imported_at',[IDENTITY_TARGET_TABLE]);
  findings.identityReceipts=receipts.map(row=>({sourceSha256:row.source_sha256,targetId:row.target_id,importedAt:row.imported_at}));
  const foreign=receipts.filter(row=>row.target_id!==databaseId);
@@ -284,6 +290,8 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
    report.target={kind:'sqlite',file};
   }else throw new ExportError('configuration','mode must be d1 or sqlite');
   report.identity=identityFindings;
+  // Every write from here on, the identity receipt first, goes through the import session of the contract verified above.
+  openImportSession(db,{now:()=>batch.finishedAt});
   await recordIdentity(db,{databaseId:mode==='d1'?target.databaseId:identityFindings.databaseId,aggregateSha256:batch.aggregateSha256,importedAt:batch.finishedAt});
   const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
   if(stagedGeneration){
@@ -332,6 +340,10 @@ export async function runStageCleanup({mode,target=null,sqliteFile=null,fetchImp
   const tables=(await db.all("SELECT name FROM sqlite_master WHERE type='table'")).map(row=>row.name);
   const missing=STAGE_TABLES.filter(name=>!tables.includes(name));
   if(missing.length)throw new BackfillStop('schema_missing',{missing});
+  // AIR-661: the cleanup is a writer of the same fenced target: contract read first, every write through the import session.
+  const fence=await verifyImportFence(db);
+  if(!fence.ok)throw new BackfillStop(fence.reason,{missing:fence.missing?.slice(0,20)??null,version:fence.version??null});
+  openImportSession(db,{now:()=>now().toISOString()});
   report.result=await discardStage(db,programmeRunId,{limit,abandon,now:()=>now().toISOString()});
   return await finish('completed');
  }catch(error){

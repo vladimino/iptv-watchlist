@@ -329,13 +329,17 @@ if(section('10')){
  const canonical=fresh('open');
  await seed(canonical.env);
  await writeFilmFacts(canonical.env,facts());
- assert.equal(dump(canonical.file,OWNED,true),dump(projected.file,OWNED),'identical rows for identical inputs, apart from the named exception identity_provenance_title_source');
+ // ADR 0218 stage 2 (AIR-661, exception projector_import_stage2_dimensions): the projector repository writes no metadata lifecycle row and no processing field
+ // on the identity row; everything else is identical.
+ const stage2=text=>JSON.stringify(JSON.parse(text).map(([table,list])=>[table,table==='film_dimension'?list.filter(item=>item.dimension!=='metadata').map(item=>item.dimension==='identity'?{...item,next_action:null,last_error:null,failure_reason:null,retry_at:null,attempts:0}:item):list]));
+ assert.equal(rows(projected.file,"SELECT COUNT(*) n FROM film_dimension WHERE dimension='metadata'")[0].n,0,'the projector repository inserts no metadata dimension row');
+ assert.equal(stage2(dump(canonical.file,OWNED,true)),stage2(dump(projected.file,OWNED)),'identical rows for identical inputs, apart from the named exceptions identity_provenance_title_source and projector_import_stage2_dimensions');
  assert.ok(JSON.parse(rows(canonical.file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p).titleSource,'the named exception is visible');
  assert.deepEqual(P6_DIFFERENTIAL_EXCEPTIONS.filter(item=>item.status==='accepted').map(item=>item.id).sort(),['blank_never_overwrites','identity_provenance_title_source','redirected_film_refused','reviewed_owner_rows_protected','sync_null_clock_keeps_stored']);
  // clearing: the projector's releaseFilm / null sync / null metadata give the rows the canonical clear gives
  await repo.releaseFilm(ID);await repo.projectFilmSyncState({filmId:ID,sync:null});await repo.projectFilm({film,metadata:null,watchlist:null});
  await writeFilmFacts(canonical.env,{...facts({requestId:'clear',expectedRevision:2}),metadata:null,sync:null,watchlist:false});
- assert.equal(dump(canonical.file,OWNED,true),dump(projected.file,OWNED),'identical rows after the clear');
+ assert.equal(stage2(dump(canonical.file,OWNED,true)),stage2(dump(projected.file,OWNED)),'identical rows after the clear (stage-2 exception as above)');
 }
 
 // 11. Producers: the planner, dispatch and readback registration; the route stays dormant below open; the module is imported only by the producers module.
