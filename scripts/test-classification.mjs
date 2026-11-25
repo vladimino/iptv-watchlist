@@ -1621,6 +1621,9 @@ export const FILES={
  "ratings.mjs": {
   "suite": "core"
  },
+ "receipt-operation-key.mjs": {
+  "suite": "core"
+ },
  "removal-rating-lookup.mjs": {
   "suite": "core"
  },
