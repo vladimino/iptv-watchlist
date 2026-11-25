@@ -114,7 +114,9 @@ const INSERT='INSERT INTO film_identity_evidence ('+COLUMNS+') SELECT ?,NULL,?,?
 const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND (source_root IS NOT NULL OR reconstructed_from IS ?) AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
 // Commit-time schema guard of a batch prepared without the control tables.
 export const ABSENT="NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('identity_evidence_writer','identity_evidence_writer_change'))";
-const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";
+// The condition that a writer is recording (one `?`: the writer name); exported so a domain integration can assert on it without naming the control table.
+export const WRITER_ACTIVE_SQL="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";
+const ACTIVE=WRITER_ACTIVE_SQL;
 
 // The statements of one evidence row, for the caller to append INSIDE its own domain batch (ADR 0215 decision 1). On a schema WITHOUT the control tables they are ONE guard
 // statement, never nothing: it asserts at COMMIT time that the tables are still absent, so a batch prepared before migration 0042 was applied cannot commit after the

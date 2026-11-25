@@ -432,6 +432,94 @@ for(const state of ['pending','on']){
  assert.equal(stored(bad.file,'a|2001'),null);
 }
 
+// ===== 14. the document path: an unreadable or unverified predecessor is not an absent decision; the predecessor is bound inside the batch; the producer's explicit outcome =====
+{
+ const documentWrite=(world,env,key,next)=>Authority.routeWrite(env,'epg/discovery-resolution.json',{[key]:next},{lease:world.lease});
+ const failingRead=world=>{let armed=true;return {...world.env,DB:d1Standin(world.file,{onQuery:async text=>{if(armed&&/^SELECT payload_json, decision_hash FROM discovery_decision WHERE observation_key=/.test(text)){armed=false;throw new Error('D1_ERROR: network connection lost');}}})};};
+ for(const state of ['on','off']){
+  const w=await world(chain42);
+  const ek=sql(w.file,"SELECT evidence_key FROM discovery_observation WHERE observation_key='a|2001'")[0].evidence_key;
+  const inherited=alias('known_epg_alias',{evidenceKey:ek});
+  await delta(w,'a|2001',inherited);
+  if(state==='on')await setWriter(w.env,'on');
+  // A metadata-only rewrite of an inherited verification, with the predecessor read failing once: no check is invented.
+  const rewrite={...inherited,deferReason:'wall_budget',lastAttemptAt:CHECKED_LATER};
+  if(state==='on'){
+   await rejects(documentWrite(w,failingRead(w),'a|2001',rewrite),/discovery_/);
+   assert.deepEqual(JSON.parse(stored(w.file,'a|2001').payload_json),inherited,'on: the batch failed closed, nothing changed');
+   assert.equal(ledger(w.file).length,0,'on: no row was invented');
+   await documentWrite(w,w.env,'a|2001',rewrite);
+   assert.equal(ledger(w.file).length,0,'on: the replan with a readable predecessor writes no row either (no check was performed)');
+  }else{
+   await documentWrite(w,failingRead(w),'a|2001',rewrite);
+   assert.equal(JSON.parse(stored(w.file,'a|2001').payload_json).deferReason,'wall_budget','off: the write is unchanged by the evidence code');
+   assert.equal(ledger(w.file).length,0);
+  }
+ }
+ {
+  // A stored payload that does not match its hash is unknown too.
+  const w=await world(chain42);
+  await delta(w,'a|2001',alias('known_epg_alias'));
+  await setWriter(w.env,'on');
+  sql(w.file,"UPDATE discovery_decision SET payload_json=replace(payload_json,'603','777') WHERE observation_key='a|2001'");
+  await rejects(documentWrite(w,w.env,'a|2001',detail({checkedAt:CHECKED_LATER})),/discovery_/);
+  assert.equal(ledger(w.file).length,0);
+ }
+ {
+  // The predecessor changes between the read and the commit: while the writer records, the batch fails and the caller replans.
+  const w=await world(chain42);
+  await delta(w,'a|2001',alias('known_epg_alias'));
+  await setWriter(w.env,'on');
+  let moved=false;
+  const racing={...w.env,DB:d1Standin(w.file,{onBatch:async batch=>{
+   if(!moved&&batch.some(item=>/INSERT INTO discovery_decision_history/.test(item.text))){
+    moved=true;
+    const other=alias('known_epg_alias',{checkedAt:CHECKED_LATER});
+    sql(w.file,"UPDATE discovery_decision SET payload_json='"+JSON.stringify(other)+"', decision_hash='"+(await hashOf(other))+"' WHERE observation_key='a|2001'");
+   }
+  }})};
+  await rejects(documentWrite(w,racing,'a|2001',detail({checkedAt:CHECKED_LATER})),/discovery_/);
+  assert.equal(ledger(w.file).length,0,'no row for a write whose predecessor moved');
+  // As for any document batch that fails after it opened the transfer, the transfer stays `loading` until the existing recovery resets it; the test stands in for that.
+  sql(w.file,"UPDATE discovery_transfer SET state='idle' WHERE id=1");
+  await documentWrite(w,w.env,'a|2001',detail({checkedAt:CHECKED_LATER}));
+  assert.deepEqual(ledger(w.file).map(row=>row.method),['tmdb_detail_check'],'the replan records the check');
+ }
+ {
+  // Successful and failed revalidation on the document path, from inherited decisions.
+  const w=await world(chain42);
+  const ek=sql(w.file,"SELECT evidence_key FROM discovery_observation WHERE observation_key='a|2001'")[0].evidence_key;
+  const inherited=detail({anchor:[100],evidenceKey:ek});
+  await delta(w,'a|2001',inherited);
+  await setWriter(w.env,'on');
+  const outcome=(previous,result)=>Authority.decisionAfterRevalidation(previous,result,{evidenceKey:ek,checkedAt:CHECKED_LATER,provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:'603'}});
+  const failedOnly=outcome(inherited,{failed:[90]});
+  await documentWrite(w,w.env,'a|2001',failedOnly);
+  assert.equal(ledger(w.file).length,0,'failed-only revalidation on the document path writes no row');
+  await documentWrite(w,w.env,'a|2001',outcome(failedOnly,{reconfirmed:[95]}));
+  assert.equal(ledger(w.file).length,1,'a reconfirmed duration writes the detail row');
+ }
+ {
+  // The explicit outcome of a producer wins over the transition rule: no row for `check: false`, a row for `check: true` even where the transition shows no change of source, id or anchor.
+  const w=await world(chain42);
+  await setWriter(w.env,'on');
+  const base=detail();
+  await delta(w,'a|2001',base);
+  const rechecked=detail({checkedAt:CHECKED_LATER,attempts:2});
+  assert.equal(Authority.decisionCheckPerformed(base,rechecked),false,'the transition rule alone cannot see this one');
+  const none=await world(chain42);
+  await setWriter(none.env,'on');
+  const inherited=detail({tmdbId:'604',filmId:'tmdb_604'});
+  sql(none.file,"INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('a|2001','"+RUN+"',1,'verified',1,NULL,NULL,NULL,'604','movie','tmdb_604','"+(await hashOf(inherited))+"','"+JSON.stringify(inherited)+"')");
+  await Authority.writeDecisionDelta(none.env,{'a|2001':{previous:inherited,next:{...inherited,checkedAt:CHECKED_LATER},check:false}},{lease:none.lease});
+  assert.equal(ledger(none.file).length,0,'check false: no row');
+  await Authority.writeDecisionDelta(none.env,{'a|2001':{previous:{...inherited,checkedAt:CHECKED_LATER},next:{...inherited,checkedAt:CHECKED_LATER,attempts:3},check:true}},{lease:none.lease});
+  assert.equal(ledger(none.file).length,1,'check true: the explicit outcome records the row');
+ }
+ // Every actual producer is either a transition into verified, a change of source or id, or a revalidation that passes its outcome (see the card's review): the explicit flag of the revalidation caller.
+ assert.match(fs.readFileSync('src/discovery.js','utf8'),/\{previous,next,check:reconfirmed\.length>0\}/,'the revalidation caller passes its explicit outcome');
+}
+
 // ===== 11. dormant: the bundle holds the writer but nothing activates it; no reader, no import =====
 {
  const source=fs.readFileSync('src/discovery-authority.js','utf8');

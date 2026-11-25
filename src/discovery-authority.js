@@ -8,7 +8,7 @@
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
 import {revokeWriteMatches,originalStillEffective} from './domain/discovery-identity-review.js';
-import {planDomainEvidence,domainEvidenceStatements} from './identity-evidence-writer.js';
+import {planDomainEvidence,domainEvidenceStatements,readWriter,WRITER_ACTIVE_SQL} from './identity-evidence-writer.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
@@ -61,11 +61,10 @@ export function decisionCheckPerformed(previous,next){
 }
 // The statements to place BEFORE the history insert of a batch, in the same batch (see above), or [] for a decision without evidence. A value the ledger model refuses (an id or a time
 // outside its shape) is a decision that states no recordable check: no row, the domain step is unchanged. A damaged evidence schema fails the decision write closed.
-async function decisionEvidence(env,key,decision,hash,at,previous){
- const input=decisionEvidenceInput(key,decision);
- if(!input||!decisionCheckPerformed(previous,decision))return [];
+// The two statements of one row (or the single commit-time guard on a schema without the control tables), or [] when the ledger model refuses the value (no recordable check).
+async function decisionEvidenceStatements(env,key,decision,hash,at){
  let plan;
- try{plan=await planDomainEvidence('discovery_decision',input);}
+ try{plan=await planDomainEvidence('discovery_decision',decisionEvidenceInput(key,decision));}
  catch(error){
   if(error?.code==='identity_evidence_invalid'||error?.code==='identity_evidence_out_of_slice')return [];
   throw failed('discovery_unavailable',error);
@@ -74,6 +73,26 @@ async function decisionEvidence(env,key,decision,hash,at,previous){
   return await domainEvidenceStatements(env,plan,{requestId:'discovery_decision:'+hash,at,assertSql:EVIDENCE_ASSERT,
    when:{sql:'NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',params:[key,hash]}});
  }catch(error){throw failed('discovery_unavailable',error);}
+}
+// Options. `check` (optional boolean) is the producer's explicit outcome (a revalidation that reconfirmed a duration, or not) and wins over the transition rule. `unknown` means the stored decision could
+// not be read or verified: that is NOT an absent decision, so no check is assumed; while the writer records, the batch fails closed (and the caller replans), while it is off nothing changes. `bind` (the
+// document path, whose predecessor is read outside the batch) asserts inside the batch that the stored decision is still the predecessor, again only while the writer records; `previousHash` is its hash.
+async function decisionEvidence(env,key,decision,hash,at,previous,{check,unknown=false,bind=false,previousHash=null}={}){
+ if(!decisionEvidenceInput(key,decision))return [];
+ if(unknown){
+  // Before the batch opens anything: a recording writer refuses an unknown predecessor outright (nothing is written, the transfer is untouched). The in-batch assertion below still covers a writer
+  // that starts recording after this read.
+  let state;
+  try{state=(await readWriter(env,'discovery_decision')).state;}catch(error){throw failed('discovery_unavailable',error);}
+  if(state!=='off')throw failed('discovery_unavailable',new Error('discovery_evidence_predecessor_unknown'));
+  const guard=await decisionEvidenceStatements(env,key,decision,hash,at);
+  return guard.length===1?guard:guard.length?[[EVIDENCE_ASSERT('NOT '+WRITER_ACTIVE_SQL),['discovery_decision']]]:[];
+ }
+ if(!(typeof check==='boolean'?check:decisionCheckPerformed(previous,decision)))return [];
+ const statements=await decisionEvidenceStatements(env,key,decision,hash,at);
+ if(!bind||statements.length<2)return statements;
+ const bound=previousHash==null?['NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=?)',[key]]:['EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[key,previousHash]];
+ return [...statements,[EVIDENCE_ASSERT('NOT '+WRITER_ACTIVE_SQL+' OR '+bound[0]),['discovery_decision',...bound[1]]]];
 }
 export const LEASE_TTL_MS=90000;
 export const STATEMENT_CAP=40;
@@ -567,9 +586,13 @@ async function writeDecisions(env,map,gate,context){
   if(!decision||typeof decision!=='object'||Array.isArray(decision))throw failed('discovery_conflict');
   const hash=await decisionHash(decision);
   const kind=mediaKind(decision);
-  let previous=null;
-  try{const stored=await one(db,'SELECT payload_json FROM discovery_decision WHERE observation_key=?',[key]);previous=stored?JSON.parse(stored.payload_json):null;}catch{previous=null;}
-  const evidence=await decisionEvidence(env,key,decision,hash,new Date().toISOString(),previous);
+  // The predecessor of the evidence rule: absent (no stored row) and unknown (the read failed, or the payload does not parse or match its hash) are different things.
+  let previous=null,previousHash=null,unknown=false;
+  try{
+   const stored=await one(db,'SELECT payload_json, decision_hash FROM discovery_decision WHERE observation_key=?',[key]);
+   if(stored){previous=JSON.parse(stored.payload_json);previousHash=stored.decision_hash;if(!previous||typeof previous!=='object'||Array.isArray(previous)||await decisionHash(previous)!==previousHash)throw new Error('predecessor_unverified');}
+  }catch{previous=null;previousHash=null;unknown=true;}
+  const evidence=await decisionEvidence(env,key,decision,hash,new Date().toISOString(),previous,{unknown,bind:true,previousHash});
   const observation=await one(db,'SELECT evidence_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=?',[key]);
   if(!observation)throw failed('discovery_fence');
   if(decision.evidenceKey!=null&&observation.evidence_key!=null&&observation.evidence_key!==decision.evidenceKey)throw failed('discovery_fence');
@@ -1426,7 +1449,7 @@ export async function writeDecisionDelta(env,changes,context={}){
   const cas=expected==null?'NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=?)':'EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)';
   const live=' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1) AND EXISTS (SELECT 1 FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=? AND (? IS NULL OR evidence_key IS NULL OR evidence_key=?)) AND '+cas;
   const generation=gate.generation+1,at=new Date().toISOString();
-  const evidenceRows=await decisionEvidence(env,key,next,hash,at,previous);
+  const evidenceRows=await decisionEvidence(env,key,next,hash,at,previous,{check:typeof change.check==='boolean'?change.check:undefined});
   try{
    await commit(db,[
     fence(gate,lease,live,[key,evidence,evidence,key,...(expected==null?[]:[expected])]),
