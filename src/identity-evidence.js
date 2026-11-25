@@ -158,7 +158,9 @@ export function initialSliceShape(row){
  // Canonical order puts the Letterboxd entity first (`letterboxd_*` sorts before `tmdb_movie`).
  if(!LETTERBOXD.has(row.subjectKind)||row.objectKind!=='tmdb_movie')return false;
  if(row.polarity==='restricts')return row.route==='letterboxd_export_import'&&row.method==='title_year_search';
- if(row.polarity==='asserts')return row.method==='page_check'&&PAGE_CHECK_ROUTES.includes(row.route);
+ // ADR 0213 decisions 2 and 4 (scenarios 6 and 8): an archive check is per archive, so the rated-archive route names its archive in `source_scope`; without it two archives
+ // checking the same root would collapse into one key. The general model keeps the scope optional for other routes and for reconstruction.
+ if(row.polarity==='asserts')return row.method==='page_check'&&PAGE_CHECK_ROUTES.includes(row.route)&&(row.route!=='letterboxd_rated_archive'||row.sourceScope!==null);
  return false;
 }
 
@@ -226,11 +228,21 @@ async function writeEvidence(env,{plan,filmId,expectedRevision,requestId,at,rece
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push(insert);
+ // The Film's revision is not a key-wide guard: another request (another Film's evidence-only call, or an admission batch) can record the same key between this
+ // operation's absence read and its batch, and the insert above is then a silent no-op. The batch therefore asserts that the row with the key is ITS OWN before the
+ // revision bump and the receipt tail, so a receipt is applied only by the batch that wrote its evidence.
+ statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND request_id=?)'),[plan.evidenceKey,requestId]]);
  statements.push([fenced.BUMP,['film',id,instant(at,'at')]]);
  try{await fenced.commit(env,gate,statements,entities,tail);}
  catch(error){
   const named=TRIGGER.exec(String(error?.cause?.message||''));
   if(error?.code==='film_person_unavailable'&&named)throw failed(named[0],error);
+  // A refused assertion (ownership, revision or precondition) with the key now recorded by another request is the lost race: typed, permanent, never applied.
+  if(['film_person_precondition','film_person_revision_conflict'].includes(error?.code)){
+   let row=null;
+   try{row=await readEvidence(env,plan.evidenceKey);}catch{/* the original error stands */}
+   if(row&&row.request_id!==requestId)throw failed(EVIDENCE_PRESENT,error);
+  }
   throw error;
  }
  return {id,revision:expected+1};
@@ -308,10 +320,17 @@ export async function recordIdentityEvidence(env,input={}){
  const digest=await identityEvidenceDigest({evidenceKey:plan.evidenceKey,filmId});
  const clock=clockOf(input.now);
  const spec=identityEvidenceOperation({replan:input.replan||(async()=>({evidence:input.evidence,filmId})),now:clock});
- const outcome=await receiptedWrite(env,{requestId,operation:IDENTITY_EVIDENCE_OPERATION,origin:IDENTITY_EVIDENCE_ORIGIN,target:{kind:'film',id:filmId},expectedRevision:Number(film.revision??0),digest,now:clock,policy:input.policy||RETRY_POLICY},{
+ let outcome;
+ try{outcome=await receiptedWrite(env,{requestId,operation:IDENTITY_EVIDENCE_OPERATION,origin:IDENTITY_EVIDENCE_ORIGIN,target:{kind:'film',id:filmId},expectedRevision:Number(film.revision??0),digest,now:clock,policy:input.policy||RETRY_POLICY},{
   atomic:true,readback:spec.readback,revalidate:spec.revalidate,
   run:ctx=>writeEvidence(env,{plan,filmId,expectedRevision:ctx.currentRevision,requestId,at:clock(),receiptMark:{requestId:ctx.requestId,attempt:ctx.attempt,now:clock(),target:ctx.target}}),
- });
+ });}
+ catch(error){
+  // The lost race: another request recorded the key first. This receipt was settled `abandoned` with that class by its own attempt; nothing of it landed.
+  if(error?.code!==EVIDENCE_PRESENT)throw error;
+  const row=await readEvidence(env,plan.evidenceKey);
+  return {ran:true,state:'present',receipt:true,receiptState:'abandoned',errorClass:EVIDENCE_PRESENT,requestId,evidenceKey:plan.evidenceKey,written:false,seq:row?Number(row.seq):null,filmId:row?.film_id??null};
+ }
  const row=await readEvidence(env,plan.evidenceKey);
  return {...outcome,receipt:true,requestId,evidenceKey:plan.evidenceKey,written:row?.request_id===requestId,seq:row?Number(row.seq):null};
 }

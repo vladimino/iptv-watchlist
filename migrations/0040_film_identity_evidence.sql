@@ -88,6 +88,20 @@ BEGIN
  SELECT RAISE(ABORT, 'film_identity_evidence_not_open');
 END;
 
+-- Append-only also against a conflict policy. `INSERT OR REPLACE` (or `REPLACE`, or an upsert's REPLACE) deletes the conflicting row without firing a DELETE trigger
+-- while recursive triggers are off, the SQLite default, so the no-delete trigger alone cannot stop it. This trigger fires BEFORE the conflict is resolved, whatever the
+-- policy and the recursive-trigger setting: an existing evidence key is an exact replay and inserts nothing (RAISE(IGNORE): the row, its seq and payload are kept, as
+-- the writer's ON CONFLICT DO NOTHING intends); an explicit seq already used, or a second supersession of the same row, is refused.
+CREATE TRIGGER film_identity_evidence_insert_conflict
+BEFORE INSERT ON film_identity_evidence
+FOR EACH ROW
+BEGIN
+ SELECT RAISE(IGNORE) WHERE EXISTS (SELECT 1 FROM film_identity_evidence WHERE evidence_key = NEW.evidence_key);
+ SELECT RAISE(ABORT, 'film_identity_evidence_seq_taken') WHERE NEW.seq IS NOT NULL AND EXISTS (SELECT 1 FROM film_identity_evidence WHERE seq = NEW.seq);
+ SELECT RAISE(ABORT, 'film_identity_evidence_superseded_once')
+ WHERE NEW.supersedes_key IS NOT NULL AND EXISTS (SELECT 1 FROM film_identity_evidence WHERE supersedes_key = NEW.supersedes_key);
+END;
+
 -- Append-only (ADR 0213 decision 5): no row is ever changed or deleted.
 CREATE TRIGGER film_identity_evidence_no_update
 BEFORE UPDATE ON film_identity_evidence

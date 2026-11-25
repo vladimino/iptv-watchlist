@@ -95,7 +95,7 @@ async function admissionBatch(env,{filmId=FILM,expected,plans,requestId='admissi
  assert.deepEqual(rows(template,'SELECT mode,cutover,generation FROM film_person_authority'),[{mode:'r2',cutover:'open',generation:0}],'the marker is not moved');
  const objects=rows(template,"SELECT type,name FROM sqlite_master WHERE tbl_name='film_identity_evidence' ORDER BY type,name").map(row=>row.type+':'+row.name);
  assert.deepEqual(objects,['index:film_identity_evidence_object','index:film_identity_evidence_scope','index:film_identity_evidence_subject','index:film_identity_evidence_superseded_once','index:sqlite_autoindex_film_identity_evidence_1',
-  'table:film_identity_evidence','trigger:film_identity_evidence_film_bound','trigger:film_identity_evidence_insert_open','trigger:film_identity_evidence_insert_shape','trigger:film_identity_evidence_no_delete',
+  'table:film_identity_evidence','trigger:film_identity_evidence_film_bound','trigger:film_identity_evidence_insert_conflict','trigger:film_identity_evidence_insert_open','trigger:film_identity_evidence_insert_shape','trigger:film_identity_evidence_no_delete',
   'trigger:film_identity_evidence_no_update','trigger:film_identity_evidence_scope_target','trigger:film_identity_evidence_supersedes_target']);
  const downgrade=database('r2');
  refused(downgrade,'UPDATE schema_contract SET version=39 WHERE id=1',/schema_contract_downgrade/);
@@ -112,9 +112,18 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  for(const stage of ['r2','prepared','held'])refused(database(stage),insert(),/film_identity_evidence_not_open/);
  const file=database('open');
  ok(file,insert());
- refused(file,insert({source_ref:'another ref'}),/UNIQUE constraint failed: film_identity_evidence.evidence_key/);
+ const original=JSON.stringify(rows(file,'SELECT * FROM film_identity_evidence'));
+ ok(file,insert({source_ref:'another ref'}));
  ok(file,insert({source_ref:'another ref'})+' ON CONFLICT(evidence_key) DO NOTHING');
  assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),1,'an existing key is a no-op for the writer');
+ // Append-only against a conflict policy, with recursive triggers OFF (the SQLite default): REPLACE never deletes the existing row (its seq and payload stay).
+ for(const verb of ['INSERT OR REPLACE','REPLACE']){
+  ok(file,'PRAGMA recursive_triggers=OFF;'+insert({source_ref:'replaced',request_id:'evil'}).replace(/^INSERT/,verb));
+  ok(file,'PRAGMA recursive_triggers=OFF;'+insert({source_ref:'replaced',request_id:'evil'})+' ON CONFLICT(evidence_key) DO UPDATE SET source_ref=excluded.source_ref');
+ }
+ assert.equal(JSON.stringify(rows(file,'SELECT * FROM film_identity_evidence')),original,'REPLACE and an upsert by key leave the row, its seq and payload unchanged');
+ refused(file,'PRAGMA recursive_triggers=OFF;'+insert({evidence_key:key(90),source_root:hex('page-r')}).replace('INSERT INTO film_identity_evidence (','INSERT OR REPLACE INTO film_identity_evidence (seq,').replace("VALUES ('","VALUES ("+one(file,'SELECT seq FROM film_identity_evidence')+",'"),/film_identity_evidence_seq_taken/);
+ assert.equal(JSON.stringify(rows(file,'SELECT * FROM film_identity_evidence')),original,'an explicit seq never replaces a row');
  refused(file,"UPDATE film_identity_evidence SET source_ref='x'",/film_identity_evidence_append_only/);
  refused(file,'DELETE FROM film_identity_evidence',/film_identity_evidence_append_only/);
  // seq is monotonic and orders rows causally.
@@ -164,7 +173,10 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  refused(file,insert({evidence_key:key(41),route:'watchlist_admission',source_root:hex('page-v2'),supersedes_key:key(1)}),/film_identity_evidence_supersedes/);
  refused(file,insert({evidence_key:key(42),source_root:hex('page-v2'),source_scope:ARCHIVE1,supersedes_key:key(1)}),/film_identity_evidence_supersedes/);
  ok(file,insert({evidence_key:key(43),source_root:hex('page-v2'),supersedes_key:key(1)}));
- refused(file,insert({evidence_key:key(44),source_root:hex('page-v3'),supersedes_key:key(1)}),/UNIQUE constraint failed: film_identity_evidence.supersedes_key/);
+ refused(file,insert({evidence_key:key(44),source_root:hex('page-v3'),supersedes_key:key(1)}),/film_identity_evidence_superseded_once/);
+ const superseding=JSON.stringify(rows(file,'SELECT * FROM film_identity_evidence WHERE evidence_key=\''+key(43)+'\''));
+ refused(file,'PRAGMA recursive_triggers=OFF;'+insert({evidence_key:key(46),source_root:hex('page-v4'),supersedes_key:key(1)}).replace(/^INSERT/,'INSERT OR REPLACE'),/film_identity_evidence_superseded_once/);
+ assert.equal(JSON.stringify(rows(file,'SELECT * FROM film_identity_evidence WHERE evidence_key=\''+key(43)+'\'')),superseding,'a second supersession by REPLACE never erases the first');
  ok(file,insert({evidence_key:key(45),source_root:hex('page-v3'),supersedes_key:key(43)}));
  // No foreign key on the Film: a row survives the Film it names (a merge keeps the id it was written for).
  assert.equal(one(file,"SELECT COUNT(*) FROM pragma_foreign_key_list('film_identity_evidence')"),0);
@@ -229,7 +241,11 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
   {subject:{kind:'discovery_observation',value:'obs-1'},relation:'candidate_for',object:{kind:'tmdb_movie',value:'603'},polarity:'asserts',route:'discovery_scan',method:'tmdb_detail_check',sourceRoot:'obs-1',observedAt:AT},
   diary({supersedesKey:'b'.repeat(64)}),rec({route:'ratings_diary',sourceRoot:PAGE}),
  ];
+ outside.push(archive(ARCHIVE1,{sourceScope:null}),archive(ARCHIVE1,{sourceScope:undefined}));
  for(const input of outside)await assert.rejects(()=>planIdentityEvidence(input),code('identity_evidence_out_of_slice'));
+ // A rated-archive check names its archive: the same source root checked by two archives is two keys (scenarios 6 and 8).
+ assert.notEqual(await evidenceKeyOf(archive(PAGE,{sourceScope:ARCHIVE1})),await evidenceKeyOf(archive(PAGE,{sourceScope:ARCHIVE2})),'same root, different archive scope: two keys');
+ assert.equal(reason(archive(PAGE,{sourceScope:null})),'accepted','the general model keeps the scope optional');
  assert.throws(()=>evidenceInsertStatement({row:normalizeEvidence(rec()),evidenceKey:'a'.repeat(64)},{filmId:FILM,requestId:'r',at:AT}),code('identity_evidence_out_of_slice'),'the helper never writes a reconstructed row');
  const plan=await planIdentityEvidence(diary());
  assert.throws(()=>evidenceInsertStatement(plan,{filmId:'tmdb:603',requestId:'r',at:AT}),code('film_person_invalid'));
@@ -391,6 +407,82 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  assert.equal((await readReceipt(env,diaryRequest)).errorClass,EVIDENCE_PRESENT);
  assert.equal((await readReceipt(env,watchRequest)).errorClass,'producer_source_changed');
  assert.deepEqual(ledger(file).map(row=>row.request_id),['admission:diary-1'],'one row, written by the admission batch; no receipt claims it');
+}
+
+{
+ // The global evidence-key race. The Film revision is not a key-wide guard, so each interleaving below lets the key land between the operation's absence read and its
+ // batch. The losing batch must not bump the Film or apply its receipt: it rolls back, the receipt is abandoned as `identity_evidence_present`, one row stays.
+ const evidenceKey=await evidenceKeyOf(diary());
+ // (a) the same key for two DIFFERENT existing Films: the other Film's call completes inside this one's window.
+ {
+  const file=database('open');
+  let interleave=null;
+  const env=envOf(file,{onBatch:async statements=>{if(interleave&&statements.some(item=>/INSERT INTO film_identity_evidence/.test(item.text))){const run=interleave;interleave=null;await run();}}});
+  await seedFilm(env);await seedFilm(env,OTHER);
+  const plain=envOf(file);
+  let winner=null;
+  interleave=async()=>{winner=await recordIdentityEvidence(plain,{evidence:diary(),filmId:OTHER,now:iso(0)});};
+  const before=revision(file);
+  const loser=await recordIdentityEvidence(env,{evidence:diary(),filmId:FILM,now:iso(0)});
+  assert.equal(winner.state,'applied','the other Film recorded the key');
+  assert.deepEqual([loser.state,loser.receipt,loser.receiptState,loser.errorClass,loser.written],['present',true,'abandoned',EVIDENCE_PRESENT,false]);
+  assert.equal(revision(file),before,'the losing batch did not bump its Film');
+  const lost=await readReceipt(env,await identityEvidenceRequestId({evidenceKey,filmId:FILM}));
+  assert.deepEqual([lost.state,lost.errorClass],['abandoned',EVIDENCE_PRESENT],'the losing receipt is settled non-applied with a typed class');
+  assert.deepEqual(ledger(file).map(row=>[row.film_id,row.request_id]),[[OTHER,await identityEvidenceRequestId({evidenceKey,filmId:OTHER})]],'one row, owned by the winner');
+  assert.equal(receipts(file).filter(row=>row.state==='applied').length,1,'only the winner applied');
+ }
+ // (b) the same Film: an admission batch records the key (with and without moving the Film's revision) between the absence read and the batch.
+ for(const moves of [false,true]){
+  const file=database('open');
+  let interleave=false;
+  const env=envOf(file,{onBatch:async statements=>{
+   if(!interleave||!statements.some(item=>/INSERT INTO film_identity_evidence/.test(item.text)))return;
+   interleave=false;
+   const plain=envOf(file);
+   if(moves)await admissionBatch(plain,{expected:revision(file),plans:[await planIdentityEvidence(diary())],requestId:'admission:race-1'});
+   else ok(file,insert({evidence_key:evidenceKey,request_id:'admission:race-1',source_ref:'diary:entry-1'}));
+  }});
+  await seedFilm(env);
+  interleave=true;
+  const before=revision(file);
+  const loser=await recordIdentityEvidence(env,{evidence:diary(),filmId:FILM,now:iso(0)});
+  assert.deepEqual([loser.state,loser.receiptState,loser.errorClass],['present','abandoned',EVIDENCE_PRESENT],moves?'revision moved':'revision unmoved');
+  assert.equal(revision(file),before+(moves?1:0),'only the admission bumped the Film');
+  assert.deepEqual(ledger(file).map(row=>row.request_id),['admission:race-1']);
+  assert.equal(receipts(file).filter(row=>row.state==='applied').length,0,'no evidence receipt is applied');
+ }
+ // (c) the replay race: the reconciler's readback finds the key absent, then another request records it before the replay batch; the replay abandons, never applies.
+ {
+  const file=database('open');
+  let bump=false,interleave=false;
+  const env=envOf(file,{onBatch:async statements=>{
+   if(!statements.some(item=>/INSERT INTO film_identity_evidence/.test(item.text)))return;
+   if(bump){bump=false;ok(file,"UPDATE canonical_revision SET revision=revision+1 WHERE kind='film' AND id='"+FILM+"'");return;}
+   if(interleave){interleave=false;await recordIdentityEvidence(envOf(file),{evidence:diary(),filmId:OTHER,now:iso(70000)});}
+  }});
+  await seedFilm(env);await seedFilm(env,OTHER);
+  bump=true;
+  await assert.rejects(()=>recordIdentityEvidence(env,{evidence:diary(),filmId:FILM,now:iso(0)}),code('film_person_revision_conflict'));
+  const requestId=await identityEvidenceRequestId({evidenceKey,filmId:FILM});
+  interleave=true;
+  const pass=await reconcileReceipts(env,{operations:operationRegistry([identityEvidenceOperation({replan:async receipt=>receipt.requestId===requestId?{evidence:diary(),filmId:FILM}:null,now:()=>iso(70000)})]),now:iso(70000),origin:IDENTITY_EVIDENCE_ORIGIN});
+  assert.ok(!pass.applied.some(item=>(item.requestId??item)===requestId),'the replay is never reported applied');
+  const settled=await readReceipt(env,requestId);
+  assert.deepEqual([settled.state,settled.errorClass],['abandoned',EVIDENCE_PRESENT],'the replay lost the race and is abandoned, not applied');
+  assert.deepEqual(ledger(file).map(row=>row.film_id),[OTHER]);
+ }
+ // The rated-archive writer refuses an archive check without its archive scope, before any receipt or row.
+ {
+  const file=database('open');
+  const env=envOf(file);
+  await seedFilm(env);
+  await assert.rejects(()=>recordIdentityEvidence(env,{evidence:archive(ARCHIVE1,{sourceScope:null}),filmId:FILM,now:iso(0)}),code('identity_evidence_out_of_slice'));
+  assert.deepEqual([ledger(file).length,receipts(file).length],[0,0]);
+  // Two archives over the SAME source root: two rows, one per archive scope.
+  for(const scope of [ARCHIVE1,ARCHIVE2])assert.equal((await recordIdentityEvidence(env,{evidence:archive(PAGE,{sourceScope:scope}),filmId:FILM,now:iso(scope===ARCHIVE1?0:120000)})).state,'applied');
+  assert.deepEqual(ledger(file).map(row=>[row.source_root,row.source_scope]),[[PAGE,ARCHIVE1],[PAGE,ARCHIVE2]]);
+ }
 }
 
 // ===== 7. fail closed: schema, marker, receipts, redirect and merge =====
