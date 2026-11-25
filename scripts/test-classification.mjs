@@ -355,6 +355,9 @@ export const FILES={
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
+ "film-history-aggregate.mjs": {
+  "suite": "core"
+ },
  "canonical-readiness-classes.mjs": {
   "suite": "core"
  },
@@ -1071,6 +1074,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-import.mjs": {
   "suite": "core"
  },
  "identity-evidence-writer.mjs": {
