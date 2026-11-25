@@ -3,7 +3,7 @@
 // Covered: the migration's refusal and replay; the control tables (absent = off, compare-and-swap, valid transitions, append-only change log, drain evidence, recorded
 // breaks); `source_order` and `known_alias`; the domain path (unbound candidate rows only, fenced by the writer's batch, not by the Film/Person marker); the key and strength
 // helpers; absent/off/pending/on, a valid duplicate, a mismatching row and a different causal position (all rolling the domain batch back), statement counts, and the
-// dormant wiring (no Worker import).
+// the dormant wiring (only the E2c owner writer imports the control; no Worker module can change it).
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -523,6 +523,23 @@ const setWriter=async(env,writer,target)=>{
    assert.deepEqual(probe(other),[],column+': rolled back');
   }
  }
+ // AIR-619 review: a stored row of the same key whose provenance is a RECONSTRUCTION (known root, non-null reconstructed_from) is semantically equivalent to a live plan with that
+ // root, not a collision, when the causal position is equal; a different source_order still collides. The first row stays immutable (never promoted to live).
+ {
+  const file=withProbe(copy(template));const env=envOf(file);
+  await setWriter(env,'discovery_owner','on');
+  const real=await planDomainEvidence('discovery_owner',owner({sourceOrder:4}));
+  const stored={evidence_key:real.evidenceKey,film_id:null,subject_kind:'discovery_observation',subject_value:OBS,relation:'candidate_for',object_kind:'tmdb_movie',object_value:'603',polarity:'asserts',route:'owner_action',method:'owner_statement',
+   source_root:'intent-1',source_ref:null,source_scope:null,scope_evidence_key:null,supersedes_key:null,observed_at:AT,origin:'reconstruction',reconstruction_run:'run-1',reconstructed_from:'rec-1',request_id:'import',recorded_at:AT,source_order:4};
+  ok(file,'INSERT INTO film_identity_evidence ('+COLUMNS.join(',')+') VALUES ('+COLUMNS.map(name=>lit(stored[name])).join(',')+')');
+  await domainBatch(env,file,real,{requestId:'live-1',mark:'equal'});
+  assert.deepEqual(probe(file),['equal'],'equal source order: a valid duplicate, the domain step commits');
+  assert.equal(ledgerRows(file).length,1,'no second row');
+  assert.equal(one(file,'SELECT origin FROM film_identity_evidence'),'reconstruction','the first matching row is never promoted to live');
+  const unequal=await planDomainEvidence('discovery_owner',owner({sourceOrder:5}));
+  await assert.rejects(()=>domainBatch(env,file,unequal,{requestId:'live-2',mark:'unequal'}),/CHECK constraint failed/);
+  assert.deepEqual(probe(file),['equal'],'unequal source order: a collision, the batch rolled back');
+  }
  // A key first inserted before an interval and committed again inside it gets no new row (coverage is per key, not per occurrence).
  {
   const file=withProbe(copy(template));const env=envOf(file);
@@ -576,13 +593,14 @@ const setWriter=async(env,writer,target)=>{
  }
 }
 
-// ===== 7. dormant: only the Discovery decision writer (E2a, AIR-617) imports the helper, nothing calls the operator, nothing reads the ledger or the control =====
+// ===== 7. dormant: only the Discovery writers (E2a decision, E2c owner) import the helper, nothing calls the operator, nothing reads the ledger or the control =====
+// AIR-619 (E2c): `src/discovery-owner-evidence.js` builds the owner statements; `src/discovery-authority.js` reads the control row of `discovery_owner`.
 {
  const sources=fs.readdirSync('src',{recursive:true}).filter(name=>String(name).endsWith('.js')).map(name=>path.join('src',String(name)));
  const mentions=sources.filter(name=>/identity_evidence_writer/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(mentions,['src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
+ assert.deepEqual(mentions,['src/discovery-owner-evidence.js','src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,['src/discovery-authority.js'],'only the Discovery decision write imports the helper (E2a); no route, Workflow, cron or producer imports the writer control');
+ assert.deepEqual(importers,['src/discovery-authority.js','src/discovery-owner-evidence.js'],'only the Discovery writers import the helper (E2a decision, E2c owner); no route, Workflow, cron or producer imports the writer control');
  const operator=sources.filter(name=>name!=='src/identity-evidence-writer.js'&&/\bchangeWriter\b/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(operator,[],'nothing in the Worker calls the activation/break operator: no row of any writer is ever flipped by code');
  assert.ok(!/changeWriter/.test(fs.readFileSync('build.mjs','utf8')+fs.readFileSync('scripts/bundle-scope.mjs','utf8').replace(/\/\/.*$/gm,'')),'the bundle hands the operator to nothing');
