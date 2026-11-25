@@ -43,6 +43,12 @@ const linked=linkFilms(letterboxd,catalog,LATER,{verified:true});
 assert.equal(linked.ok,true);
 assert.equal(linked.survivor.id,'film:28nq');
 assert.equal(JSON.stringify(linked.redirect),JSON.stringify({from:'film:tmdb:1656',to:'film:28nq',at:LATER}));
+// AIR-661 / ADR 0218 decision 6 (W3): the retired Film still holds its reviewed dictionary localization, a control row, so the retirement refuses
+// and nothing of either Film changes. A review route settles it first; the stand-in below removes the retired row the survivor already carries.
+const beforeRefusal=await counts();
+await assert.rejects(()=>repo.applyLink({survivor:linked.survivor,redirect:linked.redirect,metadata,credits:[director]}),error=>error.code==='film_retirement_protected_rows'&&error.rows.some(row=>row.dimension==='localization'&&row.reasons.includes('reviewed')));
+assert.deepEqual(await counts(),beforeRefusal);
+await db.run("DELETE FROM film_dimension WHERE film_id='film:tmdb:1656' AND dimension='localization'");
 const merged=await repo.applyLink({survivor:linked.survivor,redirect:linked.redirect,metadata,credits:[director]});
 assert.equal(merged.id,'film:28nq');
 assert.equal(merged.canonicalIdentity,'tmdb:1656');
@@ -123,6 +129,9 @@ const hopStored=await repo.saveFilm({film:hopWeak,credits:[director]});
 assert.equal(hopStored.conflicts.some(item=>item.value==='Черновик'),true);
 await repo.saveFilm({film:hopB,credits:[{personId:hopActor.id,role:'actor',ordinal:0}]});
 await repo.saveFilm({film:hopC});
+// W3 refuses the reviewed dictionary row of hop-a until a review route settles it (stand-in: the row is removed first).
+await assert.rejects(()=>repo.applyLink({survivor:hopB,redirect:{from:hopA.id,to:hopB.id,at:LATER}}),/film_retirement_protected_rows/);
+await db.run('DELETE FROM film_dimension WHERE film_id=? AND dimension=?',[hopA.id,'localization']);
 await repo.applyLink({survivor:hopB,redirect:{from:hopA.id,to:hopB.id,at:LATER}});
 await repo.applyLink({survivor:hopC,redirect:{from:hopB.id,to:hopC.id,at:LATER}});
 const reopenedHops=createCanonicalRepository(openSqlite(database));

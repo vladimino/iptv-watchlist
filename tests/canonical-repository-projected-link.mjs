@@ -25,7 +25,10 @@ const migrated=()=>{
 };
 const facts=(extra={})=>({now:NOW,metadata:{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true},fingerprint:{present:false},prediction:{present:false},title:{original:'The Legend of Zorro'},...extra});
 const dictionary={title:'Legend',status:'verified',tmdbId:'1656',sources:['dictionary']};
-const catalog=filmView(facts({localId:'film:tmdb:1656',tmdbId:'1656',decision:{status:'verified'},title:{original:'The Legend of Zorro',dictionary}}));
+// AIR-661 / ADR 0218 decision 6: the retirement (W3) refuses a Film holding a reviewed row, so the Film retired below carries no reviewed
+// dictionary localization; case 7 proves the refusal with one.
+const catalog=filmView(facts({localId:'film:tmdb:1656',tmdbId:'1656',decision:{status:'verified'},title:{original:'The Legend of Zorro'}}));
+const reviewedCatalog=filmView(facts({localId:'film:tmdb:1656',tmdbId:'1656',decision:{status:'verified'},title:{original:'The Legend of Zorro',dictionary}}));
 const letterboxd=filmView(facts({letterboxdId:'28nq',title:{original:'The Legend of Zorro',provisional:{title:'Zorro'}}}));
 const person=personView({roleId:'director/legend',original:'Martin Campbell',now:NOW,dictionary:{name:'Martin Campbell',status:'verified',source:'dictionary'}});
 const linked=linkFilms(letterboxd,catalog,NOW,{verified:true});
@@ -132,6 +135,15 @@ const add=(db,id,scheme,value)=>{
 {
  const db=migrated(),repository=await setup(db);const before=state(db);
  await assert.rejects(()=>write(db,repository,{redirects:[{...redirectA,to:'film:other'}]}),/Redirect target must be the survivor/);
+ assert.equal(state(db),before);
+}
+// 7. The retired Film holds a reviewed localization (a control row): the retirement refuses with its own code, nothing written.
+{
+ const db=migrated(),repository=projector.CanonicalRepository.createCanonicalRepository(adapterOf(db));
+ await repository.projectPerson({person});
+ await repository.projectFilm({film:reviewedCatalog,watchlist:true,credits:[director],metadata});
+ const before=state(db);
+ await assert.rejects(()=>write(db,repository,{redirects:[redirectA]}),error=>error.code==='film_retirement_protected_rows');
  assert.equal(state(db),before);
 }
 // 6. A later statement fails: the transaction leaves nothing (the release and the Film write are not kept).
