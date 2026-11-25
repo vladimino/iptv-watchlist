@@ -247,12 +247,11 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
 }
 
 // EXPLAIN QUERY PLAN of the snapshot statement (ADR 0216 decision 7). Owner decision of 25 Nov 2026 on PR #1000: option A, a non-unique index
-// tmdb_retirement_decision_movie ON tmdb_retirement_decision(movie_id), delivered by AIR-667 (migration, real chain and production readback). This
-// synthetic fixture installs exactly that index when the chain does not have it yet (IF NOT EXISTS: the same test holds before and after AIR-667 lands)
-// and asserts the target plan: every lookup is index-served, the ledger is SEARCHed by that index and never scanned. Nothing here applies a migration.
+// tmdb_retirement_decision_movie ON tmdb_retirement_decision(movie_id), created by migration 0040 (AIR-667). The fixture is the real migration chain,
+// which carries the index; the test asserts the target plan: every lookup is index-served, the ledger is SEARCHed by that index and never scanned.
 {
  const file=database();
- sqlite(file,'CREATE INDEX IF NOT EXISTS tmdb_retirement_decision_movie ON tmdb_retirement_decision (movie_id)');
+ assert.equal(rows(file,"SELECT name FROM sqlite_master WHERE type='index' AND name='tmdb_retirement_decision_movie'").length,1,'the chain carries the index (0040)');
  const params=['["film:x"]','["film:x"]','["film:x"]','["film:x"]','65','[["tmdb","1"]]','65','["1"]','65'];
  let i=0;const text=IDENTITY_SNAPSHOT_SQL.replace(/\?/g,()=>{const v=params[i++];return /^\d+$/.test(v)?v:q(v);});
  assert.equal(i,params.length,'every parameter is bound');
