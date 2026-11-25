@@ -14,6 +14,7 @@ const DISCOVERY_ATTEMPT_LIMIT=5;
 // and the ledger walk all stop before that reserve. The renew margin is half of the 90 s lease TTL, so a lease is
 // renewed while it still has at least that long to live. A single D1 query or TMDB request cannot be pre-empted:
 // the budget is checked between awaited steps, and a request's own timeout is cut to the time left.
+// AIR-682 (owner decision, 25 Nov 2026): 40 s remains the default (the synchronous-caller bound of AIR-352); the autonomous Workflow passes its own `chunkBudgetMs` (DISCOVERY_WORKFLOW_CHUNK_BUDGET_MS, 300 s) through advanceDiscovery.
 const PAGED_CHUNK_BUDGET_MS=40000;
 const PAGED_COMMIT_RESERVE_MS=8000;
 const PAGED_MIN_REQUEST_MS=2000;
@@ -802,7 +803,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 // very next durable write after the status; see advanceDiscovery.
 // A ledger above the in-memory cap is a cursor, not an array. One page is resident at a time, and only the
 // next `limit` actionable observations are kept for the TMDB calls.
-async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt=null){
+async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt=null,chunkBudgetMs=PAGED_CHUNK_BUDGET_MS){
  const writeAvailability=pinned?.epgPin?.authority!=='d1';
  const last=await loadJSON(env,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
@@ -814,7 +815,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // `candidateDeadline`; no durable write other than the final status and checkpoint starts after `persistLimit`; the
  // last PAGED_CHECKPOINT_RESERVE_MS are the final renewal, status and checkpoint. A D1 write batch cannot be pre-empted, so
  // each unit is also started only if the slowest write batch seen so far still fits before its deadline.
- const candidateDeadline=t0+PAGED_CHUNK_BUDGET_MS-PAGED_COMMIT_RESERVE_MS,walkDeadline=candidateDeadline-PAGED_MIN_REQUEST_MS;
+ const candidateDeadline=t0+chunkBudgetMs-PAGED_COMMIT_RESERVE_MS,walkDeadline=candidateDeadline-PAGED_MIN_REQUEST_MS;
  let writeCostMs=0;
  const timedWrite=async write=>{const began=Date.now();try{return await write();}finally{writeCostMs=Math.max(writeCostMs,Date.now()-began);}};
  // A cheap group can be several D1 batches in one timedWrite; using that whole duration for every remaining
@@ -822,7 +823,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const cappedWriteMs=()=>Math.min(writeCostMs||PAGED_DEFAULT_WRITE_MS,3000);
  const writeEstimate=count=>cappedWriteMs()*count;
  // In-flight unit plus status and checkpoint, capped so a multi-batch cheap group cannot reserve 36 s.
- const persistLimit=()=>t0+PAGED_CHUNK_BUDGET_MS-Math.max(PAGED_COMMIT_RESERVE_MS,Math.min(15000,3*(writeCostMs||PAGED_DEFAULT_WRITE_MS)));
+ const persistLimit=()=>t0+chunkBudgetMs-Math.max(PAGED_COMMIT_RESERVE_MS,Math.min(15000,3*(writeCostMs||PAGED_DEFAULT_WRITE_MS)));
  const candidateHeadroom=()=>PAGED_MIN_REQUEST_MS+writeEstimate(2);
  // AIR-374 P3c: the time the canonical Film admission may use inside this chunk: the persist limit minus the cost of three writes (one admission unit is several round trips), so a unit never starts when it could not finish before the checkpoint reserve.
  const canonicalLimit=()=>persistLimit()-writeEstimate(3);
@@ -1341,7 +1342,7 @@ async function ledgerDescription(pinned,key){
 }
 // AIR-353: `entryAt` is when advanceDiscovery began. The gap to the chunk's own clock is `preChunkMs`: the preflight reads
 // (continuation, lease, generation, programme) that `totalMs` does not cover.
-async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null,entryAt=null){
+async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null,entryAt=null,chunkBudgetMs=PAGED_CHUNK_BUDGET_MS){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),writeAvailability=pinned?.epgPin?.authority!=='d1',hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
@@ -1355,13 +1356,13 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
   if(e?.message!=='Discovery ledger JSON is incomplete')throw e;
   streamed=false;source=await loadJSON(pinned,'epg/discovery-latest.json');
  }
- if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt);
+ if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt,chunkBudgetMs);
  // AIR-426. Under D1 authority a ledger of READ_CAP rows or fewer is read whole, which sends the chunk down the whole-ledger path below. That path
  // saves the whole decision map, and a whole-map save fails closed (`discovery_bounded` above READ_CAP decisions, `discovery_fence` for any decision
  // whose observation is not in the active ledger). A frozen production ledger never gets there (47,059 rows), but a bounded one has the size of
  // one scan (20,568 rows on 10 November, 19,821 and 20,506 earlier), against 32,530 stored decisions of which 4,995 have no active observation. The D1 chunk is
  // the paged one whatever the size; this is the same descriptor the reader gives above READ_CAP.
- if(Array.isArray(source?.items)&&source.archive?.source==='d1')return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,{...source,paged:true,itemCount:source.items.length,items:null},startedAt,hopId,fence,pinned,entryAt);
+ if(Array.isArray(source?.items)&&source.archive?.source==='d1')return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,{...source,paged:true,itemCount:source.items.length,items:null},startedAt,hopId,fence,pinned,entryAt,chunkBudgetMs);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const last=await loadJSON(pinned,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
@@ -1981,7 +1982,7 @@ async function advanceDiscovery(env,body={}){
  const checkpoint=async summary=>{const record=continuationAfterChunk(summary,budget,hopId,new Date().toISOString(),programmeRunId);committed={summary,record,outcome:await saveOwnedContinuation(env,hopId,record)};if(body.onCheckpoint)await body.onCheckpoint(committed);};
  const release=async()=>{try{await releaseDiscoveryLease(env,acquired);trace.leaseReleased=true;}catch{trace.leaseReleased=false;}};
  try{
-  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint,now):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
+  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint,now,Number.isFinite(body.chunkBudgetMs)&&body.chunkBudgetMs>0?body.chunkBudgetMs:PAGED_CHUNK_BUDGET_MS):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){
   if(committed){result=committed.summary;trace.trailingError=diagnosticErrorCode(e);}
   else{
