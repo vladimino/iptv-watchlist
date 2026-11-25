@@ -1042,7 +1042,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
 
 // EXPLAIN QUERY PLAN of every statement of the aggregate (ADR 0216 decision 7): each lookup is a primary-key or index SEARCH, no base table and no index is
 // scanned (the bound json_each key lists, a constant row, derived tables and the measuring CTE of the bounded document read are the only SCANs). A scan of
-// film_redirect is never scanned: its ancestry step is a SEARCH through film_redirect_by_target (migration 0042, part of the real chain this fixture is built from).
+// film_redirect is never scanned: its ancestry step is a SEARCH through film_redirect_by_target (migration 0043, part of the real chain this fixture is built from).
 {
  const file=world({links:{'tmdb:5':'tmdb-5','letterboxd:l5':'tmdb-5','letterboxd:own2':'tmdb-5','tmdb:66':'tmdb-5'}});
  film(file,'film:other:2',[['letterboxd','own2']]);film(file,'film:old:5');sqlite(file,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);
@@ -1064,7 +1064,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   assert.deepEqual(scans,[],text.slice(0,160)+'\n'+plan.join('\n'));
   assert.ok(!plan.some(d=>/film_redirect/.test(d)&&/^SCAN /.test(d)),'film_redirect is never scanned');
   if(text.startsWith('WITH RECURSIVE anc')){
-   assert.ok(plan.some(d=>/^SEARCH r USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),'the ancestry step is served by film_redirect_by_target (migration 0042)\n'+plan.join('\n'));
+   assert.ok(plan.some(d=>/^SEARCH r USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),'the ancestry step is served by film_redirect_by_target (migration 0043)\n'+plan.join('\n'));
    assert.ok(plan.some(d=>/^SEARCH owner_review_entry USING INDEX owner_review_entry_identity \(identity_link=\?\)/.test(d)),'the owner entries are found by identity_link, not by a range of every film entry\n'+plan.join('\n'));
   }
   if(text.startsWith('WITH g AS'))assert.ok(plan.some(d=>/^SEARCH ratings_document USING INDEX sqlite_autoindex_ratings_document_1 \(key=\?\)/.test(d)),'the measure is a primary-key search\n'+plan.join('\n'));

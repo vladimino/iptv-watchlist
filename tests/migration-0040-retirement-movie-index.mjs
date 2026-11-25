@@ -77,9 +77,9 @@ assert.deepEqual(objects(after),[...objects(before),'index:'+INDEX].sort(),'exac
 refuse(copyOf(after,'again'),'a second apply on version 40');
 assert.equal(version(migrated(40)),40,'the chain through 0040 ends at version 40');
 assert.ok(objects(migrated(40)).includes('index:'+INDEX),'the chain through 0040 carries the index');
-assert.ok(objects(migrated(40)).every(name=>objects(migrated()).includes(name)),'a later migration (0041, AIR-601; 0042, AIR-647) keeps every 0040 object');
-assert.equal(version(migrated(41)),41,'the chain through 0041 ends at version 41 (0041 follows 0040)');
-assert.equal(version(migrated()),42,'the full chain ends at version 42 (0042, AIR-647, follows 0041)');
+assert.ok(objects(migrated(40)).every(name=>objects(migrated()).includes(name)),'a later migration (0041, AIR-601) keeps every 0040 object');
+assert.equal(version(migrated(42)),42,'the chain through 0042 ends at version 42 (0042 follows 0041, which follows 0040)');
+assert.equal(version(migrated()),43,'the full chain ends at version 43 (0043, AIR-647, follows 0042)');
 
 const shape=rows(after,"SELECT name,\"unique\" AS uniq,partial FROM pragma_index_list('tmdb_retirement_decision')").find(item=>item.name===INDEX);
 assert.equal(shape.uniq,0,'non-unique');assert.equal(shape.partial,0,'not partial');

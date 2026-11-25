@@ -2,7 +2,7 @@
 // typed resolver of AIR-646 (src/film-aggregate-resolver.js), with the mandatory candidate discovery and coverage of decision 6b (G1).
 // DORMANT: nothing in the Worker imports this module or the resolver (neither is bundled; build.mjs does not name them), so no route serves it and no
 // consumer is switched. Activation is AIR-648 (its own owner GO and its pre-activation readback of both indexes it needs, tmdb_retirement_decision_movie (0040,
-// AIR-667) and film_redirect_by_target (0042, this card): both migrations are delivered offline only and applied together by the AIR-603 M1 chain). The internal route handler below exists for the tests and for that card.
+// AIR-667) and film_redirect_by_target (0043, this card): both migrations are delivered offline only and applied together by the AIR-603 M1 chain). The internal route handler below exists for the tests and for that card.
 // It only reads D1: every statement is a plain SELECT (a write is refused before it reaches the binding), no R2, no network, no repair, no promotion, no cache.
 //
 // Shape of one request (decision 7): the final identity fence is reserved first (resolver); then each section reserves its after-statement before it reads,
@@ -483,7 +483,7 @@ async function availabilitySection(db,fence,set){
 // ONE statement reads everything the section consumes, including every column the localization mapping reads, so the title is built from the rows the token
 // covers (localizationInputsFromRows is the loader's own mapping).
 // Owner ancestry (ADR 0081: an owner_review_entry link is a snapshot a Film merge does not rewrite, so the owner values of a Film are those of every link in the redirect
-// TREE that ends at it): a recursive CTE walks `film_redirect` BACKWARDS from the survivor through `film_redirect_by_target` (migration 0042), whatever alias the request
+// TREE that ends at it): a recursive CTE walks `film_redirect` BACKWARDS from the survivor through `film_redirect_by_target` (migration 0043), whatever alias the request
 // used. It is bounded in depth and in breadth INSIDE the statement: it stops at OWNER_ANCESTOR_DEPTH + 1 levels and at OWNER_ANCESTORS_MAX + 2 rows (the survivor, its
 // ancestors, and one more row that proves an overflow); either overflow is typed (`owner_ancestry_bounded`) and never a partial answer. The edges (child, parent, depth)
 // are part of the section token and of its after-read, so a new or removed edge anywhere in the tree moves it; a leaf has no child row, so a child that appears under

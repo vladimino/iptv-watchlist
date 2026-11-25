@@ -337,7 +337,7 @@ export const FILES={
  "film-aggregate.mjs": {
   "suite": "core"
  },
- "migration-0042-film-redirect-index.mjs": {
+ "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
  "film-aggregate-resolver.mjs": {
@@ -1046,6 +1046,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-writer.mjs": {
   "suite": "core"
  },
  "identity-work-inventory.mjs": {

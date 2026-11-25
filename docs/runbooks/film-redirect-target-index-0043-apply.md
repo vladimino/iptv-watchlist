@@ -1,4 +1,4 @@
-# Film redirect target index, migration 0042: prerequisites, window, readback and forward-only rollback (the apply needs its own owner GO)
+# Film redirect target index, migration 0043: prerequisites, window, readback and forward-only rollback (the apply needs its own owner GO)
 
 **Status:** prepared on 25 Nov 2026 under [AIR-647](https://trello.com/c/WKSwJOwm). The file is in the repository and **not applied**; a deploy applies nothing. Whether it has been applied is read live (`schema_contract`, `PRAGMA index_list`) and from a dated evidence page, never from this paragraph. **This runbook authorizes no operation.** By the owner's decision of 25 Nov 2026 it is not applied on its own: all approved pending migrations are applied together in the coordinated pre-activation window (cards AIR-603 M1 and [AIR-648](https://trello.com/c/zh0cfDWK)), with a separately approved exact chain, target, preflight and readback.
 
@@ -8,15 +8,15 @@
 
 ## What the apply does, and does not
 
-- **Does:** one execution of `migrations/0042_film_redirect_by_target.sql`: the non-unique, non-partial index `film_redirect_by_target` on `film_redirect (to_film_id)` and the version change 41 to 42.
-- **Does not:** write any redirect row (the only row that changes is the single `schema_contract` row), change `0001`, a Film, a claim, a trigger, a marker, an authority, a lease, a writer, a public API, a flag, a Task or any Worker code, or activate the aggregate. Offline proof: `tests/migration-0042-film-redirect-index.mjs` (chain, refusals, dump parity on a populated forest, the real ancestry statement scanned before and searched after, readers by target and by `from_id`).
+- **Does:** one execution of `migrations/0043_film_redirect_by_target.sql`: the non-unique, non-partial index `film_redirect_by_target` on `film_redirect (to_film_id)` and the version change 42 to 43.
+- **Does not:** write any redirect row (the only row that changes is the single `schema_contract` row), change `0001`, a Film, a claim, a trigger, a marker, an authority, a lease, a writer, a public API, a flag, a Task or any Worker code, or activate the aggregate. Offline proof: `tests/migration-0043-film-redirect-index.mjs` (chain, refusals, dump parity on a populated forest, the real ancestry statement scanned before and searched after, readers by target and by `from_id`).
 
 ## Prerequisites (checked immediately before the GO is used, not remembered)
 
-1. `schema_contract` holds exactly one row, `id` 1, `version` `41`; `0040` and `0041` are applied (their own GO, in the M1 chain order 0039, 0040, 0041, then this file).
-2. The objects the file's guard checks are all present, read from `sqlite_master` (not inferred from the version integer): the tables `film`, `film_redirect` (its `CREATE` text names `to_film_id`), `film_identity_evidence`, `tmdb_retirement_decision`; the index `tmdb_retirement_decision_movie`; the triggers `film_identity_evidence_no_update`, `film_identity_evidence_no_delete`, `schema_contract_no_downgrade`; and **no** object named `film_redirect_by_target`.
+1. `schema_contract` holds exactly one row, `id` 1, `version` `42`; `0040`, `0041` and `0042` are applied (their own GO, in the M1 chain order 0039, 0040, 0041, 0042, then this file).
+2. The objects the file's guard checks are all present, read from `sqlite_master` (not inferred from the version integer): the tables `film`, `film_redirect` (its `CREATE` text names `to_film_id`), `film_identity_evidence` (its `CREATE` text has `source_order`), `tmdb_retirement_decision`, `identity_evidence_writer`, `identity_evidence_writer_change`; the index `tmdb_retirement_decision_movie`; the triggers `film_identity_evidence_no_update`, `film_identity_evidence_no_delete`, `identity_evidence_writer_change_no_update`, `identity_evidence_writer_change_no_delete`, `schema_contract_no_downgrade`; and **no** object named `film_redirect_by_target`.
 3. The GO names the live Git blob and SHA-256 of the file on `main`, the production D1 `iptv` and the exact execution path. Recheck the blob; do not use a remembered value.
-4. If another migration has landed on `main` first (an open migration PR can claim the same number), this file was renumbered and re-pinned before merge; the GO names the merged number and predecessor version, and the guard's predecessor is the then-current head.
+4. If another migration has landed on `main` first (an open migration PR can claim the same number; this file was written as 0042 and renumbered to 0043 when AIR-637's 0042 landed first), this file was renumbered and re-pinned before merge; the GO names the merged number and predecessor version, and the guard's predecessor is the then-current head.
 5. No other migration, import or cutover is in flight, and no Film merge is running at the same moment (owner-initiated and rare; the GO states the window).
 6. Before-state captured in the same window (read-only `SELECT`s, through the tool the GO names): the `schema_contract` row; `SELECT COUNT(*) FROM film_redirect`; `SELECT COUNT(*) FROM film`; the Film/Person authority marker (mode, cutover, generation).
 
@@ -26,23 +26,23 @@ One index entry per redirect row (D1 `rows_written`), plus the `sqlite_master` r
 
 ## The step
 
-Execute the unchanged file once, as **one** atomic batch (guard, `CREATE INDEX`, version update). Do not edit, split or blindly retry it. After a failed or unclear execution read the state back first and do not re-run: the file cannot run twice (it refuses anything but version 41).
+Execute the unchanged file once, as **one** atomic batch (guard, `CREATE INDEX`, version update). Do not edit, split or blindly retry it. After a failed or unclear execution read the state back first and do not re-run: the file cannot run twice (it refuses anything but version 42).
 
 ## Readback (all must hold; record it in a dated evidence page under `docs/evidence/`)
 
-- `schema_contract`: one row, `version` `42`, the v42 note.
+- `schema_contract`: one row, `version` `43`, the v43 note.
 - `PRAGMA index_list('film_redirect')` lists `film_redirect_by_target` with `unique` 0 and `partial` 0; `PRAGMA index_info` names `to_film_id`.
 - The counts of `film_redirect` and `film` and the Film/Person marker equal the before-state.
 - Where an authorized read path allows it: `EXPLAIN QUERY PLAN` of `SELECT from_id FROM film_redirect WHERE to_film_id IN (SELECT value FROM json_each('["film:x"]'))` reads `SEARCH film_redirect USING COVERING INDEX film_redirect_by_target`. If no such path is authorized, say so in the evidence instead.
-- **Both indexes before activation.** Aggregate activation (AIR-648) needs `tmdb_retirement_decision_movie` (0040) **and** `film_redirect_by_target` (0042) read back in production; the activation card verifies the actual objects, reuses this evidence and never applies again.
+- **Both indexes before activation.** Aggregate activation (AIR-648) needs `tmdb_retirement_decision_movie` (0040) **and** `film_redirect_by_target` (0043) read back in production; the activation card verifies the actual objects, reuses this evidence and never applies again.
 
 ## Stop conditions
 
-Not exactly one `schema_contract` row at version 41, any predecessor object of prerequisite 2 missing, an object of the new name present, another migration in flight, drift between the before-state and the apply, a failed or partial execution, or any readback difference.
+Not exactly one `schema_contract` row at version 42, any predecessor object of prerequisite 2 missing, an object of the new name present, another migration in flight, drift between the before-state and the apply, a failed or partial execution, or any readback difference.
 
 ## Rollback and forward recovery
 
-A code revert changes no D1 object; the index stays. `schema_contract.version` never goes down (`schema_contract_no_downgrade`) and no redirect row is rolled back. Dropping the index changes no query result (only speed), but it would take the ancestry step of the display section off an index, which blocks activation, and `0042` cannot be re-applied afterwards (it refuses version 42). **No `DROP INDEX` without a separate owner approval**; a wrong index would be corrected by a later forward migration.
+A code revert changes no D1 object; the index stays. `schema_contract.version` never goes down (`schema_contract_no_downgrade`) and no redirect row is rolled back. Dropping the index changes no query result (only speed), but it would take the ancestry step of the display section off an index, which blocks activation, and `0043` cannot be re-applied afterwards (it refuses version 43). **No `DROP INDEX` without a separate owner approval**; a wrong index would be corrected by a later forward migration.
 
 ## What this page does not authorize
 
