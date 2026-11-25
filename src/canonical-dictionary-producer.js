@@ -16,7 +16,7 @@
 // What a unit is: the facts of one Film that the dictionary owns: `original_title` (the entry's `original`, source `dictionary`, with `titleSource`), the effective Russian localization (reviewed, source `dictionary`) and the TMDB
 // identity (`canonical_identity` is filled only when empty and the id is a trusted external id of that Film). Membership, metadata and sync clocks are never part of a dictionary unit. Aliases are part of the snapshot digest (they
 // are dictionary content) but this producer does not write them: the canonical `film_alias` table exists, but no unit of this layer carries aliases (ADR 0127).
-// Named conflicts (`kind` kept: nothing written for the field; `replaced`: written over a different lower-ranked value): owner_kept, reviewed_kept, unranked_kept, no_identity_row, needs_trusted_tmdb_id,
+// Named conflicts (`kind` kept: nothing written for the field; `replaced`: written over a different lower-ranked value): owner_kept, reviewed_kept, unranked_kept, needs_trusted_tmdb_id,
 // identity_mismatch (kept), snapshot_already_applied (kept: this exact snapshot, version and digest, was applied before and the Film no longer holds it) and replaced_lower, replaced_reviewed, replaced_automatic (replaced). Stored: operation kind, origin, target, digests, revisions, state; no title, payload or personal data.
 import {failed} from './film-person-authority.js';
 import {applyFilmFacts,digestOf,filmFactsOperation,producerRequestId,producerRouteOpen,readFilmSnapshot,reconcileOwnOrigin,FILM_FACTS_OPERATION} from './canonical-producer-adapters.js';
@@ -100,7 +100,7 @@ export function buildDictionaryInput(snapshot,unit,{at}={}){
   if(!trusted.includes(entry.tmdbId))conflicts.push({field:'canonicalIdentity',reason:'needs_trusted_tmdb_id',kind:'kept'});
   else{film.canonicalIdentity=wantedIdentity;filmChanges=true;}
  }
- // (2) original_title, ranked by the title order (the dictionary ranks below the owner only, so an owner source is the one higher-precedence case and is named below; the writer applies the whole order again under its fence); the provenance (`titleSource`) lives in the identity row, so a title is written only where that row exists.
+ // (2) original_title, ranked by the title order (the dictionary ranks below the owner only, so an owner source is the one higher-precedence case and is named below; the writer applies the whole order again under its fence); the provenance (`titleSource`) lives in the identity row, which the writer creates when it is missing (ADR 0218 C1).
  const identity=snapshot.dimensions?.identity||null;
  const storedTitle=text(stored.original_title);
  if(entry.original){
@@ -109,7 +109,7 @@ export function buildDictionaryInput(snapshot,unit,{at}={}){
   const send=()=>{film.originalTitle=entry.original;film.source=DICTIONARY_SOURCE;};
   // An EQUAL title is adopted only where its stored source is explicitly lower-ranked (provenance upgrade). An owner, reviewed, unranked (no titleSource) or already-dictionary row is left alone: equality is no proof of who owns the value.
   if(storedTitle===entry.original){if(identity&&!strong&&storedSource!==null&&storedSource!=='owner'&&storedSource!==DICTIONARY_SOURCE)send();}
-  else if(!identity)conflicts.push({field:'originalTitle',reason:'no_identity_row',kind:'kept'});
+  // ADR 0218 decision 5 (C1): a missing identity row no longer drops the title; the writer creates the row with `titleSource` in the same fenced batch.
   else if(storedTitle===null){send();filmChanges=true;}
   else if(strong||storedSource==='owner')conflicts.push({field:'originalTitle',reason:identity.authority==='owner'||storedSource==='owner'?'owner_kept':'reviewed_kept',kind:'kept'});
   else if(storedSource===null)conflicts.push({field:'originalTitle',reason:'unranked_kept',kind:'kept'});

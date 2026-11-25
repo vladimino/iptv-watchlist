@@ -54,7 +54,7 @@ const T0='2026-11-16T11:00:00.000Z';
 const SHA='a'.repeat(64);
 const q=value=>value==null?'NULL':"'"+String(value).replace(/'/g,"''")+"'";
 const receipt=(tmdb,over={})=>({tmdb:String(tmdb),sourceCode:'sc'+tmdb,archiveSha256:SHA,title:'Film '+tmdb,year:2001,verifiedAt:T,...over});
-const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state'];
+const KEYS=['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state'];
 
 {
  const file=database('prepared');

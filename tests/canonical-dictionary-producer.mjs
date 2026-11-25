@@ -163,7 +163,9 @@ if(section('3')){
   r=build(withTitle(title,source,identity));assert.equal(r.input.film.originalTitle,undefined,label+': not restated');assert.equal(r.input.film.source,undefined,label);assert.deepEqual(reasons(r),[],label+': equality is no conflict');
  }
  for(const source of ['tmdb','letterboxd','watchlist','epg','discovery','mystery']){r=build(withTitle('Orig 1',source));assert.deepEqual([r.input.film.originalTitle,r.input.film.source,r.input.updatedAt],['Orig 1','dictionary',U],source+': an explicitly lower-ranked equal title is upgraded');}
- r=build(snap({dimensions:{}}));assert.deepEqual(reasons(r),['originalTitle:no_identity_row:kept']);assert.equal(r.input.film.originalTitle,undefined);assert.equal(r.input.film.canonicalIdentity,'tmdb:1');
+ // ADR 0218 C1: no identity row no longer drops the title; the writer creates the row with titleSource in the same batch. A stored title with no row is unranked and kept.
+ r=build(snap({dimensions:{}}));assert.deepEqual(reasons(r),[]);assert.deepEqual([r.input.film.originalTitle,r.input.film.source],['Orig 1','dictionary']);assert.equal(r.input.film.canonicalIdentity,'tmdb:1');
+ r=build(snap({film:film({original_title:'Old'}),dimensions:{}}));assert.deepEqual(reasons(r),['originalTitle:unranked_kept:kept']);assert.equal(r.input.film.originalTitle,undefined);
  r=build(withTitle('Old','tmdb'));assert.deepEqual(reasons(r),['originalTitle:replaced_lower:replaced']);assert.equal(r.conflicts[0].from,'tmdb');assert.equal(r.input.film.originalTitle,'Orig 1');
  for(const source of ['letterboxd','watchlist','epg','discovery','dictionary']){r=build(withTitle('Old',source));assert.deepEqual(reasons(r),['originalTitle:replaced_lower:replaced'],source);}
  assert.equal(build(withTitle('Old','dictionary')).conflicts[0].from,'dictionary');
@@ -182,12 +184,12 @@ if(section('3')){
  r=build(loc({status:'provisional',authority:null,value:'Рус 1',source:'wikidata'}));assert.deepEqual(reasons(r),[],'the same value is not a conflict');
  r=build(loc({status:'provisional',authority:null,value:null,source:'wikidata'}));assert.deepEqual(reasons(r),[],'a blank stored value is not a conflict');
  // nothing to hand the writer
- r=build(snap({trustedTmdb:[],dimensions:{}}),{id:ID(1),entry:entry(1,{title:null})});assert.equal(r.outcome,'kept');assert.deepEqual(reasons(r),['canonicalIdentity:needs_trusted_tmdb_id:kept','originalTitle:no_identity_row:kept']);
+ r=build(snap({trustedTmdb:[],dimensions:{}}),{id:ID(1),entry:entry(1,{title:null})});assert.equal(r.outcome,'proceed');assert.deepEqual(reasons(r),['canonicalIdentity:needs_trusted_tmdb_id:kept'],'ADR 0218 C1: a title with no identity row is handed to the writer, which creates the row');assert.equal(r.input.film.originalTitle,'Orig 1');
  r=build(loc({status:'reviewed',authority:'owner',value:'Мое',source:'owner'},{film:film({original_title:'Old',canonical_identity:'tmdb:1'}),dimensions:{identity:{status:'reviewed',authority:'owner',provenance_json:ts('owner')},localization:{status:'reviewed',authority:'owner',value:'Мое',source:'owner'}}}));
  assert.equal(r.outcome,'kept');assert.deepEqual(reasons(r),['localization:owner_kept:kept','originalTitle:owner_kept:kept']);
  // a title fill alone moves the Film clock; an identity fill alone does too; a title restate alone does not
  r=build(snap({film:film({canonical_identity:'tmdb:1'})}),{id:ID(1),entry:entry(1,{title:null})});assert.deepEqual([r.input.film.originalTitle,r.input.updatedAt,r.input.localization],['Orig 1',T,undefined]);
- r=build(snap({dimensions:{}}),{id:ID(1),entry:entry(1,{title:null})});assert.deepEqual([r.outcome,r.input.film.canonicalIdentity,r.input.film.originalTitle,r.input.updatedAt],['proceed','tmdb:1',undefined,T],'an identity fill alone is something to write');
+ r=build(snap({dimensions:{}}),{id:ID(1),entry:entry(1,{title:null,original:null})});assert.deepEqual([r.outcome,r.input.film.canonicalIdentity,r.input.film.originalTitle,r.input.updatedAt],['proceed','tmdb:1',undefined,T],'an identity fill alone is something to write');
  // an entry with only a localization or only an original title
  r=build(snap({trustedTmdb:[]}),{id:ID(1),entry:entry(1,{tmdbId:null,original:null})});assert.deepEqual([r.outcome,r.input.film.originalTitle,r.input.film.canonicalIdentity,!!r.input.localization],['proceed',undefined,undefined,true]);
  r=build(snap(),{id:ID(1),entry:entry(1,{tmdbId:null,title:null})});assert.deepEqual([r.outcome,r.input.film.originalTitle,!!r.input.localization],['proceed','Orig 1',false]);
@@ -275,7 +277,7 @@ if(section('6')){
  assert.deepEqual([filmRow(file,5).original_title,titleSource(file,5)],['Orig 5','dictionary']);
  assert.deepEqual(filmRow(file,6),{contract_version:1,canonical_identity:null,original_title:null,updated_at:U},'a redirected Film is refused');
  assert.equal(revision(file,ID(4)),0);assert.equal(revision(file,ID(6)),0);
- assert.deepEqual(out.conflicts.map(item=>item.id.slice(-1)+':'+item.reason).sort(),['1:replaced_lower','2:unranked_kept','3:needs_trusted_tmdb_id','3:no_identity_row','4:identity_mismatch','5:replaced_lower']);
+ assert.deepEqual(out.conflicts.map(item=>item.id.slice(-1)+':'+item.reason).sort(),['1:replaced_lower','2:unranked_kept','3:needs_trusted_tmdb_id','3:unranked_kept','4:identity_mismatch','5:replaced_lower']);
  assert.equal(receipts(file).length,4);
 }
 
@@ -555,7 +557,7 @@ if(section('11')){
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the module holds no SQL of its own');
  assert.ok(!/\b(writeFilmFacts|planFilmFacts|fenced|receiptedWrite)\b/.test(code_),'the writer is reached only through the receipt adapter');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-dictionary-producer'),'the Worker does not name it');
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  assert.ok(PRODUCER_WIRING.find(item=>item.name==='epg_commit').requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
 }
 console.log('canonical-dictionary-producer: ok');
