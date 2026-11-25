@@ -8,10 +8,48 @@ import os from 'node:os';
 import path from 'node:path';
 import {StageStop} from '../src/generation-stage.js';
 import {D1Error} from '../scripts/d1-backfill.mjs';
+import {spawnSync} from 'node:child_process';
 import {openSqlite as openSqliteProcess} from '../scripts/offline-import.mjs';
+import {renderSql} from '../scripts/d1-backfill.mjs';
 import {sqliteSync,sqliteRunner} from './sqlite-session.mjs';
 // AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
 export const openSqlite=file=>openSqliteProcess(file,{runner:sqliteRunner});
+
+// Memory (CI incident 2026-11-25): `openSqlite().transaction()` keeps every statement of the transaction as text and then joins it into one script (and prefixes it again), so the
+// legacy `publishGeneration` of a 1.25x generation (about 650 MB of SQL) held several copies of it in the V8 heap and ran out at the CI heap limit. This adapter is the same reference write
+// with the same rendering (`renderSql`, the renderer `openSqlite` uses), the same statements in the same order and one sqlite3 run of `PRAGMA foreign_keys=ON; BEGIN; ...; COMMIT;` under
+// `-bail` (a failure rolls the whole transaction back), but the script is appended to a temporary file in 1 MB slices and sqlite3 reads that file, so the script is never in memory.
+// Reads are the ordinary adapter's. Use it for the large legacy writes only; the staged path under test keeps the production `openSqlite` adapter.
+export function openSqliteStreaming(file){
+ const base=openSqlite(file);
+ let state=null;
+ const flush=()=>{if(state.parts.length){fs.writeSync(state.fd,state.parts.join('\n')+'\n');state.parts=[];state.size=0;}};
+ return {
+  run(sql,params=[]){
+   if(!state)return base.run(sql,params);
+   const statement=renderSql(sql,params)+';';state.parts.push(statement);state.size+=statement.length;
+   if(state.size>(1<<20))flush();
+   return Promise.resolve();
+  },
+  get(sql,params){if(state)throw new Error('Read inside the import transaction');return base.get(sql,params);},
+  all(sql,params){if(state)throw new Error('Read inside the import transaction');return base.all(sql,params);},
+  async transaction(fn){
+   if(state)return fn();
+   const script=path.join(root,'stream-'+process.hrtime.bigint()+'.sql');
+   state={fd:fs.openSync(script,'w'),parts:[],size:0};
+   try{
+    fs.writeSync(state.fd,'PRAGMA foreign_keys=ON;\nPRAGMA synchronous=OFF;\nBEGIN;\n');
+    await fn();
+    flush();fs.writeSync(state.fd,'COMMIT;\n');
+   }finally{fs.closeSync(state.fd);state=null;}
+   const input=fs.openSync(script,'r');
+   try{
+    const result=spawnSync('sqlite3',['-bail',file],{stdio:[input,'pipe','pipe'],encoding:'utf8'});
+    if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
+   }finally{fs.closeSync(input);fs.rmSync(script,{force:true});}
+  },
+ };
+}
 
 // ADR-0021 implemented: a generation staged in bounded chunks and published by one commit writes exactly the final rows the
 // legacy publishGeneration writes, at 1.25x the production order of magnitude, and every interruption, refusal or mismatch
