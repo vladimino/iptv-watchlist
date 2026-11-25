@@ -171,7 +171,9 @@ async function admitRatedFilmD1(env,input,{admission,expected,at,requestId,gate,
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film_rated_admission WHERE film_id=? AND source_code=? AND request_id=?)'),[id,admission.sourceCode,requestId]]);
  if(input.evidence!==undefined&&input.evidence!==null)statements.push(evidenceInsertStatement(input.evidence,{filmId:id,requestId,at}));
  statements.push([fenced.BUMP,['film',id,at]]);
- try{await writeFenced(env,gate,statements,entities,tail);}
+ try{
+  await writeFenced(env,gate,statements,entities,tail);
+ }
  catch(error){
   const message=String(error?.cause?.message||'');
   if(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_rated_admission/i.test(message))throw conflict(/source_code/.test(message)?'code_on_other_film':'other_code_on_film');
