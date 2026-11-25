@@ -28,12 +28,12 @@ const OPEN=[
  `INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('${RUN}','published','${AT}','${'a'.repeat(64)}','${AT}')`,
  `UPDATE published_epg_authority SET mode='d1',cutover='open',programme_run_id='${RUN}',generation=1 WHERE id=1`,
  "UPDATE watchlist_authority SET mode='d1' WHERE id=1",
- // AIR-667: the index the resolver's EQP target needs, installed exactly as the resolver test does (IF NOT EXISTS: valid before and after the migration lands).
- 'CREATE INDEX IF NOT EXISTS tmdb_retirement_decision_movie ON tmdb_retirement_decision (movie_id)',
 ].join(';\n');
 const schema=path.join(root,'schema.sqlite');
 sqlite(schema,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 sqlite(schema,OPEN);
+// AIR-667: migration 0040 of the real chain installs tmdb_retirement_decision_movie; the EQP below asserts the plan over it.
+assert.equal(sqliteSync([schema],{input:"SELECT name FROM sqlite_master WHERE type='index' AND name='tmdb_retirement_decision_movie';",encoding:'utf8'}).stdout.trim(),'tmdb_retirement_decision_movie');
 let n=0;
 const blank=()=>{const file=path.join(root,'f-'+(n++)+'.sqlite');fs.copyFileSync(schema,file);return file;};
 
