@@ -65,22 +65,76 @@ export function catalogReady(body){
  return out('unknown','C5','metadata_unknown');
 }
 
-// `prediction` carries the prediction-domain verdicts the aggregate does not read (no fingerprint section in ADR 0216): fingerprint
-// 'present'|'absent'|'unavailable'|'unknown', compatibility 'compatible'|'incompatible'|'unknown'. Not supplied means unknown: a negative is never inferred.
-export function predictionReady(body,prediction={}){
+// ---- Prediction-domain evidence (checked handoff) ----
+// The aggregate has no fingerprint section and no compatibility verdict (ADR 0216), so P3, P5 and P6 need prediction-domain evidence. A bare verdict string
+// is not evidence: it could belong to another Film, another pointer or profile, or to a generation that has since moved. The evidence is therefore a bound
+// object: the reading side (offline parity/diagnostics, `predictionFacts` of the AIR-660 parity domain) states which Film and which
+// authorized storage ids its fingerprint read examined, and the aggregate token, coverage token and taste profile versions it was computed against.
+// `checkPredictionEvidence` verifies that binding against the body being judged; anything unbound, partial, moved or unreadable certifies neither a positive
+// nor a negative. No storage read, no compatibility algorithm and no adapter lives here.
+export const PREDICTION_EVIDENCE_CONTRACT='film-prediction-evidence/v1';
+const FINGERPRINT_STATES=['present','absent','partial','unavailable','unknown'];
+const COMPATIBILITY=['compatible','incompatible','unknown'];
+const canonical=v=>JSON.stringify(v??null,(k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(key=>[key,x[key]])):x);
+const sameSet=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&canonical([...a].sort())===canonical([...b].sort());
+
+// The storage ids the aggregate authorizes: each verified lid and `tmdb_<n>` of a trusted, non-conflicting, non-retired, uncontested movie claim.
+export function authorizedStorageIds(identity){
+ const ids=[];
+ for(const c of identity?.claims||[]){
+  if(!stableClaim(c))continue;
+  ids.push(c.scheme==='tmdb'?'tmdb_'+c.value:String(c.value));
+ }
+ return ids.sort();
+}
+
+// Build the evidence from `predictionFacts` output and what the read examined. A plain object: the reading side owns the facts, this only fixes the shape.
+export function predictionEvidence(facts,{filmId,examinedStorageIds,predictionToken,coverageToken,tasteProfileVersions=[]}){
+ return {
+  contract:PREDICTION_EVIDENCE_CONTRACT,filmId,examinedStorageIds:[...(examinedStorageIds||[])],predictionToken:predictionToken??null,coverageToken:coverageToken??null,
+  tasteProfileVersions:[...tasteProfileVersions],fingerprint:facts?.fingerprint?.status??'unknown',fingerprintStorageIds:[...(facts?.fingerprint?.storageIds||[])],
+  compatibility:facts?.compatibility??'unknown',
+ };
+}
+
+// -> null when the evidence is coherent with `body`, else the reason it is not. Never throws.
+export function checkPredictionEvidence(body,evidence){
+ try{
+  if(evidence==null||typeof evidence!=='object'||evidence.contract!==PREDICTION_EVIDENCE_CONTRACT)return 'evidence_shape';
+  if(!FINGERPRINT_STATES.includes(evidence.fingerprint)||!COMPATIBILITY.includes(evidence.compatibility))return 'evidence_shape';
+  const identity=body?.identity,p=body?.predictions;
+  if(evidence.filmId!==identity?.filmId)return 'evidence_foreign_film';
+  const authorized=authorizedStorageIds(identity);
+  if(!authorized.length||!sameSet(evidence.examinedStorageIds,authorized))return 'evidence_incomplete_fingerprint_coverage';
+  if(!p||canonical(evidence.predictionToken)!==canonical(p.token)||canonical(evidence.coverageToken)!==canonical(p.coverage?.token))return 'evidence_token_moved';
+  const versions=[...new Set((p.current||[]).map(x=>x.tasteProfileVersion??null))];
+  if(!sameSet(evidence.tasteProfileVersions,versions))return 'evidence_profile_changed';
+  if(!evidence.fingerprintStorageIds.every(id=>authorized.includes(id)))return 'evidence_foreign_film';
+  if(evidence.fingerprint==='absent'&&evidence.fingerprintStorageIds.length)return 'evidence_incoherent';
+  if(evidence.fingerprint==='present'&&!evidence.fingerprintStorageIds.length)return 'evidence_incoherent';
+  return null;
+ }catch{return 'evidence_shape';}
+}
+
+// `evidence` is optional prediction-domain evidence (above). Absent or unbound evidence is `unknown` on every axis: a negative or a positive that only the
+// prediction domain can state is never inferred from the aggregate or from a bare verdict.
+export function predictionReady(body,evidence){
  const g=gate(body?.identity);
  if(g)return g;
  const p=body.predictions;
- const fingerprint=prediction.fingerprint??'unknown';
- const compatibility=prediction.compatibility??'unknown';
+ const supplied=evidence!=null;
+ const unbound=supplied?checkPredictionEvidence(body,evidence):null;
+ const ev=supplied&&!unbound?evidence:null;
+ const fingerprint=ev?.fingerprint??'unknown';
+ const compatibility=ev?.compatibility??'unknown';
  if(!sectionOk(p)||fingerprint==='unavailable')return out('unknown','P1','prediction_unavailable');
  if(p.status==='conflict')return out('unknown','P2','conflict');
  const complete=p.coverage?.status==='complete';
  if(fingerprint==='absent'&&complete)return out(false,'P3','fingerprint_absent');
  if(p.status==='absent'&&p.reason==='none'&&complete)return out(false,'P4','prediction_absent');
- if(compatibility==='incompatible'&&(fingerprint==='present'||p.status==='present'))return out(false,'P5','incompatible');
+ if(compatibility==='incompatible')return out(false,'P5','incompatible');
  if(fingerprint==='present'&&p.status==='present'&&compatibility==='compatible'&&complete)return out(true,'P6');
- const reason=fingerprint!=='present'?'fingerprint_unknown':!complete?'coverage_incomplete':p.status!=='present'?'section_'+p.status:'compatibility_unknown';
+ const reason=unbound?'prediction_'+unbound:fingerprint!=='present'?'fingerprint_unknown':!complete?'coverage_incomplete':p.status!=='present'?'section_'+p.status:'compatibility_unknown';
  return out('unknown','P7',reason);
 }
 
@@ -92,7 +146,7 @@ export function readinessContext(body){
  return {provenance,freshness:'unknown'};
 }
 
-export function deriveReadiness(body,{prediction}={}){
+export function deriveReadiness(body,{prediction}={}){ // `prediction`: prediction-domain evidence, see predictionReady
  return {
   contract:READINESS_CONTRACT,
   displayReady:displayReady(body),

@@ -14,6 +14,9 @@ import {
  LINK_DOCUMENT_MAX_PARTS,LINK_INDEX_MAX_ENTRIES,FACT_RECORDS_MAX,FACT_RECORD_MAX_PARTS,SETTLEMENT_ROWS_MAX,CANDIDATES_MAX,CURRENT_SHOWS_MAX,CREDITS_MAX,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX,OWNER_ENTRIES_MAX,
 } from '../src/film-aggregate.js';
 import {createStatementBudget,REQUEST_STATEMENT_BUDGET,AUTHORIZED_ALIASES_PER_SCHEME} from '../src/film-aggregate-resolver.js';
+import {readFilmReadiness} from '../src/film-readiness-composition.js';
+import {predictionEvidence,authorizedStorageIds} from '../src/film-readiness.js';
+import {predictionFacts} from '../src/domain/film-dimension-parity.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-aggregate-v1-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -560,8 +563,8 @@ function world({lids=['l5'],links=null,records=true}={}){
 // Dormant: the Worker bundle does not contain the aggregate, its route or the resolver, and nothing in src imports them (activation is AIR-648).
 {
  const build=fs.readFileSync('build.mjs','utf8');
- for(const name of ['film-aggregate','film-aggregate-resolver'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
- for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'))
+ for(const name of ['film-aggregate','film-aggregate-resolver','film-readiness','film-readiness-composition'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
+ for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'&&f!=='film-readiness-composition.js'))
   assert.ok(!/film-aggregate/.test(fs.readFileSync('src/'+name,'utf8')),name+' must not import the dormant aggregate');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the Worker routes no internal film aggregate');
  if(fs.existsSync('dist/server/index.js'))assert.ok(!fs.readFileSync('dist/server/index.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the built bundle does not serve the route');
@@ -1117,6 +1120,76 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   if(text.startsWith('WITH g AS'))assert.ok(plan.some(d=>/^SEARCH ratings_document USING INDEX sqlite_autoindex_ratings_document_1 \(key=\?\)/.test(d)),'the measure is a primary-key search\n'+plan.join('\n'));
  }
  assert.ok(seen.size>=9,'every statement shape was planned: '+seen.size);
+}
+
+// ---- AIR-665 / ADR 0218 stage 5: derived readiness over the REAL readFilmAggregate response (zero extra statements, no write) ----
+{
+ const rd=async(file,id,options={})=>{const e=env(file,options);const out=await readFilmReadiness(e,id,options.prediction?{prediction:options.prediction}:{});return {...out,calls:e.calls};};
+ const sig=r=>[r.readiness.displayReady.rule,r.readiness.catalogReady.rule,r.readiness.predictionReady.rule];
+ const evidenceFor=(fingerprints=[])=>body=>{
+  const storageIds=authorizedStorageIds(body.identity);
+  const pointers=(body.predictions.current||[]).map(c=>({film_id:c.storageId,r2_key:c.body.r2Key,content_sha256:c.contentSha256,fingerprint_hash:c.fingerprintHash}));
+  const facts=predictionFacts({storageIds,fingerprints,pointers,coverage:body.predictions.coverage});
+  return predictionEvidence(facts,{filmId:body.identity.filmId,examinedStorageIds:storageIds,predictionToken:body.predictions.token,coverageToken:body.predictions.coverage?.token,tasteProfileVersions:[...new Set((body.predictions.current||[]).map(c=>c.tasteProfileVersion??null))]});
+ };
+ // found: usable title and metadata, complete coverage, a pointer. Without prediction-domain evidence predictionReady is unknown, never true.
+ const file=world();pointer(file,'l5',3.5);metadata(file,'film:tmdb:5',{year:1995,runtime:120,synopsis:'s',poster:'p',url:'u',genres:['Drama']});ownerTitle(file,'k1','film:tmdb:5','Heat');
+ const before=fileSha(file);
+ const plain=await read(file,'tmdb_5');
+ const found=await rd(file,'tmdb_5');
+ assert.equal(found.http,200);
+ assert.deepEqual(found.body,plain.body,'the composition returns the aggregate body unchanged');
+ assert.deepEqual([found.readiness.displayReady.value,found.readiness.catalogReady.value],[true,true]);
+ assert.deepEqual([found.readiness.predictionReady.rule,found.readiness.predictionReady.value,found.readiness.predictionReady.reason],['P7','unknown','fingerprint_unknown']);
+ // Measured cost: the derivation adds no D1 statement, no write, no R2 or network (the proxies throw).
+ assert.equal(found.calls.queries,plain.calls.queries,'zero additional D1 statements');
+ assert.equal(fileSha(file),before,'no write');
+ // Bound evidence from the real body: coherent evidence is accepted (never a positive without a fingerprint and compatibility verdict); another Film's is not.
+ const fp=[{film_id:'l5',fingerprint_hash:'h',invalidated_at:null}];
+ const good=await rd(file,'tmdb_5',{prediction:evidenceFor(fp)});
+ assert.notEqual(good.readiness.predictionReady.reason,'prediction_evidence_shape');
+ assert.ok(!String(good.readiness.predictionReady.reason).startsWith('prediction_evidence_'),'coherent evidence binds: '+good.readiness.predictionReady.reason);
+ const foreign=await rd(file,'tmdb_5',{prediction:body=>({...evidenceFor(fp)(body),filmId:'film:other'})});
+ assert.deepEqual([foreign.readiness.predictionReady.value,foreign.readiness.predictionReady.reason],['unknown','prediction_evidence_foreign_film']);
+ // redirected: display and catalog are judged on the survivor.
+ const redir=world();film(redir,'film:old:5');sqlite(redir,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);metadata(redir,'film:tmdb:5',{year:1995});
+ const viaRedirect=await rd(redir,'film:old:5');
+ assert.equal(viaRedirect.body.identity.verdict,'redirected');
+ assert.equal(viaRedirect.readiness.catalogReady.rule,'C2');
+ // TV-only Film: no stable alias (C1).
+ const tv=blank();film(tv,'film:tv:3',[['tmdb_tv','3']]);putLinks(tv,{});metadata(tv,'film:tv:3',{year:2001});
+ const tvOut=await rd(tv,'tmdb_tv:3');
+ assert.deepEqual([tvOut.readiness.catalogReady.rule,tvOut.readiness.catalogReady.reason],['C1','no_stable_alias']);
+ // Complete coverage with no pointer: P4 from the aggregate alone. Incomplete candidate coverage with a pointer stays unknown.
+ assert.equal((await rd(world(),'tmdb_5')).readiness.predictionReady.rule,'P4');
+ const incomplete=world({links:{'tmdb:5':'tmdb-5'}});pointer(incomplete,'l5',3);
+ const inc=await rd(incomplete,'tmdb_5');
+ assert.notEqual(inc.body.predictions.coverage.status,'complete');
+ assert.equal(inc.readiness.predictionReady.value,'unknown');
+ // Known conflict between authorized storage ids with incomplete coverage: P2.
+ const conflict=world({lids:['a1','a2']});pointer(conflict,'a1',3);pointer(conflict,'a2',4);sqlite(conflict,"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");
+ const c=await rd(conflict,'tmdb_5');
+ assert.deepEqual([c.body.predictions.status,c.readiness.predictionReady.rule,c.readiness.predictionReady.reason],['conflict','P2','conflict']);
+ // Held ratings domain: coverage incomplete, never a negative.
+ const heldRatings=world();sqlite(heldRatings,"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");
+ assert.equal((await rd(heldRatings,'tmdb_5')).readiness.predictionReady.value,'unknown');
+ // Film/Person authority not open (held or unprepared): G1 for every predicate; an absent request is G2 not_applicable.
+ const unopened=path.join(root,'unopened.sqlite');sqlite(unopened,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const heldIdentity=await rd(unopened,'tmdb_5');
+ assert.deepEqual([heldIdentity.http,heldIdentity.body.identity.verdict,...sig(heldIdentity)],[503,'unavailable','G1','G1','G1']);
+ const missing=await rd(world(),'tmdb_999');
+ assert.deepEqual([missing.http,...sig(missing)],[404,'G2','G2','G2']);
+ // Moved section: the prediction pointer changes during the read: the section is unavailable (P1).
+ const mv=world();pointer(mv,'l5',3);
+ let moved=false;
+ const em=env(mv,{onQuery:t=>{if(!moved&&t.includes('FROM watchlist_authority')){moved=true;pointer(mv,'l5',3,{sha:'e'.repeat(64)});}}});
+ const movedOut=await readFilmReadiness(em,'tmdb_5',{prediction:evidenceFor()});
+ assert.deepEqual([movedOut.readiness.predictionReady.rule,movedOut.readiness.predictionReady.reason],['P1','prediction_unavailable']);
+ // Identity moved during the read: 503, identity only: G1.
+ const idm=world();let m2=false;
+ const eim=env(idm,{onQuery:t=>{if(!m2&&t.includes('FROM published_epg_show')){m2=true;claim(idm,'film:tmdb:5','letterboxd','late1');}}});
+ const idOut=await readFilmReadiness(eim,'tmdb_5');
+ assert.deepEqual([idOut.http,...sig(idOut)],[503,'G1','G1','G1']);
 }
 
 console.log('film-aggregate: FilmAggregateV1 sections (display, watchlist, availability, personal, predictions, history) over the AIR-646 resolver; G1 candidate discovery and coverage with its bounds; per-section before/after tokens (generation_moved), identity_moved with no section, the 40-statement budget with the reserved fence, C2 dedup and conflicts, the Watchlist negative proof, history limited/unavailable; dormant and read-only');
