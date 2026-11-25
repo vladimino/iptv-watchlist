@@ -1,9 +1,9 @@
 # ADR 0218: Film lifecycle dimensions: persist only control state, derive facts and readiness from their authorities
 
-**Status:** Proposed  
-**Original decision date:** pending owner disposition  
-**Recorded at:** 2026-11-25, from `main` `6123890`; revised after the [independent review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7162637848) of `8b7cabf` against `main` `961c045`, and after the [second review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7163011485) of `91284c9`  
-**Approval source:** not yet decided. Owner selections A1, B1, C1, D1 recorded on 2026-11-25 ([handoff](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360)); final disposition pending re-review  
+**Status:** Accepted  
+**Original decision date:** 2026-11-25 ([owner disposition](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164620646))  
+**Recorded at:** 2026-11-25, from `main` `6123890`; revised after the [independent review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7162637848) of `8b7cabf` against `main` `961c045`, after the [second review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7163011485) of `91284c9`, the [third review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7163347244) of `eae7cad` and the [final design review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164620646) of `3ad66ec`  
+**Approval source:** [Product Owner disposition of 25 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164620646), recorded verbatim by the Coordinator: «давай принимать», accepting the consolidated ADR at `3ad66ec` with the selections A1, B1, C1, D1 ([selection record](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360)). This is an architecture acceptance only, with no implementation card, retirement, reconciliation run, schema apply, flag, Task or production GO.  
 **Related work:** [AIR-644](https://trello.com/c/nFBGvvnU). Builds on Accepted [ADR 0211](0211-catalog-enrichment-producer.md), [ADR 0213](0213-film-identity-evidence-ledger.md), [ADR 0214](0214-film-metadata-per-field-provenance.md), [ADR 0215](0215-identity-evidence-full-model.md) and [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md). Coordinated with PV1 [AIR-631](https://trello.com/c/i8td3wu0) and PVE [AIR-636](https://trello.com/c/0jJADYxg).  
 **Supersedes:** In part, the AIR-42 D1 status and readiness rules listed in [decision 4](#4-readiness) (the stored identity, metadata, fingerprint and prediction status graphs and the domain readiness predicates, for D1 consumers). It amends no other accepted ADR.  
 **Superseded by:** None
@@ -215,8 +215,8 @@ The ADR 0214 triggers are not live today. PV1 reads the same predicate when it l
 1. **Offline parity reader.** For each Film, it compares the derived facts (decision 2) with the stored row and classifies the row as `agree`, `stale_copy`, `control` (kept) or `unknown_legacy`. Parity compares derivation outputs with stored control columns only; it does not expect stale copies to equal current facts.
 2. **W2 safe import.** W2 today overwrites `film.original_title` and `film.canonical_identity` (`src/canonical-repository.js:165`) before it deletes and reinserts dimensions. The change:
    - writes the title and identity through the same guarded rule as W1: a `strong()` identity row keeps the stored values, and a ranked `titleSource` is respected, so a kept `titleSource` never ranks a value it did not bind;
-   - deletes and rewrites only the `identity` and `metadata` rows it imports, and only when they are neither control nor `unknown_legacy`; it inserts only into empty slots or over such rows;
-   - stops inserting `fingerprint`/`prediction` rows and processing fields, and **no longer deletes** `fingerprint`/`prediction` rows or any other retirement candidate: they stay untouched until the separately authorized stage 6;
+   - deletes and rewrites only the `identity` row it imports, and only when it is neither control nor `unknown_legacy`; it inserts an identity row only into an empty slot or over such a row;
+   - **never deletes or rewrites any retirement candidate** — every `metadata` row (locked or unlocked), every `fingerprint` row and every `prediction` row stays byte-identical until the separately authorized stage 6; it inserts no new `metadata`, `fingerprint` or `prediction` row, since those states are derived (decision 2), and writes no processing fields;
    - moves its offline readers, verify and export/import fixtures in the same change.
 
    Before any mutation, W2 reads the target schema contract version and refuses when the importer predates it. An old importer is refused on the actual target, not trusted to check itself.
@@ -232,7 +232,7 @@ The ADR 0214 triggers are not live today. PV1 reads the same predicate when it l
 
 ## Selected options
 
-The Product Owner selected A1, B1, C1 and D1 on 25 November 2026, 14:42 Europe/Madrid, without qualifications, for reviewed HEAD `eae7cad` ([consolidated handoff](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360)). These selections are recorded here. They are not yet the final ADR disposition, which follows the independent re-review of this revision. The design above is normative for them.
+The Product Owner selected A1, B1, C1 and D1 on 25 November 2026, 14:42 Europe/Madrid, without qualifications, for reviewed HEAD `eae7cad` ([consolidated handoff](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360)). The consolidated ADR was then [accepted](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164620646) at `3ad66ec`. The design above is normative.
 
 | Choice | Selected | Normative content | Not selected, and why |
 | --- | --- | --- | --- |
@@ -274,7 +274,7 @@ Real SQLite fixtures in `tests/`, one test per case, plus the cases above:
 - Metadata: legacy fresh without fields; legacy unattributed value stays `present`; explicit null vs unknown; no freshness window applied; lock preserved through W1, W2, W3 and retirement; merge per ADR 0214: a lone retired lock moves with the release row and history, two different metadata rows without `resolve.metadataState` refuse, a merge outside that path refuses.
 - Import: W2 keeps `original_title`/`canonical_identity` under a strong row and a ranked `titleSource`; preserves control and unknown legacy rows on delete and insert; refuses an old importer against the target contract before mutation; W3 refuses a Film with control or unknown rows.
 - Readiness: one fixture per rule G1-G3, D1-D4, C1-C5 and P1-P7, asserting that exactly one rule matches. This includes a `tmdb_tv`-only Film (`no_stable_alias`), a proved-absent fingerprint, a held marker, unknown compatibility, incomplete coverage with a present prediction (`unknown`), and a known conflict plus incomplete coverage (`conflict`). Core-field usability: an empty string, `0`, `[]`, malformed `genres_json` and a wrong type are not usable; an explicit-null provenance row is proved absent.
-- Stage 2: an import over a Film with `fingerprint`/`prediction` rows leaves them byte-identical.
+- Stage 2: an import over a Film with `metadata` (locked and unlocked), `fingerprint` and `prediction` rows leaves them byte-identical and inserts none.
 - Retirement: parity classifications for every class; the predicate never matches a control or unknown row; restore against the recorded post-delete revision.
 - Concurrency: merge and import racing a W1 write (revision CAS).
 
@@ -325,7 +325,7 @@ Removes two silently diverging copies and the localization staleness gap, protec
 
 ## Evidence
 
-- **Original decision:** pending.
+- **Original decision:** [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164620646); [selections](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360).
 - **Implementation:** none.
 - **Dated verification:** code inventory at `main` `6123890`, revised at `961c045` and against `main` `3b4db68` for the owner selections, 2026-11-25; static analysis, no production reads.
 - **Uncertainty:** production row contents (F5 impact, legacy `authority`/`status` values) not measured; whether any sealed document carries `dimensions`; `mergeFilms` has no caller today.

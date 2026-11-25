@@ -16,7 +16,7 @@ A generation has a phase of `published` or `withheld`. `published_generation` is
 
 `film_metadata.payload_json` is the watchlist and `parseFilm` record: year, runtime, genres, synopsis, poster, and url. `film_person_credit` orders the director and the cast. `film_dimension` remains the lifecycle status and is not that record. `people.json` remains the name cache, not the credit edges.
 
-Proposed [ADR 0218](../../adr/0218-film-lifecycle-dimensions-revision.md) (owner selections recorded, not implemented) classifies every `film_dimension` column as control, copy or unknown legacy, and plans no schema change before a separately authorized retirement migration; until it is delivered this contract is unchanged.
+Accepted [ADR 0218](../../adr/0218-film-lifecycle-dimensions-revision.md) (accepted target, not implemented) classifies every `film_dimension` column as control, copy or unknown legacy, and plans no schema change before a separately authorized retirement migration; until it is delivered this contract describes the live schema.
 
 `candidate_decision` is the AIR-48 decision: status, catalog film id, optional Film reference, TMDB id, identity source, provenance, and the attempt fields. `candidate_decision_history` keeps the decision it replaced. `score_result` is not that decision. A verified or terminal ambiguous decision does not need a score row.
 
