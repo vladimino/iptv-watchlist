@@ -1,0 +1,52 @@
+# Film dimension parity: offline classification of `film_dimension` rows
+
+Stage 1 of [ADR 0218](../adr/0218-film-lifecycle-dimensions-revision.md) ([AIR-660](https://trello.com/c/daGePESx)). The reader derives each Film's facts from their domain authorities (ADR 0218 decision 2) and classifies every stored `film_dimension` row under the per-column matrix of decision 1. It is offline and read only. **This page authorizes no operation**: no production read, retirement, reconciliation, import, schema apply, flag or Task.
+
+## What it is
+
+| Part | Path | Role |
+| --- | --- | --- |
+| Pure classifier | `src/domain/film-dimension-parity.js` | derived facts and the class of one row; no I/O |
+| Page reader | `src/film-dimension-parity.js` | one bounded page of Films from a D1-shaped binding; SELECT only |
+| Offline report | `scripts/film-dimension-parity.mjs` | pages through a private SQLite copy opened with `sqlite3 -readonly` |
+| Tests | `tests/film-dimension-parity.mjs` | real SQLite fixtures built from every migration |
+
+Nothing in the Worker imports these modules. No route, MCP tool, Workflow or cron calls them.
+
+## Classes
+
+| Class | Meaning | Later stages |
+| --- | --- | --- |
+| `control` | the row may be the only durable record of a decision: an `owner` authority or `reviewed` identity row, an identity `titleSource`, a metadata row matching the ADR 0214 lock (`status='reviewed' OR authority='owner'`), an applied reviewed/owner localization, or a provisional localization whose source has no `film_localization_source` row (`projection_sole_record`) | kept |
+| `agree` | a provisional localization projection equal to the existing resolver's output over its authorities | kept |
+| `stale_copy` | a copy whose truth lives elsewhere (identity/metadata without control state, fingerprint, prediction), or a localization projection the resolver would now choose differently (`projection_stale`, ADR 0218 F5) | only fingerprint, prediction and unlocked metadata rows can become stage-6 candidates, and only with their own L3 GO |
+| `unknown_legacy` | a value no current writer produces: an unknown `authority`, an unknown localization `status`, a `reviewed` or authority-carrying fingerprint/prediction row, a `titleSource` outside identity, an unreadable identity provenance, or conflicting owner titles | retained and reported |
+
+A copy's stored status is never compared as truth. The difference with the derived fact is reported as `diverges` for information only. Every row carries `proof`: `complete` when the facts of its dimension were readable, `unavailable` when its domain marker was not `open` (Film/Person held, prediction `r2` or held, owner review not `d1`/`open`).
+
+## Derived facts and their limits
+
+- **Identity:** the ADR 0216 decision 3 verdict for a canonical `film:` id: `found`, `redirected`, `absent`, `conflict`, `cycle` or `unavailable`. A settled tmdb retirement is removed from the alias set before conflict evaluation; an unsettled claim on a scheme no section reads (for example a slug) does not fail identity. `retired` and `unverified` describe external requests and are not produced for `film:` ids.
+- **Aliases (G1):** the survivor's trusted, non-conflicting, non-retired `tmdb` and `letterboxd` claims; storage ids are `tmdb_<n>` and each lid. A `tmdb_tv`-only Film has no stable alias.
+- **Metadata:** a usable value is `present` with confidence `unattributed`; everything else is `unknown`. `film_metadata_field` (ADR 0214 PV1) is not live, so no field is ever proved `absent`. Freshness is `unknown`.
+- **Localization:** the existing `resolveLocalization` over `owner_review_entry` (the Film and its redirect ancestors), the applied reviewed row and the source rows; the stored provisional row is a legacy candidate of its own source, exactly as at runtime.
+- **Fingerprint and prediction:** read under authorized storage ids only. The reader does **not** read the ratings link index, so candidate coverage is `incomplete` (`ratings_evidence_not_read`) and nothing is ever proved absent or `none`. A known conflict between storage ids stays `conflict`. Compatibility is `incompatible` only for a pointer bound to another fingerprint hash or an invalidated fingerprint; otherwise `unknown` (the ADR-0035 registry and the profile rule are not read).
+- The marker generations of Film/Person, prediction and owner review are read before and after each page; a move refuses the page.
+
+## Running it on an offline copy
+
+```bash
+node scripts/film-dimension-parity.mjs --d1-sqlite /absolute/private/copy.sqlite
+```
+
+Options: `--page N` (1 to 200, default 100), `--max-films N` (stop after N Films; the report says `truncated`), `--detail` (adds every classified row with ids and values to stdout; keep that output private and out of GitHub, Trello and logs). Without `--detail` the report holds counts only.
+
+The copy is whatever the owner already holds. This page does not authorize making a new production export, and a report describes that copy only, never live production.
+
+## Cost (measurement, not a threshold)
+
+Measured on the SQLite stand-in with one row per dimension per Film, 25 November 2026: a page of 1 Film read 24 statements and 194 rows; 100 Films, 36 statements and 1 382 rows; 200 Films, 48 statements and 2 582 rows; zero rows written in every case. About 180 of the rows are the fixed table inventory and marker reads. Statements grow with the number of 80-id chunks per page, not with the number of Films. Rows returned are a lower bound of D1 `rows_read`.
+
+## Not done here
+
+No live census, no retirement (stage 6), no projection reconciliation (stage 4), no import change (stage 2, [AIR-661](https://trello.com/c/1Rv634jd)) and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)).

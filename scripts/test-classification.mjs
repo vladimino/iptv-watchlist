@@ -889,6 +889,9 @@ export const FILES={
  "film-person-authority.mjs": {
   "suite": "core"
  },
+ "film-dimension-parity.mjs": {
+  "suite": "core"
+ },
  "film-person-backfill.mjs": {
   "suite": "core"
  },
