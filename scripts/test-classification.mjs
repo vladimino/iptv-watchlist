@@ -665,6 +665,9 @@ export const FILES={
  "letterboxd-view-double.mjs": {
   "suite": "core"
  },
+ "reservation-guard-fixture.mjs": {
+  "suite": "core"
+ },
  "view-index-d1-input.mjs": {
   "suite": "core"
  },

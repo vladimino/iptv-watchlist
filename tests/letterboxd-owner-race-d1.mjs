@@ -11,6 +11,7 @@ import * as RatingsD1 from '../src/ratings-d1.js';
 import * as WatchlistD1 from '../src/watchlist-d1.js';
 import {admissionStep} from '../src/letterboxd-sync-admission.js';
 import {d1Standin} from './d1-standin.mjs';
+import {RESERVATION_SQL, DIARY_KEY, guardOf, splitRows} from './reservation-guard-fixture.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {scoped, scopedReplacing} from '../scripts/bundle-scope.mjs';
 
@@ -129,4 +130,29 @@ async function paused(kind = 'bridge') {
 }
 await paused();
 await paused('link_failed');
+// Sixth review: the reservation fence on the REAL D1 path when the reservation text is cut by the 60,000-byte part boundary of the stored check document. A live reservation permits the Ratings link; a replaced or removed
+// reservation refuses it. The contract text is pinned to the one the canonical writer is tested with (canonical-rated-admission-producer).
+{
+  const built = Facts.reservationGuard('c-live-0001');
+  assert.deepEqual(JSON.parse(JSON.stringify(built)), guardOf('c-live-0001'), 'one fence contract'); assert.equal(built.sql, RESERVATION_SQL);
+  assert.equal(Facts.reservationGuard('bad id'), null);
+  const rows = (checkId, offset) => splitRows(checkId, offset, AT).map(([key, part, body, etag, at]) => `INSERT INTO ratings_document (key, part, body, etag, updated_at) VALUES ('${key}', ${part}, '${body}', '${etag}', '${at}');`).join('\n');
+  const db = open(), env = {DB: db}; currentDb = db;
+  for (const offset of [1, 20, 38]) {
+    db.sql(`DELETE FROM ratings_document WHERE key='${DIARY_KEY}'`); db.sql(rows('c-live-0001', offset));
+    assert.equal(db.sql(`SELECT length(CAST(body AS BLOB)) AS n FROM ratings_document WHERE key='${DIARY_KEY}' AND part=0`)[0].n, 60000, 'the needle is cut at byte 60000');
+    const lid = 'Bd' + offset, tmdb = String(900700 + offset);
+    await Facts.applyDiaryEvidence(env, [{lid, watchedDate: '2026-11-17', rating: 3, ratingState: 'rated', sourceRef: 'diary:viewing:' + offset}]);
+    // another holder: refused
+    await assert.rejects(() => Facts.bridgeDiaryFilm({...env, effectGuard: guardOf('c-gone-0002')}, {lid, tmdb}), error => error.code === 'write_contention');
+    assert.equal(((await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value || {})['tmdb:' + tmdb], undefined, 'a foreign reservation links nothing');
+    // the live reservation (cut by the boundary): permitted
+    const linked = await Facts.bridgeDiaryFilm({...env, effectGuard: guardOf('c-live-0001')}, {lid, tmdb});
+    assert.equal(linked.state, 'linked', 'a live reservation across the boundary permits the link (offset ' + offset + ')');
+  }
+  // removed: refused
+  db.sql(`DELETE FROM ratings_document WHERE key='${DIARY_KEY}'`);
+  await Facts.applyDiaryEvidence(env, [{lid: 'Bd99', watchedDate: '2026-11-17', rating: 3, ratingState: 'rated', sourceRef: 'diary:viewing:99'}]);
+  await assert.rejects(() => Facts.bridgeDiaryFilm({...env, effectGuard: guardOf('c-live-0001')}, {lid: 'Bd99', tmdb: '900799'}));
+}
 console.log('letterboxd-owner-race-d1: ok');

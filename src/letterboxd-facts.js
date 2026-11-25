@@ -619,6 +619,15 @@ function recordRatingChange(record,incoming,effective){
  // AIR-489 / ADR 0166 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
  // (src/letterboxd-diary-identity.js). Reuses the receipt pattern of ADR 0105 and the alias protocol of linkFilm; nothing is merged.
  const DIARY_IDENTITY_KEY=FACTS_PREFIX+'scans/diary-identity.json',DIARY_IDENTITY_CAP=200;
+ // AIR-599 (sixth review of PR #1009): THE contract of the check-reservation fence of a Letterboxd identity effect, built here once and consumed unchanged by the Ratings D1 writes (ratings-d1) and the canonical D1 writes
+ // (canonical-mutations) through `env.effectGuard = {sql, params}`. The SQL boolean holds only while the LOGICALLY RECONSTRUCTED check document still contains this holder's `"reservation":{"checkId":"<id>"` text. The document
+ // is stored in parts cut every 60,000 bytes with no regard to JSON tokens, so a needle may span two adjacent parts: besides one part, the tail of each part joined to the head of the next is searched (the needle is far
+ // shorter than a part, so it spans at most two). It asserts the TOKEN (the reservation still on the entry), not the wall clock. Same batch, no schema, no second authority.
+ function reservationGuard(checkId){
+  if(typeof checkId!=='string'||!/^[\w-]{8,80}$/.test(checkId))return null;
+  const needle='"reservation":{"checkId":"'+checkId+'"',length=needle.length;
+  return {sql:'(EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND instr(body,?)>0) OR EXISTS (SELECT 1 FROM ratings_document a JOIN ratings_document b ON b.key=a.key AND b.part=a.part+1 WHERE a.key=? AND instr(substr(a.body,-?)||substr(b.body,1,?),?)>0))',params:[DIARY_IDENTITY_KEY,needle,DIARY_IDENTITY_KEY,length-1,length-1,needle]};
+ }
  // The movie id each lid's record already carries, from the link index and the record (one read of the index, one per lid).
  async function diaryLinks(env,lids){
   const {value:index}=await readJSON(env,FACTS_KEYS.links),out=new Map();
@@ -886,5 +895,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,DIARY_IDENTITY_KEY,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

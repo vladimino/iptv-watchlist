@@ -658,19 +658,27 @@ async function putPayload(env,runId,report){
  assert.equal(other.admitted,true);
 }
 
-// AIR-599 (fifth review of PR #1009): an env carrying the check reservation of a Letterboxd identity effect (`effectGuard`) admits only while the shared check document still holds that reservation; an effect whose
-// reservation was released, taken over or voided by an owner action is refused AT COMMIT (no Film, no admission row).
+// AIR-599 (fifth and sixth review of PR #1009): an env carrying the check reservation of a Letterboxd identity effect (`effectGuard`) admits only while the shared check document still holds that reservation, also when the
+// reservation text is CUT BY THE PART BOUNDARY of the stored document (parts of 60,000 bytes with no regard to JSON tokens). A released, taken-over or voided reservation is refused AT COMMIT (no Film, no admission row).
 {
+ const {guardOf,splitRows,DIARY_KEY}=await import('./reservation-guard-fixture.mjs');
  const file=database('open');
- const key='letterboxd/facts/scans/diary-identity.json';
- assert.equal(sqlite(file,"INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('"+key+"',0,'{\"films\":{\"Rx1\":{\"reservation\":{\"checkId\":\"c-live\",\"until\":\"x\"}}}}','e','"+T0+"')").status,0);
- const gone={...envOf(file),effectGuard:{key,needle:'"reservation":{"checkId":"c-gone"'}};
+ const insert=rows=>rows.map(([key,part,body,etag,at])=>"INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('"+key+"',"+part+",'"+body+"','"+etag+"','"+at+"');").join('\n');
+ // the live reservation `c-live-0001` is cut inside the needle at byte 60000
+ assert.equal(sqlite(file,insert(splitRows('c-live-0001',20,T0))).status,0);
+ const gone={...envOf(file),effectGuard:guardOf('c-gone-0002')};
  await assert.rejects(()=>FA.admitRatedFilm(gone,{receiptKey:'tmdb_610',receipt:receipt(610),expectedRevision:0,at:T,requestId:'req-gone'}));
  assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='610'"),0,'no admission without the reservation');
  assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:610'"),0);
- const live={...envOf(file),effectGuard:{key,needle:'"reservation":{"checkId":"c-live"'}};
+ const live={...envOf(file),effectGuard:guardOf('c-live-0001')};
  const ok=await FA.admitRatedFilm(live,{receiptKey:'tmdb_610',receipt:receipt(610),expectedRevision:0,at:T,requestId:'req-live'});
- assert.equal(ok.admitted,true,'the live reservation admits');
+ assert.equal(ok.admitted,true,'the live reservation, cut by the part boundary, admits');
+ // the reservation replaced (another holder) or removed: refused
+ assert.equal(sqlite(file,"DELETE FROM ratings_document WHERE key='"+DIARY_KEY+"';\n"+insert(splitRows('c-other-0003',7,T0))).status,0);
+ await assert.rejects(()=>FA.admitRatedFilm(live,{receiptKey:'tmdb_611',receipt:receipt(611),expectedRevision:0,at:T,requestId:'req-replaced'}));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='611'"),0,'a replaced reservation admits nothing');
+ assert.equal(sqlite(file,"DELETE FROM ratings_document WHERE key='"+DIARY_KEY+"'").status,0);
+ await assert.rejects(()=>FA.admitRatedFilm(live,{receiptKey:'tmdb_611',receipt:receipt(611),expectedRevision:0,at:T,requestId:'req-removed'}));
 }
 
 console.log('canonical-rated-admission-producer: ok');

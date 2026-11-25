@@ -183,14 +183,14 @@ const LetterboxdDiaryIdentity=(()=>{
   const mine=new Map();
   // AIR-599 (fifth review of PR #1009): the env an EFFECT commits through carries its reservation (`effectGuard`): every Ratings or canonical batch of the effect asserts that the shared check document still holds this check
   // id, so an effect whose reservation was released, taken over or voided by an owner action (also after the reservation expired) is refused at commit. No reservation, no effect.
-  const guarded=lid=>mine.has(lid)?{...env,effectGuard:{key:LetterboxdFacts.DIARY_IDENTITY_KEY,needle:'"reservation":{"checkId":"'+mine.get(lid)+'"'}}:null;
+  const guarded=lid=>{const guard=mine.has(lid)?LetterboxdFacts.reservationGuard(mine.get(lid)):null;return guard?{...env,effectGuard:guard}:null;};
   // A local effect (a trusted-bridge link, a link repair) needs no lease budget, but never starts once the reservation window is spent.
   const late=()=>clock()>=now+RESERVATION_MS-15000;
   // The ledger-row token guards of the items whose budget a write applies (each once): a seed read before an owner action is never installed after it.
   const guardsOf=lids=>{const seen={},out=[];for(const lid of lids){const guard=wanted.find(item=>item.lid===lid)?.guard;if(guard&&!seen[lid]){seen[lid]=true;out.push(guard);}}return out;};
   try{gate=await CanonicalCatalogReader.catalogReaderGate(env);}catch{gate=null;}
   const open=!!gate&&gate.mode==='d1'&&gate.state==='open';
-  const newCheckId=()=>typeof crypto!=='undefined'&&typeof crypto.randomUUID==='function'?crypto.randomUUID():String(now)+':'+Math.random().toString(36).slice(2);
+  const newCheckId=()=>typeof crypto!=='undefined'&&typeof crypto.randomUUID==='function'?crypto.randomUUID():String(now)+'-'+Math.random().toString(36).slice(2,12);
   // The one place an entry is written from an outcome. Only `gone` and `definite` charge an attempt (with a fresh check id); `transport` raises the streak and backs off;
   // `not_now` and a link intent keep the count and are due again at the next run. The queue position is never changed.
   const record=(item,reason,{tmdb=null}={})=>{

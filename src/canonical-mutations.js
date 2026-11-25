@@ -104,12 +104,14 @@ async function letterboxdEpochMoved(db,gate){
  if(!fence||fence.kind!=='letterboxd')return false;
  try{const row=await one(db,"SELECT 1 AS ok FROM letterboxd_sync_mode WHERE id=1 AND mode='cloudflare' AND epoch=?",[fence.epoch]);return !row;}catch{return false;}
 }
+const RESERVATION_SQL=/^\(EXISTS \(SELECT 1 FROM ratings_document WHERE key=\? AND instr\(body,\?\)>0\) OR EXISTS \(SELECT 1 FROM ratings_document a JOIN ratings_document b /;
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
  if(gate.producerFence)out.push(...fenceStatements(gate.producerFence));
  if(gate.effectGuard){
-  if(typeof gate.effectGuard.key!=='string'||typeof gate.effectGuard.needle!=='string'||!gate.effectGuard.needle)throw failed('film_person_invalid');
-  out.push([assertSql('EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND instr(body,?)>0)'),[gate.effectGuard.key,gate.effectGuard.needle]]);
+  const guard=gate.effectGuard;
+  if(typeof guard.sql!=='string'||!RESERVATION_SQL.test(guard.sql)||!Array.isArray(guard.params)||guard.params.length!==6)throw failed('film_person_invalid');
+  out.push([assertSql(guard.sql),guard.params]);
  }
  for(const entity of entities)out.push([REVISION,[entity.kind,entity.id,entity.expected]]);
  return out;

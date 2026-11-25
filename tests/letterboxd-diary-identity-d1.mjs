@@ -103,7 +103,7 @@ const pendingOf = async (env, lid) => (await Facts.readDiaryIdentity(env)).films
   add('Dd1c', 'fixture-dd1c-2002', '900150', 'Fixture Dd1c', 2002); add('Dd1d', 'fixture-dd1d-2003', '900151', 'Fixture Dd1d', 2003);
   seenGuard.length = 0;
   await Identity.resolve(env, [{lid: 'Dd1c', slug: 'fixture-dd1c-2002'}], opts());
-  assert.equal(seenGuard.length, 1); assert.match(seenGuard[0]?.needle || '', /^"reservation":\{"checkId":"[\w-]+"$/, 'the canonical admission carries the reservation');
+  assert.equal(seenGuard.length, 1); assert.match(seenGuard[0]?.params?.[1] || '', /^"reservation":\{"checkId":"[\w-]+"$/, 'the canonical admission carries the reservation');
   // an effect PAUSED across the expiry of its reservation, the owner dismissing the id meanwhile (an expired reservation is not in flight): the final link is refused AT COMMIT
   const original = Facts.bridgeDiaryFilm; let paused = false;
   Facts.bridgeDiaryFilm = async (e, args) => {
