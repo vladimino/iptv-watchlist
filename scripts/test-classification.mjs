@@ -355,6 +355,9 @@ export const FILES={
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
+ "film-readiness.mjs": {
+  "suite": "core"
+ },
  "film-history-aggregate.mjs": {
   "suite": "core"
  },
