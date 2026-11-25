@@ -198,8 +198,18 @@ export async function planManifest({runId,family,cohortAt,writers,records}={}){
    else group.inputs.push(...record.rows);
   }
  }
+ // ONE immutable key -> ETag mapping for the whole manifest: the guard re-read before a chunk is per physical object, so two records of one object that pin different ETags cannot both
+ // be right. The whole conflicting object is excluded and reported; no ETag is ever chosen silently.
+ const etags=new Map();
+ for(const group of groups.values()){
+  if(group.source.kind!=='r2_object')continue;
+  const set=etags.get(group.source.key)||new Set();set.add(group.source.etag);etags.set(group.source.key,set);
+ }
+ const clashing=new Set([...etags].filter(([,set])=>set.size>1).map(([key])=>key));
+ for(const key of clashing)report.conflicts.push({object:key,etags:[...etags.get(key)].sort(),reason:'r2_object_etag'});
  const staged=[];
  for(const group of groups.values()){
+  if(group.source.kind==='r2_object'&&clashing.has(group.source.key)){report.excluded.push({index:group.index,token:group.token,reason:'r2_object_conflict'});continue;}
   if(group.conflict){report.excluded.push({index:group.index,token:group.token,reason:'source_conflict'});report.conflicts.push({source:group.token,indexes:group.indexes,reason:'source_descriptor'});continue;}
   if(!group.inputs.length){report.excluded.push({index:group.index,token:group.token,reason:'no_rows'});continue;}
   if(group.inputs.length>MAX_ROWS_PER_CHUNK){report.excluded.push({index:group.index,token:group.token,reason:'record_too_large'});continue;}
@@ -269,14 +279,19 @@ export function validateManifest(manifest){
  instant(manifest.cohortAt,'cohort_at');
  if(canonicalJson(checkWriters(manifest.writers,manifest.family))!==canonicalJson(manifest.writers))throw invalid('writers');
  if(!Array.isArray(manifest.chunks)||!manifest.chunks.length||manifest.chunks.length>100000)throw invalid('chunks');
- const keys=new Set(),tokens=new Set();
+ const keys=new Set(),tokens=new Set(),objectEtag=new Map();
  manifest.chunks.forEach((chunk,index)=>{
   if(!plain(chunk)||chunk.chunkNo!==index+1||!Array.isArray(chunk.sources)||!Array.isArray(chunk.rows))throw invalid('chunk');
   if(!chunk.sources.length||chunk.sources.length>MAX_SOURCES_PER_CHUNK||!chunk.rows.length||chunk.rows.length>MAX_ROWS_PER_CHUNK)throw invalid('chunk_bounds');
   chunk.sources.forEach((source,position)=>{
    if(!plain(source)||source.ordinal!==position+1||typeof source.token!=='string'||!TOKEN.test(source.token)||tokens.has(source.token))throw invalid('source');
    tokens.add(source.token);
-   if(source.kind==='r2_object'){r2Source(source);}
+   if(source.kind==='r2_object'){
+    r2Source(source);
+    // One pinned ETag per physical object across the WHOLE manifest, chunks included (an externally built manifest is held to it too).
+    if(objectEtag.has(source.key)&&objectEtag.get(source.key)!==source.etag)throw invalid('r2_etag_conflict');
+    objectEtag.set(source.key,source.etag);
+   }
    else if(source.kind==='d1_row')d1Source(source);
    else throw invalid('source_kind');
   });
@@ -578,7 +593,9 @@ async function claim(db,run,{owner,leaseMs,at}){
 // - The claimed staging is read back once more under the lease (no chunk runs without the seal); a mismatch stops the run through this attempt's compare-and-swap only.
 // - R2 sources: `readEtag(key)` is re-read before EVERY submission of a chunk that uses the object (the first send and each retry, after a possible receipt was settled); a difference
 //   stops the run (`r2_moved`) and nothing is sent.
-// - A lost response is settled by the chunk's receipt: present means done, absent means the same chunk is sent again (at most `retries` times, default 2).
+// - A lost response is settled by the chunk's receipt: present means done; absent at one readback permits sending the exact chunk again (at most `retries` times, default 2) but does NOT
+//   prove that a timed-out batch cannot still commit (ADR 0202). The resend is safe because the chunk is idempotent and fenced: a late first batch finds the receipt taken or `chunk_no` no
+//   longer next and is refused, or its inserts are no-ops.
 // Returns {state, done, chunks:[receipt...], totals}.
 export async function importRun(env,input={}){
  const db=await ready(env);
@@ -650,7 +667,10 @@ export async function importRun(env,input={}){
     if(!await readReceipt(db,runId,chunkNo))throw failed('identity_evidence_import_unavailable',new Error('receipt_not_found_after_commit'));
     break;
    }catch(error){
-    // A lost response: the receipt decides. Present means the batch committed (and is never undone); absent means it did not, and the same chunk may be sent again (idempotent).
+    // A lost response: the receipt decides. Present means the batch committed (and is never undone). Absent at THIS readback permits sending the exact chunk again, but does not prove
+    // that a timed-out batch cannot still commit later (ADR 0202): the retry is safe because the chunk is idempotent and fenced (receipt primary key, next-`chunk_no` fence, key
+    // assertions, `ON CONFLICT DO NOTHING`), so whichever of the two batches commits second is refused or a no-op.
+    
     const receipt=await readReceipt(db,runId,chunkNo).catch(()=>null);
     if(receipt&&receipt.attempt===attempt)break;
     if(receipt)throw failed('identity_evidence_import_lease_lost',error);

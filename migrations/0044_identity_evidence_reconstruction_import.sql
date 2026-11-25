@@ -204,7 +204,7 @@ CREATE TRIGGER identity_evidence_import_receipt_no_update BEFORE UPDATE ON ident
 CREATE TRIGGER identity_evidence_import_receipt_no_delete BEFORE DELETE ON identity_evidence_import_receipt BEGIN SELECT RAISE(ABORT, 'identity_evidence_import_immutable'); END;
 CREATE TRIGGER identity_evidence_import_run_no_delete BEFORE DELETE ON identity_evidence_import_run BEGIN SELECT RAISE(ABORT, 'identity_evidence_import_immutable'); END;
 
--- ===== The seal: counts per chunk and in total equal the declared ones, the digest is the run's, and the run flips to `sealed` in the same statement =====
+-- ===== The seal: counts per chunk and in total equal the declared ones, the digest is the run's, every R2 object pins ONE ETag across the whole manifest, and the run flips to `sealed` in the same statement =====
 CREATE TRIGGER identity_evidence_import_seal_check BEFORE INSERT ON identity_evidence_import_seal FOR EACH ROW
 WHEN NOT EXISTS (
   SELECT 1 FROM identity_evidence_import_run r
@@ -220,6 +220,11 @@ WHEN NOT EXISTS (
   WHERE c.run_id = NEW.run_id
   AND (c.source_count <> (SELECT COUNT(*) FROM identity_evidence_import_source s WHERE s.run_id = c.run_id AND s.chunk_no = c.chunk_no)
    OR c.row_count <> (SELECT COUNT(*) FROM identity_evidence_import_row w WHERE w.run_id = c.run_id AND w.chunk_no = c.chunk_no))
+ )
+ OR EXISTS (
+  SELECT 1 FROM identity_evidence_import_source s
+  WHERE s.run_id = NEW.run_id AND s.kind = 'r2_object'
+  AND EXISTS (SELECT 1 FROM identity_evidence_import_source o WHERE o.run_id = s.run_id AND o.kind = 'r2_object' AND o.source_key = s.source_key AND o.etag <> s.etag)
  )
  OR EXISTS (
   SELECT 1 FROM identity_evidence_import_source s

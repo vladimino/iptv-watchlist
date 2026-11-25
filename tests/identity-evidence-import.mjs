@@ -15,7 +15,7 @@ import {evidenceKeyOf,normalizeEvidence} from '../src/identity-evidence.js';
 import {changeWriter} from '../src/identity-evidence-writer.js';
 import * as Import from '../src/identity-evidence-import.js';
 
-const {planManifest,loadManifest,sealRun,loadAndSealManifest,importRun,stopImportRun,readImportRun,readImportReport,readStagedManifest,manifestDigest,chunkStatements,guardCondition,identityEvidenceImportStatus,GUARD_TABLES}=Import;
+const {planManifest,validateManifest,loadManifest,sealRun,loadAndSealManifest,importRun,stopImportRun,readImportRun,readImportReport,readStagedManifest,manifestDigest,chunkStatements,guardCondition,identityEvidenceImportStatus,GUARD_TABLES}=Import;
 
 const NEW='0044_identity_evidence_reconstruction_import.sql',PREVIOUS='0043_film_redirect_by_target.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -640,6 +640,49 @@ const r2Record=(i,record,over={})=>({source:{kind:'r2_object',key:OBJECT,record:
  await assert.rejects(()=>run(env2,planned.digest,{readEtag:async()=>moved}),code('identity_evidence_import_r2_moved'));
  assert.equal(ledger(second).length,50,'chunk 1 committed and stays');
  assert.equal(one(second,'SELECT COUNT(*) FROM identity_evidence_import_receipt'),1,'its receipt stays');
+}
+
+{
+ // ONE pinned ETag per physical object across the whole manifest: different records of one object with different ETags exclude the WHOLE object (in one chunk and across chunks); the
+ // other objects and D1 sources stay; an externally built manifest is refused by validation and the load; the seal trigger refuses it in the database too.
+ const mixed=(i,etag)=>r2Record(i,undefined,{etag});
+ const sameChunk=await plan([mixed(1,'v1'),mixed(2,'v2'),record(3)]);
+ assert.deepEqual(sameChunk.report.counts,{chunks:1,sources:1,rows:1},'the conflicting object is left out whole; the D1 source stays');
+ assert.deepEqual(sameChunk.report.conflicts,[{object:OBJECT,etags:['v1','v2'],reason:'r2_object_etag'}]);
+ assert.deepEqual(sameChunk.report.excluded.map(item=>item.reason),['r2_object_conflict','r2_object_conflict']);
+ assert.deepEqual(sameChunk.report.r2Residual,[],'no residual window is reported for an object that is not imported');
+ // Across chunks (more than 50 records between the two ETags).
+ const across=await plan([mixed(1,'v1'),...records(60,10),mixed(2,'v2')]);
+ assert.deepEqual(across.report.counts,{chunks:2,sources:60,rows:60});
+ assert.equal(across.report.conflicts.length,1);
+ // A single-ETag object is untouched, and the same-ETag many-records case keeps one report entry.
+ const fine=await plan([mixed(1,'v1'),mixed(2,'v1')]);
+ assert.deepEqual(fine.report.r2Residual.map(item=>[item.key,item.etag,item.chunks]),[[OBJECT,'v1',[1]]]);
+ assert.deepEqual(fine.report.conflicts,[]);
+ // Only the conflicting object is excluded: another object with its own ETag stays.
+ const other=await plan([mixed(1,'v1'),mixed(2,'v2'),{source:{kind:'r2_object',key:'verified-films.json',record:'x',etag:'e9',r2:'verified_films_after_a2',residualAccepted:true},rows:[{evidence:evidence(5)}]}]);
+ assert.deepEqual(other.report.r2Residual.map(item=>item.key),['verified-films.json']);
+ // An externally constructed manifest with mixed ETags (same chunk, and across chunks) is refused before anything is staged.
+ const good=await plan([mixed(1,'v1'),mixed(2,'v1')]);
+ const goodDigest=good.digest;
+ for(const [name,edit] of [['same chunk',manifest=>{manifest.chunks[0].sources[1].etag='v2';}],
+  ['across chunks',manifest=>{const copyOf=JSON.parse(JSON.stringify(manifest.chunks[0]));copyOf.chunkNo=2;copyOf.sources.forEach(source=>{source.etag='v2';source.token='r2:'+'0'.repeat(63)+source.ordinal;});copyOf.rows.forEach((row,index)=>{row.reconstructedFrom='r2:'+'0'.repeat(63)+row.sourceOrdinal;row.key=(index+9).toString(16).padStart(64,'0');});manifest.chunks.push(copyOf);}]]){
+  const external=JSON.parse(JSON.stringify(good.manifest));edit(external);
+  assert.throws(()=>validateManifest(external),error=>{assert.equal(error.code,'identity_evidence_import_invalid');assert.equal(error.reason,'r2_etag_conflict',name);return true;});
+  const file=copy(template);
+  await assert.rejects(()=>loadManifest(envOf(file),{manifest:external,approvedDigest:goodDigest}),code('identity_evidence_import_invalid'),name);
+  assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_import_run'),0,name+': nothing is staged');
+ }
+ // The database refuses to seal a staging that holds one object under two ETags, whatever the code says.
+ const file=copy(template);
+ const run_=envOf(file);
+ await run_.DB.batch([run_.DB.prepare('INSERT INTO identity_evidence_import_run (run_id,family,manifest_sha256,cohort_at,chunk_count,source_count,row_count,writers_json,state,attempt,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind('run-m','a',goodDigest,COHORT,1,2,2,'[]','staging',0,COHORT,COHORT)]);
+ const row_=(ordinal,tok)=>"INSERT INTO identity_evidence_import_row (run_id,chunk_no,ordinal,source_ordinal,evidence_key,subject_kind,subject_value,relation,object_kind,object_value,polarity,route,method,source_root,observed_at,reconstructed_from) VALUES ('run-m',1,"+ordinal+","+ordinal+",'"+String(ordinal).repeat(64)+"','discovery_observation','x|"+ordinal+"','candidate_for','tmdb_movie','1','asserts','discovery_scan','tmdb_detail_check','x|"+ordinal+"',"+lit(SEEN)+",'"+tok+"')";
+ ok(file,"INSERT INTO identity_evidence_import_chunk (run_id,chunk_no,source_count,row_count) VALUES ('run-m',1,2,2);"
+  +"INSERT INTO identity_evidence_import_source (run_id,chunk_no,ordinal,kind,source_key,record_ref,etag,source_token) VALUES ('run-m',1,1,'r2_object','obj.json','a','v1','t1');"
+  +"INSERT INTO identity_evidence_import_source (run_id,chunk_no,ordinal,kind,source_key,record_ref,etag,source_token) VALUES ('run-m',1,2,'r2_object','obj.json','b','v2','t2');"+row_(1,'t1')+';'+row_(2,'t2'));
+ refused(file,"INSERT INTO identity_evidence_import_seal (run_id,manifest_sha256,chunk_count,source_count,row_count,sealed_at) VALUES ('run-m','"+goodDigest+"',1,2,2,"+lit(at(1))+")",/identity_evidence_import_seal_mismatch/);
+ assert.equal(one(file,"SELECT state FROM identity_evidence_import_run WHERE run_id='run-m'"),'staging');
 }
 
 // ===== 9. the review contract: same-source conflicts, mandatory writers, report-only dry run, truthful readback, stale stops, REPLACE-proof sources =====
