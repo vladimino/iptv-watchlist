@@ -7,7 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-import {readDimensionParity,PARITY_PAGE_MAX} from '../src/film-dimension-parity.js';
+import {readDimensionParity,PARITY_PAGE_MAX,PARITY_REDIRECT_DEPTH} from '../src/film-dimension-parity.js';
+import {CANONICAL_REDIRECT_DEPTH} from '../src/canonical-read-model.js';
 import {parityReport,sqliteReadOnlyBinding} from '../scripts/film-dimension-parity.mjs';
 import {createHash} from 'node:crypto';
 import {classifyRow,identityVerdict,localizationFacts,metadataFacts,predictionFacts,retiredMovieIds,usableField,summarize,PARITY_CLASSES} from '../src/domain/film-dimension-parity.js';
@@ -251,6 +252,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 
 // 8. Pure rules, one per case.
 {
+ assert.equal(PARITY_REDIRECT_DEPTH,CANONICAL_REDIRECT_DEPTH,'the parity reader follows redirects as deep as the read model');
  assert.deepEqual([...retiredMovieIds([{seq:1,kind:'retire',movie_id:'5'},{seq:2,kind:'restore',movie_id:'5',supersedes_seq:1},{seq:3,kind:'retire',movie_id:'6'}])],['6']);
  assert.equal(identityVerdict({requested:'film:z',filmExists:false,redirect:{state:'direct',survivor:'film:z',chain:[]}}).verdict,'absent');
  assert.equal(identityVerdict({requested:'film:z',available:false}).verdict,'unavailable');
@@ -297,6 +299,14 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
  const writer={DB:{prepare(sql){if(/^\s*SELECT/i.test(sql))return sqliteReadOnlyBinding(file).prepare(sql);throw new Error('reached the copy');}}};
  await assert.doesNotReject(readDimensionParity(writer));
  assert.equal(digest(),before);
+}
+
+// 10. Static: inactive. Nothing in src imports the reader or its pure half, so the Worker bundle cannot reach it.
+{
+ const importers=[];
+ const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!full.endsWith('film-dimension-parity.js')&&fs.readFileSync(full,'utf8').includes('film-dimension-parity'))importers.push(full);}};
+ walk('src');
+ assert.deepEqual(importers,[],'nothing in src imports the parity reader');
 }
 
 fs.rmSync(root,{recursive:true,force:true});

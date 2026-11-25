@@ -5,14 +5,16 @@
 // production reader: running it against production D1 would be a new read operation that needs its own authorization.
 //
 // Bounds: at most PARITY_PAGE_MAX Films per call, ids in chunks of PARITY_CHUNK per statement (no per-Film statement), redirect chains at most
-// CANONICAL_REDIRECT_DEPTH rounds. The marker generation is read before and after; a move refuses the page (film_person_generation_moved).
+// PARITY_REDIRECT_DEPTH rounds. The marker generation is read before and after; a move refuses the page (film_person_generation_moved).
 import {database,failed,many,readMarker} from './film-person-authority.js';
-import {CANONICAL_REDIRECT_DEPTH,ownerCandidatesFromEntries} from './canonical-read-model.js';
+import {ownerCandidatesFromEntries} from './localization-sources.js';
 import {classifyRow,identityVerdict,localizationFacts,metadataFacts,predictionFacts,retiredMovieIds,summarize} from './domain/film-dimension-parity.js';
 
 export const PARITY_PAGE_MAX=200;
 export const PARITY_PAGE_DEFAULT=100;
 export const PARITY_CHUNK=80;
+// The redirect depth of the canonical read model (CANONICAL_REDIRECT_DEPTH); not imported, because nothing in src may import that unbundled module.
+export const PARITY_REDIRECT_DEPTH=8;
 const FILM=/^film:.+/;
 
 const counter=()=>({statements:0,rows:0});
@@ -60,7 +62,7 @@ async function markers(env,db,names){
 async function redirects(db,ids){
  const state=new Map(ids.map(id=>[id,{survivor:id,chain:[],seen:new Set([id]),state:'direct'}]));
  let open=[...state.values()];
- for(let round=0;round<CANONICAL_REDIRECT_DEPTH&&open.length;round++){
+ for(let round=0;round<PARITY_REDIRECT_DEPTH&&open.length;round++){
   const rows=await chunked(db,'SELECT from_id,to_film_id FROM film_redirect WHERE from_id IN (/*ids*/)',[...new Set(open.map(item=>item.survivor))]);
   const next=new Map(rows.map(row=>[row.from_id,row.to_film_id])),still=[];
   for(const item of open){
@@ -82,7 +84,7 @@ async function ancestors(db,survivors){
  const links=new Map(survivors.map(id=>[id,[id]])),owner=new Map(survivors.map(id=>[id,id]));
  let frontier=[...survivors];
  for(let round=0;frontier.length;round++){
-  if(round>=CANONICAL_REDIRECT_DEPTH)throw failed('parity_owner_redirect');
+  if(round>=PARITY_REDIRECT_DEPTH)throw failed('parity_owner_redirect');
   const rows=await chunked(db,'SELECT from_id,to_film_id FROM film_redirect WHERE to_film_id IN (/*ids*/) ORDER BY from_id',frontier);
   frontier=[];
   for(const row of rows){const survivor=owner.get(row.to_film_id);if(survivor===undefined||owner.has(row.from_id))continue;owner.set(row.from_id,survivor);links.get(survivor).push(row.from_id);frontier.push(row.from_id);}
