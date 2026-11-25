@@ -8,6 +8,8 @@
 
 ## Inputs and what each run checks
 
+**ADR 0218 stage 2 ([AIR-661](https://trello.com/c/1Rv634jd)).** Besides schema version 4, the target must carry the offline import target contract ([D1 schema contract](../reference/data/d1-schema.md)). `verifyTargetIdentity` reads it before the identity receipt or any other write and stops with `import_target_unfenced`, `import_target_contract_unsupported`, `import_target_fence_invalid`, `import_target_session_open` or `import_target_schema_unsupported`; every write of the run and of the stage cleanup then goes through the import session. A Film write keeps the title and identity under a control or unknown-legacy identity row (ledger outcome `explained`, reason `identity_control_kept`); a link whose retired Film holds a protected row, found at the plan or inside the batch, is a ledger `conflict` with reason `film_retirement_protected_rows`; a stored provisional title W2 keeps is `explained` with reason `localization_control_kept`. Installing the contract on a real D1 database is its own owner GO; this executor still cannot run against production D1 (schema far past 4).
+
 This bulk migration/backfill procedure remains L3 under [authorization and escalation](../process/authorization-and-escalation.md). A specific approved plan may cover bounded preparation, write batches, verification and agreed holdpoints, but AIR-358 does not authorize a new production migration, cutover, cleanup or restore. Never treat a safe SELECT as a data-changing command.
 
 | Input | Where it comes from | Checked by the executor |
