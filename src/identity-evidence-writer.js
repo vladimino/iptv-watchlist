@@ -160,7 +160,7 @@ export async function bridgeEvidenceStatements(env,plan,{requestId,at,assertSql=
   r.sourceRoot,null,r.sourceScope,r.scopeEvidenceKey,r.supersedesKey,r.sourceOrder]];
  return [insert,assertion];
 }
-// What the claim unit passes as the producer input's `evidence` function (see `writeUnit` in src/canonical-film-external-ids-producer.js): rooted -> the bridge statements for THIS batch's request id and clock;
+// What the claim unit passes as the producer input's `evidence` function (see `writeUnit` of the Film external-id unit): rooted -> the bridge statements for THIS batch's request id and clock;
 // rootless -> no statement at all (the write is ineligible for bridge evidence, ADR 0215 decision 5: neither a refutation nor a coverage failure).
 export function claimBridgeEvidence(env,{filmId,lid,root}={}){
  if(root===undefined||root===null)return undefined;
