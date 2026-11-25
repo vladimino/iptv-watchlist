@@ -10,7 +10,7 @@
 - The cards this record plans: [AIR-617](https://trello.com/c/IfAZDYDj) (E2a), [AIR-618](https://trello.com/c/4RqJUcyf) (E2b), [AIR-619](https://trello.com/c/eXzl5TI8) (E2c), [AIR-620](https://trello.com/c/Zq9KsXPr) (E2d), [AIR-621](https://trello.com/c/xTwNtXbc) (E3a), [AIR-622](https://trello.com/c/cOVFfEYd) (E3b), [AIR-623](https://trello.com/c/ogwMreGD) (E4a), [AIR-624](https://trello.com/c/g3Ka7qFa) (E4b), [AIR-625](https://trello.com/c/ibrRmnwA) (E5).
 
 **Supersedes:** None. If accepted, it amends [ADR 0213](0213-film-identity-evidence-ledger.md) explicitly, and only here:
-- decision 2 gains a method value, `known_alias`, with its place in the ranking of decision 3 left to the owner (decision 5, choice 0215-3 = B and open question Q1);
+- decision 2 gains a method value, `known_alias`, and decision 3 ranks it by method **and** `source_scope` together: with `known_epg_alias` alongside `title_only`, with `known_alias_year_runtime` alongside `title_year`, never proof (decision 5, choice 0215-3 = B and Q1 = Q1-a);
 - decision 4 gains a second write path (decision 1 below); an `alias_bridge` row is written only with a causal root and uses the standard rooted key (decision 5, choice 0215-8b = C);
 - decision 5: owner precedence follows the source's own causal order within one causal scope, never the ledger `seq` (decision 6 below, choice 0215-8a);
 - decision 6 step 3 imports through a dedicated, manifest-bound path instead of the `identity_evidence` operation (decision 7 below, choice 0215-6).
@@ -185,7 +185,7 @@ Vocabulary as in ADR 0213 decisions 1-3, plus one method value, `known_alias` (c
   - Both variants use `method = known_alias`. The variant is kept in `source_scope` (`known_epg_alias` or `known_alias_year_runtime`), so the two stay distinct rows, are reported separately and can be filtered.
   - `known_alias` is **never proof**, like every title method.
   - The row records only what the decision stores: no alias text is invented, because the decision does not keep which alias or slot matched, and no root other than the observation key is set.
-  - Its rank among the methods is **open question Q1** below. Until it is decided, a reader treats `known_alias` as never proof and does not compare it with `title_only` or `title_year`.
+  - **Rank (Q1 = Q1-a).** For this method, strength derives from method and `source_scope` together: `known_epg_alias` ranks alongside `title_only`, and `known_alias_year_runtime` alongside `title_year`. A missing or unknown scope never defaults to a stronger tier; it ranks with `title_only`. Neither variant is proof, and a known-alias row never counts as independent of a detail-check row with the same root (the observation key). The evidence key is unchanged.
   - Nothing here changes the Discovery algorithm or its alias store.
 - **A bridge root is never guessed.** `linkEvidence` (`src/canonical-letterboxd-claim.js:43`) returns the current authoritative fact key, not the check that established the link, and several checks of one pair may exist. So a root exists only by **explicit causal hand-over**: the Diary or Watchlist caller that has just verified and linked the pair passes the page-check digest of that very check with the link event (`src/letterboxd-diary-identity.js:225`, `src/letterboxd-facts.js:693`). A matching `same_work` row is never looked up to fill the root.
 - **A bridge row only with that root (choice 0215-8b = C).**
@@ -289,7 +289,7 @@ This replaces "through the `identity_evidence` operation" in ADR 0213 decision 6
 ### 8. The reader contract (E4)
 
 Nothing reads the ledger to decide anything until that reader's own amendment is accepted (ADR 0213 decision 8). E4a (the ADR 0170 inventory) and E4b (the ADR 0184 planner) stay as listed there. A global catalog identity reader would be a decision of its own. Every amendment follows these rules:
-1. **Strength** comes from the method ranking of ADR 0213 decision 3. Owner rows come first, and a `restricts` row blocks proof use unless an owner or a verified method asserts the proposition.
+1. **Strength** comes from the method ranking of ADR 0213 decision 3, with one exception: `known_alias` is ranked by method and `source_scope` together (decision 5, Q1-a), and an unknown scope ranks with `title_only`. Owner rows come first, and a `restricts` row blocks proof use unless an owner or a verified method asserts the proposition.
 2. **Independence** counts distinct known roots. A null root is never independent.
 3. **Scoped withdrawals and owner chronology** apply as decision 6 defines them: precedence by source order, unknown order unresolved.
 4. **Film subjects** are resolved through `film_redirect`.
@@ -340,7 +340,7 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 | Retirement | decision without application (no `film_has_id`); application failure; restore by `supersedes_seq`; unattributable historical application reported | E2d, E3c |
 | Historical mapping | each row of Tables 4 and 5, including missing and ambiguous methods (b3, c2), exact owner intents, R2 records in non-terminal states excluded | E3a-E3c |
 | Import | manifest digest bound to the GO; guard failures for changed, added and deleted sources; concurrent live insert; collision; lost response and resume; bounds; R2 ETag change | ER, E3a-E3c |
-| Readers | strength, independence with null roots, withdrawals, source order and unresolved order, redirects, absence inside and outside coverage, reconstructed rows not proof | E4a, E4b |
+| Readers | strength, including both `known_alias` ranks, an unknown scope never ranked higher, and both variants never proof; independence with null roots and same-root known-alias and detail-check rows, withdrawals, source order and unresolved order, redirects, absence inside and outside coverage, reconstructed rows not proof | E4a, E4b |
 | Failure and recovery | writer `off` stops new rows and keeps old ones; a wrong row answered by an owner's scoped withdrawal; a stopped import resumed without duplicates | EC, ER |
 
 ## Alternatives considered
@@ -400,13 +400,7 @@ Selected by the owner on 25 Nov 2026 ([consolidated owner choices](https://githu
 | 0215-8a | Owner chronology (amends ADR 0213 decision 5) | **A** precedence by `source_order` within one causal scope; unknown or incomparable order unresolved |
 | 0215-8b | Bridge rows | **C** a row only with a causal page-check root, standard rooted key; no rootless live bridge rows |
 
-**Open question Q1 (new, raised by 0215-3 = B): the rank of `known_alias`.** ADR 0213 decision 3 ranks methods by a fixed order, and a new method needs a place in it. It is never proof under every option.
-- **Q1-a.** Same tier as `title_year` for `known_alias_year_runtime`, and as `title_only` for `known_epg_alias` (the rank follows what each variant matched).
-- **Q1-b.** One tier for both, between `title_year` and `title_only`.
-- **Q1-c.** One tier for both, below `title_only`.
-- **Q1-d.** Leave it unranked until the first reader amendment (E4) needs it; readers meanwhile never compare it.
-
-Executor's recommendation: **Q1-a**, because `known_alias_year_runtime` checked year and runtime and `known_epg_alias` checked title only. Q1-d is the minimal option. The decision is the owner's.
+**Q1 (raised by 0215-3 = B): the rank of `known_alias`.** Selected by the owner on 25 Nov 2026: **Q1-a** ([owner choice](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7155532290); verbatim on [AIR-616](https://trello.com/c/DZNk9uMJ#comment-6b06896594f5dce5863b9663)). The rank follows what each variant matched: `known_epg_alias` alongside `title_only`, `known_alias_year_runtime` alongside `title_year`. Not chosen: Q1-b (one tier between the two), Q1-c (one tier below `title_only`), Q1-d (unranked until E4).
 
 ## Follow-ups
 
@@ -414,7 +408,6 @@ Executor's recommendation: **Q1-a**, because `known_alias_year_runtime` checked 
 - Create the EC, ECM, ER, ERM and E3c cards. Narrow AIR-622 to Discovery and park AIR-620 with its reason.
 - Add each card's real prerequisites as bare URLs in native checklists.
 - Copy the relevant rows of Tables 3-5 into each E2 and E3 card.
-- Record the owner's answer to Q1 in this record before its final disposition.
 
 **Candidate follow-ups, not selected.**
 - A bounded live re-verification of the 402 non-minting TMDB claims by the page check of ADR 0166, which would give them `page_check` evidence.
