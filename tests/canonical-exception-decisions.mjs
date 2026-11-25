@@ -9,11 +9,12 @@ import {EXTRA_EXCEPTIONS} from '../src/canonical-differential-registry.js';
 import {handoffReadiness} from '../src/canonical-producers.js';
 
 const ALL=[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS];
-const ACCEPTED=['blank_never_overwrites','canonical_identity_requires_trusted_tmdb','credit_ordinals_kept','credits_not_pruned_by_the_planner','held_localization_not_recorded','identity_provenance_title_source','noop_write_keeps_updated_at','external_ids_not_pruned_by_the_planner','redirected_film_refused','reviewed_owner_rows_protected','sync_null_clock_keeps_stored','updated_at_is_write_time'].sort();
+// projector_import_stage2_dimensions: the behaviour of ADR 0218 decision 7 stage 2, accepted by the owner with the ADR (PR #997), AIR-661.
+const ACCEPTED=['blank_never_overwrites','canonical_identity_requires_trusted_tmdb','credit_ordinals_kept','credits_not_pruned_by_the_planner','external_ids_not_pruned_by_the_planner','held_localization_not_recorded','identity_provenance_title_source','noop_write_keeps_updated_at','projector_import_stage2_dimensions','redirected_film_refused','reviewed_owner_rows_protected','sync_null_clock_keeps_stored','updated_at_is_write_time'].sort();
 const OPEN=[];
 
-assert.equal(ALL.length,12,'twelve named differences in total');
-assert.equal(new Set(ALL.map(item=>item.id)).size,12,'ids are unique');
+assert.equal(ALL.length,13,'thirteen named differences in total');
+assert.equal(new Set(ALL.map(item=>item.id)).size,13,'ids are unique');
 assert.deepEqual(ALL.filter(item=>item.status==='accepted').map(item=>item.id).sort(),ACCEPTED,'exactly the owner-accepted differences are accepted');
 assert.deepEqual(ALL.filter(item=>item.status!=='accepted').map(item=>item.id).sort(),OPEN,'no difference is open');
 assert.ok(ALL.every(item=>item.status==='accepted'||item.status==='draft'),'only accepted or draft');

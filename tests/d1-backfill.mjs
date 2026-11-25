@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {withImportFence} from './import-fence-helper.mjs';
 import {createHash} from 'node:crypto';
 import {spawn,spawnSync} from 'node:child_process';
 import fs from 'node:fs';
@@ -26,7 +27,8 @@ const sha256=value=>createHash('sha256').update(value).digest('hex');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-backfill-'));
 // Every run needs schema v3: 0001, the staging tables of 0002 and the candidate show identity of 0003.
 const v1Migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
-const migration=['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n');
+// AIR-661: an import target also carries the ADR 0218 stage-2 fence, or the import refuses it (import_target_unfenced; proved below).
+const migration=withImportFence(['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'));
 const ACCOUNT='0123456789abcdef0123456789abcdef',TOKEN='test-d1-token';
 const TARGET='11111111-1111-4111-8111-111111111111';
 const at='2026-10-26T01:00:00.000Z',later='2026-10-26T05:00:00.000Z';

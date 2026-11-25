@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {withImportFence} from './import-fence-helper.mjs';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -23,7 +24,7 @@ const rules=loadDomainRules();
 const identityFor=films=>identityResolver({canonicalize:rules.canonicalFilmId,films});
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-offline-import-'));
 const database=path.join(root,'import.sqlite');
-exec(database,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(database,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const db=openSqlite(database);
 const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
 const at='2026-10-19T01:00:00.000Z';
@@ -178,7 +179,7 @@ await assert.rejects(repositories.epg.recordDecision({observationKey:'heat|1995'
 assert.equal((await repositories.epg.readDecision('heat|1995')).current.status,'ambiguous');
 
 const partFile=path.join(root,'partial.sqlite');
-exec(partFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(partFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const partDb=openSqlite(partFile);
 const partRepos={canonical:createCanonicalRepository(partDb),epg:createEpgRepository(partDb),prediction:createPredictionRepository(partDb)};
 const partPerson=person('person:actor/zz-part','actor/zz-part',at);
@@ -229,7 +230,7 @@ assert.equal(classifyObject('guide.xml'),'unmapped');
 assert.equal(classifyObject('epg/guide.xml.gz'),'unmapped');
 assert.equal(projected.records.some(record=>record.key==='enrichment/films/zz-omit/predictions.json'&&record.disposition==='unportable'),true);
 const omitFile=path.join(root,'omit.sqlite');
-exec(omitFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(omitFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const omitDb=openSqlite(omitFile);
 const omitRepos={canonical:createCanonicalRepository(omitDb),epg:createEpgRepository(omitDb),prediction:createPredictionRepository(omitDb)};
 const omitted=await importBatch(omitDb,omitRepos,{inventory:inventory({finishedAt:at,aggregateSha256:'sha-omit',keys:sourceKeys}),importedAt:at,units:[
@@ -240,7 +241,7 @@ assert.equal(omitted.parity.missing.some(item=>item.table==='programme_generatio
 assert.equal(omitted.claimsFullParity,false);
 
 const fullFile=path.join(root,'full.sqlite');
-exec(fullFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(fullFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const fullDb=openSqlite(fullFile);
 const fullRepos={canonical:createCanonicalRepository(fullDb),epg:createEpgRepository(fullDb),prediction:createPredictionRepository(fullDb)};
 const fullPerson=person('person:actor/zz-full','actor/zz-full',at);
@@ -336,7 +337,7 @@ for(const bad of [{r2Key:'r2/prediction/new',contentSha256:SHA_NEW},{r2Key:'enri
 }
 
 const emptyFile=path.join(root,'empty-show.sqlite');
-exec(emptyFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(emptyFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const emptyDb=openSqlite(emptyFile);
 const emptyRepos={canonical:createCanonicalRepository(emptyDb),epg:createEpgRepository(emptyDb),prediction:createPredictionRepository(emptyDb)};
 const emptyFilm=film('film:zz-empty','Empty Title',at);
@@ -354,7 +355,7 @@ await emptyDb.run("UPDATE published_generation SET programme_run_id='run-other' 
 assert.equal((await verifyParity(emptyDb,emptySpec)).mismatched.some(item=>item.table==='published_generation'&&item.field==='pointer'),true);
 
 const hashFile=path.join(root,'hash.sqlite');
-exec(hashFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(hashFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const hashDb=openSqlite(hashFile);
 const hashRepos={canonical:createCanonicalRepository(hashDb),epg:createEpgRepository(hashDb),prediction:createPredictionRepository(hashDb)};
 const hashFilm=film('film:zz-hash','Hash Title',at);
@@ -439,7 +440,7 @@ for(let index=0;index<volumeCount;index++){
 }
 volumeSql.push('COMMIT');
 const volumeDatabase=path.join(root,'volume.sqlite');
-exec(volumeDatabase,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(volumeDatabase,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 exec(volumeDatabase,volumeSql.join(';\n'));
 const volumeRows=await snapshotSqlite(volumeDatabase).all('SELECT id,role_id,contract_version FROM person ORDER BY id');
 assert.equal(volumeRows.length,volumeCount);
@@ -495,7 +496,7 @@ assert.equal(refused.applied,0);
 assert.equal(refused.claimsFullParity,false);
 assert.equal(refusal({inventory:inventory({finishedAt:at,aggregateSha256:'sha',keys:['watchlist.json','started/zz.json']}),units:[]}),null);
 const refusedDb=openSqlite(path.join(root,'refused.sqlite'));
-exec(path.join(root,'refused.sqlite'),fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(path.join(root,'refused.sqlite'),withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
 const refusedRun=await importBatch(refusedDb,{canonical:createCanonicalRepository(refusedDb),epg:createEpgRepository(refusedDb),prediction:createPredictionRepository(refusedDb)},{importedAt:at,inventory:inventory({finishedAt:at,aggregateSha256:'sha',keys:['watchlist.json','mystery/zz.json']}),units:[{family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-refused',targetTable:'film',targetId:'film:zz-refused',unportable:false,input:{film:film('film:zz-refused','Refused',at),watchlist:true}}]});
 assert.equal(refusedRun.stopped,true);
 assert.equal(await count(refusedDb,'SELECT COUNT(*) AS n FROM film'),0);

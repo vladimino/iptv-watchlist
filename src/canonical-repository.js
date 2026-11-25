@@ -1,6 +1,10 @@
 // AIR-70. D1 repository for canonical Film and Person records. The caller supplies the database and the domain result.
 // The offline import uses it, and since AIR-275 phase 2 (ADR 0056) the Worker bundle carries it for the enrichment projector.
 // R2 stays authoritative. This module does not score a candidate or choose shows.
+// AIR-661 / ADR 0218 decision 7 stage 2: the offline import (W2, writeFilm) writes the title and identity only where the stored identity row is
+// replaceable, deletes and rewrites only that identity row, never deletes or inserts a metadata, fingerprint or prediction row and writes no
+// processing field. The offline retirement (W3, retireFilm) refuses a Film holding a protected row. Both checks are repeated in SQL inside the
+// write, so a row that became protected after the plan is still kept (title) or still refuses (retirement).
 
 export function createCanonicalRepository(db){
  return {
@@ -152,6 +156,13 @@ async function planRetirement(db,redirect){
  if(current&&current.to_film_id!==to)throw new Error('Redirect target conflicts');
  if(await db.get('SELECT 1 AS ok FROM film_generation WHERE film_id=?',[from]))throw new Error('Redirected film already belongs to a generation');
  if(await db.get('SELECT 1 AS ok FROM film_epg_last_airing WHERE film_id=?',[from]))throw new Error('Redirected film has EPG history');
+ if(!current){
+  // ADR 0218 decision 6 (W3): a Film holding a lock, a reviewed/owner row, a titleSource or an unknown_legacy row is not retired until a review
+  // route has settled it.
+  const rows=await db.all('SELECT dimension,status,provenance_json,authority FROM film_dimension WHERE film_id=? ORDER BY dimension',[from]);
+  const held=rows.map(row=>({dimension:row.dimension,reasons:protectedReasons(row)})).filter(row=>row.reasons.length);
+  if(held.length){const error=new Error('film_retirement_protected_rows');error.code='film_retirement_protected_rows';error.rows=held;throw error;}
+ }
  return {from,to,at:required(redirect.at,'redirect.at'),release:!current};
 }
 
@@ -162,16 +173,20 @@ async function writeFilm(db,plan){
   if(plan.watchlist===false)await db.run('DELETE FROM watchlist_film WHERE film_id=?',[film.id]);
   return;
  }
- await db.run('INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=excluded.canonical_identity,original_title=excluded.original_title,updated_at=excluded.updated_at',[film.id,film.contractVersion,film.canonicalIdentity??null,film.originalTitle??null,plan.updatedAt]);
+ // The title and identity are kept when the stored identity row is control (strong(), a ranked titleSource) or unknown_legacy: an import has no
+ // rank and never binds a titleSource to a value it did not rank.
+ await db.run(`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=CASE WHEN ${identityHeld()} THEN film.canonical_identity ELSE excluded.canonical_identity END,original_title=CASE WHEN ${identityHeld()} THEN film.original_title ELSE excluded.original_title END,updated_at=excluded.updated_at`,[film.id,film.contractVersion,film.canonicalIdentity??null,film.originalTitle??null,plan.updatedAt]);
  await db.run('DELETE FROM film_external_id WHERE film_id=?',[film.id]);
  if(plan.credits!==undefined&&!plan.keepHistory)await db.run('DELETE FROM film_person_credit WHERE film_id=?',[film.id]);
  for(const item of film.externalIds||[])await db.run('INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?)',[film.id,required(item.scheme,'scheme'),String(item.value),item.trusted&&!item.conflicting?1:0,item.conflicting?1:0,json(item.provenance)]);
  for(const item of film.aliases||[])await db.run('INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,?,?,?) ON CONFLICT(film_id,kind,value) DO NOTHING',[film.id,item.kind||'title',required(item.value,'alias'),json(item.provenance)]);
  await noteHeldLocalization(db,{table:'film_dimension',column:'film_id',id:film.id,kind:'title',entityKind:'film',incoming:film.localization});
- const dimensions=plan.owner==='enrichment'?['identity','metadata']:['identity','metadata','fingerprint','prediction'];
- if(plan.owner==='enrichment')await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension IN ('identity','metadata')",[film.id]);
- else await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension<>'localization'",[film.id]);
- for(const dimension of dimensions)await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(film.id,film[dimension]));
+ // Only the identity row is imported, and only into an empty slot or over a replaceable row. metadata, fingerprint and prediction rows stay
+ // byte-identical until the separately authorized stage 6; their states are derived (ADR 0218 decision 2).
+ if(film.identity){
+  await db.run(`DELETE FROM film_dimension WHERE film_id=? AND dimension='identity' AND ${REPLACEABLE_IDENTITY_SQL}`,[film.id]);
+  await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO NOTHING',dimensionParams(film.id,importedIdentity(film.identity)));
+ }
  await db.run(localizationUpsert('film_dimension','film_id'),dimensionParams(film.id,film.localization));
  if(plan.credits!==undefined)for(const credit of plan.credits){
   if(credit.role!=='director'&&credit.role!=='actor')throw new Error('Credit role is invalid');
@@ -210,6 +225,9 @@ async function adoptRetired(db,retirement){
 }
 
 async function retireFilm(db,retirement){
+ // The race twin of the plan check (planRetirement): a protected row that appeared after the plan makes this insert violate NOT NULL, which
+ // aborts the caller's transaction before anything of the retired Film is deleted.
+ await db.run(`INSERT INTO film_redirect (from_id,to_film_id,at) SELECT ?,NULL,? WHERE EXISTS (SELECT 1 FROM film_dimension WHERE film_id=? AND ${PROTECTED_ROW_SQL})`,[retirement.from,retirement.at,retirement.from]);
  await db.run('DELETE FROM film_person_credit WHERE film_id=?',[retirement.from]);
  await db.run('DELETE FROM film_metadata WHERE film_id=?',[retirement.from]);
  await db.run('DELETE FROM film_alias WHERE film_id=?',[retirement.from]);
@@ -313,8 +331,10 @@ function conflictParams(kind,id,conflict){
 }
 
 function dimensionView(row){
- const provenance=parseJson(row.provenance_json);
+ // AIR-661: an unreadable legacy provenance (an unknown_legacy row that W2 keeps) is reported, not thrown, so the offline read and verify still work.
+ let provenance,unreadable=false;try{provenance=parseJson(row.provenance_json);}catch{provenance=null;unreadable=true;}
  const state={dimension:row.dimension,status:row.status,updatedAt:row.updated_at,source:row.source,sourceVersion:row.source_version,provenance:provenance?.authority||!row.authority?provenance:{...(provenance||{}),authority:row.authority},lastError:row.last_error,failureReason:row.failure_reason,retryAt:row.retry_at,attempts:row.attempts,nextAction:row.next_action};
+ if(unreadable)state.provenanceUnreadable=true;
  if(row.dimension==='localization')state.value=row.value;
  return state;
 }
@@ -338,8 +358,66 @@ function metadataView(row){return {schemaVersion:row.schema_version,year:row.yea
 function updatedAtOf(entity){return entity.localization?.updatedAt||entity.identity?.updatedAt;}
 function json(value){return value==null?null:JSON.stringify(value);}
 function parseJson(value){return value?JSON.parse(value):null;}
+const identityHeld=()=>`EXISTS (SELECT 1 FROM film_dimension WHERE film_id=excluded.id AND dimension='identity' AND NOT ${REPLACEABLE_IDENTITY_SQL})`;
+// The imported identity row: no processing fields (ADR 0218 F2) and no titleSource (an import ranks no title).
+function importedIdentity(state){
+ const provenance=state.provenance&&typeof state.provenance==='object'&&!Array.isArray(state.provenance)?Object.fromEntries(Object.entries(state.provenance).filter(([key])=>key!=='titleSource')):state.provenance;
+ return {...state,provenance,lastError:null,failureReason:null,retryAt:null,attempts:0,nextAction:null};
+}
 async function dimensionRow(db,table,column,id,dimension){return db.get('SELECT dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at FROM '+table+' WHERE '+column+'=? AND dimension=?',[id,dimension]);}
 
 function requiredFilm(value){const id=required(value,'film id');if(!id.startsWith('film:'))throw new Error('Film id must start with film:');return id;}
 function requiredPerson(value){const id=required(value,'person id');if(!id.startsWith('person:'))throw new Error('Person id must start with person:');return id;}
 function required(value,name){if(value==null||value==='')throw new Error(name+' is required');return value;}
+
+// ADR 0218 protected-row predicates (AIR-661). The statuses each writer of a dimension sets: the same lists as the parity classifier's KNOWN_STATUSES
+// (not imported, because this bundled module may not import; a test pins them together).
+export const DIMENSION_STATUSES=Object.freeze({
+ identity:Object.freeze(['unresolved','resolving','resolved','ambiguous','rejected','reviewed','found','redirected','absent','conflict','unverified','cycle']),
+ metadata:Object.freeze(['missing','fetching','partial','fresh','stale','failed','reviewed']),
+ localization:Object.freeze(['missing','provisional','reviewed']),
+ fingerprint:Object.freeze(['missing','generating','current','stale','failed']),
+ prediction:Object.freeze(['missing','generating','current','stale','failed']),
+});
+const sqlList=values=>values.map(value=>"'"+value.replaceAll("'","''")+"'").join(',');
+// 1 when provenance_json is unreadable, not an object, or carries a titleSource; 0 otherwise. CASE keeps json_type away from invalid JSON.
+const PROVENANCE_HELD="(CASE WHEN provenance_json IS NULL THEN 0 WHEN NOT json_valid(provenance_json) THEN 1 WHEN json_type(provenance_json)='null' THEN 0 WHEN json_type(provenance_json)<>'object' THEN 1 WHEN json_type(provenance_json,'$.titleSource') IS NOT NULL THEN 1 ELSE 0 END)";
+const noAuthority="(authority IS NULL OR authority='')";
+const LOCALIZATION_AUTHORITY=['owner','dictionary'];
+const allowedAuthority=dimension=>dimension==='localization'?LOCALIZATION_AUTHORITY:dimension==='identity'||dimension==='metadata'?['owner']:[];
+
+// SQL predicate (over film_dimension columns) of an identity row W2 may replace: a known non-reviewed status, no authority, a readable provenance
+// without titleSource. Everything else is control or unknown_legacy (ADR 0218 stage-1 parity classes) and is kept. The JS twin is
+// replaceableIdentity below; a test runs both over the same rows.
+export const REPLACEABLE_IDENTITY_SQL=`(status IN (${sqlList(DIMENSION_STATUSES.identity.filter(status=>status!=='reviewed'))}) AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
+
+// SQL predicate of a row that W3 must not delete: a lock or any reviewed/owner row, a titleSource, or an unknown_legacy shape (unknown status,
+// unreadable provenance, an authority no writer of that dimension sets). The JS twin is protectedReasons below.
+export const PROTECTED_ROW_SQL=`(status='reviewed' OR authority='owner' OR ${PROVENANCE_HELD}=1 OR CASE dimension ${Object.entries(DIMENSION_STATUSES).map(([dimension,statuses])=>{const allowed=allowedAuthority(dimension);return `WHEN '${dimension}' THEN (status NOT IN (${sqlList(statuses)}) OR NOT (${noAuthority}${allowed.length?` OR authority IN (${sqlList(allowed)})`:''}))`;}).join(' ')} ELSE 1 END)`;
+
+const fenceParse=text=>{if(text==null)return {ok:true,value:null};try{return {ok:true,value:JSON.parse(text)};}catch{return {ok:false};}};
+const fencePlain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+const fenceFilled=value=>value!=null&&value!=='';
+
+export function replaceableIdentity(row){
+ if(!row)return true;
+ const provenance=fenceParse(row.provenance_json);
+ if(!provenance.ok||(provenance.value!=null&&!fencePlain(provenance.value)))return false;
+ if(fencePlain(provenance.value)&&provenance.value.titleSource!==undefined)return false;
+ return DIMENSION_STATUSES.identity.includes(row.status)&&row.status!=='reviewed'&&!fenceFilled(row.authority);
+}
+
+// The reasons a row is protected from W3, empty when it is not.
+export function protectedReasons(row){
+ const reasons=[];
+ const provenance=fenceParse(row.provenance_json);
+ if(!provenance.ok||(provenance.value!=null&&!fencePlain(provenance.value)))reasons.push('malformed_provenance');
+ else if(fencePlain(provenance.value)&&provenance.value.titleSource!==undefined)reasons.push('title_source');
+ if(row.status==='reviewed')reasons.push('reviewed');
+ if(row.authority==='owner')reasons.push('owner_authority');
+ const known=DIMENSION_STATUSES[row.dimension];
+ if(!known||!known.includes(row.status))reasons.push('unknown_status');
+ const allowed=allowedAuthority(row.dimension);
+ if(fenceFilled(row.authority)&&!allowed.includes(row.authority))reasons.push('unknown_authority');
+ return reasons;
+}

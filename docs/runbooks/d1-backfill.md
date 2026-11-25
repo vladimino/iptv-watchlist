@@ -8,6 +8,8 @@
 
 ## Inputs and what each run checks
 
+**ADR 0218 stage 2 ([AIR-661](https://trello.com/c/1Rv634jd)).** Before any write, the import reads the target for the trigger `film_dimension_import_fence` (migration 0040) and stops with `import_target_unfenced` when it is missing. A Film write keeps the title and identity under a control or `unknown_legacy` identity row (ledger outcome `explained`, reason `identity_control_kept`), never touches `metadata`, `fingerprint` or `prediction` rows and writes no processing field; a link whose retired Film holds a protected row stops with `film_retirement_protected_rows`. Applying migration 0040 to any non-local target is its own owner GO. This executor still requires schema version 4 below, so it cannot run against production D1 (schema 39 and later) at all.
+
 This bulk migration/backfill procedure remains L3 under [authorization and escalation](../process/authorization-and-escalation.md). A specific approved plan may cover bounded preparation, write batches, verification and agreed holdpoints, but AIR-358 does not authorize a new production migration, cutover, cleanup or restore. Never treat a safe SELECT as a data-changing command.
 
 | Input | Where it comes from | Checked by the executor |

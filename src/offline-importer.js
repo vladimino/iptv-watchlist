@@ -3,6 +3,7 @@
 // Identity follows the shared canonicalFilmId rule and evidence keys follow the resolver's candidateEvidence rule;
 // both are supplied by the caller, so this module never carries a second copy of either rule.
 import {catalogMetadata,creditRoster} from './enrichment-projection.js';
+import {FILM_DIMENSION_IMPORT_FENCE,replaceableIdentity,verifyImportFence} from './film-dimension-import-fence.js';
 export {catalogMetadata,creditRoster};
 
 // ADR 0034 bounded discovery ledger: the archive pointer, the write-once manifest versions and segment versions are a second source
@@ -248,6 +249,10 @@ export async function importBatch(db,repositories,batch){
  if(!importedAt)throw new Error('importedAt is required');
  const refused=refusal(batch);
  if(refused)return refused;
+ // AIR-661 / ADR 0218 decision 7: the target is read before any mutation. A target without the stage-2 fence is refused, so an old importer and
+ // this one never share a database.
+ const fence=await verifyImportFence(db);
+ if(!fence.ok)return refusal({...batch,blockers:[{reason:fence.reason,targetTable:'film_dimension',targetId:FILM_DIMENSION_IMPORT_FENCE}]});
  const units=batch.units||[];
  const limit=batch.limit??null;
  const ledgerRows=[];
@@ -680,10 +685,17 @@ function versionUnit(entry,filmId,item,table,targetId,resolved,links,storedId){
  return unit({family:'prediction',kind:'prediction',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:table,targetId,identity:provenanceOf(resolved),input:{filmId,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintHash:item.fingerprintHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion,predictedRating:item.predictedRating,r2Key:item.r2Key,contentSha256:item.contentSha256,updatedAt}});
 }
 
+// After saveFilm the stored title and identity differ from the import only when W2 kept them under a control or unknown_legacy identity row.
+function identityKept(saved,film){
+ return !!saved&&!!film&&((saved.originalTitle??null)!==(film.originalTitle??null)||(saved.canonicalIdentity??null)!==(film.canonicalIdentity??null));
+}
 async function applyUnit(repositories,unit){
  if(unit.kind==='person')return applied(await repositories.canonical.savePerson(unit.input));
  if(unit.kind==='film'){
   const saved=await repositories.canonical.saveFilm(unit.input);
+  // A control or unknown_legacy identity row keeps the stored title and identity (ADR 0218 decision 7); like a kept reviewed localization this is
+  // explained, not a conflict.
+  if(identityKept(saved,unit.input.film))return {outcome:'explained',reason:'identity_control_kept'};
   const wanted=unit.input.film?.localization?.value??null;
   const stored=saved?.dimensions?.localization?.value??null;
   if(wanted!=null&&stored!==wanted)return {outcome:'explained',reason:'reviewed_kept'};
@@ -802,7 +814,7 @@ async function checkpoint(db,unit,importedAt){
 }
 function matchable(kind){return kind==='film'||kind==='person'||kind==='fingerprint'||kind==='prediction'||kind==='rating'||kind==='decision'||kind==='profile';}
 async function storedMatches(db,repositories,unit){
- if(unit.kind==='film')return filmStored(repositories,unit);
+ if(unit.kind==='film')return filmStored(db,repositories,unit);
  if(unit.kind==='person')return personStored(repositories,unit);
  if(unit.kind==='fingerprint'){const row=await db.get('SELECT schema_version,fingerprint_hash,generated_at,invalidated_at,r2_key,content_sha256 FROM fingerprint_payload WHERE film_id=?',[unit.targetId]);return !!row&&row.schema_version===unit.input.schemaVersion&&row.fingerprint_hash===unit.input.fingerprintHash&&(row.generated_at??null)===(unit.input.generatedAt??null)&&(row.invalidated_at??null)===(unit.input.invalidatedAt??null)&&row.r2_key===unit.input.r2Key&&row.content_sha256===unit.input.contentSha256;}
  if(unit.kind==='prediction'){const row=await db.get('SELECT taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at FROM prediction_current WHERE film_id=?',[unit.input.filmId]);return !!row&&row.taste_profile_version===unit.input.tasteProfileVersion&&row.taste_profile_hash===unit.input.tasteProfileHash&&row.fingerprint_hash===unit.input.fingerprintHash&&row.fingerprint_schema_version===unit.input.fingerprintSchemaVersion&&row.prediction_prompt_version===unit.input.predictionPromptVersion&&row.predicted_rating===unit.input.predictedRating&&row.r2_key===unit.input.r2Key&&row.content_sha256===unit.input.contentSha256&&row.updated_at===unit.input.updatedAt;}
@@ -811,13 +823,15 @@ async function storedMatches(db,repositories,unit){
  if(unit.kind==='profile'){const row=await db.get('SELECT profile_hash,created_at,r2_key,content_sha256 FROM profile_version WHERE version=?',[unit.input.version]);return !!row&&row.profile_hash===unit.input.profileHash&&row.created_at===unit.input.createdAt&&row.r2_key===unit.input.r2Key&&row.content_sha256===unit.input.contentSha256;}
  return false;
 }
-async function filmStored(repositories,unit){
+async function filmStored(db,repositories,unit){
  if((unit.unmatchedCredits||0)>0)return false;
  const saved=await repositories.canonical.readFilm(unit.targetId);
  if(!saved)return false;
  const film=unit.input.film||{};
- if((saved.originalTitle??null)!==(film.originalTitle??null))return false;
- if((saved.canonicalIdentity??null)!==(film.canonicalIdentity??null))return false;
+ if(replaceableIdentity(await db.get("SELECT status,provenance_json,authority FROM film_dimension WHERE film_id=? AND dimension='identity'",[unit.targetId]))){
+  if((saved.originalTitle??null)!==(film.originalTitle??null))return false;
+  if((saved.canonicalIdentity??null)!==(film.canonicalIdentity??null))return false;
+ }
  if(saved.contractVersion!==film.contractVersion)return false;
  if(typeof unit.input.watchlist==='boolean'&&saved.watchlist!==unit.input.watchlist)return false;
  if(!sameLocalization(saved.dimensions?.localization,film.localization))return false;
@@ -956,8 +970,9 @@ async function verifyFilms(db,films,missing,extra,mismatched){
  for(const film of films){
   const row=rows.find(item=>item.id===film.id);
   if(!row)continue;
-  if('originalTitle' in film&&(row.original_title??null)!==(film.originalTitle??null))mismatched.push({table:'film',id:film.id,field:'original_title'});
-  if('canonicalIdentity' in film&&(row.canonical_identity??null)!==(film.canonicalIdentity??null))mismatched.push({table:'film',id:film.id,field:'canonical_identity'});
+  const kept=!replaceableIdentity(await db.get("SELECT status,provenance_json,authority FROM film_dimension WHERE film_id=? AND dimension='identity'",[film.id]));
+  if(!kept&&'originalTitle' in film&&(row.original_title??null)!==(film.originalTitle??null))mismatched.push({table:'film',id:film.id,field:'original_title'});
+  if(!kept&&'canonicalIdentity' in film&&(row.canonical_identity??null)!==(film.canonicalIdentity??null))mismatched.push({table:'film',id:film.id,field:'canonical_identity'});
   if('contractVersion' in film&&row.contract_version!==film.contractVersion)mismatched.push({table:'film',id:film.id,field:'contract_version'});
   if('watchlist' in film){const listed=await db.get('SELECT 1 AS ok FROM watchlist_film WHERE film_id=?',[film.id]);if(!!listed!==!!film.watchlist)mismatched.push({table:'watchlist_film',id:film.id,field:'watchlist'});}
   if('localization' in film||'localizationStatus' in film){const stored=await db.get("SELECT value,status,authority FROM film_dimension WHERE film_id=? AND dimension='localization'",[film.id]);if('localization' in film&&(stored?.value??null)!==(film.localization??null))mismatched.push({table:'film_dimension',id:film.id,field:'localization'});if('localizationStatus' in film&&(stored?.status??null)!==(film.localizationStatus??null))mismatched.push({table:'film_dimension',id:film.id,field:'localization_status'});}

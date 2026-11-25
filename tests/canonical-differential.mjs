@@ -97,6 +97,7 @@ const PREDICATES={
  held_localization_not_recorded:d=>['film_alias','person_alias','localization_conflict'].includes(d.table)&&d.kind==='only_projector',
  noop_write_keeps_updated_at:d=>['film_metadata','watchlist_film'].includes(d.table)&&d.kind==='column'&&d.column==='updated_at'&&String(d.projector)>String(d.canonical),
  canonical_identity_requires_trusted_tmdb:d=>d.table==='film'&&d.kind==='column'&&d.column==='canonical_identity'&&d.projector!==null&&d.canonical===null,
+ projector_import_stage2_dimensions:d=>d.table==='film_dimension'&&((d.kind==='only_canonical'&&['metadata','fingerprint','prediction'].includes(d.row?.dimension))||(d.kind==='column'&&/\|identity$/.test(d.key)&&['next_action','last_error','failure_reason','retry_at','attempts'].includes(d.column)&&(d.projector===null||d.projector==='none'||d.projector===0))),
  credit_ordinals_kept:d=>d.table==='film_person_credit'&&d.kind==='column'&&d.column==='ordinal',
 };
 const KNOWN=new Map([...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS].map(item=>[item.id,item]));
@@ -123,7 +124,8 @@ async function scenario(id,{setup,projector,canonical,accepts=[],expects=accepts
  else if(!outcome)assert.equal(seen.canonical,'ok',id+': the canonical path completed ('+seen.canonical+')');
  const unclassified=[],named=new Map();
  for(const diff of diffs){
-  const matched=accepts.find(name=>PREDICATES[name](diff,{left,right}));
+  // ADR 0218 stage 2 (AIR-661) changes the projector repository for every scenario, so its exception is always accepted, never expected.
+  const matched=[...accepts,'projector_import_stage2_dimensions'].find(name=>PREDICATES[name](diff,{left,right}));
   if(!matched){unclassified.push(diff);continue;}
   named.set(matched,(named.get(matched)||0)+1);
  }
@@ -254,17 +256,20 @@ const merged=await scenario('redirect_merge_retired_into_survivor',{setup:seedPr
 {
  const first={persons:PEOPLE(),films:[film()]};
  const next={persons:PEOPLE(),films:[film({originalTitle:null,body:META({synopsis:null,poster:null,genres:[],payload:{},updatedAt:T2}),localization:loc({value:null,updatedAt:T2})})]};
- await scenario('blank_incoming_values',{setup:seedProjector(first),projector:file=>projectorApply(file,next),canonical:file=>canonicalApply(file,next,T2),accepts:['identity_provenance_title_source','updated_at_is_write_time','blank_never_overwrites','noop_write_keeps_updated_at'],expects:['blank_never_overwrites','noop_write_keeps_updated_at'],
+ // The metadata lifecycle row the canonical writers write is in the base as a legacy row: the projector repository no longer writes it (ADR 0218 stage 2),
+ // and without it the canonical call would not be a no-op on film_metadata.
+ await scenario('blank_incoming_values',{setup:async file=>{await projectorApply(file,first);rows(file,"INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) SELECT film_id,'metadata','fresh','tmdb',NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,'stop',updated_at FROM film_dimension WHERE dimension='identity'");rows(file,"UPDATE film_dimension SET next_action='stop' WHERE dimension='identity'");},projector:file=>projectorApply(file,next),canonical:file=>canonicalApply(file,next,T2),accepts:['identity_provenance_title_source','updated_at_is_write_time','blank_never_overwrites','noop_write_keeps_updated_at'],expects:['blank_never_overwrites','noop_write_keeps_updated_at'],
   check:({left,right})=>{assert.equal(rows(left,'SELECT synopsis s FROM film_metadata')[0].s,null);assert.equal(rows(right,'SELECT synopsis s FROM film_metadata')[0].s,'A hacker learns the truth.');assert.equal(rows(right,'SELECT original_title t FROM film')[0].t,'The Matrix');}});
 }
 
-// 15. A reviewed (owner) identity row and title are never replaced by an automatic refresh on the canonical path; the projector guards only the localization.
+// 15. A reviewed (owner) identity row and title are never replaced by an automatic refresh: on the canonical path, and since ADR 0218 stage 2 (AIR-661) on the projector
+// repository (W2) too, so the two paths now agree on the title and the row.
 {
  const owner=dim('identity',{status:'reviewed',source:'owner',sourceVersion:'owner',provenance:{authority:'owner'}});
  const first={persons:PEOPLE(),films:[film({identity:owner,originalTitle:'Owner Title'})]};
  const next={persons:PEOPLE(),films:[film({originalTitle:'Automatic Title',identity:dim('identity',{updatedAt:T2})})]};
- await scenario('reviewed_identity_protected',{setup:seedProjector(first),projector:file=>projectorApply(file,next),canonical:file=>canonicalApply(file,next,T2),accepts:['identity_provenance_title_source','updated_at_is_write_time','reviewed_owner_rows_protected'],expects:['reviewed_owner_rows_protected'],
-  check:({left,right})=>{assert.equal(rows(left,'SELECT original_title t FROM film')[0].t,'Automatic Title');assert.equal(rows(right,'SELECT original_title t FROM film')[0].t,'Owner Title');assert.equal(rows(right,"SELECT status s FROM film_dimension WHERE dimension='identity'")[0].s,'reviewed');}});
+ await scenario('reviewed_identity_protected',{setup:seedProjector(first),projector:file=>projectorApply(file,next),canonical:file=>canonicalApply(file,next,T2),accepts:['identity_provenance_title_source','updated_at_is_write_time','reviewed_owner_rows_protected'],expects:[],
+  check:({left,right})=>{assert.equal(rows(left,'SELECT original_title t FROM film')[0].t,'Owner Title');assert.equal(rows(left,"SELECT status s FROM film_dimension WHERE dimension='identity'")[0].s,'reviewed');assert.equal(rows(right,'SELECT original_title t FROM film')[0].t,'Owner Title');assert.equal(rows(right,"SELECT status s FROM film_dimension WHERE dimension='identity'")[0].s,'reviewed');}});
 }
 
 // 16. The source reorders the cast: the projector renumbers the ordinals, the canonical writers keep the existing ones (a credit that exists is kept as it is).
@@ -315,7 +320,11 @@ const merged=await scenario('redirect_merge_retired_into_survivor',{setup:seedPr
 // ---- coverage and summary ---------------------------------------------------------------------------------------------------------------------------------------
 const byId=new Map(results.map(item=>[item.id,item]));
 const used=new Set(results.flatMap(item=>item.exceptions));
-for(const id of KNOWN.keys())if(!used.has(id))assert.fail('the exception '+id+' is registered but no scenario meets it: an exception nothing exercises is an unproven claim');
+// ADR 0218 stage 2 (AIR-661): the projector repository (W2) now keeps a reviewed/owner identity row and its title as the canonical writers do, so the
+// two paths converged on this exception. It stays registered (owner-accepted) but no scenario may meet it any more; scenario 15 proves the agreement.
+const CONVERGED=new Set(['reviewed_owner_rows_protected']);
+for(const id of CONVERGED)assert.ok(!used.has(id),id+': converged under ADR 0218 stage 2, so no scenario may meet it');
+for(const id of KNOWN.keys())if(!used.has(id)&&!CONVERGED.has(id))assert.fail('the exception '+id+' is registered but no scenario meets it: an exception nothing exercises is an unproven claim');
 const {GAPS}=await import('../src/canonical-producers.js');
 assert.deepEqual(DIFFERENTIAL_COVERAGE.map(item=>item.gap),[...GAPS],'the coverage registry names exactly the former producer gaps, in order');
 for(const item of DIFFERENTIAL_COVERAGE){
