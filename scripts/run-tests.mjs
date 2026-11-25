@@ -3,6 +3,7 @@ import {spawn} from 'node:child_process';
 import {availableParallelism,tmpdir} from 'node:os';
 import path from 'node:path';
 import {selectSuite} from './test-classification.mjs';
+import {onPath,resolveSqliteCli} from './sqlite-cli.mjs';
 
 // AIR-378. Runs every self-contained test file in its own Node process (process isolation is kept), a bounded number at a time.
 //
@@ -421,6 +422,19 @@ export function parseShard(value){
  return {index:Number(match[1]),count:Number(match[2])};
 }
 
+// The sqlite3 shell behind the D1 stand-in is checked once per run (scripts/sqlite-cli.mjs): it must run its standard input and stop at the statement that fails under
+// -bail. macOS ships a sqlite3 that does neither reliably (24 Nov 2026: 3.54.0 ran nothing with `-cmd` and `-bail`, and runs the rest of a line after a failed statement),
+// so the first shell that passes, the sqlite3 of PATH or else Homebrew's keg-only sqlite, is put first in PATH for every file and named in IPTV_SQLITE3_VERIFIED, which
+// lets the files skip the same check; without one the run stops here instead of failing every database test one by one. CI's Ubuntu sqlite3 passes as it is.
+function prepareSqlite(){
+ const verified=process.env.IPTV_SQLITE3_VERIFIED;
+ if(verified&&onPath('sqlite3')===verified)return;
+ const found=resolveSqliteCli();
+ if(!found.command){console.error('No usable sqlite3 shell for the test suite:\n - '+found.problems.join('\n - '));process.exit(2);}
+ if(found.fallback)console.log(`sqlite3 for this run: ${found.command}\n - `+found.problems.join('\n - '));
+ process.env.PATH=found.directory+path.delimiter+(process.env.PATH||'');
+ process.env.IPTV_SQLITE3_VERIFIED=found.command;
+}
 async function main(){
  const args=process.argv.slice(2);
  const directory=option(args,'dir','TEST_DIR','tests');
@@ -434,6 +448,7 @@ async function main(){
  if(shard===undefined){console.error(`--shard must be "index/count" with 1 <= index <= count, got "${option(args,'shard','TEST_SHARD',undefined)}"`);process.exit(2);}
  const suite=option(args,'suite','TEST_SUITE','core');
  if(suite!=='core'&&suite!=='non-functional'&&suite!=='all'){console.error(`--suite must be core, non-functional or all, got "${suite}"`);process.exit(2);}
+ prepareSqlite();
  if(suite==='all'){
   if(shard){console.error('--suite all cannot be combined with --shard');process.exit(2);}
   const rest=[];

@@ -6,7 +6,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {approvedMigrationChain,needsOneShot,quoteToJson,sqliteSync} from './sqlite-session.mjs';
+import {onPath} from '../scripts/sqlite-cli.mjs';
 
+// JSON text with the values of the named REAL fields (outside strings) at 15 significant digits; every other token, integers included, and every string untouched.
+// Used only where the shell's JSON writer itself rounds reals to 15 digits and drops `.0` (sqlite3 3.54).
+function at15(text,rounds,reals=new Set(['r','big','f','one','inf','ninf'])){
+ if(!rounds)return text;
+ let out='',at=0,key=null,afterKey=false;
+ while(at<text.length){
+  const c=text[at];
+  if(c==='"'){let end=at+1;while(text[end]!=='"'){if(text[end]==='\\')end++;end++;}const literal=text.slice(at,end+1);out+=literal;at=end+1;
+   if(text[at]===':'){key=JSON.parse(literal);afterKey=true;out+=':';at++;}else afterKey=false;continue;}
+  const number=afterKey?/^-?\d+(\.\d+)?([eE][+-]?\d+)?/.exec(text.slice(at,at+40)):null;
+  if(number){out+=reals.has(key)?Number(number[0]).toPrecision(15):number[0];at+=number[0].length;afterKey=false;continue;}
+  afterKey=false;out+=c;at++;
+ }
+ return out;
+}
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-sqlite-session-'));
 const db=name=>path.join(root,name+'.sqlite');
 const once=(file,input,json=false)=>spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});
@@ -146,7 +162,20 @@ const same=(file,input,json=false)=>{
  const TYPED="SELECT 1 AS i, -2.5 AS r, 1e300 AS big, 0.1+0.2 AS f, 9007199254740993 AS huge, NULL AS n, '' AS e, 'it''s \"q\" \\ back, with a comma' AS t, 'line1'||char(10)||'line2'||char(13)||char(9)||'x' AS nl, '12' AS numtext, 1.0 AS one, 'ünï☃' AS u, 'NULL' AS nulltext, 'X''00''' AS blobtext, 1e999 AS inf, -1e999 AS ninf, 'a' AS \"we,ird'col\", 2 AS i UNION ALL SELECT 2,3.25,-1e-300,0.5,-9007199254740993,'n','e','''','','0',2.0,'','null','',0,0,'',3;";
  const viaQuote=spawnSync('sqlite3',['-quote','-header','-bail',':memory:'],{input:TYPED,encoding:'utf8'}),viaJson=spawnSync('sqlite3',['-json','-bail',':memory:'],{input:TYPED,encoding:'utf8'});
  assert.equal(viaQuote.status,0,viaQuote.stderr);assert.equal(viaJson.status,0,viaJson.stderr);
- assert.equal(quoteToJson(viaQuote.stdout),viaJson.stdout,'the converted quote output is the JSON text of the CLI, byte for byte');
+ // The conversion keeps every real exactly (17 significant digits, as quote mode prints it). sqlite3 3.54 prints a real with 15 in JSON mode (0.1+0.2 is `0.3`, 1.0 is `1`)
+ // and with 17 in quote mode; older shells print 17 in both. Where the shell's two writers agree the texts are equal byte for byte; where they differ, every real of the
+ // conversion must round to what the JSON writer printed and all else stays byte for byte, so the conversion is never less exact than the CLI.
+ const converted=quoteToJson(viaQuote.stdout);
+ // Exactness is asserted on the value, not on one spelling: Ubuntu's shell prints 0.300000000000000044, sqlite3 3.54's quote mode 0.30000000000000004 (the same binary64).
+ assert.equal(JSON.parse(converted)[0].f,0.1+0.2,'the real is kept exactly: '+converted.slice(0,80));
+ assert.equal(JSON.parse(converted)[0].huge,9007199254740993,'an integer token is copied, not rounded');
+ const jsonRounds=JSON.parse(spawnSync('sqlite3',['-json',':memory:'],{input:'SELECT 0.1+0.2 AS f;',encoding:'utf8'}).stdout)[0].f!==0.1+0.2;
+ assert.equal(at15(converted,jsonRounds),at15(viaJson.stdout,jsonRounds),'the converted quote output is the JSON text of the CLI, byte for byte'+(jsonRounds?' (REAL tokens at the 15 digits this JSON writer prints)':''));
+ // The normalisation touches REAL tokens outside strings only: integers (unsafe ones too) and string contents stay byte for byte, and an equal real in another spelling still compares equal.
+ const sample='[{"i":9007199254740993,"n":-12,"s":"\\"f\\":0.30000000000000004, 1.0e+300","r":0.300000000000000044,"big":1.0e+300,"one":1}]';
+ assert.equal(at15(sample,true),'[{"i":9007199254740993,"n":-12,"s":"\\"f\\":0.30000000000000004, 1.0e+300","r":0.300000000000000,"big":1.00000000000000e+300,"one":1.00000000000000}]');
+ assert.equal(at15('[{"r":0.30000000000000004}]',true),at15('[{"r":0.300000000000000044}]',true));
+ assert.equal(at15(sample,false),sample,'no normalisation where the writers agree');
  assert.equal(quoteToJson(spawnSync('sqlite3',['-quote','-header',':memory:'],{input:'SELECT 1 AS a WHERE 0;',encoding:'utf8'}).stdout),'','no row is no output, as in JSON mode');
  assert.equal(quoteToJson(''),'');
  assert.throws(()=>quoteToJson("'a'\n'unterminated"),/unterminated/);
@@ -231,4 +260,42 @@ const same=(file,input,json=false)=>{
  assert.equal(needsOneShot(['-bail',file],'-- c\nUPDATE parent SET id=id WHERE id=-1; /* c */ SELECT changes();'),false,'a real write before the read, comments around it, is shared');
 }
 
-console.log('sqlite session: same results and failures as a process per call, no state between calls, replaced files, shared files, large answers, many databases and the quote-mode answer of large values passed');
+// A sqlite3 that runs nothing can never pass a test (24 Nov 2026: sqlite3 3.54 with `-cmd` and `-bail` read no input and exited 0, so every call answered status 0
+// with no output). Each shim below stands first in PATH of a process of its own that makes one session call and one one-shot call; the shell check of the first
+// call (scripts/sqlite-cli.mjs) refuses a shell that runs nothing or keeps going after a failed statement, and the markers of every call refuse a shell that passed
+// the check but then ran nothing, or stopped with status 0 before the end of a script. The shim that only forwards to the real shell answers as before.
+{
+ const real=process.env.IPTV_SQLITE3_VERIFIED||onPath('sqlite3');
+ assert.ok(real,'a sqlite3 on PATH');
+ const shims=path.join(root,'shims'),probe=path.join(root,'probe.mjs');
+ const forward=`n=$#; i=0; while [ $i -lt $n ]; do a=$1; shift; i=$((i+1)); [ "$a" = "-bail" ] || set -- "$@" "$a"; done; exec '${real}' "$@"\n`;
+ // Forwards the shell check to the real shell (its first line names it) and answers every other script, a session's open standard input included, with `body` at once.
+ const afterProbe=body=>`IFS= read -r first\ncase "$first" in *__SQLITE_CLI_PROBE_START__*) { printf '%s\\n' "$first"; cat; } | '${real}' "$@"; exit $?;; esac\n${body}\n`;
+ const cases={
+  silent:{script:'exit 0\n',expect:/did not run its standard input/},
+  leaky:{script:forward,expect:/kept running statements after one failed under -bail/},
+  'probe-only':{script:afterProbe('exit 0'),expect:/did not run the script \(its start marker did not come back\)/},
+  'cut-short':{script:afterProbe("printf '__SQLITE_SESSION_START__\\n'; exit 0"),expect:/before the end of the script \(its end marker did not come back\)/},
+  real:{script:`exec '${real}' "$@"\n`,expect:null}
+ };
+ fs.writeFileSync(probe,`import {sqliteSync} from ${JSON.stringify(path.resolve('tests/sqlite-session.mjs'))};
+const file=process.argv[2],report=(label,run)=>{try{const r=run();console.log(label+' ANSWER '+JSON.stringify({status:r.status,stdout:r.stdout}));}catch(error){console.log(label+' THROWN '+error.message);}};
+report('session',()=>sqliteSync(['-json','-bail',file],{input:'SELECT 1 AS n;',timeoutMs:20000}));
+report('oneshot',()=>sqliteSync(['-json','-bail',file],{input:'PRAGMA user_version=1;SELECT 2 AS n;',timeoutMs:20000}));
+`);
+ for(const [name,{script,expect}] of Object.entries(cases)){
+  const directory=path.join(shims,name);fs.mkdirSync(directory,{recursive:true});
+  fs.writeFileSync(path.join(directory,'sqlite3'),'#!/bin/sh\n'+script,{mode:0o755});
+  const env={...process.env,PATH:directory+path.delimiter+(process.env.PATH||'')};delete env.IPTV_SQLITE3_VERIFIED;
+  const result=spawnSync(process.execPath,[probe,db('guard-'+name)],{encoding:'utf8',env,timeout:60000});
+  assert.equal(result.status,0,name+': '+result.stderr);
+  const lines=result.stdout.trim().split('\n');
+  assert.equal(lines.length,2,name+': two calls: '+result.stdout);
+  for(const line of lines){
+   if(expect)assert.match(line,expect,name+': '+line);
+   else assert.match(line,/^(session|oneshot) ANSWER \{"status":0,"stdout":"\[\{\\"n\\":[12]\}\]\\n"\}$/,name+': '+line);
+  }
+ }
+}
+
+console.log('sqlite session: same results and failures as a process per call, no state between calls, replaced files, shared files, large answers, many databases, the quote-mode answer of large values and the refusal of a shell that runs nothing passed');

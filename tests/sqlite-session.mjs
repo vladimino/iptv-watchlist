@@ -18,14 +18,24 @@
 //    in quote mode), and quote mode costs a write per value (90 000 small rows: 0.7 s against 0.1 s in JSON mode). So a `-json` call runs in JSON mode unless the
 //    same statement shape returned large values before; then it runs as `.mode quote` with headers and the output is turned into the same JSON text here. Quote
 //    mode keeps what JSON mode keeps: column names, NULL, numbers as the CLI prints them (copied verbatim) and text. The choice changes the time of a call only.
+//  - A shell that runs nothing can never pass a test (24 Nov 2026: sqlite3 3.54 with `-cmd` and `-bail` read no input and exited 0). `PRAGMA synchronous=OFF` is
+//    sent as input, never as `-cmd`; every script read from standard input is framed by a start and an end marker that must come back (a failing script under
+//    `-bail` stops before the end marker, as before). A call whose start marker is missing, or that ends with status 0 without its end marker, throws instead of
+//    answering, and so does a shell that cannot be started. The first call of a process also checks the shell itself (scripts/sqlite-cli.mjs).
 import {spawn,spawnSync} from 'node:child_process';
 import {copyFileSync,existsSync,mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {Worker,isMainThread,workerData,MessageChannel,receiveMessageOnPort} from 'node:worker_threads';
+import {onPath,sqliteCliProblem} from '../scripts/sqlite-cli.mjs';
 
-const MARK='__SQLITE_SESSION_DONE__';
+const MARK='__SQLITE_SESSION_DONE__',START='__SQLITE_SESSION_START__';
+const SYNC_OFF='PRAGMA synchronous=OFF;\n';
+// What a call that started gets back: its output without the start marker. Anything else is a shell fault, not an answer.
+const NOT_RUN='sqlite3 did not run the script (its start marker did not come back): ';
+const CUT_SHORT='sqlite3 exited with status 0 before the end of the script (its end marker did not come back): ';
+const describe=(status,stdout,stderr)=>'exit '+status+', stdout '+JSON.stringify(String(stdout??'').slice(0,200))+', stderr '+JSON.stringify(String(stderr??'').slice(0,300));
 // `-json` for a statement shape that returns large values: the CLI is asked for quote mode with headers.
 const cliArgs=args=>args.flatMap(argument=>argument==='-json'?['-quote','-header']:[argument]);
 // Statement shapes (the start of the script, literals removed) whose answers were large values. Learned from the answers of this process; see the note above.
@@ -46,6 +56,15 @@ function settleJson(shape,quoted,result){
 // The output of `-quote -header` for ONE result set, as the text `-json` prints for it: `[{"name":value,...},\n{...}]\n`, or nothing for no row.
 // A text value is quoted with '' for a quote and may span lines; NULL, numbers and X'..' blobs are bare. Numbers are copied as printed (JSON mode prints the
 // same digits); the infinities are written as JSON mode writes them. A blob becomes its hex text (JSON mode prints unusable bytes for a blob; no test reads one).
+// The text of SQLite's unistr() argument: \\ is a backslash; \XXXX, \uXXXX, \+XXXXXX and \UXXXXXXXX are code points; nothing else follows a backslash.
+function unistr(literal){
+ return literal.replace(/\\(?:\\|([0-9a-fA-F]{4})|u([0-9a-fA-F]{4})|\+([0-9a-fA-F]{6})|U([0-9a-fA-F]{8})|)/g,(escape,a,b,c,d)=>{
+  if(escape==='\\\\')return '\\';
+  const hex=a||b||c||d;
+  if(!hex)throw new Error('sqlite quote output: bad unistr escape');
+  return String.fromCodePoint(parseInt(hex,16));
+ });
+}
 export function quoteToJson(text){
  if(!text)return '';
  const length=text.length,NEEDS_ESCAPE=/["\\\u0000-\u001f\u2028\u2029]/;
@@ -53,6 +72,14 @@ export function quoteToJson(text){
  // one value starting at `position`: returns its JSON token and leaves `position` after it
  const value=()=>{
   const first=text.charCodeAt(position);
+  // sqlite3 3.54 quotes a text that holds a control character as unistr('...'): the SQL literal, with a backslash as \\ and the character as \uXXXX.
+  if(first===117&&text.startsWith("unistr('",position)){
+   position+=7;
+   const token=value(),literal=JSON.parse(token);
+   if(text.charCodeAt(position)!==41)throw new Error('sqlite quote output: unterminated unistr');
+   position++;
+   return JSON.stringify(unistr(literal));
+  }
   if(first===39){
    let from=position+1,end=text.indexOf("'",from);
    if(end<0)throw new Error('sqlite quote output: unterminated text');
@@ -67,7 +94,8 @@ export function quoteToJson(text){
    }
    return NEEDS_ESCAPE.test(content)?JSON.stringify(content):'"'+content+'"';
   }
-  if(first===88&&text.charCodeAt(position+1)===39){
+  // A blob is X'..' (x'..' since sqlite3 3.54).
+  if((first===88||first===120)&&text.charCodeAt(position+1)===39){
    const end=text.indexOf("'",position+2);if(end<0)throw new Error('sqlite quote output: unterminated blob');
    const hex=text.slice(position+2,end);position=end+1;return '"'+hex+'"';
   }
@@ -100,19 +128,26 @@ if(!isMainThread&&workerData?.sqliteSession){
  const answer=message=>{port.postMessage(message);Atomics.store(flag,0,1);Atomics.notify(flag,0);};
  const close=key=>{const session=sessions.get(key);if(!session)return;sessions.delete(key);try{session.child.stdin.end();}catch{}try{session.child.kill('SIGKILL');}catch{}};
  const open=(key,args,fileKey)=>{
-  // Durability of a test database is not part of any test: no fsync per statement (a connection setting, not stored in the file).
-  const child=spawn('sqlite3',['-cmd','PRAGMA synchronous=OFF',...args],{stdio:['pipe','pipe','pipe']});
+  const child=spawn('sqlite3',args,{stdio:['pipe','pipe','pipe']});
   const session={child,fileKey,chunks:[],tail:'',err:'',waiting:null,dead:false};
   child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
   child.stdout.on('data',chunk=>{session.chunks.push(chunk);session.tail=(session.tail+chunk).slice(-(MARK.length+1));settle(session);});
   child.stderr.on('data',chunk=>{session.err+=chunk;});
   child.stdin.on('error',()=>{});
-  child.on('error',error=>{session.dead=true;if(sessions.get(key)===session)sessions.delete(key);const wait=session.waiting;session.waiting=null;if(wait)wait({status:1,stdout:'',stderr:String(error.message||error),signal:null});});
+  child.on('error',error=>{session.dead=true;if(sessions.get(key)===session)sessions.delete(key);const wait=session.waiting;session.waiting=null;if(wait)wait({fault:'sqlite3 could not be started: '+String(error.message||error)});});
   child.on('close',(code,signal)=>{
    session.dead=true;if(sessions.get(key)===session)sessions.delete(key);
    const wait=session.waiting;session.waiting=null;
-   if(wait)wait({status:code??1,stdout:session.chunks.join(''),stderr:session.err,signal:signal||null});
+   if(!wait)return;
+   const stdout=session.chunks.join('');
+   // A script that fails under -bail ends the process before the end marker: that is its answer. Without the start marker nothing ran; with status 0 and no end marker the script was cut short.
+   if(!stdout.startsWith(START+'\n'))wait({fault:NOT_RUN+describe(code??signal,stdout,session.err)});
+   else if(code===0)wait({fault:CUT_SHORT+describe(code,stdout,session.err)});
+   else wait({status:code??1,stdout:stdout.slice(START.length+1),stderr:session.err,signal:signal||null});
   });
+  // Durability of a test database is not part of any test: no fsync per statement (a connection setting, not stored in the file). Sent as input: `-cmd` with
+  // `-bail` makes sqlite3 3.54 read no input at all.
+  child.stdin.write(SYNC_OFF);
   sessions.set(key,session);
   return session;
  };
@@ -120,8 +155,9 @@ if(!isMainThread&&workerData?.sqliteSession){
   // Only the last characters are looked at: a long answer is kept as chunks and joined once, never re-scanned.
   if(!session.waiting||session.tail!==MARK+'\n')return;
   const wait=session.waiting;session.waiting=null;
-  const stdout=session.chunks.join('').slice(0,-(MARK.length+1)),stderr=session.err;session.chunks=[];session.tail='';session.err='';
-  wait({status:0,stdout,stderr,signal:null});
+  const text=session.chunks.join(''),stderr=session.err;session.chunks=[];session.tail='';session.err='';
+  if(!text.startsWith(START+'\n')){try{session.child.kill('SIGKILL');}catch{}wait({fault:NOT_RUN+describe(0,text,stderr)});return;}
+  wait({status:0,stdout:text.slice(START.length+1,-(MARK.length+1)),stderr,signal:null});
  };
  port.on('message',message=>{
   const {args,key,fileKey,input,prefix}=message;
@@ -134,7 +170,7 @@ if(!isMainThread&&workerData?.sqliteSession){
   session.chunks=[];session.tail='';session.err='';
   session.waiting=answer;
   try{// Every call starts as a fresh connection did: foreign keys off (SQLite's default) unless this script turns them on.
-  session.child.stdin.write((prefix||'')+'PRAGMA foreign_keys=OFF;\n'+input+'\n;\n.print '+MARK+'\n');}catch(error){const wait=session.waiting;session.waiting=null;if(wait)wait({status:1,stdout:'',stderr:String(error.message||error),signal:null});}
+  session.child.stdin.write('.print '+START+'\n'+(prefix||'')+'PRAGMA foreign_keys=OFF;\n'+input+'\n;\n.print '+MARK+'\n');}catch(error){const wait=session.waiting;session.waiting=null;if(wait)wait({fault:'sqlite3 did not accept the script: '+String(error.message||error)});}
  });
 }
 
@@ -186,6 +222,8 @@ export function needsOneShot(args,input){
  if(rest.length!==1||!rest[0]||rest[0].startsWith(':')||rest[0].startsWith('-'))return true;
  const text=String(input??'');
  if(/^\s*\./m.test(text))return true;
+ // A comment or literal that does not end would swallow the end marker and every later script of a shared connection.
+ if(codeStatements(text)===null)return true;
  const body=text.replace(/PRAGMA\s+foreign_keys\s*=\s*ON\s*;/gi,'');
  if(/\bPRAGMA\b/i.test(body)||/\b(ATTACH|DETACH|TEMP|TEMPORARY|VACUUM)\b/i.test(body))return true;
  if(/\bBEGIN\b/i.test(body)&&!/\b(COMMIT|END|ROLLBACK)\b/i.test(body))return true;
@@ -226,7 +264,17 @@ export function approvedMigrationChain(input){
   if(at===input.length)return false;
  }
 }
+// The shell is checked once per process, before its first call: it must run its input and stop at the statement that fails (scripts/sqlite-cli.mjs). npm test
+// checks the sqlite3 it puts first in PATH once and names it in IPTV_SQLITE3_VERIFIED, so its files skip the repeat; any other sqlite3 is checked here.
+let shellChecked=false;
+function checkShell(){
+ if(shellChecked)return;
+ const verified=process.env.IPTV_SQLITE3_VERIFIED;
+ if(!verified||onPath('sqlite3')!==verified){const problem=sqliteCliProblem('sqlite3');if(problem)throw new Error(problem);}
+ shellChecked=true;
+}
 export function sqliteSync(args,options={}){
+ checkShell();
  const input=options.input;
  const schema=args.length===2&&args[0]==='-bail'&&!args[1].startsWith(':')&&!args[1].startsWith('file:')&&approvedMigrationChain(input)&&!existsSync(args[1]);
  if(!schema)return sqliteSync1(args,options);
@@ -243,9 +291,15 @@ export function sqliteSync(args,options={}){
 function sqliteSync1(args,{input='',timeoutMs=300000,...options}={}){
  const json=args.includes('-json'),shape=json?shapeOf(String(input)):null,quoted=json&&largeShapes.has(shape);
  if(needsOneShot(args,input)){
-  // A one-shot call in the usual form (`[-json] -bail file`) also skips the fsync per statement; any other argument list is run as given.
-  const usual=args.filter(argument=>argument!=='-json'&&argument!=='-bail').length===1&&!args.some(argument=>argument.startsWith(':'));
-  const real=quoted?cliArgs(args):args,result=spawnSync('sqlite3',usual?['-cmd','PRAGMA synchronous=OFF',...real]:real,{input,encoding:'utf8',maxBuffer:1<<30,...options});
+  // A script read from standard input (`[-json] [-bail] database`) is framed by the markers, and one on a database file also skips the fsync per statement;
+  // any other argument list (SQL given as an argument, other options) is run as given.
+  const rest=args.filter(argument=>argument!=='-json'&&argument!=='-bail');
+  const framed=rest.length===1&&!!rest[0]&&!rest[0].startsWith('-'),usual=framed&&!rest[0].startsWith(':');
+  const text=framed?'.print '+START+'\n'+(usual?SYNC_OFF:'')+String(input??'')+'\n;\n.print '+MARK+'\n':input;
+  const result=spawnSync('sqlite3',quoted?cliArgs(args):args,{input:text,encoding:'utf8',maxBuffer:1<<30,...options});
+  if(result.error&&result.error.code!=='ETIMEDOUT')throw new Error('sqlite3 could not be run: '+result.error.message);
+  // A script whose comment or literal does not end swallows the end marker itself; the shell's answer to it (status 0, nothing run after the opening) is what a process per call always gave.
+  if(framed)unframe(result,codeStatements(String(input??''))!==null);
   return json?settleJson(shape,quoted,result):result;
  }
  const file=args.find(argument=>argument!=='-json'&&argument!=='-bail');
@@ -258,7 +312,18 @@ function sqliteSync1(args,{input='',timeoutMs=300000,...options}={}){
  let received=receiveMessageOnPort(port);
  for(let attempt=0;!received&&attempt<5000;attempt++){Atomics.wait(pause,0,0,2);received=receiveMessageOnPort(port);}
  if(!received)throw new Error('sqlite session gave no answer');
+ if(received.message.fault)throw new Error(received.message.fault);
  return json?settleJson(shape,quoted,received.message):received.message;
+}
+// The answer of a framed one-shot call without its markers; throws when the script did not run, or (a well-formed script) stopped with status 0 before its end.
+function unframe(result,wellFormed=true){
+ const stdout=String(result.stdout??'');
+ if(result.signal){if(stdout.startsWith(START+'\n'))result.stdout=stdout.slice(START.length+1);return result;}
+ if(!stdout.startsWith(START+'\n'))throw new Error(NOT_RUN+describe(result.status,stdout,result.stderr));
+ const ended=stdout.endsWith(MARK+'\n');
+ if(result.status===0&&!ended&&wellFormed)throw new Error(CUT_SHORT+describe(result.status,stdout,result.stderr));
+ result.stdout=stdout.slice(START.length+1,ended?-(MARK.length+1):undefined);
+ return result;
 }
 
 // `runner` for scripts/offline-import.mjs `openSqlite(file, {runner})`: the same persistent process, with the shape of the spawnSync call it replaces.
