@@ -100,13 +100,13 @@ On macOS the shell Apple ships does not qualify (24 Nov 2026: `/usr/bin/sqlite3`
 
 The three scenarios skipped that way are `footer-memory-production-size` and `owner-limbo-memory-production-size` (`tests/footer-memory.mjs`) and `user-reads-memory-production-size` (`tests/user-read-memory.mjs`); the nightly `Non-functional tests` workflow still runs all three on Node 22.
 
-On a laptop the heaviest mutation files of the non-functional suite (`canonical-producer-driver-mutation*.mjs`, about 280 s each six at a time on the owner's Mac) can pass the runner's default 300 s per-file limit. The runner reads `TEST_JOBS` and `TEST_TIMEOUT_MS` from the environment and the pre-push hook inherits them, so a local push uses:
+On a laptop the heaviest mutation files of the non-functional suite (`canonical-producer-driver-mutation*.mjs`: about 110 s on CI, about 280 s each six at a time on the owner's Mac, and up to about 850 s two at a time while other sessions load the machine) pass the runner's default 300 s per-file limit. The pre-push hook therefore runs `npm run test:all` with a 30-minute per-file limit (`TEST_TIMEOUT_MS=1800000`) unless `TEST_TIMEOUT_MS` is already set; the limit only guards against a hung file. The runner reads `TEST_JOBS` and `TEST_TIMEOUT_MS` from the environment and the hook passes them on, so a push can still lower the concurrency on a busy machine:
 
 ```bash
-TEST_JOBS=2 TEST_TIMEOUT_MS=900000 git push
+TEST_JOBS=2 git push
 ```
 
-CI keeps its defaults.
+`npm test`, `npm run test:all` run by hand, and CI keep the 300 s default.
 
 The tests of this tooling:
 
