@@ -95,7 +95,7 @@ flowchart TB
     resolve["Typed resolver<br/>claims, redirects, retirements"]
     fatal["404 absent, 409 conflict,<br/>410 retired, 503 unavailable<br/>no section returned"]
     readset["Identity read-set<br/>generation, revisions, claims"]
-    ids["Survivor Film and<br/>verified alias set per domain"]
+    ids["Survivor Film, authorized aliases<br/>and bounded candidate coverage"]
     display["display<br/>metadata, owner review"]
     watch["watchlist<br/>source and projection"]
     avail["availability<br/>published EPG generation"]
