@@ -128,7 +128,7 @@ CREATE TABLE film_metadata_field (
  film_id TEXT NOT NULL,
  field TEXT NOT NULL CHECK (field IN ('year','runtime','synopsis','poster','url','genres')),
  tier TEXT NOT NULL CHECK (tier IN ('owner','automatic','released')),
- source TEXT NOT NULL CHECK (source IN ('letterboxd','tmdb','owner')),
+ source TEXT NOT NULL CHECK (source IN ('letterboxd','tmdb','owner','unattributed')),
  origin TEXT NOT NULL CHECK (origin IN ('catalog_enrichment','owner_route')),
  anchor_scheme TEXT CHECK (anchor_scheme IS NULL OR anchor_scheme IN ('letterboxd','tmdb')),
  anchor_value TEXT,
@@ -144,7 +144,8 @@ CREATE TABLE film_metadata_field (
  CHECK ((anchor_scheme IS NULL) = (anchor_value IS NULL)),
  CHECK ((tier = 'automatic') = (agreement IS NOT NULL)),
  CHECK (tier <> 'automatic' OR (anchor_scheme IS NOT NULL AND anchor_digest IS NOT NULL)),
- CHECK ((source = 'owner') = (origin = 'owner_route' AND tier IN ('owner','released') AND anchor_scheme IS NULL))
+ CHECK (source NOT IN ('owner','unattributed') OR (origin = 'owner_route' AND tier IN ('owner','released') AND anchor_scheme IS NULL)),
+ CHECK (source <> 'owner' OR anchor_digest IS NOT NULL)
 ) STRICT, WITHOUT ROWID;
 ```
 
@@ -155,9 +156,20 @@ The DDL is the contract's shape. The exact constraint text belongs to card PV1, 
 - There is no foreign key. Consistency comes from the single writer, the binding and the triggers below, and no cascade can silently move or delete a row.
 - The semantic columns are `tier`, `source`, `anchor_*`, `agreement`, `observed_at` and `value_digest`. They decide ranks (decision 3) and converge (decision 6).
 - The audit columns are `origin`, `checked_at`, `write_key`, `written_revision` and `updated_at`. They may differ between arrival orders and are never compared.
-- A pinned automatic value keeps its `source` and anchor columns with `tier = 'owner'`. A value the owner typed has `source = 'owner'` and no anchor.
+- **Owner authority is separate from observation lineage.** `tier` says who protects the value; `source` and the anchor columns say where it came from, and are never invented:
+  - a pinned automatic value keeps its `source` and anchor columns, with `tier = 'owner'`;
+  - a value the owner typed has `source = 'owner'`, no anchor, and `anchor_digest` = the Film's digest at the `set`, which records the identity under which the owner asserted it (decision 9);
+  - a pin of an `unknown` value (legacy, or written by an undeclared writer) has `source = 'unattributed'`, no anchor and `anchor_digest` NULL, because its identity is not known. It is protected like any pin; its release leaves `tier = 'released'` with `source = 'unattributed'`, which ranks `unknown`;
+  - a blank field cannot be locked (`rejected: blank_field`); `set` is the way to give it an owner value.
 
-**Binding.**
+**Invalidation on every raw value change.** Database triggers on `film_metadata` delete the non-owner field rows that a raw change makes stale, atomically with the change, whatever code issues it:
+- `film_metadata_field_invalidate_update`, `AFTER UPDATE OF year, runtime, synopsis, poster, url, genres_json`: for each column whose value changed (`NEW.x IS NOT OLD.x`), it deletes that field's row when `tier <> 'owner'`. Unchanged fields are untouched;
+- `film_metadata_field_invalidate_delete`, `AFTER DELETE`, and `film_metadata_field_invalidate_move`, `AFTER UPDATE OF film_id`: they delete every non-owner field row under the old `film_id`;
+- `film_metadata_field_invalidate_insert`, `AFTER INSERT`: it deletes every non-owner field row already present for that `film_id` (orphans of an earlier delete or move).
+
+The new writer orders its batch accordingly: it changes the value first (the trigger removes the stale row), then writes the new field row. An equal value raises no trigger, so adoption updates the row in place. A merge writes the moved rows explicitly after the move. Pins are never deleted by these triggers; their protection is decision 11. So an old A → B → A sequence, a delete and identical re-insert, or a move and re-create, leaves the field `unknown`, never resurrecting an earlier occurrence's provenance.
+
+**Binding.** A second, independent check:
 - A field row counts only while its `value_digest` equals the SHA-256 of the canonical JSON of the stored value. Otherwise the field reads as `unknown`, and the mismatch is reported as `provenance_mismatch`.
 - So a path that changes or moves a value without its field row can never make an old row describe a new value. Such paths are old code, a restore, the offline importer or a manual repair.
 - The writer compares digests when it plans. The Film revision fence makes the plan and the commit atomic.
@@ -240,7 +252,7 @@ Candidate card PV4 may give the EPG metadata stage real lineage; until then, its
 **Fences in the batch.** Beside the existing marker, Film revision and no-redirect fences:
 - **every metadata batch**, a fill included, asserts the control row's `mode` and `revision` that the plan read, whenever the control table exists. No batch planned under one mode commits under another; the producer's ordinary retry replans it;
 - **every declared batch** (fill, adoption or replacement) also asserts the planned anchor set: every planned anchor still holds by its exact `(scheme, value)`, and no other trusted `letterboxd` or `tmdb` anchor of the Film exists. This is the writer's own compound assertion, not one of the caller's 12 guards. A competing claim or a retirement fails it;
-- **every automatic declared batch** also asserts that the Film has no `identity_disagreement` on its ADR 0211 film row (an absent table or row means none). So a known disagreement blocks every C1 write, fills included;
+- **every automatic declared batch** (today only C1; the rule is C1's, as agreed, and undeclared EPG writes stay allowed) also asserts that the Film has no `identity_disagreement` on its ADR 0211 film row (an absent table or row means none). So a known disagreement blocks every C1 write, fills included;
 - **an owner batch** asserts the mode, the revision and the Film revision, and nothing about disagreement, so a manual correction during a disagreement works (decision 9 adds the revert's anchor assertion);
 - **an undeclared batch** asserts the mode and the revision only. It is not blocked by a disagreement: the EPG chain resolves its target through the canonical claims and reads no C1 state. Its values stay `unknown`, visible in the owner view, and are adopted or replaced by confirmed observations later.
 
@@ -276,11 +288,12 @@ In modes `off` and `hold`, declared writers only fill and adopt, as ADR 0211 del
 
 ### 6. Convergence
 
-**What converges.** In mode `enforce`, for a fixed set of `confirmed` and owner observations of one field, the semantic projection of the field ends the same in every order of arrival. The projection is the value plus the semantic columns. This holds provided the Film's anchors and locks stay the same.
+**What converges.** In mode `enforce`, for a fixed set of `confirmed` automatic observations of one field, with the field's owner protection fixed, the semantic projection of the field ends the same in every order of arrival. The projection is the value plus the semantic columns. This holds provided the Film's anchors and locks stay the same.
 
 **Why.** Every replacement and every adoption strictly raises the rank. The rank is a total order: the digest tie-break makes it total. So the final state is the maximum of the set.
 
 **What is not claimed.**
+- **Owner actions are not observations.** They are commands ordered by the Film revision (`expectedRevision`): two different `set`s apply in their command order, the later one winning, never by digest. An automatic observation never replaces an `owner` field, whatever its rank.
 - `unconfirmed` observations only fill blanks (0214-4 = B). Among themselves, the first fill wins, as in ADR 0211. A `confirmed` observation then replaces whichever one landed.
 - Undeclared writes rank `unknown` and claim no order.
 - Mode `hold` claims no convergence.
@@ -326,7 +339,7 @@ The `unconfirmed` 72 h fallback stays blank-only, exactly as accepted in ADR 021
 - each value, with its field row and its effective rank;
 - the locks;
 - the Film's C1 conflicts and hints;
-- its history, including the history of Films redirected into it (one hop).
+- its history, including the history of Films redirected into it (one hop), **paginated**: newest first, at most 50 rows per page, with a cursor on `(at, id)`.
 
 It is a pure read, registered in the GET write baseline.
 
@@ -334,9 +347,9 @@ It is a pure read, registered in the GET write baseline.
 
 | Action | Effect |
 | --- | --- |
-| `set` | writes an owner value (`tier = 'owner'`, `source = 'owner'`) after validating the field's type and bounds; history |
-| `lock` | pins the current value (`tier = 'owner'`, source and anchor columns kept); history |
-| `release` | keeps the value, `tier = 'released'`, so it ranks `unknown`; history. Under a dimension lock the field stays protected, and the readback says `dimension_locked: true` |
+| `set` | writes an owner value (`tier = 'owner'`, `source = 'owner'`, `anchor_digest` = the current digest) after validating the field's type and bounds; history |
+| `lock` | pins the current value: an attributed value keeps its source and anchor columns, an `unknown` one is pinned as `source = 'unattributed'`; a blank field is `rejected: blank_field`; history |
+| `release` | keeps the value and its lineage columns, `tier = 'released'`, so it ranks `unknown`; history. Under a dimension lock the field stays protected, and the readback says `dimension_locked: true` |
 | `revert` | restores one history row's old value and semantic columns, then pins it; history |
 | `refresh` | raises the C1 `core` refresh epoch through the ADR 0211 `retry` mechanism (its `expectedRows` compare-and-swap, epoch and lease fences). Epoch-only: no metadata, no history, no Film revision bump. `not_in_scope` when the Film has no state rows |
 
@@ -356,13 +369,13 @@ Every metadata action is one `writeFilmFacts` batch with owner authority, the fe
 
 How the record behaves:
 - **Atomic.** It is inserted in the same batch as the effect. A metadata command, a no-op included, bumps the Film revision, so `applied_revision` is real.
-- **Refresh.** `refresh` writes only the C1 state rows and this row, and its batch asserts the C1 epochs and `expectedRows`.
+- **Refresh.** `refresh` writes only the C1 state rows and this row. Its batch asserts the C1 epochs and `expectedRows`, and also the control row's `mode` and `revision` (not `off`), that the Film exists and is not redirected, and the ADR 0211 control generation, so the route's pre-read is not the only activation or identity check.
 - **Immutable.** `film_metadata_owner_command_immutable` refuses `UPDATE` and `DELETE`, and the primary key refuses a second insert.
 
 **Replay and failures.** The route reads the command row before anything else:
 - **Same key, different digest:** `rejected: request_mismatch`, for any field or action.
 - **Same key, same digest:** `already_applied`, with the stored `outcome` and `applied_revision`, without a batch. That holds whatever was written, merged or redirected since.
-- **No row:** the command never committed, because the record and the effect are one batch. A lost response or an `uncertain` (503, `outcome: unknown`) answer is settled by this one read, and the command may be sent again.
+- **No row:** the command **has not committed yet**. It does not prove that an earlier attempt still in flight can never commit. A resend is nevertheless safe: the command row's primary key is inserted in the same batch as the effect, so of two concurrent attempts at most one commits, and the other fails on the key and answers from the row it then reads. A route answering `uncertain` (503, `outcome: unknown`) tells the caller to read again or resend the same command.
 - **Rejections are not recorded**, because they commit nothing: validation, a stale `expectedRevision` or `expectedRows`, `foreign_history`, `anchor_changed`, `identity_unknown`, a refused mode. Each is recomputed deterministically on a retry. Revisions and epochs only grow, so a stale command stays stale.
 
 **`historyRef` and identity.**
@@ -376,6 +389,7 @@ How the record behaves:
 - **Clear (`metadata: null`).**
   - Refused (`film_metadata_locked`) while any field is `owner` or the dimension lock holds, unless the write carries owner authority.
   - Refused (`film_metadata_attributed`) for an automatic caller while any field row is attributed.
+  - Refused (`film_metadata_hold`) for an automatic caller while the mode is `hold`. The clear batch asserts the mode it planned under, so an older plan committing after a switch to `hold` fails.
   - Otherwise allowed. Each non-blank value gets a history row (`cleared`), and the Film's field rows are deleted in the same batch.
 - **Merge (`reconcile`, dormant).** The comparison is field-wise: the six values plus their field rows. The result is assembled field by field, and the retired Film's history stays under its own id.
   - Equal value and equal row: the survivor's row is kept.
@@ -409,7 +423,7 @@ One durable row, `film_metadata_provenance_control(id = 1, mode, revision, updat
 | schema absent | today's behaviour; no lock can exist; the owner route answers `schema_absent` |
 | `off` | today's rows, plus the mode assertion; no field row is written; the owner route refuses writes; only before activation |
 | `enforce` | everything in decisions 4-10 |
-| `hold` | protections P1-P4 below, and **no automatic replacement**: every automatic writer, declared or not, only fills and adopts. The owner route works. Nothing is deleted |
+| `hold` | protections P1-P4 below, and **no automatic replacement or clear**: every automatic writer, declared or not, only fills and adopts, and an automatic clear is refused. The owner route works. Nothing is deleted except through owner authority |
 
 **Transitions**, enforced by triggers on the control row:
 - `film_metadata_provenance_one_way`: once the mode leaves `off`, it never returns;
@@ -434,7 +448,7 @@ Each transition is an owner production operation with a readback.
 **Code that predates PV1** never writes `film_metadata_field`. Its side effects are bounded:
 - it cannot touch a pin, a dimension-locked Film or history, because of the triggers;
 - a value it changes reads `unknown` through the binding;
-- a row it deletes or moves leaves the field rows behind under the old id, unmatched, and those read `unknown` too;
+- a value it changes, a row it deletes and a row it moves have their non-owner field rows removed by the invalidation triggers (decision 2), so they read `unknown`;
 - so nothing is ever wrongly attributed.
 
 **Fail-safe.** Each of these fails the metadata write closed with `film_person_unavailable`, and the unit retries:
@@ -514,7 +528,7 @@ None of these cards is required for AIR-275 or for the ADR 0207 A2 flip.
 | **PV3** | The owner route of decision 9, with the command record | PV1 | refuses writes at `off` | implementation GO |
 | **PVU** | Admin UI for PV3, with visual QA | PV3 | UI only | implementation GO; owner visual check |
 | **PVM** | Apply the PV1 migration file | PV1 merged and deployed | no behaviour change at `off` | production GO |
-| **PVE** | `off → enforce`. Preflight: PVM applied; PV1, PV2 and PV3 deployed in the running version; the control row at `off`. Then a readback of the mode. Then natural acceptance in `Верификация`, on the counts of decision 13: replacements, refusals, conflicts and history. Rollback is `hold` | PVM; PV1, PV2 and PV3 deployed | the irreversible step is leaving `off`; `hold` stops replacements | production GO (owner L3) |
+| **PVE** | `off → enforce`. Preflight: PVM applied; PV1, PV2 and PV3 deployed in the running version; the control row at `off`; and a **drain**: that version at 100 % for longer than the longest unit or Workflow step bound, no Workflow instance or producer unit of an older version still running, and no unsettled receipt planned by an older version (the ADR 0207 A2 pattern), because a deployed version does not prove that an older in-flight batch cannot commit later. A late pre-PV1 batch is still harmless: the invalidation triggers turn its value changes into `unknown`, and the lock triggers stop it at pins. Then a readback of the mode. Then natural acceptance in `Верификация`, on the counts of decision 13: replacements, refusals, conflicts and history. Rollback is `hold` | PVM; PV1, PV2 and PV3 deployed | the irreversible step is leaving `off`; `hold` stops replacements | production GO (owner L3) |
 | **PVT** | A periodic refresh policy | measured C2 and PVE costs | its own decision | owner decision |
 | **PV4** (candidate, parked) | EPG per-field lineage | PV1; its own decision | — | owner decision |
 
@@ -525,8 +539,9 @@ None of these cards is required for AIR-275 or for the ADR 0207 A2 flip.
 **PV1: writer, schema and triggers (on real SQLite)**
 - **Schema absent.** The statements are byte-identical to today's for every caller.
 - **`off`.** Today's rows, plus the mode assertion; no field rows.
-- **Binding and declaration:**
+- **Binding, invalidation and declaration:**
   - a digest mismatch reads `unknown` and reports `provenance_mismatch`;
+  - raw old-code statements: A → B → A, a delete and identical re-insert, and a move and re-create each leave the field `unknown`; only the changed field's row is removed; a pinned row survives (or the statement aborts, decision 11); a roll-forward writer re-attributes only through a real observation;
   - an undeclared write fills a blank, replaces an `unknown` value with history, deletes the field row, and never replaces an attributed or locked value;
   - EPG mixed clocks, a synopsis-only refresh and a TMDB-resolved `metadata_sync` input are all undeclared;
   - a future `observedAt` is `film_person_invalid`.
@@ -550,7 +565,7 @@ None of these cards is required for AIR-275 or for the ADR 0207 A2 flip.
   - an older observation of the same rank refused;
   - confidence never degrades;
   - a lower precedence refused;
-  - **convergence:** every permutation of a set of `confirmed` and owner observations, including equal times with different values and equal values of different ranks, ends with the same projection.
+  - **convergence:** every permutation of a set of `confirmed` automatic observations, with owner protection held fixed, including equal times with different values and equal values of different ranks, ends with the same projection.
 - **Anchors:**
   - `not_required` and `confirmed` derived by the writer, and `agreement_stale`;
   - both own-source changes (lid L → L′, TMDB A → B);
@@ -572,7 +587,7 @@ None of these cards is required for AIR-275 or for the ADR 0207 A2 flip.
     - dimension rows follow the lifecycle rule;
     - field rows move or are deleted with the row;
     - the batch stays within the cap or is refused as `film_person_bounded`;
-  - an old-code delete or move leaves the field rows orphaned, and they read `unknown`.
+  - an old-code delete or move removes the non-owner field rows through the invalidation triggers, and they read `unknown`.
 - **Bounds:** the caller's guards stay at most 12, and real `core`, owner and merge batches stay within 60 statements.
 
 **PV2: C1**
@@ -601,7 +616,11 @@ None of these cards is required for AIR-275 or for the ADR 0207 A2 flip.
   - `anchor_changed`, also for an anchor set that changes between the plan and the commit;
   - `identity_unknown`;
   - `set` works where revert is refused;
-- `refresh` writes no metadata and no history;
+- `refresh` writes no metadata and no history; a `refresh` planned before the mode or the Film changed fails on its fences; two concurrent resends of one command commit once;
+- `lock` and `release` of a legacy value (`unattributed`, no invented source); `lock` of a blank field refused; `set`, `lock` and `revert` of owner values, and every DDL constraint on each transition;
+- two different `set`s apply in revision order;
+- an automatic clear refused during `hold`, also for a plan made before the switch;
+- the history read paginates;
 - `not_in_scope`;
 - refusal at `off` and when the schema is absent;
 - the JWT and owner checks;
@@ -713,6 +732,7 @@ The caller's guards stay within 12.
 | Second review 3: receipts | Decision 9: the command record |
 | Second review 4: merge, locks, history identity | Decisions 9 and 11: pins kept on equal values; triggers on moves and deletes, and on the field table; `old_anchor_digest`; `identity_unknown` |
 | Third review | Decision 9: an immutable command record, independent of `canonical_write_receipt`; durable `noop`; rejections not recorded; a revert's anchor set asserted at commit |
+| Fourth review | Decision 2: owner authority separated from lineage (`unattributed` pins, owner-set digest, blank lock refused), invalidation triggers against stale attribution; decision 6: owner commands ordered by revision, outside convergence; decision 9 and 11: automatic clear refused in `hold`, refresh batch fences, honest missing-row semantics, paginated history, C1-specific disagreement rule; decision 15: PVE drain |
 | Owner direction of 25 Nov 2026 | Decision 2: the normalized typed table, with the binding, triggers, merge, moves, history and command record reworked for it. Decision 11: only `off → enforce ⇄ hold`; PVR, PVO, `record` and `observe` removed. The cost is recalculated |
 
 ## Owner choices
