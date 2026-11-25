@@ -1,7 +1,8 @@
 // AIR-663 / ADR 0218 decision 3 and stage 4 (D1, Accepted). The SEPARATE, bounded reconciler of a stale effective Film localization row: a Film whose stored `localization` row is no
 // longer the output of the existing resolver, with NO new source observation (a historical applied source receipt, an owner-only change in owner_review_entry, a legacy row).
-// DORMANT, like the other canonical writers: importing this module runs nothing and NOTHING in the Worker, the cron tick, a Workflow, an MCP tool, a route or a script imports it. It reaches
-// the database only when an explicit caller (the production operation of AIR-664, under its own owner GO) invokes it, and only after assertWritable (marker d1/open).
+// The MUTATION paths are DORMANT, like the other canonical writers: importing this module runs nothing and no Worker route, cron tick, Workflow or script calls them. AIR-683 bundles the module only
+// so that the owner-only MCP tool `film_localization_diagnose` can call the READ-ONLY `diagnoseLocalizationCohort`; no MCP tool, route or Workflow reaches apply, resume, recover or restore. They
+// reach the database only when an explicit caller (the production operation of AIR-664, under its own owner GO) invokes them, and only after assertWritable (marker d1/open).
 // - Same resolver, same precedence: the output is projectionOf() of the projection writer (resolveLocalization unchanged: owner > reviewed > automatic, fixed source order, then the newer
 //   observation, then the source name; the strong() guard and its SQL WHERE). No new source row is written except the lossless legacy candidate the projection writer already preserves.
 // - Same two fences: the Film revision CAS and the owner-review token (marker generation, every consumed owner row, the redirect closure), re-proved INSIDE the batch.
@@ -19,11 +20,11 @@
 //   D1-authoritative, and only while the Film is at exactly postRevision with the row still equal to postImage; otherwise it refuses and writes nothing (`localization_restore_moved`).
 //   It is not a general mutation API: a fabricated or incomplete token is refused before any receipt is reserved. The alternative is a forward correction through this same reconciler.
 // Person localization is out of scope (unchanged). No table, index or column changes.
-import {assertWritable,database,failed,many,readAuthority}from './film-person-authority.js';
-import {fenced,MUTATION_STATEMENT_CAP}from './canonical-mutations.js';
-import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf}from './canonical-receipts.js';
-import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken}from './film-localization-projection.js';
-import {LOCALIZATION_ROW,readFilmSnapshot}from './canonical-film-writers.js';
+import {assertWritable,database,failed,many,readAuthority} from './film-person-authority.js';
+import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
+import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf} from './canonical-receipts.js';
+import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken} from './film-localization-projection.js';
+import {LOCALIZATION_ROW,readFilmSnapshot} from './canonical-film-writers.js';
 
 export const RECONCILE_OPERATION='film_localization_reconcile';
 export const RECONCILE_ORIGIN='localization_reconciler';
@@ -297,6 +298,51 @@ export async function dryRunLocalizationReconcile(env,{after,limit,writeCap,now}
    out.unavailable.push({id,code:error.code});
   }
  }
+ return out;
+}
+
+// DIAGNOSE (AIR-683): the read-only census of the live cohort, built ON the dry run (the resolver and planner of AIR-663 stay the oracle; no SQL guess of an effective value). It walks the
+// keyset pages of raw Film ids by itself until the table is exhausted or the wall-time budget of this call is spent, and returns AGGREGATES only (counts, reasons, error codes and bounded id
+// lists; never a stored row, an image or a value). It records nothing, opens no receipt and writes nothing. The page size is the dry run's technical parameter, not a limit of the contract.
+// `complete` is true only when the last page reported no continuation and no page failed; anything else leaves `cursor` (the last examined Film) as the resume point. A Film that moved while the
+// walk ran is observed at the time its page was read: this is a census of observations, not a global snapshot. `zeroEligible` is claimed only for a complete, fully classified walk
+// (no unavailable Film) whose authority pin did not move; otherwise it is false and the caller must treat the cohort as unknown.
+export const DIAGNOSE_BUDGET_DEFAULT_MS=20000;
+export const DIAGNOSE_BUDGET_MAX_MS=25000;
+export const DIAGNOSE_IDS_MAX=200;
+// The REAL per-invocation limit behind the continuation: every D1 statement of a Worker invocation is a subrequest (Workers Paid: 10,000 per invocation), and the planner needs about 12 statements per
+// Film (measured on the fixtures: tests/film-localization-reconciler.mjs section 14, about 12.1 for 121 Films). 500 Films is about 6,100 statements: inside the limit with headroom for Films that
+// have many owner entries or merged ancestors. It is a technical bound of ONE call, not a product limit; the caller continues from `cursor` until `complete`.
+export const DIAGNOSE_FILMS_MAX=500;
+const bump=(map,key)=>{map[key]=(map[key]||0)+1;};
+export async function diagnoseLocalizationCohort(env,{after,budgetMs,filmsMax,now,clock=Date.now}={}){
+ if(budgetMs!==undefined&&(!Number.isInteger(budgetMs)||budgetMs<1||budgetMs>DIAGNOSE_BUDGET_MAX_MS))throw failed('film_person_invalid');
+ if(filmsMax!==undefined&&(!Number.isInteger(filmsMax)||filmsMax<1||filmsMax>DIAGNOSE_FILMS_MAX))throw failed('film_person_invalid');
+ const films=filmsMax??DIAGNOSE_FILMS_MAX;
+ const budget=budgetMs??DIAGNOSE_BUDGET_DEFAULT_MS,started=clock(),startCursor=cursorOf(after);
+ const first=await readAuthority(env);
+ const out={complete:false,startedAfter:startCursor,cursor:startCursor,pages:0,examined:0,stale:0,noop:0,absent:0,held:0,heldByReason:{},unavailable:0,unavailableByCode:{},staleIds:[],unavailableIds:[],staleIdsTruncated:false,unavailableIdsTruncated:false,stopped:null,authority:{state:first.state,generation:first.generation,version:first.version,baseline:first.baseline},authorityStable:true,zeroEligible:false,elapsedMs:0};
+ let cursor=startCursor;
+ for(;;){
+  if(out.examined>=films){out.stopped='subrequest_budget';break;}
+  if(clock()-started>=budget){out.stopped='budget';break;}
+  let page;
+  try{page=await dryRunLocalizationReconcile(env,{after:cursor,limit:Math.min(RECONCILE_EXAMINE_MAX,films-out.examined),writeCap:1,now});}
+  catch(error){out.stopped=error?.code||'film_person_unavailable';break;}
+  out.pages++;out.examined+=page.examined;out.noop+=page.noop;out.absent+=page.absent;
+  for(const item of page.stale){out.stale++;if(out.staleIds.length<DIAGNOSE_IDS_MAX)out.staleIds.push(item.id);else out.staleIdsTruncated=true;}
+  for(const item of page.held){out.held++;bump(out.heldByReason,item.reason);}
+  for(const item of page.unavailable){out.unavailable++;bump(out.unavailableByCode,item.code);if(out.unavailableIds.length<DIAGNOSE_IDS_MAX)out.unavailableIds.push(item.id);else out.unavailableIdsTruncated=true;}
+  cursor=page.cursor;out.cursor=cursor;
+  if(!page.hasMore){out.complete=true;break;}
+ }
+ try{
+  const last=await readAuthority(env);
+  out.authorityStable=last.state===first.state&&last.generation===first.generation&&last.version===first.version;
+  out.authorityEnd={state:last.state,generation:last.generation,version:last.version};
+ }catch{out.authorityStable=false;}
+ out.zeroEligible=out.complete&&out.stale===0&&out.unavailable===0&&out.authorityStable;
+ out.elapsedMs=clock()-started;
  return out;
 }
 

@@ -444,7 +444,11 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
   for(const file of walk(dir))if(!file.endsWith('src/film-localization-reconciler.js')&&/\.(js|mjs|yml|yaml|json|html)$/.test(file)&&fs.readFileSync(file,'utf8').includes('film-localization-reconciler.js'))importers.push(file);
  }
  assert.deepEqual(importers,[],'no Worker, route, MCP tool, Workflow, cron, script or workflow imports the reconciler');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('film-localization-reconciler.js'),'the build does not bundle it');
+ // AIR-683: the build bundles the module, but the ONLY entry the Worker calls is the read-only diagnosis (the owner-only MCP tool); no mutation entry is referenced outside this module and its tests.
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes('film-localization-reconciler.js'),'the build bundles the module for the read-only diagnosis');
+ const workerCalls=[];
+ for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='film-localization-reconciler.js'))for(const match of fs.readFileSync('src/'+file,'utf8').matchAll(/FilmLocalizationReconciler\.([A-Za-z]+)/g))workerCalls.push(file+':'+match[1]);
+ assert.deepEqual(workerCalls,['mcp.js:diagnoseLocalizationCohort'],'the Worker reaches only the read-only diagnosis');
  const spec=R.filmLocalizationReconcileOperation();
  assert.equal(spec.atomic,true);
  const {OPERATION_KINDS}=await load('canonical-receipts.js');
@@ -465,5 +469,62 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  await R.resumeLocalizationReconcile(env,{intent,checkpoint:memory(),now:clock});
  const other={...intent,runId:'v'};
  await assert.rejects(()=>R.resumeLocalizationReconcile(env,{intent:other,checkpoint:memory(),now:clock}),code('film_person_invalid'),'an intent whose request id does not recompute is refused');
+}
+
+// ---- 14. AIR-683 diagnosis: the read-only census agrees with the dry run (the oracle), walks every page by itself, never claims zero for an incomplete or unavailable walk ----
+{
+ const file=database();
+ // 120 raw Films (three internal pages): 5 stale, 1 reviewed row that the resolver output would contradict, a redirect, the rest current (no source: noop)
+ for(let i=1;i<=120;i++)seedFilm(file,'film:tmdb:'+String(1000+i),String(1000+i));
+ for(const i of [3,60,61,100,119])sourceRow(file,'film:tmdb:'+(1000+i),'tmdb','Т'+i,T1);
+ reviewedRow(file,{id:'film:tmdb:1010',value:'Словарь'});sourceRow(file,'film:tmdb:1010','tmdb','Другое',T1);
+ seedFilm(file,'film:tmdb:9000','9000');exec(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:9000','film:tmdb:1001','"+T+"')");
+ const env={DB:d1Standin(file)};
+ const before=snapshotRows(file),receiptsBefore=JSON.stringify(receipts(file));
+ // the oracle: every page of the dry run, summed
+ const oracle={examined:0,stale:[],held:{},noop:0,absent:0,unavailable:0};
+ for(let cursor='';;){const page=await R.dryRunLocalizationReconcile(env,{after:cursor,limit:50,now:clock});oracle.examined+=page.examined;oracle.noop+=page.noop;oracle.absent+=page.absent;oracle.unavailable+=page.unavailable.length;for(const item of page.stale)oracle.stale.push(item.id);for(const item of page.held)oracle.held[item.reason]=(oracle.held[item.reason]||0)+1;cursor=page.cursor;if(!page.hasMore)break;}
+ const report=await R.diagnoseLocalizationCohort(env,{now:clock});
+ assert.deepEqual([report.complete,report.pages,report.examined,report.noop,report.absent,report.unavailable],[true,3,oracle.examined,oracle.noop,oracle.absent,oracle.unavailable],'one call walks every page');
+ assert.equal(oracle.examined,121);
+ assert.deepEqual([report.stale,report.staleIds],[oracle.stale.length,oracle.stale],'the same Films the planner calls stale');
+ assert.ok(oracle.stale.length>=5,'the fixture has stale Films');
+ assert.deepEqual(report.heldByReason,oracle.held,'held reasons equal the planner reasons');
+ assert.equal(report.held,Object.values(oracle.held).reduce((a,b)=>a+b,0));
+ assert.equal(report.examined,report.stale+report.held+report.noop+report.absent+report.unavailable,'every examined Film is classified exactly once');
+ assert.deepEqual([report.authorityStable,report.zeroEligible,report.stopped,report.authority.state],[true,false,null,'open'],'eligible Films exist, so zero is not claimed');
+ assert.equal(snapshotRows(file),before,'the diagnosis writes no row and bumps no revision');
+ assert.equal(JSON.stringify(receipts(file)),receiptsBefore,'the diagnosis opens no receipt');
+ assert.ok(!JSON.stringify(report).includes('Схватка')&&!JSON.stringify(report).includes('Т3'),'no stored value in the answer');
+ // continuation by budget: a clock that spends the budget after the first page stops with the resume cursor, and the resumed call completes the rest
+ let ticks=0;const slow=()=>ticks++*15000;
+ const partial=await R.diagnoseLocalizationCohort(env,{now:clock,clock:slow,budgetMs:20000});
+ assert.deepEqual([partial.complete,partial.stopped,partial.pages,partial.zeroEligible],[false,'budget',1,false],'an early stop is incomplete and never zero');
+ const rest=await R.diagnoseLocalizationCohort(env,{now:clock,after:partial.cursor});
+ assert.deepEqual([rest.complete,partial.examined+rest.examined,partial.stale+rest.stale],[true,report.examined,report.stale],'the continuation covers exactly the remainder');
+ const capped=await R.diagnoseLocalizationCohort(env,{now:clock,filmsMax:50});
+ assert.deepEqual([capped.complete,capped.stopped,capped.examined,capped.pages,capped.zeroEligible,capped.cursor],[false,'subrequest_budget',50,1,false,oracle.stale.length?capped.cursor:''],'the per-call Film bound stops with a resume cursor');
+ assert.equal(R.DIAGNOSE_FILMS_MAX,500);
+ for(const bad of [0,-1,1.5,501,'3'])await assert.rejects(()=>R.diagnoseLocalizationCohort(env,{filmsMax:bad}),code('film_person_invalid'));
+ for(const bad of [0,-1,1.5,25001,'3'])await assert.rejects(()=>R.diagnoseLocalizationCohort(env,{budgetMs:bad}),code('film_person_invalid'));
+ await assert.rejects(()=>R.diagnoseLocalizationCohort(env,{after:'person:x'}),code('film_person_invalid'));
+ // cost: the number of D1 statements one Film needs is small and constant for a current and a stale Film (a keyset page costs one more), so a walk is linear in the table
+ {
+  const cost=async()=>{let count=0;const db=d1Standin(file,{onQuery:async()=>{count++;}});await R.diagnoseLocalizationCohort({DB:db},{now:clock});return count;};
+  const total=await cost();
+  console.log('film-localization-diagnose: '+total+' D1 statements for 121 Films ('+(total/121).toFixed(2)+' per Film)');
+  assert.ok(total/121<13&&total/121*500<9000,'a bounded number of statements per Film: 500 Films stay inside the 10,000 subrequests of one invocation');
+ }
+ // a complete walk with nothing stale and nothing unavailable claims zero; an unavailable owner domain never does
+ const clean=database();seedFilm(clean);
+ const zero=await R.diagnoseLocalizationCohort({DB:d1Standin(clean)},{now:clock});
+ assert.deepEqual([zero.complete,zero.examined,zero.noop,zero.zeroEligible],[true,1,1,true],'a complete, fully classified walk with no eligible Film is zero');
+ const blocked=database({owner:'r2'});staleFilm(blocked,FID,'1656');
+ const unknown=await R.diagnoseLocalizationCohort({DB:d1Standin(blocked)},{now:clock});
+ assert.deepEqual([unknown.complete,unknown.unavailable,unknown.zeroEligible,Object.keys(unknown.unavailableByCode)],[true,1,false,['localization_owner_unavailable']],'owner evidence that cannot be proven is unknown, never zero');
+ const empty=await R.diagnoseLocalizationCohort({DB:d1Standin(database())},{now:clock});
+ assert.deepEqual([empty.complete,empty.examined,empty.zeroEligible],[true,0,true],'an empty table walked to its end is zero');
+ // an authority that is not served (no marker d1/open) is a refusal, not a report
+ await assert.rejects(()=>R.diagnoseLocalizationCohort({},{now:clock}),code('film_person_unavailable'));
 }
 console.log('film-localization-reconciler: ok');
