@@ -176,12 +176,20 @@ async function readBoundedDocuments(db,keys,maxParts,maxBytes){
  }
  return out;
 }
-// A fact record is a plain object that names its own key (when it carries one) and holds at most one outgoing edge (redirectTo or migrating.to), a valid key.
-// -> the edge key or null. A malformed record is never read as "no edge".
+// A fact record must carry the minimum recognized envelope, and then holds at most one outgoing edge (redirectTo or migrating.to), a valid key. -> the edge key or null.
+// Envelope (what every record written by src/letterboxd-facts.js carries): a plain object; `schemaVersion` 1 when present (the only version there is; an absent
+// one is a legacy record); `factKey`, when present, is its own key (an absent one is tolerated exactly as the ADR 0184 planner tolerates it); a `links` object is
+// REQUIRED, with a Letterboxd id (a record is only ever created for one) and a movie id that is null or a valid TMDB id. An arbitrary JSON object, `{}` included, is
+// not a fact record and never certifies a traversal. This is the shape check G1 needs, not the promotion-grade link proof of ADR 0184.
+// A malformed record is never read as "no edge".
 function recordEdge(record,key){
  if(!record||typeof record!=='object'||Array.isArray(record))throw sectionError('ratings_document_malformed');
+ if(record.schemaVersion!==undefined&&record.schemaVersion!==1)throw sectionError('ratings_document_malformed');
  if(record.factKey!==undefined&&record.factKey!==key)throw sectionError('ratings_document_malformed');
- if(record.links!==undefined&&(record.links===null||typeof record.links!=='object'||Array.isArray(record.links)))throw sectionError('ratings_document_malformed');
+ const links=record.links;
+ if(!links||typeof links!=='object'||Array.isArray(links))throw sectionError('ratings_document_malformed');
+ if(typeof links.letterboxd!=='string'||!LID.test(links.letterboxd))throw sectionError('ratings_document_malformed');
+ if(links.tmdb!=null&&!TMDB.test(String(links.tmdb)))throw sectionError('ratings_document_malformed');
  const redirect=record.redirectTo!=null,migrating=record.migrating!=null;
  if(redirect&&migrating)throw sectionError('ratings_document_malformed');
  if(!redirect&&!migrating)return null;

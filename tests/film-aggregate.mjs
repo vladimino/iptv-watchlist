@@ -636,6 +636,15 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   ['array record','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':'[]'})],
   ['wrong factKey','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,factKey:'tmdb-6'}})],
   ['links not an object','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:'x'}})],
+  // Review 2 (8581980): an arbitrary JSON object with a correct etag is not a fact record. `{}` and unrelated objects never certify a traversal.
+  ['empty object','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':'{}'})],
+  ['unrelated object','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{foo:'bar',n:1}})],
+  ['unrelated object with an edge-like field','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{redirectTo:null,migrating:null}})],
+  ['links empty','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{}}})],
+  ['links without a Letterboxd id','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:'5'}}})],
+  ['links with a bad movie id','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:'l5',tmdb:'x5'}}})],
+  ['unknown schemaVersion','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,schemaVersion:2}})],
+  ['no links but a factKey','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{factKey:'tmdb-5'}})],
   ['self redirect A->A','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,redirectTo:'tmdb-5'}})],
   ['cycle A->B->A','incomplete','ratings_evidence_unavailable',record({'tmdb:5':'a','letterboxd:l5':'a'},{a:{...good,factKey:'a',redirectTo:'b'},b:{...good,factKey:'b',redirectTo:'a'}})],
   ['redirect and migration','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,redirectTo:'x',migrating:{to:'y'}}})],
@@ -651,7 +660,12 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   assert.deepEqual([name,out.http,coverageOf(out).status,coverageOf(out).reason],[name,200,status,reason]);
   assert.ok(['partial','conflict'].includes(out.body.predictions.status),name+': never a negative');
   assert.notEqual(out.body.personal.status,'present',name);
+  assert.equal(out.body.predictions.current?.length??0,0,name);
+  assert.deepEqual([out.body.history.status,out.body.history.href],['unavailable',undefined],name+': no history href from uncertified evidence');
  }
+ // The documented legacy tolerances: a record with no factKey and no schemaVersion but a links object is a record (as the ADR 0184 planner reads it).
+ const legacy=record(BASE_INDEX,{'tmdb-5':{links:{letterboxd:'l5',tmdb:5}}});
+ assert.equal(coverageOf(await read(legacy,'tmdb_5')).status,'complete');
  // One redirect hop is still followed, both sides counted; a record that carries no factKey is read as the ADR 0184 planner reads it.
  const one=record({'tmdb:5':'a','letterboxd:l5':'a','letterboxd:zz':'b'},{a:{links:{letterboxd:'l5',tmdb:'5'},redirectTo:'b'},b:{...good,factKey:'b'}});
  const hop=await read(one,'tmdb_5');
