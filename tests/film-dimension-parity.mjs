@@ -31,7 +31,8 @@ function database({film='open',prediction='open',owner='open'}={}){
 const insert=(table,row)=>`INSERT INTO ${table} (${Object.keys(row).join(',')}) VALUES (${Object.values(row).map(q).join(',')});`;
 const filmRow=(id,title='Original')=>insert('film',{id,contract_version:1,canonical_identity:null,original_title:title,updated_at:AT});
 const claim=(film_id,scheme,value,trusted=1,conflicting=0)=>insert('film_external_id',{film_id,scheme,value:String(value),trusted,conflicting,provenance_json:null});
-const dim=(film_id,dimension,over={})=>insert('film_dimension',{film_id,dimension,status:'fresh',source:null,source_version:null,provenance_json:null,value:null,authority:null,last_error:null,failure_reason:null,retry_at:null,attempts:0,next_action:'none',updated_at:AT,...over});
+const STATUS={identity:'resolved',metadata:'fresh',localization:'provisional',fingerprint:'current',prediction:'current'};
+const dim=(film_id,dimension,over={})=>insert('film_dimension',{film_id,dimension,status:STATUS[dimension],source:null,source_version:null,provenance_json:null,value:null,authority:null,last_error:null,failure_reason:null,retry_at:null,attempts:0,next_action:'none',updated_at:AT,...over});
 const meta=(film_id,over={})=>insert('film_metadata',{film_id,schema_version:1,year:1999,runtime:120,synopsis:'Text',poster:'https://p/x.jpg',url:'https://example.test/x',genres_json:'["Drama"]',people_version:null,payload_json:'{}',r2_key:null,content_sha256:null,updated_at:AT,...over});
 const sourceRow=(film_id,src,value,observed_at=AT)=>insert('film_localization_source',{film_id,source:src,value,source_version:'v1',provenance_json:'{}',request_id:'r-'+film_id+'-'+src,observed_at,updated_at:AT});
 const ownerEntry=(link,value,key='k-'+link)=>insert('owner_review_entry',{kind:'film',source_key:key,payload_json:JSON.stringify({localization:{status:'reviewed',value,provenance:{authority:'owner'},updatedAt:AT}}),identity_link:link,identity_state:'verified',generation:1});
@@ -51,15 +52,15 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
   dim('film:a','localization',{status:'provisional',source:'tmdb',value:'Название',provenance_json:'{}'}),
   sourceRow('film:a','tmdb','Название'),
   dim('film:a','fingerprint',{status:'failed',last_error:'boom',attempts:2}),
-  dim('film:a','prediction',{status:'ready'}),
+  dim('film:a','prediction',{status:'current'}),
   print('tmdb_1'),pointer('tmdb_1'),meta('film:a'),
   filmRow('film:b'),claim('film:b','tmdb',2),
-  dim('film:b','identity',{status:'found'}),
+  dim('film:b','identity',{status:'resolved'}),
   dim('film:b','metadata',{status:'fresh',authority:'importer'}),
   dim('film:b','localization',{status:'provisional',source:'epg',value:'Старое',provenance_json:'{}'}),
   sourceRow('film:b','epg','Старое','2026-11-01T00:00:00.000Z'),sourceRow('film:b','tmdb','Новое'),
   dim('film:b','fingerprint',{status:'reviewed'}),
-  dim('film:b','prediction',{status:'none',authority:'owner'}),
+  dim('film:b','prediction',{status:'missing',authority:'owner'}),
   filmRow('film:c'),claim('film:c','tmdb',3),
   dim('film:c','identity',{status:'reviewed',authority:'owner'}),
   dim('film:c','metadata',{status:'stale',authority:'owner'}),
@@ -81,11 +82,11 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
  assert.equal(rows['film:a/fingerprint'].class,'stale_copy');assert.ok(rows['film:a/fingerprint'].notes.includes('processing_fields'));
  assert.equal(rows['film:a/fingerprint'].derived,'present','a value under an authorized key is read as is');
  assert.equal(rows['film:a/prediction'].class,'stale_copy');
- assert.equal(rows['film:b/identity'].class,'stale_copy');assert.equal(rows['film:b/identity'].diverges,false);
+ assert.equal(rows['film:b/identity'].class,'stale_copy');assert.equal(rows['film:b/identity'].diverges,true,'informational only: a copy status is never truth');
  assert.equal(rows['film:b/metadata'].class,'unknown_legacy');assert.deepEqual(rows['film:b/metadata'].reasons,['unknown_authority']);
  assert.equal(rows['film:b/localization'].class,'stale_copy','F5: tmdb outranks epg, the projection is stale');assert.deepEqual(rows['film:b/localization'].reasons,['projection_stale']);
  assert.deepEqual(rows['film:b/localization'].expected,{tier:'automatic',source:'tmdb'});
- assert.equal(rows['film:b/fingerprint'].class,'unknown_legacy');assert.deepEqual(rows['film:b/fingerprint'].reasons,['reviewed_status']);
+ assert.equal(rows['film:b/fingerprint'].class,'unknown_legacy');assert.deepEqual(rows['film:b/fingerprint'].reasons,['unknown_status','reviewed_status']);
  assert.equal(rows['film:b/prediction'].class,'unknown_legacy');assert.deepEqual(rows['film:b/prediction'].reasons,['unknown_authority']);
  assert.equal(rows['film:c/identity'].class,'control');assert.deepEqual(rows['film:c/identity'].reasons,['owner_authority','reviewed']);
  assert.equal(rows['film:c/metadata'].class,'control','authority owner is the lock');
@@ -109,16 +110,22 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
  assert.equal(stats.read,result.cost.rowsReturned,'every row returned is counted');
 }
 
-// 2. Absent vs unknown, and no false negatives: a Film with no dimension rows and no metadata yields facts but no row; unusable metadata is
-// unknown, never present and never absent.
+// 2. Presence, usability and absence are three axes: a stored non-null value is present whatever its type, with a usability diagnostic;
+// a null is unknown (no explicit-null provenance exists yet); nothing is absent. A Film with no dimension rows yields facts but no row.
 {
  const file=database();
  sqlite(file,[filmRow('film:e'),claim('film:e','tmdb',5),meta('film:e',{year:0,runtime:null,synopsis:'  ',poster:'',url:null,genres_json:'not json'}),filmRow('film:f')].join('\n'));
  const {result}=await run(file);
  assert.equal(result.classified.length,0,'a missing dimension row is not classified as anything');
  const e=result.facts.get('film:e').metadata;
- for(const field of ['year','runtime','synopsis','poster','url','genres'])assert.equal(e.fields[field].status,'unknown',field);
- assert.equal(e.fields.year.reason,'not_positive');assert.equal(e.fields.genres.reason,'malformed');assert.equal(e.fields.url.reason,'null','a null without explicit-null provenance is unknown, not absent');assert.equal(usableField('url',{url:42}).reason,'wrong_type');
+ for(const field of ['year','synopsis','poster','genres'])assert.deepEqual([e.fields[field].status,e.fields[field].usable,e.fields[field].confidence],['present',false,'unattributed'],field);
+ assert.equal(e.fields.year.diagnostic,'not_positive');assert.equal(e.fields.synopsis.diagnostic,'empty');assert.equal(e.fields.poster.diagnostic,'empty');assert.equal(e.fields.genres.diagnostic,'malformed');
+ for(const field of ['runtime','url'])assert.deepEqual([e.fields[field].status,e.fields[field].reason],['unknown','null_unproved'],field);
+ assert.deepEqual(e.present,['year','synopsis','poster','genres']);assert.deepEqual(e.usable,[]);
+ assert.equal(usableField('url',{url:42}).reason,'wrong_type');
+ const mixed=metadataFacts({year:'1999',runtime:90,synopsis:'s',poster:'p',url:'u',genres_json:'[]'});
+ assert.deepEqual([mixed.fields.year.status,mixed.fields.year.diagnostic],['present','wrong_type']);
+ assert.deepEqual([mixed.fields.genres.status,mixed.fields.genres.diagnostic],['present','empty']);
  const f=result.facts.get('film:f');
  assert.equal(f.metadata.fields.year.reason,'no_metadata_row');
  assert.equal(f.identity.verdict,'found');assert.equal(f.identity.aliases.stable,false);
@@ -130,7 +137,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 // a marker that moves during the page refuses it.
 {
  const file=database({film:'held'});
- sqlite(file,[filmRow('film:g'),claim('film:g','tmdb',7),dim('film:g','identity',{status:'found'}),dim('film:g','prediction',{status:'ready'})].join('\n'));
+ sqlite(file,[filmRow('film:g'),claim('film:g','tmdb',7),dim('film:g','identity',{status:'found'}),dim('film:g','prediction',{status:'current'})].join('\n'));
  const {result}=await run(file);
  const rows=byKey(result);
  assert.equal(result.facts.get('film:g').identity.verdict,'unavailable');
@@ -140,7 +147,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 }
 {
  const file=database({prediction:'held'});
- sqlite(file,[filmRow('film:h'),claim('film:h','tmdb',8),dim('film:h','fingerprint',{status:'ready'}),print('tmdb_8')].join('\n'));
+ sqlite(file,[filmRow('film:h'),claim('film:h','tmdb',8),dim('film:h','fingerprint',{status:'current'}),print('tmdb_8')].join('\n'));
  const {result}=await run(file);
  assert.equal(byKey(result)['film:h/fingerprint'].proof,'unavailable');
  assert.equal(result.facts.get('film:h').prediction.fingerprint.status,'unavailable');
@@ -228,7 +235,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 }
 {
  const file=database({prediction:'r2'});
- sqlite(file,[filmRow('film:q'),claim('film:q','tmdb',41),dim('film:q','prediction',{status:'ready'})].join('\n'));
+ sqlite(file,[filmRow('film:q'),claim('film:q','tmdb',41),dim('film:q','prediction',{status:'current'})].join('\n'));
  const {result}=await run(file);
  assert.equal(result.facts.get('film:q').prediction.prediction.reason,'prediction_not_authoritative');
  assert.equal(byKey(result)['film:q/prediction'].proof,'unavailable');
@@ -237,7 +244,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 // 7. Paging and bounds: the cursor walks every Film once; the page size is capped; an id outside the film scheme is refused.
 {
  const file=database();
- const statements=[];for(let i=0;i<7;i++)statements.push(filmRow('film:n'+i),dim('film:n'+i,'prediction',{status:'ready'}));
+ const statements=[];for(let i=0;i<7;i++)statements.push(filmRow('film:n'+i),dim('film:n'+i,'prediction',{status:'current'}));
  sqlite(file,statements.join('\n'));
  const seen=[];let after='';
  for(let guard=0;guard<10;guard++){const {result}=await run(file,{after,limit:3});seen.push(...result.classified.map(item=>item.film_id));if(!result.next)break;after=result.next;}
@@ -271,7 +278,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
  const none=predictionFacts({storageIds:['tmdb_1'],coverage:{status:'incomplete',reason:'discovery_cap'}});
  assert.equal(none.prediction.status,'partial','never none under incomplete coverage');
  // Every class is reachable and the summary counts each row once.
- const made=[classifyRow({film_id:'film:1',dimension:'prediction',status:'x'},{}),classifyRow({film_id:'film:1',dimension:'metadata',status:'reviewed'},{}),classifyRow({film_id:'film:1',dimension:'fingerprint',status:'x',authority:'y'},{})];
+ const made=[classifyRow({film_id:'film:1',dimension:'prediction',status:'current'},{}),classifyRow({film_id:'film:1',dimension:'metadata',status:'reviewed'},{}),classifyRow({film_id:'film:1',dimension:'fingerprint',status:'current',authority:'y'},{})];
  assert.deepEqual(made.map(item=>item.class),['stale_copy','control','unknown_legacy']);
  assert.ok(PARITY_CLASSES.includes('agree'));
  assert.equal(summarize(made).rows,3);
@@ -281,7 +288,7 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 // value without --detail, leaves the file byte-identical, and a write statement is refused before it reaches the copy.
 {
  const file=database();
- const statements=[];for(let i=0;i<5;i++)statements.push(filmRow('film:c'+i),claim('film:c'+i,'tmdb',100+i),dim('film:c'+i,'metadata',{status:i%2?'reviewed':'fresh'}),dim('film:c'+i,'prediction',{status:'ready'}));
+ const statements=[];for(let i=0;i<5;i++)statements.push(filmRow('film:c'+i),claim('film:c'+i,'tmdb',100+i),dim('film:c'+i,'metadata',{status:i%2?'reviewed':'fresh'}),dim('film:c'+i,'prediction',{status:'current'}));
  sqlite(file,statements.join('\n'));
  const digest=()=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
  const before=digest();
@@ -299,6 +306,68 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
  const writer={DB:{prepare(sql){if(/^\s*SELECT/i.test(sql))return sqliteReadOnlyBinding(file).prepare(sql);throw new Error('reached the copy');}}};
  await assert.doesNotReject(readDimensionParity(writer));
  assert.equal(digest(),before);
+}
+
+// 11. Review of 713eb19. (a) The fatal identity fence: a conflicting, held or cyclic identity yields no metadata, localization or prediction
+// section even when those rows exist; control rows stay control, copies carry proof unavailable; a redirect to a missing survivor is unavailable.
+// (b) Unknown statuses and ambiguous provenance are unknown_legacy on every dimension; proof distinguishes complete, incomplete and unavailable.
+// (c) An owner authority on a non-reviewed localization is never an automatic candidate.
+{
+ const file=database();
+ sqlite(file,[
+  filmRow('film:k1'),claim('film:k1','tmdb',51),filmRow('film:k2'),claim('film:k2','tmdb',51,0,1),
+  meta('film:k1'),ownerEntry('film:k1','Владелец'),print('tmdb_51'),pointer('tmdb_51'),
+  dim('film:k1','localization',{status:'reviewed',authority:'owner',source:'owner',value:'Владелец'}),
+  dim('film:k1','metadata'),dim('film:k1','prediction'),
+  filmRow('film:k3'),filmRow('film:k4'),insert('film_redirect',{from_id:'film:k3',to_film_id:'film:k4',at:AT}),insert('film_redirect',{from_id:'film:k4',to_film_id:'film:k3',at:AT}),
+  dim('film:k3','localization',{status:'provisional',source:'tmdb',value:'Цикл'}),dim('film:k3','identity'),
+ ].join('\n'));
+ const {result}=await run(file,{coverage:()=>({status:'complete'})});
+ const rows=byKey(result),k1=result.facts.get('film:k1');
+ assert.equal(k1.identity.verdict,'conflict');assert.deepEqual(k1.identity.aliases.storageIds,[],'a failed verdict authorizes no alias');
+ assert.equal(k1.metadata.status,'unavailable');assert.equal(k1.localization.status,'unavailable');
+ assert.equal(k1.prediction.prediction.status,'unavailable');assert.equal(k1.prediction.prediction.reason,'identity_conflict');
+ assert.equal(rows['film:k1/localization'].class,'control','the applied owner title stays control under a failed fence');
+ assert.deepEqual([rows['film:k1/metadata'].class,rows['film:k1/metadata'].proof],['stale_copy','unavailable']);
+ assert.deepEqual([rows['film:k1/prediction'].class,rows['film:k1/prediction'].proof],['stale_copy','unavailable']);
+ assert.equal(result.facts.get('film:k3').identity.verdict,'cycle');
+ assert.deepEqual([rows['film:k3/localization'].class,rows['film:k3/localization'].reasons,rows['film:k3/localization'].proof],['control',['projection_unproved'],'unavailable']);
+ assert.deepEqual([rows['film:k3/identity'].class,rows['film:k3/identity'].proof],['stale_copy','complete']);
+ assert.deepEqual(identityVerdict({requested:'film:z',filmExists:true,redirect:{state:'redirected',survivor:'film:gone',chain:['film:z']},survivorExists:false}),{verdict:'unavailable',reason:'survivor_missing',survivor:null,chain:['film:z'],aliases:{tmdb:[],lids:[],tmdbTv:[],storageIds:[],stable:false}});
+}
+{
+ const file=database({film:'held'});
+ sqlite(file,[filmRow('film:h1'),claim('film:h1','tmdb',52),meta('film:h1'),dim('film:h1','localization',{status:'provisional',source:'tmdb',value:'X'}),sourceRow('film:h1','tmdb','Y')].join('\n'));
+ const {result}=await run(file);
+ assert.equal(result.facts.get('film:h1').localization.status,'unavailable','no localization fact under a held identity');
+ assert.deepEqual([byKey(result)['film:h1/localization'].class,byKey(result)['film:h1/localization'].proof],['control','unavailable']);
+}
+{
+ const file=database();
+ sqlite(file,[
+  filmRow('film:u1'),claim('film:u1','tmdb',61),claim('film:u1','letterboxd','lidU1'),print('tmdb_61'),pointer('tmdb_61'),meta('film:u1'),
+  dim('film:u1','identity',{status:'legacy_custom'}),dim('film:u1','metadata',{status:'legacy_custom'}),
+  dim('film:u1','localization',{status:'provisional',authority:'owner',source:'owner',value:'Владелец'}),sourceRow('film:u1','tmdb','Авто'),
+  dim('film:u1','fingerprint',{status:'legacy_custom'}),dim('film:u1','prediction',{provenance_json:'{bad'}),
+  filmRow('film:u2'),claim('film:u2','tmdb',62),print('tmdb_62'),pointer('tmdb_62'),meta('film:u2'),
+  dim('film:u2','metadata',{provenance_json:'[1]'}),dim('film:u2','fingerprint'),dim('film:u2','prediction'),
+  dim('film:u2','localization',{status:'provisional',authority:'dictionary',source:'tmdb',value:'Авто'}),sourceRow('film:u2','tmdb','Авто'),
+  filmRow('film:u3'),claim('film:u3','tmdb',63),print('tmdb_63'),dim('film:u3','fingerprint'),dim('film:u3','prediction'),
+ ].join('\n'));
+ const {result}=await run(file,{coverage:id=>id==='film:u2'?{status:'complete'}:{status:'incomplete',reason:'seed_absent_unproved'}});
+ const rows=byKey(result);
+ for(const dimension of ['identity','metadata','fingerprint'])assert.deepEqual([rows['film:u1/'+dimension].class,rows['film:u1/'+dimension].reasons],['unknown_legacy',['unknown_status']],dimension);
+ assert.deepEqual([rows['film:u1/prediction'].class,rows['film:u1/prediction'].reasons],['unknown_legacy',['malformed_provenance']]);
+ assert.deepEqual([rows['film:u2/metadata'].class,rows['film:u2/metadata'].reasons],['unknown_legacy',['malformed_provenance']],'a non-object provenance is ambiguous');
+ assert.deepEqual([rows['film:u1/localization'].class,rows['film:u1/localization'].reasons],['unknown_legacy',['owner_authority_not_reviewed']],'an owner row never falls to agree or stale_copy');
+ assert.equal(result.facts.get('film:u1').localization.resolved.source,'tmdb','the inconsistent owner row is not an automatic candidate');
+ assert.deepEqual([rows['film:u2/localization'].class,rows['film:u2/localization'].reasons],['unknown_legacy',['dictionary_authority_not_reviewed']]);
+ // Proof: complete coverage and a present state prove; incomplete coverage or a partial state never do.
+ assert.deepEqual([rows['film:u2/fingerprint'].proof,rows['film:u2/prediction'].proof],['complete','complete']);
+ assert.deepEqual([rows['film:u3/fingerprint'].proof,rows['film:u3/prediction'].proof],['incomplete','incomplete']);
+ assert.equal(rows['film:u2/metadata'].proof,'complete');
+ assert.equal(classifyRow({film_id:'film:9',dimension:'prediction',status:'current'},{identity:{verdict:'found'},prediction:{prediction:{status:'conflict'},coverage:{status:'complete'}}}).proof,'incomplete','a conflict is never a proof');
+ assert.equal(classifyRow({film_id:'film:9',dimension:'metadata',status:'fresh'},{identity:{verdict:'found'},metadata:metadataFacts(null)}).proof,'incomplete','no metadata row: unproved');
 }
 
 // 10. Static: inactive. Nothing in src imports the reader or its pure half, so the Worker bundle cannot reach it.

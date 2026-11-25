@@ -8,7 +8,7 @@
 // PARITY_REDIRECT_DEPTH rounds. The marker generation is read before and after; a move refuses the page (film_person_generation_moved).
 import {database,failed,many,readMarker} from './film-person-authority.js';
 import {ownerCandidatesFromEntries} from './localization-sources.js';
-import {classifyRow,identityVerdict,localizationFacts,metadataFacts,predictionFacts,retiredMovieIds,summarize} from './domain/film-dimension-parity.js';
+import {classifyRow,identityPassed,identityVerdict,localizationFacts,metadataFacts,predictionFacts,retiredMovieIds,summarize} from './domain/film-dimension-parity.js';
 
 export const PARITY_PAGE_MAX=200;
 export const PARITY_PAGE_DEFAULT=100;
@@ -109,12 +109,10 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  const survivors=[...new Set([...routes.values()].map(item=>item.survivor).filter(Boolean))];
  const both=[...new Set([...page,...survivors])];
  const has=name=>names.has(name);
- const [dimensions,filmRows,claims,metadata,sources]=await Promise.all([
+ const [dimensions,filmRows,claims]=await Promise.all([
   chunked(db,'SELECT film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at FROM film_dimension WHERE film_id IN (/*ids*/) ORDER BY film_id,dimension',page),
   chunked(db,'SELECT id,original_title FROM film WHERE id IN (/*ids*/)',both),
   chunked(db,'SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE film_id IN (/*ids*/) ORDER BY film_id,scheme,value',survivors),
-  chunked(db,'SELECT film_id,year,runtime,synopsis,poster,url,genres_json FROM film_metadata WHERE film_id IN (/*ids*/)',survivors),
-  has('film_localization_source')?chunked(db,'SELECT film_id,source,value,source_version,provenance_json,observed_at FROM film_localization_source WHERE film_id IN (/*ids*/) ORDER BY film_id,source',page):[],
  ]);
  const exists=new Set(filmRows.map(row=>row.id));
  const claimsBy=group(claims,'film_id');
@@ -134,7 +132,14 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
   const route=routes.get(id),survivor=route.survivor;
   identities.set(id,identityVerdict({requested:id,available:identityAvailable,reason:before.film.state==='held'?'film_person_held':'film_person_'+before.film.state,filmExists:exists.has(id),redirect:route,survivorExists:!!survivor&&exists.has(survivor),claims:claimsBy.get(survivor)||[],competing:competing.filter(row=>(claimsBy.get(survivor)||[]).some(claim=>claim.scheme===row.scheme&&String(claim.value)===String(row.value))),retired}));
  }
- const storage=[...new Set([...identities.values()].flatMap(item=>item.aliases.storageIds))];
+ // Sections are read only for Films whose identity passed the fence (ADR 0218 decision 2: a failed verdict yields no sections).
+ const passed=page.filter(id=>identityPassed(identities.get(id)));
+ const passedSurvivors=[...new Set(passed.map(id=>identities.get(id).survivor))];
+ const [metadata,sources]=await Promise.all([
+  chunked(db,'SELECT film_id,year,runtime,synopsis,poster,url,genres_json FROM film_metadata WHERE film_id IN (/*ids*/)',passedSurvivors),
+  has('film_localization_source')?chunked(db,'SELECT film_id,source,value,source_version,provenance_json,observed_at FROM film_localization_source WHERE film_id IN (/*ids*/) ORDER BY film_id,source',passed):[],
+ ]);
+ const storage=[...new Set(passed.map(id=>identities.get(id)).flatMap(item=>item.aliases.storageIds))];
  const prediction=before.prediction;
  const [prints,points]=prediction.available&&storage.length?await Promise.all([
   chunked(db,'SELECT film_id,fingerprint_hash,invalidated_at FROM prediction_fingerprint WHERE film_id IN (/*ids*/)',storage),
@@ -142,12 +147,12 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  ]):[[],[]];
  // Owner values from owner_review_entry for every link of each survivor's chain.
  let owners=new Map();
- if(before.owner.available&&survivors.length){
-  const links=await ancestors(db,survivors);
+ if(before.owner.available&&passedSurvivors.length){
+  const links=await ancestors(db,passedSurvivors);
   const all=[...new Set([...links.values()].flat())];
   const entries=await chunked(db,"SELECT source_key,identity_link,identity_state,payload_json FROM owner_review_entry WHERE kind='film' AND identity_state='verified' AND identity_link IN (/*ids*/) ORDER BY source_key",all);
   const candidates=ownerCandidatesFromEntries(entries);
-  owners=new Map(survivors.map(id=>[id,links.get(id).flatMap(link=>candidates.get(link)||[])]));
+  owners=new Map(passedSurvivors.map(id=>[id,links.get(id).flatMap(link=>candidates.get(link)||[])]));
  }
  const after2=await markers(env,db,names);
  if(after2.film.state!==before.film.state||after2.film.generation!==before.film.generation)throw failed('film_person_generation_moved');
@@ -159,11 +164,12 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  for(const id of page){
   const identity=identities.get(id),survivor=identity.survivor;
   const rows=dimsBy.get(id)||[],locRow=rows.find(row=>row.dimension==='localization')||null;
+  const ok=identityPassed(identity),blocked='identity_'+identity.verdict;
   const filmFacts={
    identity,
-   metadata:metadataFacts(survivor?metaBy.get(survivor)||null:null),
-   localization:localizationFacts({row:locRow,sources:sourcesBy.get(id)||[],ownerValues:survivor?owners.get(survivor)||[]:[],ownerAvailable:before.owner.available}),
-   prediction:predictionFacts({available:prediction.available&&identity.verdict!=='unavailable',reason:prediction.available?'identity_'+identity.verdict:'prediction_'+prediction.reason,storageIds:identity.aliases.storageIds,fingerprints:prints,pointers:points,coverage:coverage?coverage(id,identity.aliases):undefined}),
+   metadata:ok?metadataFacts(metaBy.get(survivor)||null):{status:'unavailable',reason:blocked},
+   localization:ok?localizationFacts({row:locRow,sources:sourcesBy.get(id)||[],ownerValues:owners.get(survivor)||[],ownerAvailable:before.owner.available}):{status:'unavailable',reason:blocked,resolved:null},
+   prediction:predictionFacts({available:ok&&prediction.available,reason:ok?'prediction_'+prediction.reason:blocked,storageIds:identity.aliases.storageIds,fingerprints:prints,pointers:points,coverage:coverage&&ok?coverage(id,identity.aliases):undefined}),
   };
   facts.set(id,filmFacts);
   for(const row of rows)classified.push(classifyRow(row,filmFacts));
