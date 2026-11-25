@@ -68,7 +68,7 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
 }
 
 // The discovery source as a vm context, with a controllable clock and a TMDB stub that records its queries.
-function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=false,sync=null,authority=Authority}){
+function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=false,sync=null,authority=Authority,published=null}){
  const queueRefreshes=[];
  const realNow=Date.now.bind(Date);
  const FakeDate=class extends Date{static now(){return realNow()+clock.offset;}};
@@ -78,7 +78,7 @@ function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=
   fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);if(throwTimeout){const error=new Error('The operation was aborted');error.name='TimeoutError';return Promise.reject(error);}if(fetchStatus)return Promise.resolve(new Response(JSON.stringify({}),{status:fetchStatus,headers:{'Content-Type':'application/json','Retry-After':'60'}}));return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:authority,pinEpg:async value=>value,
   refreshPredictionQueue:async(target,report,trigger)=>{queueRefreshes.push(trigger);},
-  loadJSON:async(target,key)=>{if(key==='sync.json')return sync;if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
+  loadJSON:async(target,key)=>{if(key==='sync.json')return sync;if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:published?published():RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const file of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
  return {context,searched,timeouts,queueRefreshes};
@@ -1221,32 +1221,74 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  if(process.env.IPTV_PRINT_TIMELINE)console.log(JSON.stringify(rows));
 }
 
-// AIR-682 (owner decision, 25 Nov 2026): a caller that passes a 300 s chunk budget (the Workflow) runs longer than the 40 s default, keeps the 16-call TMDB cap
-// and checkpoints once, inside the budget; a caller that passes none keeps 40 s.
-{
- const run=async budget=>{
-  const base=await fixture({mix:6});
-  const clock={offset:0};
-  const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=2000;}})};
-  const {context,searched}=chunkContext({clock,respond(url){
-   if(url.pathname.includes('/movie/'))return movieFor(Number(url.pathname.split('/').pop()),'Film mix'+String(Number(url.pathname.split('/').pop())-1000).padStart(2,'0'));
-   const title=url.searchParams.get('query'),index=Number(title.slice(-2));
-   return {results:index<6?[{id:1000+index,title,original_title:title,release_date:'2000-06-01'}]:[]};
-  }});
+// AIR-682 (owner decision, 25 Nov 2026): a caller that passes a 300 s chunk budget (the Workflow) runs longer than the 40 s default. Correctness only: one coherent clock.
+// The resolver VM clock and the imported DiscoveryAuthority (which reads the host Date.now for acquire, renew and expiry) share one virtual offset, so a lease that is not
+// renewed in time really expires. Every D1 write batch costs 3 virtual seconds and every TMDB request 5; 25 eligible candidates make the 16-request cap the stop.
+async function sharedClockChunk({budget=300000,disturb=null,mix=20}={}){
+ const base=await fixture({mix});
+ const clock={offset:0},state={published:RUN,fired:false,firedAtMs:null,decisionsAtFire:null,statusBefore:statusPayload(base.file)};
+ const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=3000;}})};
+ const {context,searched}=chunkContext({clock,published:()=>state.published,onFetch(){
+  clock.offset+=5000;
+  // A late disturbance: only after the chunk has been running longer than the original 90 s lease TTL.
+  if(disturb&&!state.fired&&clock.offset>95000){state.fired=true;state.firedAtMs=clock.offset;state.decisionsAtFire=decisionCount(base.file);state.pending=disturb(base,state);}
+ },respond(url){
+  if(url.pathname.includes('/movie/')){const id=Number(url.pathname.split('/').pop());return movieFor(id,'Film mix'+String(id-1000).padStart(2,'0'));}
+  const title=url.searchParams.get('query'),index=Number(title.slice(-2));
+  return {results:index<20?[{id:1000+index,title,original_title:title,release_date:'2000-06-01'}]:[]};
+ }});
+ // The host clock is patched only after the resolver context captured the real one, so the offset is applied once to each.
+ const hostNow=Date.now;Date.now=()=>hostNow.call(Date)+clock.offset;
+ let result=null,error=null,checkpoints=0,leaseExpiresAt=null,nowAtEnd=null;
+ try{
   const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
-  let checkpoints=0;
-  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;},null,budget);
-  assert.equal(checkpoints,1,'one checkpoint');
-  assert.ok(searched.length<=16,'the TMDB call cap is unchanged');
-  await Authority.releaseLease(env,lease.lease);
-  return result;
- };
- const short=await run(undefined),long=await run(300000);
- assert.ok(short.timings.totalMs<=40000,'the default budget is 40 s');
- assert.ok(long.checked>short.checked,'a 300 s budget resolves more candidates than 40 s: '+long.checked+' vs '+short.checked);
- assert.ok(long.timings.totalMs<=300000,'the long chunk checkpoints inside 300 s: '+long.timings.totalMs);
- assert.ok(long.timings.renewals>=1,'the long chunk renews its lease');
- assert.equal(long.error,null);
+  try{result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;},null,budget??undefined);}catch(e){error=e;}
+  nowAtEnd=Date.now();leaseExpiresAt=Number(leaseRow(base.file).expires_at);
+ }finally{Date.now=hostNow;}
+ return {base,state,result,error,checkpoints,searched,leaseExpiresAt,nowAtEnd,clock};
+}
+{
+ // Happy path: a chunk far beyond the original 90 s lease TTL keeps its lease through successive renewals, hits the 16-request cap, and checkpoints once.
+ const run=await sharedClockChunk();
+ assert.equal(run.error,null,'the long chunk is not cut short by its lease');
+ assert.ok(run.result.timings.totalMs>=run.clock.offset&&run.result.timings.totalMs<run.clock.offset+3000,'the chunk clock and the virtual clock agree (the real time of the run is a few ms): '+run.result.timings.totalMs+' vs '+run.clock.offset);
+ assert.ok(run.result.timings.totalMs>90000,'the chunk runs longer than the original 90 s lease TTL: '+run.result.timings.totalMs);
+ assert.ok(run.result.timings.totalMs<=300000,'and still inside 300 s: '+run.result.timings.totalMs);
+ assert.ok(run.result.timings.renewals>=2,'successive heartbeat renewals: '+run.result.timings.renewals);
+ assert.ok(run.leaseExpiresAt>run.nowAtEnd,'the persisted lease is still valid at the end of the chunk on the same clock');
+ assert.equal(run.searched.length,16,'the TMDB cap is reached and holds');
+ assert.equal(run.result.tmdbCalls,16);
+ assert.equal(run.result.error,null);
+ assert.equal(run.result.stage,'partial');
+ assert.equal(run.checkpoints,1,'one durable checkpoint');
+ assert.ok(statusPayload(run.base.file),'the final status is durable');
+ assert.equal(decisionCount(run.base.file),run.result.checked,'every counted candidate has its decision');
+}
+{
+ // The same chunk under the 40 s default stops long before: the default is unchanged.
+ const run=await sharedClockChunk({budget:null});
+ assert.equal(run.error,null);
+ assert.ok(run.result.timings.totalMs<=40000,'the default budget is 40 s: '+run.result.timings.totalMs);
+ assert.ok(run.searched.length<16,'fewer TMDB requests fit in 40 s: '+run.searched.length);
+}
+for(const [name,disturb] of [
+ ['the lease expires late',(base)=>sql(base.file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1')],
+ ['another hop owns the lease late',(base)=>sql(base.file,"UPDATE discovery_lease SET lease_id='other-hop', expires_at="+(Date.now()+80000)+' WHERE id=1')],
+ ['the programme generation changes late',async(base,state)=>{state.published='run-other';sql(base.file,"UPDATE discovery_authority SET programme_run_id='run-other', generation=generation+1 WHERE id=1");await base.env.BUCKET.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-other'}));}],
+]){
+ const run=await sharedClockChunk({disturb});
+ assert.ok(run.state.fired&&run.state.firedAtMs>95000,name+': the disturbance came after the original TTL: '+run.state.firedAtMs);
+ if(name==='the programme generation changes late'){
+  assert.equal(run.error,null,name);
+  assert.equal(run.result.stage,'programme_changed',name+': fails closed');
+ }else{
+  assert.ok(run.error,name+': the chunk must not complete');
+  assert.equal(run.error.name,'LeaseLostError',name);
+  assert.equal(run.checkpoints,0,name+': no checkpoint is written for a lost lease');
+ }
+ assert.equal(decisionCount(run.base.file),run.state.decisionsAtFire,name+': no decision is written after the disturbance');
+ const storedStatus=statusPayload(run.base.file);
+ if(name!=='the programme generation changes late'&&storedStatus!==run.state.statusBefore)assert.equal(JSON.parse(storedStatus).checkpoint,'cheap_pass',name+': no final status after the lease is lost');
 }
 
 console.log('discovery chunk budget ok');
