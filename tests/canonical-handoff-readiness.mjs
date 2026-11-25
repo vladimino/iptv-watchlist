@@ -67,7 +67,7 @@ if(on('2')){
  assert.deepEqual(Object.fromEntries(EMPTY_CLASSES.map(item=>[item.name,item.expected])),{ratedAdmission:708,retention:398,retirement:4},'the readiness counts name the three accepted H1 classes');
  assert.ok(!out.blockers.includes('empty_class_not_loaded:retention:0/401'),'the superseded 401 is not the retention expectation');
  assert.deepEqual(PRODUCER_WIRING.map(item=>item.name),['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
  fs.writeFileSync(path.join(root,'today.json'),JSON.stringify(out.blockers));
 }
 
@@ -248,6 +248,7 @@ if(on('6')){
   film_sync_state:'src/canonical-metadata-sync-producer.js',
   localization_source:'src/canonical-metadata-sync-producer.js',
   localization_conflict:'src/canonical-metadata-sync-producer.js',
+  film_localization_projection:'src/canonical-metadata-sync-producer.js',
   film_admission:'src/canonical-rated-admission-producer.js',
   film_retention:'src/canonical-rated-admission-producer.js',
  };

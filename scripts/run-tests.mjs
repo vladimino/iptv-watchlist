@@ -72,6 +72,8 @@ export const WEIGHTS={
  'discovery-bounded-drain.mjs':27,
  'epg-producer-m2b-mutation.mjs':27,
  'canonical-dictionary-producer-mutation.mjs':23,
+ // AIR-662: local estimate (about 3 s solo for 12 mutants of a 1 s functional file), not a CI mean; scheduling only.
+ 'film-localization-projection-mutation.mjs':2,
  'prediction-batch-submit.mjs':22,
  'canonical-catalog-titles-mutation.mjs':20,
  'canonical-differential-mutation.mjs':20,
