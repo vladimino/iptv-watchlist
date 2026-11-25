@@ -30,7 +30,8 @@ Each figure is one run on an otherwise idle container, wall time from start to e
 ## What changed
 
 - `scripts/run-tests.mjs`: a `--suite all` run of the repository's own `tests/` that passes in full, with the same working-tree content at its end as at its start, appends that tree (and the Node version) to `.git/iptv-test-all-passed` (`scripts/test-pass-record.mjs`, at most 50 lines).
-- `.githooks/pre-push`: skips the suite only when every pushed commit has a recorded tree on the current Node version, or differs from one only outside the paths that need the suite (the documentation-only rule the hook already had). Otherwise it runs exactly as before; `IPTV_PREPUSH_RERUN=1` forces a run.
+- `.githooks/pre-push`: skips the suite only when every pushed commit has a recorded tree on the current Node version, or differs from one only outside the paths that need the suite (the documentation-only rule the hook already had). Otherwise it runs the suite, but only when the working tree is the content of every pushed commit, and pushes only when the run's record then covers them; `IPTV_PREPUSH_RERUN=1` forces a run under the same rule.
+- Review of PR #1007 closed three holes, each with a regression that fails on the earlier code: the tree is hashed from disk in a fresh index (a copied index let `--assume-unchanged` or `--skip-worktree` attest HEAD for edited bytes); changed paths are listed raw and with `--no-renames` (a move from `src/` to `docs/` listed only the new path, and a quoted non-ASCII name did not match `^src/`, so both looked documentation-only, also in the hook's older exemption); and a miss no longer tests whatever is checked out (pushing another branch passed on a run of the current one, an inherited weakness of the hook).
 - The set of tests that must pass before a push is unchanged: core and non-functional, all files, the same isolation in the hook. No test is skipped, disabled or removed.
 
 ## Limitations
@@ -38,3 +39,5 @@ Each figure is one run on an otherwise idle container, wall time from start to e
 - One sample per configuration on one machine; laptop times differ (the owner's Mac runs the mutation files several times slower). The ratio, not the seconds, is the result.
 - The record is local and can be bypassed like the hook itself; it is not evidence for a reviewer. CI still runs the required core suite on every PR.
 - A pass on a dirty tree that is then committed is recognised (the tree is computed from the working tree); a run during which files change is not recorded.
+- The tree is what `git add -A` would commit, so clean filters such as `core.autocrlf` apply, as they do to the commit itself. A tracked file that matches `.gitignore`, or a file absent in a sparse checkout, is missing from the snapshot: the trees then differ and nothing is covered (fail closed).
+- Pushing a branch that is not checked out now needs its own checkout and `test:all`; the hook refuses it instead of testing something else.

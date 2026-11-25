@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 # Git passes local/ref and remote/ref pairs. Compare pushed code, not the entire working tree.
+# AIR-668: which paths need the suite is decided by scripts/test-pass-record.mjs (`classify`): raw NUL-separated paths without rename detection, so a
+# file moved out of src/ or a quoted non-ASCII name still counts, and a Git error counts as an executable change.
 requires_tests=0
 saw_ref=0
 tested_commits=()
@@ -12,14 +14,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [[ "$remote_sha" != "$zero" ]] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
     base="$remote_sha"
   elif git rev-parse --verify -q refs/remotes/origin/main >/dev/null; then
-    base="$(git merge-base "$local_sha" refs/remotes/origin/main)"
+    base="$(git merge-base "$local_sha" refs/remotes/origin/main)" || base=''
   else
-    requires_tests=1
-    tested_commits+=("$local_sha")
-    continue
+    base=''
   fi
-  if git diff --name-only "$base" "$local_sha" |
-    grep -Eq '^(src/|scripts/|tests/|migrations/|public/|data/|build\.mjs$|package(-lock)?\.json$|wrangler\.jsonc$|\.github/workflows/|\.githooks/)'; then
+  kind=executable
+  if [[ -n "$base" ]]; then kind="$(node scripts/test-pass-record.mjs classify "$base" "$local_sha")" || kind=executable; fi
+  if [[ "$kind" != documentation ]]; then
     requires_tests=1
     tested_commits+=("$local_sha")
   fi
@@ -35,16 +36,29 @@ fi
 # AIR-668: the pre-PR rule already runs `npm run test:all`, and running it again here doubled the time to push. When a full pass was recorded for the
 # exact content of every pushed commit (or for content that differs only in files that do not need the suite), the hook says so and does not repeat it.
 # The record is written only by a `--suite all` run that passed in full on an unchanged working tree (scripts/test-pass-record.mjs).
-# IPTV_PREPUSH_RERUN=1 always runs the suite.
-if [[ "$saw_ref" == 1 && "${IPTV_PREPUSH_RERUN:-0}" != 1 && ${#tested_commits[@]} -gt 0 ]] &&
+if [[ "${IPTV_PREPUSH_RERUN:-0}" != 1 && ${#tested_commits[@]} -gt 0 ]] &&
   covered="$(node scripts/test-pass-record.mjs check "${tested_commits[@]}")"; then
   echo '[AIR-668] pre-push: core and non-functional suites already passed on this content, not running them again:'
   echo "$covered"
   exit 0
+fi
+# The suite runs on the working tree, so it can only vouch for pushed commits whose content the working tree is. A push of another branch, or of a
+# commit beside uncommitted executable edits, stops here instead of passing on a run of something else. IPTV_PREPUSH_RERUN=1 follows the same rule.
+if [[ ${#tested_commits[@]} -gt 0 ]] && ! uncovered="$(node scripts/test-pass-record.mjs worktree "${tested_commits[@]}")"; then
+  echo '[AIR-668] pre-push: the checked-out working tree is not the content of these pushed commits, so a test run here would not test them:' >&2
+  echo "$uncovered" >&2
+  echo 'Check out each commit (or stash or commit the local edits), run `npm run test:all` there, then push again.' >&2
+  exit 1
 fi
 echo '[AIR-514] pre-push: running core and non-functional suites'
 # The per-file limit is a hang guard. On a busy laptop the heaviest mutation files (canonical-producer-driver-mutation*.mjs: about 110 s on CI,
 # 280-850 s locally under load) pass the runner's 300 s default, so the hook allows 30 minutes per file unless TEST_TIMEOUT_MS is set. CI is unchanged.
 # The non-functional measurement files (wall time, memory, latency budgets) run one at a time after the parallel phase: beside the mutation files on a busy
 # laptop they miss their bounds although each passes alone. The mutation files still run in parallel. CI and the nightly workflow are unchanged.
-TEST_TIMEOUT_MS="${TEST_TIMEOUT_MS:-1800000}" npm run test:all -- --isolate-measurements
+# The run records its tree (IPTV_TEST_PASS_RECORD=1 overrides a local 0), and the push goes ahead only when that record now covers every pushed commit:
+# a run whose working tree changed under it records nothing and stops the push.
+TEST_TIMEOUT_MS="${TEST_TIMEOUT_MS:-1800000}" IPTV_TEST_PASS_RECORD=1 npm run test:all -- --isolate-measurements
+if [[ ${#tested_commits[@]} -gt 0 ]] && ! node scripts/test-pass-record.mjs check "${tested_commits[@]}" >/dev/null; then
+  echo '[AIR-668] pre-push: the suite passed, but not on the content of every pushed commit (the working tree changed during the run); push again.' >&2
+  exit 1
+fi

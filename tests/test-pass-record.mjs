@@ -6,7 +6,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {EXECUTABLE_PATHS,RECORD_LIMIT,appendRecord,contentTree,coveringRecord,readRecords,recordPath} from '../scripts/test-pass-record.mjs';
+import {EXECUTABLE_PATHS,RECORD_LIMIT,appendRecord,changedPaths,contentTree,coveringRecord,readRecords,recordPath,touchesExecutable,uncoveredByWorkingTree} from '../scripts/test-pass-record.mjs';
 
 const repoRoot=path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 // The hook runs this suite with GIT_DIR exported (tests/epg-checkpoint-production.mjs); a git child that inherited it would act on this checkout.
@@ -49,6 +49,48 @@ try{
   assert.equal(contentTree({...at,cwd:scratch}),null,'outside a work tree there is no content tree');
  }
 
+ // 1b. Review of PR #1007: an index flag must not hide an edit. With assume-unchanged or skip-worktree on a tracked file and the file edited on disk,
+ // `git add -A` over a copy of the index kept the old blob and attested HEAD's tree for bytes that were never tested. The snapshot starts from an empty
+ // index, so it hashes what is on disk, and the real index keeps its flags.
+ {
+  for(const flag of ['--assume-unchanged','--skip-worktree']){
+   const cwd=repo();
+   const options={...at,cwd};
+   const head=git(cwd,'rev-parse','HEAD^{tree}');
+   git(cwd,'update-index',flag,'src/a.js');
+   write(cwd,'src/a.js','export const a="untested";\n');
+   assert.equal(git(cwd,'status','--porcelain'),'','the flag hides the edit from git status');
+   const tree=contentTree(options);
+   assert.notEqual(tree,head,`${flag}: the hidden edit is in the snapshot`);
+   appendRecord(recordPath(options),{tree});
+   assert.equal(coveringRecord('HEAD',options),null,`${flag}: a pass on the hidden edit does not cover HEAD`);
+   assert.deepEqual(uncoveredByWorkingTree(['HEAD'],options),['HEAD'],`${flag}: the working tree does not stand for HEAD`);
+   assert.match(git(cwd,'ls-files','-v','src/a.js'),flag==='--assume-unchanged'?/^h /:/^S /,'the real index keeps its flag');
+  }
+ }
+
+ // 1c. Changed paths are raw and rename-blind: a move out of an executable path lists the old path, a non-ASCII name is not quoted, an error is null.
+ {
+  const cwd=repo();
+  const options={...at,cwd};
+  const before=git(cwd,'rev-parse','HEAD');
+  git(cwd,'mv','src/a.js','docs/moved.md');
+  git(cwd,'commit','-qm','move');
+  const moved=changedPaths(before,'HEAD',options);
+  assert.deepEqual([...moved].sort(),['docs/moved.md','src/a.js'],'the rename shows both sides');
+  assert.equal(touchesExecutable(moved),true,'moving code into docs needs the suite');
+  write(cwd,'src/\u00e9t\u00e9 \"q\".js','export const b=1;\n');
+  git(cwd,'add','-A');git(cwd,'commit','-qm','odd name');
+  const odd=changedPaths('HEAD~1','HEAD',options);
+  assert.deepEqual(odd,['src/\u00e9t\u00e9 \"q\".js'],'the name comes back raw, not quoted');
+  assert.equal(touchesExecutable(odd),true);
+  assert.equal(changedPaths('HEAD','no-such-ref',options),null);
+  assert.equal(touchesExecutable(null),true,'an unreadable change needs the suite');
+  write(cwd,'docs/only.md','# only\n');
+  git(cwd,'add','-A');git(cwd,'commit','-qm','docs');
+  assert.equal(touchesExecutable(changedPaths('HEAD~1','HEAD',options)),false,'a documentation-only change does not');
+ }
+
  // 2. Records: newest last, one line per tree and Node version, at most RECORD_LIMIT, junk lines ignored, and a missing file reads as none.
  {
   const cwd=repo();
@@ -89,55 +131,108 @@ try{
   git(cwd,'add','-A');git(cwd,'commit','-qm','code');
   assert.equal(coveringRecord('HEAD',options),null,'an untested source change is not covered');
   assert.equal(coveringRecord('no-such-ref',options),null);
+  // A recorded tree, then a commit that only moves code into docs/ or adds an odd-named source file: neither is covered.
+  appendRecord(file,{tree:git(cwd,'rev-parse','HEAD^{tree}'),node:'v22.1.0'});
+  git(cwd,'mv','src/a.js','docs/a-code.md');
+  git(cwd,'commit','-qm','move code out');
+  assert.equal(coveringRecord('HEAD',options),null,'an executable-to-docs rename is not documentation-only');
+  git(cwd,'reset','-q','--hard','HEAD~1');
+  write(cwd,'src/\u00f1 x.js','export const n=1;\n');
+  git(cwd,'add','-A');git(cwd,'commit','-qm','odd');
+  assert.equal(coveringRecord('HEAD',options),null,'a quoted non-ASCII source name is not documentation-only');
  }
 
- // 4. The pre-push hook end to end, with this checkout's hook and record module and a stand-in `npm run test:all` that leaves a marker.
+ // 4. The pre-push hook end to end, with this checkout's hook and record module. The stand-in `npm run test:all` leaves a marker and, like the real
+ // runner, records the working tree it ran on (unless STAND_IN_NO_RECORD, which plays a run whose tree changed under it).
  {
   const cwd=repo();
   fs.mkdirSync(path.join(cwd,'.githooks'));
   fs.copyFileSync(path.join(repoRoot,'.githooks/pre-push'),path.join(cwd,'.githooks/pre-push'));
   write(cwd,'scripts/test-pass-record.mjs',fs.readFileSync(path.join(repoRoot,'scripts/test-pass-record.mjs'),'utf8'));
-  write(cwd,'stand-in.cjs',"require('node:fs').writeFileSync('ran',process.argv.slice(2).join(' '));\n");
-  write(cwd,'package.json',JSON.stringify({name:'t',private:true,scripts:{'test:all':'node stand-in.cjs'}}));
+  write(cwd,'stand-in.mjs',"import fs from 'node:fs';import {appendRecord,contentTree,recordPath} from './scripts/test-pass-record.mjs';\nfs.writeFileSync('ran',process.argv.slice(2).join(' '));\nif(!process.env.STAND_IN_NO_RECORD)appendRecord(recordPath(),{tree:contentTree()});\n");
+  write(cwd,'package.json',JSON.stringify({name:'t',private:true,scripts:{'test:all':'node stand-in.mjs'}}));
   git(cwd,'add','-A');git(cwd,'commit','-qm','hook');
   const base=git(cwd,'rev-parse','HEAD');
   git(cwd,'update-ref','refs/remotes/origin/main',base);
-  const push=(sha,extra={})=>{
+  const record=recordPath({...at,cwd});
+  const clear=()=>fs.rmSync(record,{force:true});
+  const hook=(refs,extra={})=>{
    fs.rmSync(path.join(cwd,'ran'),{force:true});
-   const result=spawnSync('bash',['.githooks/pre-push','origin','url'],{cwd,env:{...env,...extra},input:`refs/heads/f ${sha} refs/heads/f ${'0'.repeat(40)}\n`,encoding:'utf8'});
-   assert.equal(result.status,0,result.stderr+result.stdout);
-   return {ran:fs.existsSync(path.join(cwd,'ran')),out:result.stdout};
+   const input=refs.map(([name,sha])=>`refs/heads/${name} ${sha} refs/heads/${name} ${'0'.repeat(40)}\n`).join('');
+   const result=spawnSync('bash',['.githooks/pre-push','origin','url'],{cwd,env:{...env,...extra},input,encoding:'utf8'});
+   return {status:result.status,ran:fs.existsSync(path.join(cwd,'ran')),out:result.stdout,err:result.stderr};
   };
-  write(cwd,'src/a.js','export const a=4;\n');
-  const tested=contentTree({...at,cwd});
-  git(cwd,'add','-A');git(cwd,'commit','-qm','change');
-  const head=git(cwd,'rev-parse','HEAD');
-  assert.equal(push(head).ran,true,'without a record the hook runs the suite');
-  appendRecord(recordPath({...at,cwd}),{tree:tested});
-  const skipped=push(head);
-  assert.equal(skipped.ran,false,'a recorded pass of the pushed content is not repeated');
-  assert.match(skipped.out,/\[AIR-668\] pre-push: core and non-functional suites already passed on this content/);
-  assert.match(skipped.out,new RegExp(head.slice(0,12)));
-  assert.equal(push(head,{IPTV_PREPUSH_RERUN:'1'}).ran,true,'IPTV_PREPUSH_RERUN=1 always runs the suite');
-  write(cwd,'docs/a.md','# later\n');
-  git(cwd,'add','-A');git(cwd,'commit','-qm','docs later');
-  assert.equal(push(git(cwd,'rev-parse','HEAD')).ran,false,'a later documentation-only commit stays covered');
-  write(cwd,'tests/x.mjs','// x\n');
-  git(cwd,'add','-A');git(cwd,'commit','-qm','test later');
-  assert.equal(push(git(cwd,'rev-parse','HEAD')).ran,true,'a later executable change runs the suite');
-  write(cwd,'docs/b.md','# b\n');
-  git(cwd,'add','-A');git(cwd,'commit','-qm','docs only');
-  const docsOnly=git(cwd,'rev-parse','HEAD');
-  git(cwd,'update-ref','refs/remotes/origin/main',git(cwd,'rev-parse','HEAD~1'));
-  const docsPush=push(docsOnly);
-  assert.equal(docsPush.ran,false);
-  assert.match(docsPush.out,/documentation-only change/,'the documentation-only rule is unchanged');
-  // One covered ref and one uncovered ref in the same push: the suite runs.
+  const commit=(file,text,message)=>{write(cwd,file,text);git(cwd,'add','-A');git(cwd,'commit','-qm',message);return git(cwd,'rev-parse','HEAD');};
+
+  // The normal fallback: no record, the working tree is the pushed commit, the suite runs and records it.
+  const head=commit('src/a.js','export const a=4;\n','change');
+  let result=hook([['f',head]]);
+  assert.deepEqual([result.status,result.ran],[0,true],result.err+result.out);
+  // A recorded pass is not repeated, and names the covering run.
+  result=hook([['f',head]]);
+  assert.deepEqual([result.status,result.ran],[0,false],result.err);
+  assert.match(result.out,/\[AIR-668\] pre-push: core and non-functional suites already passed on this content/);
+  assert.match(result.out,new RegExp(head.slice(0,12)));
+  // IPTV_PREPUSH_RERUN=1 runs it on the matching working tree.
+  assert.deepEqual([hook([['f',head]],{IPTV_PREPUSH_RERUN:'1'}).status,fs.existsSync(path.join(cwd,'ran'))],[0,true]);
+  // A later documentation-only commit stays covered; a later test change runs the suite.
+  const docs=commit('docs/a.md','# later\n','docs later');
+  assert.deepEqual(Object.values(hook([['f',docs]])).slice(0,2),[0,false]);
+  const tests=commit('tests/x.mjs','// x\n','test later');
+  assert.deepEqual(Object.values(hook([['f',tests]])).slice(0,2),[0,true]);
+
+  // The early documentation-only exemption is rename-blind and reads raw names (review of PR #1007).
+  git(cwd,'update-ref','refs/remotes/origin/main',git(cwd,'rev-parse','HEAD'));
+  clear();
+  const moved=(()=>{git(cwd,'mv','src/a.js','docs/a-code.md');git(cwd,'commit','-qm','move code out');return git(cwd,'rev-parse','HEAD');})();
+  result=hook([['f',moved]]);
+  assert.deepEqual([result.status,result.ran],[0,true],'moving code into docs/ runs the suite');
+  assert.doesNotMatch(result.out,/documentation-only/);
+  git(cwd,'update-ref','refs/remotes/origin/main',moved);
+  clear();
+  const odd=commit('src/é "q".js','export const e=1;\n','odd name');
+  assert.deepEqual(Object.values(hook([['f',odd]])).slice(0,2),[0,true],'an odd-named source file runs the suite');
+  git(cwd,'update-ref','refs/remotes/origin/main',odd);
+  const docsOnly=commit('docs/b.md','# b\n','docs only');
+  result=hook([['f',docsOnly]]);
+  assert.deepEqual([result.status,result.ran],[0,false]);
+  assert.match(result.out,/documentation-only change/,'a documentation-only push still skips');
+
+  // A miss for content that is not checked out stops the push without running anything (review of PR #1007).
+  clear();
   git(cwd,'update-ref','refs/remotes/origin/main',base);
-  fs.rmSync(path.join(cwd,'ran'),{force:true});
-  const both=spawnSync('bash',['.githooks/pre-push','origin','url'],{cwd,env,encoding:'utf8',input:`refs/heads/a ${head} refs/heads/a ${'0'.repeat(40)}\nrefs/heads/b ${docsOnly} refs/heads/b ${'0'.repeat(40)}\n`});
-  assert.equal(both.status,0,both.stderr);
-  assert.equal(fs.existsSync(path.join(cwd,'ran')),true,'every pushed commit must be covered');
+  git(cwd,'checkout','-q','-b','other',base);
+  const other=commit('src/other.js','export const o=1;\n','other branch');
+  git(cwd,'checkout','-q','main');
+  result=hook([['other',other]]);
+  assert.deepEqual([result.status,result.ran],[1,false],'an uncovered ref that is not checked out fails closed');
+  assert.match(result.err,/not the content of these pushed commits/);
+  assert.match(result.err,new RegExp(other));
+  result=hook([['other',other]],{IPTV_PREPUSH_RERUN:'1'});
+  assert.deepEqual([result.status,result.ran],[1,false],'a forced run does not bless another commit');
+  // Two distinct uncovered refs: the working tree can stand for one of them at most.
+  result=hook([['main',docsOnly],['other',other]]);
+  assert.deepEqual([result.status,result.ran],[1,false],'two distinct uncovered refs fail closed');
+  assert.match(result.err,new RegExp(other));
+  assert.doesNotMatch(result.err,new RegExp(docsOnly),'the checked-out one is not named');
+  // A covered ref beside an uncovered one is still refused.
+  appendRecord(record,{tree:git(cwd,'rev-parse',`${docsOnly}^{tree}`)});
+  assert.deepEqual(Object.values(hook([['main',docsOnly],['other',other]])).slice(0,2),[1,false]);
+  clear();
+  // Uncommitted executable edits: the working tree is not the pushed commit.
+  write(cwd,'src/a2.js','export const dirty=1;\n');
+  result=hook([['main',docsOnly]]);
+  assert.deepEqual([result.status,result.ran],[1,false],'a dirty executable working tree fails closed');
+  fs.rmSync(path.join(cwd,'src/a2.js'));
+  // An untracked documentation file beside the commit is fine.
+  write(cwd,'notes.md','scratch\n');
+  assert.deepEqual(Object.values(hook([['main',docsOnly]])).slice(0,2),[0,true]);
+  fs.rmSync(path.join(cwd,'notes.md'));
+  // A run that records nothing (its tree changed under it) does not let the push through.
+  clear();
+  result=hook([['main',docsOnly]],{STAND_IN_NO_RECORD:'1'});
+  assert.deepEqual([result.status,result.ran],[1,true],'a run without a covering record stops the push');
+  assert.match(result.err,/not on the content of every pushed commit/);
  }
 
  // 5. The runner records a passing `--suite all` of a repository's own tests directory, and nothing for a failure, a --dir run or IPTV_TEST_PASS_RECORD=0.

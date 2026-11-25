@@ -4,39 +4,59 @@
 // (25 Nov 2026, PR #1003: about 6 minutes by hand, then 9 min 40 s inside `git push`). The runner now writes the Git tree of the working tree it tested
 // (tracked and untracked files that are not ignored, the same files the suite reads) to a file in the Git directory, but only when the run passed in full
 // and the tree was the same when the run ended as when it began. The hook skips the suite when every pushed commit's tree is one of those trees, or
-// differs from one only in files that do not need the suite (the hook's own documentation-only rule). Anything else runs the suite as before.
+// differs from one only in files that do not need the suite (the hook's own documentation-only rule). Anything else runs the suite as before, and only
+// when the checked-out content is what is being pushed.
+//
+// Fail closed everywhere: a Git error, an unreadable path list or an unknown commit counts as an executable change and as not covered.
 //
 // This is a local convenience, not evidence: like the hook itself it can be bypassed, and CI still runs the required core suite on every PR.
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,readFileSync,rmSync,copyFileSync,existsSync,writeFileSync,renameSync} from 'node:fs';
+import {mkdtempSync,readFileSync,rmSync,writeFileSync,renameSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 
 export const RECORD_NAME='iptv-test-all-passed';
 export const RECORD_LIMIT=50;
-// The same paths the hook treats as needing the suite (.githooks/pre-push keeps its own copy for its documentation-only check).
+// The paths whose change needs the suite. .githooks/pre-push asks this module (`classify`), so the hook and the record share one rule.
 export const EXECUTABLE_PATHS=/^(src\/|scripts\/|tests\/|migrations\/|public\/|data\/|build\.mjs$|package(-lock)?\.json$|wrangler\.jsonc$|\.github\/workflows\/|\.githooks\/)/;
+// The snapshot must hash the bytes on disk: no file-system monitor or untracked cache may vouch for a file.
+const SNAPSHOT_CONFIG=['-c','core.fsmonitor=false','-c','core.untrackedCache=false'];
 
-const git=(args,{cwd,env})=>execFileSync('git',args,{cwd,env,encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
+const git=(args,{cwd,env})=>execFileSync('git',args,{cwd,env,encoding:'utf8',stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024}).trim();
 
 export function recordPath({cwd=process.cwd(),env=process.env}={}){
  try{return path.resolve(cwd,git(['rev-parse','--git-path',RECORD_NAME],{cwd,env}));}catch{return null;}
 }
 
-// The tree of everything `git add -A` would stage, built in a copy of the index so the real index is left alone. Null outside a Git work tree.
+// The tree of everything `git add -A` would commit from the working tree as it is on disk. It is built in a new, empty index, never from the real one:
+// a copied index would carry assume-unchanged and skip-worktree flags and cached stat data, under which an edited tracked file keeps its old blob and the
+// tree would attest bytes that were never tested. Starting empty hashes every file that is not ignored. A file missing from disk (a sparse checkout) or
+// a tracked file that matches .gitignore is simply absent from the tree, so the tree differs from the commit and nothing is covered. Null outside a Git
+// work tree or on any Git error.
 export function contentTree({cwd=process.cwd(),env=process.env}={}){
  let scratch=null;
  try{
   const top=git(['rev-parse','--show-toplevel'],{cwd,env});
-  const index=path.resolve(top,git(['rev-parse','--git-path','index'],{cwd:top,env}));
   scratch=mkdtempSync(path.join(tmpdir(),'iptv-pass-record-'));
-  const copy=path.join(scratch,'index');
-  if(existsSync(index))copyFileSync(index,copy);
-  const scoped={...env,GIT_INDEX_FILE:copy};
-  git(['add','-A','.'],{cwd:top,env:scoped});
+  const scoped={...env,GIT_INDEX_FILE:path.join(scratch,'index')};
+  git([...SNAPSHOT_CONFIG,'add','-A','.'],{cwd:top,env:scoped});
   return git(['write-tree'],{cwd:top,env:scoped});
  }catch{return null;}
  finally{if(scratch)rmSync(scratch,{recursive:true,force:true});}
+}
+
+// The paths that differ between two tree-ish, raw (NUL-separated, never quoted) and without rename detection, so a file moved out of an executable
+// path shows its old path too. Null on any error.
+export function changedPaths(from,to,{cwd=process.cwd(),env=process.env}={}){
+ try{
+  const out=execFileSync('git',['diff','--no-renames','--no-ext-diff','--no-textconv','--name-only','-z',from,to,'--'],{cwd,env,encoding:'utf8',stdio:['ignore','pipe','ignore'],maxBuffer:64*1024*1024});
+  return out.split('\0').filter(Boolean);
+ }catch{return null;}
+}
+
+// True when the change needs the suite: an executable path, or a change that could not be listed.
+export function touchesExecutable(paths){
+ return paths===null||paths.some(file=>EXECUTABLE_PATHS.test(file));
 }
 
 export function readRecords(file){
@@ -57,31 +77,60 @@ export function appendRecord(file,{tree,node=process.version,at=new Date().toISO
  return true;
 }
 
+function commitTree(commit,options){
+ try{return git(['rev-parse','--verify','-q',`${commit}^{tree}`],options);}catch{return null;}
+}
+
 // A commit is covered when a passing run on this Node version tested its exact tree, or a tree that differs from it only outside EXECUTABLE_PATHS.
 export function coveringRecord(commit,{cwd=process.cwd(),env=process.env,node=process.version}={}){
- const records=readRecords(recordPath({cwd,env})).filter(record=>record.node===node).reverse();
+ const options={cwd,env};
+ const records=readRecords(recordPath(options)).filter(record=>record.node===node).reverse();
  if(!records.length)return null;
- let tree;
- try{tree=git(['rev-parse',`${commit}^{tree}`],{cwd,env});}catch{return null;}
+ const tree=commitTree(commit,options);
+ if(!tree)return null;
  const exact=records.find(record=>record.tree===tree);
  if(exact)return {...exact,exact:true};
  for(const record of records){
-  let changed;
-  try{changed=git(['diff','--name-only',record.tree,tree],{cwd,env}).split('\n').filter(Boolean);}catch{continue;}
-  if(!changed.some(file=>EXECUTABLE_PATHS.test(file)))return {...record,exact:false,changed:changed.length};
+  const changed=changedPaths(record.tree,tree,options);
+  if(!touchesExecutable(changed))return {...record,exact:false,changed:changed.length};
  }
  return null;
 }
 
-// `node scripts/test-pass-record.mjs check <commit>...`: exit 0 and name the record when every commit is covered, 1 otherwise. Used by .githooks/pre-push.
+// The commits among `commits` whose content the working tree does not stand for: a run of the suite here would not have tested them. Null when the
+// working tree cannot be read (then nothing is stood for).
+export function uncoveredByWorkingTree(commits,{cwd=process.cwd(),env=process.env}={}){
+ const options={cwd,env};
+ const tree=contentTree(options);
+ if(!tree)return null;
+ return commits.filter(commit=>{
+  const target=commitTree(commit,options);
+  return !target||touchesExecutable(changedPaths(tree,target,options));
+ });
+}
+
+// Command line, for .githooks/pre-push:
+//   classify <base> <commit>    prints "executable" or "documentation" for the change between them; any error prints "executable"
+//   check <commit>...           exit 0 and name the covering run when every commit is covered by a record, 1 otherwise
+//   worktree <commit>...        exit 0 when the working tree stands for every commit, 1 (naming the others) otherwise
 if(process.argv[1]&&path.resolve(process.argv[1])===path.resolve(new URL(import.meta.url).pathname)){
- const [command,...commits]=process.argv.slice(2);
- if(command!=='check'||!commits.length){console.error('usage: node scripts/test-pass-record.mjs check <commit>...');process.exit(2);}
- const covered=[];
- for(const commit of commits){
-  const record=coveringRecord(commit);
-  if(!record){process.exitCode=1;break;}
-  covered.push(`${commit.slice(0,12)} by the run of ${record.at} on tree ${record.tree.slice(0,12)}${record.exact?'':` (${record.changed} non-executable file${record.changed===1?'':'s'} differ)`}`);
+ const [command,...rest]=process.argv.slice(2);
+ if(command==='classify'&&rest.length===2){
+  console.log(touchesExecutable(changedPaths(rest[0],rest[1]))?'executable':'documentation');
+ }else if(command==='check'&&rest.length){
+  const covered=[];
+  for(const commit of rest){
+   const record=coveringRecord(commit);
+   if(!record){process.exitCode=1;break;}
+   covered.push(`${commit.slice(0,12)} by the run of ${record.at} on tree ${record.tree.slice(0,12)}${record.exact?'':` (${record.changed} non-executable file${record.changed===1?'':'s'} differ)`}`);
+  }
+  if(!process.exitCode)console.log(covered.join('\n'));
+ }else if(command==='worktree'&&rest.length){
+  const missing=uncoveredByWorkingTree(rest);
+  if(missing===null){console.log('the working tree could not be read');process.exitCode=1;}
+  else if(missing.length){console.log(missing.join('\n'));process.exitCode=1;}
+ }else{
+  console.error('usage: node scripts/test-pass-record.mjs classify <base> <commit> | check <commit>... | worktree <commit>...');
+  process.exitCode=2;
  }
- if(!process.exitCode)console.log(covered.join('\n'));
 }
