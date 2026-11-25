@@ -225,6 +225,9 @@ D1 table `film_sync_state` ([ADR 0070](../../adr/0070-metadatasync-freshness-clo
 
 ## Readiness is derived, not a new entity status
 
+Proposed [ADR 0217](../../adr/0217-film-lifecycle-dimensions-revision.md) (AIR-644, not decided) inventories which `film_dimension` rows code still reads: only `localization` (display) and `identity` (`titleSource`, owner protection) are load-bearing; `fingerprint`/`prediction` rows are offline-only copies. Until it is decided, this section stays the contract.
+
+
 - `displayReady`: non-rejected identity, a resolved identity or a Letterboxd external ID, and a usable preferred title (reviewed/provisional, original or EPG). Missing translation, fingerprint or prediction must **not** hide a film.
 - `catalogReady`: stable Letterboxd ID or trusted, non-conflicting TMDB ID **and** fresh or partial metadata.
 - `predictionReady`: both fingerprint and prediction are `current`. Neither a valid catalog id nor a fresh profile alone suffices.
