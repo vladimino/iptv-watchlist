@@ -13,8 +13,8 @@
 
 ## Prerequisites (checked immediately before the GO is used, not remembered)
 
-1. `SELECT version FROM schema_contract WHERE id = 1` reads `39` with exactly one `schema_contract` row; `0039` is applied (its own GO). The file refuses anything else.
-2. `tmdb_retirement_decision_film`, `tmdb_retirement_decision_tv` and `canonical_write_receipt_operation_history` exist; no object named `tmdb_retirement_decision_movie` exists, whatever its shape.
+1. `schema_contract` holds exactly one row, `id` 1, `version` `39`; `0039` is applied (its own GO).
+2. The objects the file's guard checks are all present, read from `sqlite_master` (not inferred from the version integer): the tables `tmdb_retirement_decision` and `canonical_write_receipt` (its `CREATE` text has `operation_key`); the indexes `tmdb_retirement_decision_film`, `tmdb_retirement_decision_tv`, `canonical_write_receipt_operation_unresolved`, `canonical_write_receipt_operation_history`; the triggers `tmdb_retirement_decision_no_update`, `tmdb_retirement_decision_no_delete`, `canonical_write_receipt_operation_key_immutable`, `schema_contract_no_downgrade`. No object named `tmdb_retirement_decision_movie` exists, whatever its shape. The guard refuses otherwise (its refusal inserts `id` 0, which `CHECK (id = 1)` always forbids, so it aborts even when the singleton row is missing). These checks are names and the column, not a full integrity proof of earlier migrations.
 3. The GO names the live Git blob and SHA-256 of the file on `main`, the production D1 `iptv` and the exact execution path. This PR adds no operator script; if the owner wants the pinned-operator contract of `0036`/`0038` (target pin, digest pin, zero retries, independent readback), it is a separate reviewed change before the apply. Recheck the blob; do not use a remembered value.
 4. If another migration has landed on `main` first, this file was renumbered and re-pinned before merge; the GO names the merged number and predecessor version.
 5. No other migration, import or cutover is in flight, and no retirement decision is being recorded at the same moment (owner-only, rare; the GO states the window).
@@ -37,7 +37,7 @@ Execute the unchanged file once, as **one** atomic batch (guard, `CREATE INDEX`,
 
 ## Stop conditions
 
-Version not 39, an expected predecessor object missing, an object of the new name present, another migration in flight, drift between the before-state and the apply, a failed or partial execution, or any readback difference.
+Not exactly one `schema_contract` row at version 39, any predecessor object of prerequisite 2 missing, an object of the new name present, another migration in flight, drift between the before-state and the apply, a failed or partial execution, or any readback difference.
 
 ## Rollback and forward recovery
 

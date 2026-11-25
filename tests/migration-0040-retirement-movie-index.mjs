@@ -41,6 +41,19 @@ assert.ok(!objects(v39).includes('index:'+INDEX),'version 39 has no movie index'
  const missingIndex=copyOf(v39,'bad-index');exec(missingIndex,'DROP INDEX tmdb_retirement_decision_tv;');refuse(missingIndex,'a missing 0016 index');
  const missing39=copyOf(v39,'bad-39');exec(missing39,'DROP INDEX canonical_write_receipt_operation_history;');refuse(missing39,'an incomplete version 39');
  const early=copyOf(v39,'early');exec(early,'CREATE INDEX '+INDEX+' ON tmdb_retirement_decision (movie_id);');refuse(early,'a pre-existing index of the same name');
+ for(const [name,statement] of [
+  ['an absent schema_contract row','DELETE FROM schema_contract;'],
+  ['a missing v39 unresolved index','DROP INDEX canonical_write_receipt_operation_unresolved;'],
+  ['a missing v39 immutable-key trigger','DROP TRIGGER canonical_write_receipt_operation_key_immutable;'],
+  ['a missing no-downgrade trigger','DROP TRIGGER schema_contract_no_downgrade;'],
+  ['a missing ledger no-delete trigger','DROP TRIGGER tmdb_retirement_decision_no_delete;'],
+ ]){
+  const file=copyOf(v39,'bad');exec(file,statement);
+  const before=dump(file),result=run(file,M40);
+  assert.notEqual(result.status,0,name+': the file aborts');
+  assert.deepEqual(dump(file),before,name+': the whole state is unchanged');
+  assert.ok(!objects(file).includes('index:'+INDEX),name+': no index installed');
+ }
  const other=copyOf(v39,'other');exec(other,'CREATE INDEX '+INDEX+' ON tmdb_retirement_decision (tv_id);');refuse(other,'a same-named index of another shape');
 }
 
