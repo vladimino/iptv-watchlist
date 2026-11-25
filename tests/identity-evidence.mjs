@@ -195,10 +195,12 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  assert.deepEqual([...SUBJECT_KINDS],['letterboxd_lid','letterboxd_short_code','tmdb_movie','tmdb_tv','discovery_observation','film']);
  assert.deepEqual([...RELATIONS],['same_work','film_has_id','candidate_for','exists']);
  assert.deepEqual([...POLARITIES],['asserts','restricts','refutes']);
- assert.equal(ROUTES.length,9);assert.equal(METHODS.length,7);
+ assert.equal(ROUTES.length,9);assert.equal(METHODS.length,8,'E1 had seven methods; known_alias is added by card EC (migration 0042)');
  // The SQL trigger lists the same sets as the module.
  const trigger=read(NEW);
- for(const value of [...SUBJECT_KINDS,...RELATIONS,...ROUTES,...METHODS])assert.ok(trigger.includes("'"+value+"'"),value+' is in the migration');
+ for(const value of [...SUBJECT_KINDS,...RELATIONS,...ROUTES,...METHODS.filter(method=>method!=='known_alias')])assert.ok(trigger.includes("'"+value+"'"),value+' is in the migration');
+ assert.ok(!trigger.includes("'known_alias'"),'0041 is not changed: known_alias is 0042');
+ assert.ok(read('0042_identity_evidence_writer_control.sql').includes("'known_alias'"),'known_alias is added by 0042');
  // The key formula is pinned: the canonical JSON of the normalized proposition, polarity, route, method, root (or the source record), scope, scoped and superseded row.
  const pinned='{"method":"page_check","object":["tmdb_movie","603"],"polarity":"asserts","reconstructedFrom":null,"relation":"same_work","root":"'+PAGE+'","route":"ratings_diary","scope":null,"scopeEvidenceKey":null,"subject":["letterboxd_lid","lid603"],"supersedesKey":null,"v":1}';
  assert.equal(await evidenceKeyOf(diary()),crypto.createHash('sha256').update(pinned).digest('hex'),'the key formula');
@@ -527,9 +529,9 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
 {
  const sources=fs.readdirSync('src',{recursive:true}).filter(name=>String(name).endsWith('.js')).map(name=>path.join('src',String(name)));
  const mentions=sources.filter(name=>fs.readFileSync(name,'utf8').includes('film_identity_evidence'));
- assert.deepEqual(mentions,['src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader)');
+ assert.deepEqual(mentions,['src/identity-evidence-writer.js','src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader)');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,[],'nothing imports the writer: no route, Workflow, cron or producer calls it');
+ assert.deepEqual(importers,['src/identity-evidence-writer.js'],'only the dormant writer-control module (card EC) imports the writer: no route, Workflow, cron or producer calls it');
  assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
 }
 console.log('identity evidence ledger: ok');
