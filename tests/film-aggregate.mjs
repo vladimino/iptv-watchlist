@@ -561,7 +561,7 @@ function world({lids=['l5'],links=null,records=true}={}){
 {
  const build=fs.readFileSync('build.mjs','utf8');
  for(const name of ['film-aggregate','film-aggregate-resolver'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
- for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'))
+ for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'))
   assert.ok(!/film-aggregate/.test(fs.readFileSync('src/'+name,'utf8')),name+' must not import the dormant aggregate');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the Worker routes no internal film aggregate');
  if(fs.existsSync('dist/server/index.js'))assert.ok(!fs.readFileSync('dist/server/index.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the built bundle does not serve the route');

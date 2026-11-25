@@ -113,7 +113,7 @@ async function guarded(budget,reason,run){
 }
 
 // ---- the alias sets (decision 6b: authorized aliases only; a TV number is never a storage key) ----
-function aliases(resolution){
+export function aliases(resolution){
  const a=resolution.authorized||{tmdb_movie:[],tmdb_tv:[],letterboxd_lid:[]};
  const over=new Set(resolution.aliasOverflow||[]);
  // The resolver keeps at most 8 aliases per scheme; the others are not read. Only the schemes a section reads count (a TV number is never a storage key).
@@ -236,7 +236,7 @@ function settledElsewhere(pair,settlement,survivor){
 
 // Reads the ratings evidence once for both ratings-dependent sections. Never throws: -> {state:'open'|'unavailable'|'budget', ...}. A failure to read or parse
 // the EVIDENCE (documents, index, records, settlement) is coverage `incomplete`, never a lost section; only the marker and the ratings_view rows decide the state.
-async function readRatings(db,budget,resolution,set){
+export async function readRatings(db,budget,resolution,set){
  const fence=fenceOf(budget,1);
  if(!fence)return {state:'budget'};
  try{
