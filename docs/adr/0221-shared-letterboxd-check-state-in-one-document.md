@@ -1,4 +1,4 @@
-# ADR 0220: The shared Letterboxd check state (entries and backlog) lives in one D1-owned Ratings document, and a check's effect is owned by a reservation
+# ADR 0221: The shared Letterboxd check state (entries and backlog) lives in one D1-owned Ratings document, and a check's effect is owned by a reservation
 
 **Status:** Accepted  
 **Original decision date:** 2026-11-25  
