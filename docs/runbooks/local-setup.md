@@ -108,6 +108,12 @@ TEST_JOBS=2 git push
 
 `npm test`, `npm run test:all` run by hand, and CI keep the 300 s default.
 
+Git opens the SSH connection to GitHub before it runs the hook, and the full suite takes about ten minutes, so an idle connection can be closed under it: the hook passes and the push then dies with exit 141 (SIGPIPE) without updating the remote. Keep the connection alive for a push that runs the suite:
+
+```bash
+GIT_SSH_COMMAND="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=40" git push
+```
+
 The tests of this tooling:
 
 | Test | What it proves |
