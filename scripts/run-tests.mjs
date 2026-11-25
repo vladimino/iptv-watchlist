@@ -13,6 +13,7 @@ import {onPath,resolveSqliteCli} from './sqlite-cli.mjs';
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
+//   npm test -- --suite all --isolate-measurements  non-functional measurement files run alone after the parallel phase (the pre-push hook; also TEST_ISOLATE_MEASUREMENTS=1)
 //   npm test -- --shard 1/3           this part of the selected suite only (also TEST_SHARD); CI runs the core suite as three jobs (AIR-418)
 //
 // AIR-583. Every run creates one private temporary root `iptv-run-XXXXXX` inside the OS temp directory and hands it to every test file as TMPDIR, TMP and TEMP
@@ -285,6 +286,8 @@ export const FIRST_SHARD_HEAVY_CREDIT=160;
 // AIR-480: 160 (was 100) so shard 1's extra FIRST_SHARD_OFFSET does not also collect the heaviest mutation file by pressure. AIR-490 left this constant for the nightly plan. AIR-494: the core plan has no mutation files, so that credit dumped the remaining heavy core files onto shards 2 and 3. CORE_FIRST_SHARD_HEAVY_CREDIT is the core-only credit, refit on the same 12-run set; the nightly plan still uses FIRST_SHARD_HEAVY_CREDIT.
 export const CORE_FIRST_SHARD_HEAVY_CREDIT=10;
 const MUTATION=/-mutation\.mjs$/;
+// A mutant-kill file, including a split part such as canonical-producer-driver-mutation-b.mjs (MUTATION above does not match the part).
+const MUTANT_KILL=/-mutation(-[a-z0-9]+)?\.mjs$/;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
 export const HEAD_LIMIT=1024*1024;
@@ -376,9 +379,14 @@ export function capture(){
 
 // `shard` is {index, count} (index from 1) or null for the whole suite. AIR-374: the files are ordered heaviest first (WEIGHTS, then name) and dealt one by one to the shard with the least weight so far
 // (ties to the lowest index), so the split is the same whichever shard asks and every file is in exactly one shard, whatever the count.
-export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit,mutationPressure=HEAVY_MUTATION_PRESSURE,suite='core'}={}){
+export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit,mutationPressure=HEAVY_MUTATION_PRESSURE,suite='core',isolateMeasurements=false}={}){
  const listed=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
  const all=selectSuite(listed,directory,suite);
+ // The pre-push hook asks for this (--isolate-measurements). A non-functional file that is not a mutant-kill check measures wall time, memory or a latency budget,
+ // and beside five CPU-bound mutation files on a laptop those measurements miss their bounds although the file passes alone (25 Nov 2026: film-person-reader's 8 s
+ // index bound and discovery-chunk-budget's hop comparison failed in turn on three hooked pushes of an unrelated branch). Such files then run alone, after the
+ // parallel phase, like the serial-only files; the mutation files keep running in parallel. The nightly workflow and CI do not pass it and are unchanged.
+ if(isolateMeasurements&&suite==='non-functional')serialOnly=new Set([...serialOnly,...all.filter(file=>!MUTANT_KILL.test(file))]);
  const core=suite==='core';
  weights=weights??(core?CORE_WEIGHTS:WEIGHTS);
  heavyCredit=heavyCredit??(core?CORE_FIRST_SHARD_HEAVY_CREDIT:FIRST_SHARD_HEAVY_CREDIT);
@@ -480,7 +488,7 @@ async function main(){
   return;
  }
  let plan;
- try{plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard,suite});}
+ try{plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard,suite,isolateMeasurements:args.includes('--isolate-measurements')||process.env.TEST_ISOLATE_MEASUREMENTS==='1'});}
  catch(error){if(error.code==='unclassified'){console.error(error.message);process.exit(2);}throw error;}
  const part=shard?` (shard ${shard.index}/${shard.count} of ${plan.suite} files)`:'';
  // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.
