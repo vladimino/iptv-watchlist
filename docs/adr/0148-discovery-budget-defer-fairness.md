@@ -57,3 +57,5 @@ Natural-run acceptance stays on AIR-492 (`Верификация`). AIR-480 addr
 ## Amendment: Workflow chunk budget (AIR-682, 25 November 2026)
 
 The 40 s wall budget in this record, and the rejection of raising it, are superseded in part for a chunk run by the Discovery Workflow, which now has 300 s (Product Owner direct instruction on [AIR-682](https://trello.com/c/UWYTPEDB), 25 November 2026: "сделай задачу на увеличение этого бюджета до 5 минут по моему распоряжению. без экспериментов и обоснований"). The per-key deferral, the 16-request cap and the fairness rules are unchanged and apply to the longer budget. The status stays Accepted.
+
+**Approval source for this amendment:** [Controller record of the Product Owner decision, PR #1019 comment](https://github.com/vladimino/iptv-watchlist/pull/1019#issuecomment-7175390465), 25 November 2026 (Madrid): the Product Owner directed exactly 300 seconds for the Workflow chunk, without alternative-budget experiments; the Controller recorded it on the PR. It records an already selected number and its direct consequences, not a new trade-off.

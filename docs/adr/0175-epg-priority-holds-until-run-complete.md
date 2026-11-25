@@ -107,3 +107,7 @@ Nothing is activated by this record. The implementation card carries the migrati
 ## Follow-ups
 
 This accepted ADR satisfies the architecture gate for the existing [AIR-539](https://trello.com/c/2eYDrWBS). Its code implementation, deterministic race/replay tests, and relevant updates to `docs/reference/orchestration-reliability.md`, `docs/runbooks/monitoring.md`, `docs/runbooks/deployment.md` and the three architecture pages are follow-up work under AIR-539. The D1 migration apply requires a **separate explicit owner GO**. Production acceptance remains contingent on safe verification of a natural EPG run after implementation and deployment.
+
+## Amendment: in-flight chunk bound (AIR-682, 25 November 2026)
+
+The in-flight Discovery chunk that can delay an EPG step is bounded by the Workflow chunk budget, now 300 s (it was the 40 s paged budget); the lease TTL and the soft-busy wait are unchanged. **Approval source for this amendment:** [Controller record of the Product Owner decision, PR #1019 comment](https://github.com/vladimino/iptv-watchlist/pull/1019#issuecomment-7175390465). The status stays Accepted.
