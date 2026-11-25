@@ -1,6 +1,6 @@
 # Identity evidence writer activation and break recording (ADR 0215 decision 4; operator contract of card EC, AIR-637)
 
-**Status:** the operator code and the migration are delivered **dormant**. Migration `0042_identity_evidence_writer_control.sql` is **not applied** (card ECM is a separate production GO) and the first writer, `discovery_decision` (card E2a, AIR-617), is delivered **dormant** in the Discovery decision write (`writeDecisionDelta`, `writeDecisions`); the other writers are cards E2b-E2d. Nothing here authorizes a production operation: **every step below is an owner-approved production operation with its own GO and readback** (L2/L3 of [authorization](../process/authorization-and-escalation.md)). Read the present state live; this page is a contract, not a status.
+**Status:** the operator code and the migration are delivered **dormant**. Migration `0042_identity_evidence_writer_control.sql` is **not applied** (card ECM is a separate production GO) and two writers are delivered **dormant**: `discovery_decision` (card E2a, AIR-617) in the Discovery decision write (`writeDecisionDelta`, `writeDecisions`) and `discovery_owner` (card E2c, [AIR-619](https://trello.com/c/eXzl5TI8)) in the owner write (`commitOwnerWrite`); the other writers are cards E2b and E2d. The E2 writers are activated in one agreed package, each with its own safety and readback gate. Nothing here authorizes a production operation: **every step below is an owner-approved production operation with its own GO and readback** (L2/L3 of [authorization](../process/authorization-and-escalation.md)). Read the present state live; this page is a contract, not a status.
 
 ## What the control is
 
@@ -46,6 +46,13 @@ Delivered dormant inside the Discovery decision write; see [Discovery and resolu
 - An authority hold of the domain needs no step: a held Discovery batch commits nothing, so nothing is missed.
 - Imports (card ER) refuse to start while the matching live writer is `pending`.
 - No operation here creates a Scheduled Task, flips a flag, applies a migration or runs a production writer outside its GO.
+
+## `discovery_owner` specifics (E2c)
+
+- **Code that contains the writer:** every version at or after the E2c merge. Drain evidence for `pending -> on` must show only such versions can commit an owner intent (`commitOwnerWrite`): one deployment at 100% from a commit containing it, and no Discovery Workflow or admin request of an older version still running. Owner writes are interactive single requests, so the proof is the deployment history plus no `discovery_intent` row in `running` created by an older version.
+- **Before `activate`:** migration `0042` must be applied (a batch prepared before it carries a commit-time guard and fails after it). With the control tables absent every owner write commits only inert statements.
+- **A step refused while active** (`conflict`, the intent `approved`) is not an activation failure: it is an issuance without `confirmedAt`. Investigate it; do not lower the writer's state to make it pass.
+- **Rows, not decisions:** the writer records only what the owner stated (assign, reject, scoped revoke, replacement); the canonical claim and every Discovery fence are unchanged, and no reader is switched by activation.
 
 ## Readback after each transition
 

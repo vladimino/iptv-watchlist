@@ -828,7 +828,7 @@ const r2Record=(i,record,over={})=>({source:{kind:'r2_object',key:OBJECT,record:
  assert.deepEqual(mentions,['src/identity-evidence-import.js'],'no other module reads or writes the import tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-import\.js['"]/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(importers,[],'nothing imports the import path: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence-import'),'the Worker bundle does not include the import path (AIR-602 bundles identity-evidence.js, not this module)');
+ assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence-import'),'the Worker bundle does not include the import path');
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0044_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0044');
  }
