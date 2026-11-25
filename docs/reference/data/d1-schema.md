@@ -6,6 +6,8 @@
 
 Versioning and recovery are in [ADR 0001](../../adr/0001-d1-schema-v1.md).
 
+Accepted [ADR 0217](../../adr/0217-source-independent-film-admission.md) (architecture only; **not installed, not live**) plans two additive tables, `film_lid_admission` and `lid_recheck_intent`, as separate migrations applied only under the owner's coordinated pending-migration window and a separately approved apply. Neither exists in the schema contract above until then. The same acceptance needs a separate forward migration that adds the `lid_tmdb_attach` writer to the evidence writer control: the delivered migration `0042` admits five named writers and is never edited.
+
 ## What is stored where
 
 An observation key such as `heat|1995` is a `candidate` row. It is not a `film.id`. `film.id` starts with `film:`. A trusted external id is unique per scheme. `tmdb` holds TMDB movie ids and `tmdb_tv` TMDB TV ids ([ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md), Accepted): the same number in the two schemes is two different entries, and `film.canonical_identity` is `tmdb:<id>` or `tmdb_tv:<id>`. A retired movie id stays as an untrusted `tmdb` row whose `provenance_json` has `status: retired`. A redirect keeps the retired id without creating a second Film. `accepted_tmdb_id` on a score does not reference `film`.
