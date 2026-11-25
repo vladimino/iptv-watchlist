@@ -1,9 +1,9 @@
 # ADR 0220: The identity row created by a ranked title write is a `titleSource` carrier with the neutral status `unresolved`, not an identity verdict
 
-**Status:** Proposed  
-**Original decision date:** 2026-11-25, selected as C1-1 by the Product Owner in chat and [relayed by the Coordinator](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168990950). That relay is a transcription; the durable owner-authored approval link is **not yet recorded** and is required before this ADR can be Accepted or merged (ADR merge gate).  
+**Status:** Accepted  
+**Original decision date:** 2026-11-25 ([Product Owner disposition, recorded by the Delivery Controller on the PR](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7170918491)): option C1-1, selected earlier in the same review and accepted explicitly by the Product Owner in the review chat.  
 **Recorded at:** 2026-11-25, against `main` `7d8d4b3` and PR #1008 HEAD `286d422`  
-**Approval source:** Pending: owner-authored direct approval link, to be added here and in the registry at disposition. Interim record: the relayed selection above.  
+**Approval source:** [Product Owner disposition of 25 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7170918491), conveyed by the Delivery Controller as a PR comment on the owner's explicit instruction (the owner's wording: «я тебе говорю здесь, что все принято. ты передаешь исполнителю через комментарий в ревью. передавай»). Selected option: C1-1. Earlier [relayed selection](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168990950).  
 **Related work:** [AIR-662](https://trello.com/c/P8cCPv1V), [PR #1008](https://github.com/vladimino/iptv-watchlist/pull/1008) (independent review finding P1-3). Narrows Accepted [ADR 0218](0218-film-lifecycle-dimensions-revision.md) decision 5; coordinated with [AIR-660](https://trello.com/c/daGePESx) (parity classification) and [AIR-661](https://trello.com/c/1Rv634jd) (guarded import and retirement, merged as `5e61ab3`).  
 **Supersedes:** In part, one sentence of [ADR 0218](0218-film-lifecycle-dimensions-revision.md) decision 5 ("That row has the current verdict as `status`"). It amends nothing else.  
 **Superseded by:** None
@@ -57,12 +57,11 @@ Code-only and reversible by deploy; rows it wrote stay valid. No flag, schema ap
 
 ## Evidence
 
-- **Original decision:** [relayed selection C1-1](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168990950); [options put to the owner](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168814532) (executor response, P1-3); [review of `9c716b4`](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168269692) and [re-review of `286d422`](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168938794).
+- **Original decision:** [Product Owner disposition recorded by the Controller](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7170918491); [relayed selection C1-1](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168990950); [options put to the owner](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168814532) (executor response, P1-3); [review of `9c716b4`](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168269692) and [re-review of `286d422`](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168938794).
 - **Implementation:** PR #1008 (`IDENTITY_CARRIER_STATUS` in `src/canonical-film-writers.js`).
 - **Dated verification:** 2026-11-25, local fixtures on SQLite (no production reads): the carrier status is identical for a clean Film, a competing claim, an unsettled `tmdb_tv` claim and a retired movie claim; the carrier insert issues no claim read; the carrier classifies as `control` for every derived verdict.
 - **Uncertainty:** the AIR-661 predicates were read at the merged `5e61ab3`; a later change of them would need to keep keying off `titleSource` and the known status list.
 
 ## Follow-ups
 
-- Owner-authored approval link for this ADR and its registry row, before merge.
-- AIR-661: confirm that its fixtures include a carrier row with status `unresolved` once this ADR is Accepted.
+- AIR-661: confirm that its fixtures include a carrier row with status `unresolved`.

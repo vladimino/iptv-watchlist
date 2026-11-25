@@ -7,7 +7,7 @@
 **Related work:** [AIR-644](https://trello.com/c/nFBGvvnU). Builds on Accepted [ADR 0211](0211-catalog-enrichment-producer.md), [ADR 0213](0213-film-identity-evidence-ledger.md), [ADR 0214](0214-film-metadata-per-field-provenance.md), [ADR 0215](0215-identity-evidence-full-model.md) and [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md). Coordinated with PV1 [AIR-631](https://trello.com/c/i8td3wu0) and PVE [AIR-636](https://trello.com/c/0jJADYxg).  
 **Supersedes:** In part, the AIR-42 D1 status and readiness rules listed in [decision 4](#4-readiness) (the stored identity, metadata, fingerprint and prediction status graphs and the domain readiness predicates, for D1 consumers). It amends no other accepted ADR.  
 **Superseded by:** None  
-**Amended by:** Proposed [ADR 0220](0220-identity-row-created-by-ranked-title-write-is-a-titlesource-carrier.md) (decision 5 only: the created identity row is a `titleSource` carrier with the neutral status `unresolved` instead of "the current verdict"; nothing else changes)
+**Amended by:** Accepted [ADR 0220](0220-identity-row-created-by-ranked-title-write-is-a-titlesource-carrier.md) (decision 5 only: the created identity row is a `titleSource` carrier with the neutral status `unresolved` instead of "the current verdict"; nothing else changes)
 
 ## Context
 
