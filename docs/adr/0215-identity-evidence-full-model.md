@@ -1,7 +1,7 @@
 # ADR 0215: The full identity evidence model: each domain step writes its own evidence under its own fence, bare sightings stay in their domains, and history is mapped record by record
 
 **Status:** Proposed  
-**Original decision date:** not decided (owner choices 0215-1 to 0215-7, 0215-8a and 0215-8b are open)  
+**Original decision date:** not decided. The owner selected all nine choices on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622); exact wording on [AIR-616](https://trello.com/c/DZNk9uMJ#comment-6b067f103671a1cae1b82f63)). That is a direction, not the final disposition of this record.  
 **Recorded at:** 2026-11-24. Renumbered from 0214 the same day, because [PR #988](https://github.com/vladimino/iptv-watchlist/pull/988) took that number first.  
 **Approval source:** not yet decided. The owner approved the roadmap card on 24 Nov 2026 ([AIR-616](https://trello.com/c/DZNk9uMJ)); that is not an architecture decision.  
 **Related work:**
@@ -10,7 +10,8 @@
 - The cards this record plans: [AIR-617](https://trello.com/c/IfAZDYDj) (E2a), [AIR-618](https://trello.com/c/4RqJUcyf) (E2b), [AIR-619](https://trello.com/c/eXzl5TI8) (E2c), [AIR-620](https://trello.com/c/Zq9KsXPr) (E2d), [AIR-621](https://trello.com/c/xTwNtXbc) (E3a), [AIR-622](https://trello.com/c/cOVFfEYd) (E3b), [AIR-623](https://trello.com/c/ogwMreGD) (E4a), [AIR-624](https://trello.com/c/g3Ka7qFa) (E4b), [AIR-625](https://trello.com/c/ibrRmnwA) (E5).
 
 **Supersedes:** None. If accepted, it amends [ADR 0213](0213-film-identity-evidence-ledger.md) explicitly, and only here:
-- decision 4 gains a second write path (decision 1 below), and an `alias_bridge` row is keyed by its source reference instead of its root (decision 5, choice 0215-8b);
+- decision 2 gains a method value, `known_alias`, with its place in the ranking of decision 3 left to the owner (decision 5, choice 0215-3 = B and open question Q1);
+- decision 4 gains a second write path (decision 1 below); an `alias_bridge` row is written only with a causal root and uses the standard rooted key (decision 5, choice 0215-8b = C);
 - decision 5: owner precedence follows the source's own causal order within one causal scope, never the ledger `seq` (decision 6 below, choice 0215-8a);
 - decision 6 step 3 imports through a dedicated, manifest-bound path instead of the `identity_evidence` operation (decision 7 below, choice 0215-6).
 
@@ -147,32 +148,32 @@ Aggregate `SELECT` statements only, on the production D1 database. Every query r
 - If such a rollback happens anyway, the interval is broken from the deployment of that version. The operator records the break in the change table, from the deployment history, and sets the writer `off`. A later activation starts again at step 1.
 - An authority hold of the domain needs no step: a held Discovery batch commits nothing, so nothing is missed.
 
-**What coverage means.** The ledger records propositions once per key, not occurrences. Coverage is therefore a guarantee about eligible commits and row existence, not a per-interval observation log:
+**What coverage means.** The ledger records propositions once per key, not occurrences. For the bridge writer, only a claim write with a handed-over root is eligible; a claim write without one is outside coverage by definition. Coverage is therefore a guarantee about eligible commits and row existence, not a per-interval observation log:
 - **Guarantee.** Every eligible commit (a new decision, intent receipt or claim write by that writer's step, decision 5) committed while the writer was `on` has its row present, written by that batch or already present under the same key.
-- **Negative.** If no row with key K exists at read time, then no eligible commit for K happened during any unbroken `on` interval of that writer. That is the only negative a reader may draw.
+- **Negative, per key.** If no row with key K exists at read time, then no eligible commit for K happened during any unbroken `on` interval of that writer. That is the only negative a reader may draw; it is a statement about one key, never an event query over an interval.
 - **Not provided.** A row's `seq` or time does not say which interval saw the proposition: a key first inserted before an interval and committed again inside it gets no new row. A reader may not filter rows by time to conclude anything about one interval. A per-interval or per-occurrence record would be a new decision.
 - **Not "not checked".** A missing row never means that nothing was checked. A decision verified before any interval and never rewritten has no live row; that is inherited state, reported by the reconstruction (decision 7) or as unknown.
 
-**Tests (EC and each E2 card):** absent, `off`, `pending` and `on`; a compare-and-swap race on the control row; a batch of the previous version committing during `pending` (no row, no coverage claimed); a rollback with and without the recorded break; a repeated unchanged decision (no batch, no row); a duplicate key (no second row, assertion passes); a mismatching row under the same key (batch rolls back); a key first inserted before an interval and committed again inside it; an `off`/`on` flip racing a domain batch; each statement count under the cap, on the duplicate and the new-row path.
+**Tests (EC and each E2 card):** a schema without the EC tables (the writer reads it as `off` and inserts nothing; the domain batch is unchanged); recovery from a `pending` left by an interrupted activation (`pending → off`, or `pending → on` only with drain evidence; a repeated `off → pending` is a no-op); absent, `off`, `pending` and `on`; a compare-and-swap race on the control row; a batch of the previous version committing during `pending` (no row, no coverage claimed); a rollback with and without the recorded break; a repeated unchanged decision (no batch, no row); a duplicate key (no second row, assertion passes); a mismatching row under the same key (batch rolls back); a key first inserted before an interval and committed again inside it; an `off`/`on` flip racing a domain batch; each statement count under the cap, on the duplicate and the new-row path.
 
 ### 5. Writer mapping (E2a-E2d)
 
-Vocabulary as in ADR 0213 decisions 1-3. Under the recommended options, no new route, method or relation value is needed.
+Vocabulary as in ADR 0213 decisions 1-3, plus one method value, `known_alias` (choice 0215-3 = B). Adding it is a forward change of the ledger's method CHECK, key helper and tests, delivered by card EC, never by changing E1.
 
 **Table 3. What each future writer writes.**
 
 | Writer (card) | Step | Row | Polarity | Route | Method | `source_root` | Path and batch | Observation time |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `discovery_decision` (E2a) | A decision becomes `verified` with `identitySource: 'tmdb_detail'`, including the revalidation that turns a known alias into a detail check | `candidate_for(discovery_observation:<observation key>, tmdb_movie:<tmdbId>)` (`tmdb_tv` if the media kind is TV) | `asserts` | `discovery_scan` | `tmdb_detail_check` | the observation key | domain; the decision write's batch | `checkedAt` |
-| `discovery_decision` (E2a) | `verified` with `known_epg_alias` | the same proposition | `asserts` | `discovery_scan` | `title_only` (choice 0215-3) | the observation key | domain | `checkedAt` |
-| `discovery_decision` (E2a) | `verified` with `known_alias_year_runtime` | the same proposition | `asserts` | `discovery_scan` | `title_year` (choice 0215-3) | the observation key | domain | `checkedAt` |
+| `discovery_decision` (E2a) | `verified` with `known_epg_alias` | the same proposition | `asserts` | `discovery_scan` | `known_alias`, `source_scope` = `known_epg_alias` | the observation key | domain | `checkedAt` |
+| `discovery_decision` (E2a) | `verified` with `known_alias_year_runtime` | the same proposition | `asserts` | `discovery_scan` | `known_alias`, `source_scope` = `known_alias_year_runtime` | the observation key | domain | `checkedAt` |
 | `discovery_decision` (E2a) | any other status, a deferral, a policy exclusion, the admission and its minting claim | no row | — | — | — | — | — | — |
 | `discovery_owner` (E2c) | an owner intent with an assign effect (confirm, correct, each child of a group assign) | `candidate_for(discovery_observation, tmdb_movie)` | `asserts` | `owner_action` | `owner_statement` | the intent's idempotency key (`ownerIdentity.requestId`) | domain; `commitOwnerWrite` batch, with `source_order` = the history revision (decision 6) | `ownerIdentity.at` |
 | `discovery_owner` (E2c) | `identity_reject` | `candidate_for(discovery_observation, tmdb_movie)` for the rejected id | `refutes` | `owner_action` | `owner_statement` | the intent key | domain | the intent's `confirmedAt` |
 | `discovery_owner` (E2c) | `identity_revoke` | the revoked intent's proposition, with `scope_evidence_key` = that intent's row key (decision 6) | `refutes` (scoped) | `owner_action` | `owner_statement` | the revoke's intent key | domain | the intent's `confirmedAt` |
 | `discovery_owner` (E2c) | reconsider | no row: it reopens resolution and states no identity | — | — | — | — | — | — |
-| `claim_alias_bridge` (E2b) | `pass/proved`, then the write (Diary link, Watchlist link or owner backfill) | `film_has_id(film:<id>, letterboxd_lid:<lid>)` | `asserts` | `ratings_alias_bridge` | `alias_bridge` | the page-check digest **only when the caller hands it over with the link** (decision 5 notes); otherwise null, keyed by `source_ref` = the claim unit's receipt `request_id` in place of the root (choice 0215-8b) | canonical; the `film_external_ids` batch with its receipt | the batch time |
-| `claim_alias_bridge` (E2b) | `already`, `not_proved`, `conflict` | no row: nothing was concluded | — | — | — | — | — | — |
+| `claim_alias_bridge` (E2b) | `pass/proved`, then the write (Diary link, Watchlist link or owner backfill) | `film_has_id(film:<id>, letterboxd_lid:<lid>)` | `asserts` | `ratings_alias_bridge` | `alias_bridge` | the page-check digest handed over by the caller with the link; **no row without it** (choice 0215-8b = C) | canonical; the `film_external_ids` batch with its receipt | the batch time |
+| `claim_alias_bridge` (E2b) | `already`, `not_proved`, `conflict`; or a write without a handed-over root (backfill, replay, pre-A2 link) | no row: nothing concluded, or the write is ineligible for bridge evidence | — | — | — | — | — | — |
 | `tmdb_retirement_decision` (E2d) | an owner `retire` decision is recorded | `same_work(tmdb_movie:<M>, tmdb_tv:<T>)` | `asserts` | `owner_action` | `owner_statement` | the decision's `request_id` | canonical; the `recordRetirementDecision` batch | `confirmation.at` |
 | `tmdb_retirement_decision` (E2d) | an owner `restore` is recorded | one scoped row withdrawing the `same_work` row of the retire named by `supersedes_seq` | `refutes` (scoped) | `owner_action` | `owner_statement` | the restore's `request_id` | canonical; the same batch | `confirmation.at` |
 | `tmdb_retirement_application` (E2d) | an applier installs the trusted `tmdb_tv` claim for a recorded `retire` | `film_has_id(film, tmdb_tv:<T>)` | `asserts` | `owner_action` | `owner_statement` | the applied decision's `request_id` | canonical; **only the applier's own fenced batch**, the one that writes the claim | the batch time |
@@ -180,12 +181,20 @@ Vocabulary as in ADR 0213 decisions 1-3. Under the recommended options, no new r
 **Notes on the mapping.**
 - **A row only for a step that checked.** The Discovery writer inserts its row under the same condition as its history row: only when the decision write records a new decision (a new decision hash). A run that leaves a verified decision unchanged performed no new check and writes nothing (ADR 0213 decision 4, "no verification, no evidence").
 - **One EPG label is one source.** The Discovery root is the observation key (normalized title and year), as ADR 0213 decision 2 already names it. A re-check of the same pair writes nothing (same key). A known-alias row and a detail-check row of the same observation share a root, so they never count as independent of each other.
-- **A bridge root is never guessed.** `linkEvidence` (`src/canonical-letterboxd-claim.js:43`) returns the current authoritative fact key, not the check that established the link, and several checks of one pair may exist. So the claim unit gets a root only by **explicit causal hand-over**: the Diary or Watchlist caller that has just verified and linked the pair passes the page-check digest of that very check with the link event (`src/letterboxd-diary-identity.js:225`, `src/letterboxd-facts.js:693`). A matching `same_work` row is never looked up to fill the root.
-- **One occurrence, one key, whatever the hand-over (choice 0215-8b).** The occurrence is the claim unit's receipt request: `request_id = producerRequestId({event, target, digest})` (`src/canonical-producer-adapters.js`), where the event is `link:<lid>:<tmdb>` or `backfill:<requestId>:<cohort>` and the content digest covers the claim content, not the page digest. So the request id is the same whether or not a retry carries the hand-over.
-  - An `alias_bridge` row is keyed by `source_ref` = that `request_id` **in place of the root**, live or reconstructed. The root is stored as an attribute, outside the key.
-  - **The first committed attempt fixes the root.** A retry with a lost hand-over meets the same key and changes nothing; a later hand-over never adds a root to a row stored without one. An uncertain attempt is settled by the receipt protocol (ADR 0207 decision 3) before any retry.
-  - The same link event for the same target and content is the same occurrence, so a removal and a re-add through an identical event write no new row. Telling them apart would need a new event identity, which this record does not add.
-  - Independence still counts known roots only. A null root is never independent.
+- **Known aliases keep their own method (choice 0215-3 = B).** Alternative known titles carry real weight with localized EPG titles, so they are not folded into `title_only` or `title_year`.
+  - Both variants use `method = known_alias`. The variant is kept in `source_scope` (`known_epg_alias` or `known_alias_year_runtime`), so the two stay distinct rows, are reported separately and can be filtered.
+  - `known_alias` is **never proof**, like every title method.
+  - The row records only what the decision stores: no alias text is invented, because the decision does not keep which alias or slot matched, and no root other than the observation key is set.
+  - Its rank among the methods is **open question Q1** below. Until it is decided, a reader treats `known_alias` as never proof and does not compare it with `title_only` or `title_year`.
+  - Nothing here changes the Discovery algorithm or its alias store.
+- **A bridge root is never guessed.** `linkEvidence` (`src/canonical-letterboxd-claim.js:43`) returns the current authoritative fact key, not the check that established the link, and several checks of one pair may exist. So a root exists only by **explicit causal hand-over**: the Diary or Watchlist caller that has just verified and linked the pair passes the page-check digest of that very check with the link event (`src/letterboxd-diary-identity.js:225`, `src/letterboxd-facts.js:693`). A matching `same_work` row is never looked up to fill the root.
+- **A bridge row only with that root (choice 0215-8b = C).**
+  - With the hand-over, the claim batch writes one row under the standard ADR 0213 key, root included.
+  - Without it (the backfill, a replay, a link made before the ADR 0207 A2 flip, an event without the hand-over), the canonical claim write is unchanged and **ineligible for bridge evidence**. It writes no row. That is neither a refutation nor a coverage failure.
+  - **Receipts are unchanged.** The claim content digest covers the claim content, not the page digest, so the request id and the content digest are the same with or without the hand-over. The evidence insert only joins the batch.
+  - **Lost hand-over on retry.** The first committed attempt decides. If it committed with the hand-over, the row exists. If an uncertain first attempt is settled by the receipt protocol (ADR 0207 decision 3) and the claim was applied without a row, no root is attributed later to that applied claim: the write stays ineligible.
+  - **Re-add.** A new link event with a hand-over writes a row; the same root gives the same key, so a re-add of the same check writes nothing new.
+  - Independence counts known roots only.
 - **A retirement decision is not its application.** `recordRetirementDecision` records the decision and moves the Film revision; it writes no `film_external_id`, canonical identity or dimension (`src/tmdb-retirement-decisions.js:8`). So the decision writer records only what the owner stated: the TMDB movie and the TV entry are the same work. `film_has_id(film, tmdb_tv)` is the canonical effect, and only the batch that installs the claim may write it. A decision that is never applied, or whose application fails, has no `film_has_id` row.
 - **E2d is parked.** No live retirement writer and no applier at `open` exist: `recordRetirementDecision` is not bundled and nothing calls it. E2d can be implemented only together with, or after, an approved live retirement writer and applier, which is a separate product decision not made here. The four existing decisions are covered by reconstruction (decision 7, c4 and c5).
 - **The claim side of an owner revoke (choice 0215-5).** E2c records the scoped withdrawal only, and the canonical claim stays as it is today: an ADR 0178 revoke changes the Discovery decision and its assigned rows, never `film_external_id`. A Discovery claim cannot be attributed to one assign: it carries no observation key, and `discovery_admission.observation_key` is null on every row. Changing a claim on a revoke would be a decision of its own, with its own writer and readers.
@@ -225,7 +234,7 @@ The rules of ADR 0213 decision 6 apply unchanged: nothing is invented, unknowns 
 | # | Source record | Row | Unknowns and limits | Size (L0) |
 | --- | --- | --- | --- | --- |
 | b1 | `verified` decisions and history rows with `identitySource: 'tmdb_detail'` | as E2a; time from the payload `checkedAt`, never from `written_at` | the TMDB response, the matched TMDB title and the durations compared are not stored, and the row needs none of them | 11,708 distinct pairs |
-| b2 | `verified` with `known_epg_alias` or `known_alias_year_runtime` | as E2a (choice 0215-3) | which slot and alias confirmed the match; decisions that rested on an alias key other than the Film's title or original title (222 of 3,790 on 17 Nov 2026, ADR 0158) cannot be told apart from the rest, so all get the same weak method | 4,701 + 11 pairs |
+| b2 | `verified` with `known_epg_alias` or `known_alias_year_runtime` | as E2a: method `known_alias`, variant in `source_scope` (choice 0215-3 = B) | which slot and alias confirmed the match is not stored and is never invented; decisions that rested on an alias key other than the Film's title or original title (222 of 3,790 on 17 Nov 2026, ADR 0158) cannot be told apart from the rest | 4,701 + 11 pairs |
 | b3 | `verified` with no `identitySource` (the R2-era decisions loaded on 4 Nov 2026) | **no row**: method not recorded | reported by count | 1,866 pairs |
 | b4 | owner history rows (`discovery_identity_correct`, `discovery_identity_revoke`) and intent receipts | as E2c; root is the intent key, so the history row and the intent receipt of one action give one row | none expected: both carry the key | 2 (rejects) |
 | b5 | owner actions from before the D1 activation: R2 `admin/actions/discovery_identity_correct/v1/` | as E2c, only when the object states the effect, the movie, the observation and its key; otherwise no row | the count is unknown until the dry run lists the prefix (an L0 R2 list) | unknown |
@@ -238,11 +247,11 @@ The rules of ADR 0213 decision 6 apply unchanged: nothing is invented, unknowns 
 | --- | --- | --- | --- | --- |
 | c1 | trusted minting ids | no row (decision 3) | — | 12,886 `tmdb` + 406 `letterboxd` |
 | c2 | trusted `tmdb` on a Film not minted from it, null provenance | **no row**: method and route not recorded | reported by count; these are the claims whose justification matters most (Follow-ups) | 402 |
-| c3 | trusted `letterboxd` from the claim unit | as E2b, with a **null root** (the page check behind the link is not kept with the claim), keyed by `reconstructed_from` (the claim row's identity). **It is never counted as covered by a live row**, rooted or not: ADR 0213 forbids null-root coverage and this record makes no exception. When exactly one `letterboxd_claim` receipt matches the claim by target and recomputed digest, the report names it as the probable live occurrence; when none or several match, the occurrence is reported as unknown | time from the matching receipt's `settled_at` when it matches by target and a recomputed digest; otherwise null | 9 |
+| c3 | trusted `letterboxd` from the claim unit | **no row** (choice 0215-8b = C): the causal page check behind each claim is not kept with it, and it is never inferred from a receipt or from a matching `same_work` row. Each claim is reported with the reason `bridge_root_unavailable`. This is specific to bridge rows; null-root reconstruction under ADR 0213 stays allowed for other families | reported by count | 9 |
 | c4 | `tmdb_retirement_decision` | as the E2d decision writer: `same_work(tmdb_movie, tmdb_tv)`, and a scoped withdrawal for a restore by `supersedes_seq` | time is `confirmation.at`; `recorded_at` of a loaded row is the load time | 4 |
 | c5 | the trusted `tmdb_tv` rows | `film_has_id(film, tmdb_tv)` as the E2d application, **only** when the row's provenance matches one decision field by field (film, lid, TV id, link, confirmation); otherwise **no row, reported as unattributable**. The untrusted retired `tmdb` rows give no row | when and by which writer it was applied is not recorded: time null | 4 |
 | c6 | `letterboxd_slug` rows | no row: a slug is never identity (ADR 0052) | — | 406 |
-| c7 | canonical receipts on their own | no row: a receipt keeps a digest, not a proposition; used only to date c3 | — | — |
+| c7 | canonical receipts on their own | no row: a receipt keeps a digest, not a proposition | — | — |
 | c8 | `film_redirect` | no row: a merge is not evidence | no reason or actor is recorded | 15 |
 | c9 | the 0001 assertion tables | nothing | empty | 0 |
 
@@ -250,16 +259,23 @@ Family (a), the 714 admissions, keeps the mapping of ADR 0213 decision 6 (card E
 
 **Import path (choice 0215-6 = A, recommended).** Every family imports through one dedicated path, family (a) included. Its unit of approval is an immutable manifest.
 
-1. **Dry run → manifest with a bounded as-of cohort.** The dry run writes nothing in production. It fixes an as-of cohort per source, recorded in the manifest: the exact list of source records (for Discovery history, every `(observation_key, revision)` with `written_at` at or before the cohort time; for intents, every key in `receipt` state; for claims and retirement decisions, the exact rows). It produces the dated coverage report and the manifest: the ordered chunks, each with its source records, their guard fields, the rows to insert and their full semantic identity. The manifest's SHA-256 is printed in the report. **The owner's import GO names that digest**; another digest needs another GO.
-   - **Late arrivals are out of cohort.** A source record added after the cohort time is not imported by this run and does not stop it. After the writer is `on` it is covered live; otherwise a later run with its own cohort takes it. The report states the cohort time.
-2. **Load and seal.** The import operator loads the approved manifest into staging tables (chunk membership, guards, rows), create-only, with `UPDATE` and `DELETE` refused by triggers. It reads them back, recomputes the digest, and only then writes a seal row with that digest, create-only. The run row names the sealed digest, and it must equal the digest of the owner's GO. No chunk runs without the seal.
+1. **Dry run → manifest with a bounded as-of cohort.** The dry run writes nothing in production. It extracts, per source, the exact list of source records at its extraction time and freezes **that list** as the cohort. No cross-store snapshot is claimed, and the sources need not be quiet:
+   - append-only sources (Discovery history): every `(observation_key, revision)` read with `written_at` at or before the cohort time;
+   - mutable sources (intents in `receipt` state, claim rows, retirement decisions): exactly the rows read, each with its guard fields.
+
+   The manifest lists the ordered chunks, each with its source records, their guard fields, the rows to insert and their full semantic identity, `source_order` included. Every `evidence_key` appears once in the whole manifest: when two source records map to one key, the first in manifest order owns it and the others are listed as duplicates in the report. The manifest's SHA-256 is printed in the report. **The owner's import GO names that digest**; another digest needs another GO.
+   - **Late arrivals are out of cohort.** A source record added after extraction is not imported by this run and does not stop it, even if its own timestamp is earlier (a late or backdated record). The post-import reconciliation lists such records, and a later run with its own cohort takes them, unless a live writer already covers them.
+2. **Load and seal.** The import operator loads the approved manifest into staging tables (chunk membership, guards, rows), with `UPDATE` and `DELETE` refused by triggers and a unique index on `(run, evidence_key)`. It reads them back and recomputes the digest. The seal is one batch that asserts no seal exists yet and that the staged counts per chunk equal the manifest's, then writes the seal row with the digest. **After the seal, a trigger refuses every staging insert for that run**, so the sealed content cannot grow. The operator reads the staging back once more after the seal; any difference abandons the run. The run row names the sealed digest, and it must equal the digest of the owner's GO. No chunk runs without the seal.
 3. **Chunks.** Each chunk is one D1 batch. It:
    - asserts the run (state, the live lease of this attempt, the sealed digest) and that `chunk_no` is the next one, as the chunk receipts of ADR 0202 do;
    - **asserts membership and content at commit:** for every staged source record of the chunk, the record exists with exactly its staged guard fields (field equality, including `json_extract` fields; D1 has no SQL hash). A changed or deleted listed record fails the chunk as `source_moved`;
    - inserts **from the staging rows**, not from caller values, with `ON CONFLICT (evidence_key) DO NOTHING`, `origin = reconstruction`, `reconstruction_run` and `reconstructed_from`;
-   - **asserts, for every staged row, that the ledger row with that key now has the staged semantic identity** (proposition, polarity, route, method, root or substitute, `source_scope`, `scope_evidence_key`). A collision therefore fails the whole chunk, before any receipt, and stops the run for owner review;
-   - appends its chunk receipt, create-only, with counts computed in the batch from the actual outcome: rows of this run and chunk present with `reconstruction_run` = this run (inserted) and staged keys owned by another origin or run (covered).
-4. **Coverage.** A staged key already present with the same semantic identity, because a live writer wrote it before or during the import, is covered and counted as such. Null-root rows are never covered by another row (ADR 0213).
+   - **asserts, for every staged row, that the ledger row with that key now has the staged semantic identity**: proposition, polarity, route, method, root (or, for a null root, the `reconstructed_from` substitute), `source_scope`, `scope_evidence_key` and `source_order`. A different or unknown `source_order` on the same key is a collision. A collision fails the whole chunk, before any receipt, and stops the run for owner review;
+   - appends its chunk receipt, create-only, with three counts computed in the batch from the actual outcome:
+     - `inserted`: rows of this run and chunk;
+     - `already_imported`: keys already present from an earlier reconstruction of the same source record (a replay of the same `reconstructed_from`), which is idempotent and never counted as corroboration;
+     - `live_covered`: keys present from a live writer with the same semantic identity.
+4. **Coverage.** Only `live_covered` is coverage. A null-root row is never covered by another row (ADR 0213), and a rooted live row never covers a rootless historical record.
 5. **Unknown outcome and resume.** After a lost response, the chunk receipt decides: present means done, absent means the same chunk is sent again, which is idempotent. A resumed attempt takes a new lease, and a chunk sent under a stale lease fails its run assertion. A listed source record that changed or disappeared stops the run: the owner re-runs the dry run and gives a new GO for the new digest.
 6. **R2 sources cannot be asserted inside D1.** They are eligible only when frozen by contract: `verified-films.json` after the ADR 0207 A2 flip (its guard refuses every later write), and an `admin/actions/` owner record only in its terminal `applied` state, which no code rewrites. The dry run pins each object's ETag in the manifest; the operator re-reads it before the chunk that uses it and stops on a difference. The remaining window between that read and the D1 commit is stated per object in the report and the post-import readback, and is accepted as an individually approved residual risk, or the object is excluded, by the owner's GO. Non-terminal R2 records are excluded and reported.
 7. **Bounds.** At most 50 source records and 200 rows per chunk, within D1's 2,000 statements per batch and 100 binds per statement. Imports refuse to start while the matching live writer is `pending`.
@@ -268,7 +284,7 @@ This replaces "through the `identity_evidence` operation" in ADR 0213 decision 6
 
 **Order.** Families (b) and (c) import after their matching live writers are `on` (E2a and E2c; E2b), so that each history row is checked against live coverage first. The retirement history (c4, c5) needs no live writer.
 
-**Tests (ER):** a guard failing for a changed or deleted listed record; a concurrent addition after the cohort time (not imported, run continues); two concurrent runs; a live insert of the same key during the import; tampering with staged rows before and after the seal; a collision rolling back the chunk with no receipt; a lost response at every step; resume with a stale lease; a manifest digest that differs from the approved one; an R2 ETag change and its residual-window line in the report; chunk bounds; an import attempt while the writer is `pending`.
+**Tests (ER):** a staging insert after the seal refused; a seal racing a late load; a key present twice in a manifest; a replay of the same reconstructed record (`already_imported`); a live row of the same key (`live_covered`); a `source_order` mismatch on one key; a backdated record added after extraction; a guard failing for a changed or deleted listed record; a concurrent addition after the cohort time (not imported, run continues); two concurrent runs; a live insert of the same key during the import; tampering with staged rows before and after the seal; a collision rolling back the chunk with no receipt; a lost response at every step; resume with a stale lease; a manifest digest that differs from the approved one; an R2 ETag change and its residual-window line in the report; chunk bounds; an import attempt while the writer is `pending`.
 
 ### 8. The reader contract (E4)
 
@@ -320,7 +336,7 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 | Activation | absent, `off`, `pending`, `on`; control compare-and-swap race; old-version commit during `pending`; rollback with and without a recorded break | EC, each E2 |
 | Eligibility | a new decision writes a row; an unchanged or repeated decision writes none; a duplicate key writes none; policy exclusion and reconsider write none | E2a, E2c |
 | Owner semantics | assign, reject, replacement of the same and of another candidate, revoke of an assign and of a reject, reinstatement, group children with partial success, forward-referenced withdrawal | E2c, E3b |
-| Bridge root | caller hand-over gives the root; backfill, replay and pre-A2 links give null; matching but unrelated, withdrawn, multiple and missing page checks never give a root; remove and re-add | E2b, E3c |
+| Bridge rows | a rooted first commit writes one rooted row; a rootless first commit (backfill, replay, pre-A2 link, lost hand-over) writes none and leaves the claim write unchanged; a retry after a rooted commit writes nothing new; an uncertain first attempt settled without a row stays rootless; re-add with the same check writes nothing new; matching but unrelated, withdrawn, multiple and missing page checks never give a root; ambiguous history gives no row and a reported reason | E2b, E3c |
 | Retirement | decision without application (no `film_has_id`); application failure; restore by `supersedes_seq`; unattributable historical application reported | E2d, E3c |
 | Historical mapping | each row of Tables 4 and 5, including missing and ambiguous methods (b3, c2), exact owner intents, R2 records in non-terminal states excluded | E3a-E3c |
 | Import | manifest digest bound to the GO; guard failures for changed, added and deleted sources; concurrent live insert; collision; lost response and resume; bounds; R2 ETag change | ER, E3a-E3c |
@@ -332,14 +348,15 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 - **0215-1 B. One canonical receipt for every row, with a new target kind.** It needs a rebuilt `canonical_write_receipt` (SQLite cannot alter a CHECK) and a revision for things that have none, and it moves Film revisions for Discovery's decisions. Not recommended.
 - **0215-1 C. Film-bound rows only.** No row for an observation that never becomes a Film and no owner rejection. It drops exactly the evidence before a Film exists that the owner asked to plan. Not recommended.
 - **0215-2 B. First-sighting `exists` rows** for Watchlist and Diary lids, written in the promotion batch and the fact batch. It needs a new route (`watchlist_scan`) and a new method (`listing`), duplicates durable domain records, and still cannot cover the archive candidates. A reasonable later step if a reader needs it; not recommended now.
-- **0215-3 B. A new method `known_alias`.** More precise than `title_only`, but it extends the closed method list for the same strength tier. **C. No row** for a known alias: it loses the fact that 4,700 decisions rest on title matches alone.
+- **0215-3, selected B: a new method `known_alias`.** A: fold known aliases into `title_only` and `title_year` (loses the distinction the owner needs for localized titles). C: no row (loses the fact that 4,700 decisions rest on known titles alone).
 - **0215-4 B. A Worker environment flag per writer.** It needs a removal card per flag, is not visible in D1, and records no coverage boundary. **C. Active from deploy.** It contradicts the dormant-then-activate shape of the E2 cards and gives no clean coverage start.
 - **0215-5 B. A revoke also removes the claim.** The Discovery claim carries no observation key and every admission's `observation_key` is null, so a revoke cannot know whether a claim rests on the revoked assign. It would also make an evidence writer a canonical writer. Not recommended.
 - **0215-6 B. The dedicated path only for families without a Film;** family (a) keeps the `identity_evidence` operation. Two import mechanisms, and 714 revision moves for history.
 - **0215-8a B. Keep ADR 0213's "higher `seq` wins" among owner rows.** Import order would then decide owner precedence, so a historical action imported late would override a later live one. Not recommended.
 - **0215-8a C. Import history before activating live writers, so `seq` happens to match time.** It forces a fixed order on every family, still fails for R2-era actions and for any re-import, and would make import order part of the meaning. Not recommended.
+- **0215-8b, selected C: a bridge row only with a causal root.** Not chosen: A, keying by the receipt `request_id` (rootless live rows), and B below.
 - **0215-8b B. Keep ADR 0213's key with the root for bridge rows.** The same occurrence would get a different key when a retry loses the hand-over, so one claim could produce two rows that look like two sources. Not recommended.
-- **0215-8b C. Write a bridge row only when a root is handed over.** Stable, but the backfill, replays and pre-A2 links would leave claims without any evidence row, and the gap would look like "no evidence". Possible, at the cost of coverage.
+- **Consequence of C.** The backfill, replays, pre-A2 links and the nine historical claims have no bridge row. That is a stated, bounded gap, not a negative.
 - **No null-root coverage exception is proposed.** Under every 0215-8b option, a rootless row never counts as covered by another row.
 
 ## Consequences
@@ -365,21 +382,31 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 - **Uncertainty:**
   - the number of pre-D1 owner actions in R2 (b5);
   - whether E1's triggers admit domain-path inserts (decision 1);
-  - receipt matching for c3 dating, which a dry run must prove.
+  - whether any historical claim kept a causal root that the survey missed; the E3c dry run lists them, and only a found causal record could change c3.
 
-## Owner choices (open)
+## Owner choices
 
-| # | Choice | Options | Recommendation |
-| --- | --- | --- | --- |
-| 0215-1 | Write path for evidence of a domain step | **A** domain path under the domain's fence; **B** canonical receipt with a new target kind; **C** Film-bound rows only | **A** |
-| 0215-2 | Bare sightings (`exists`) | **A** not stored now, relation reserved, revisit trigger stated; **B** first-sighting rows for Watchlist and Diary lids | **A** |
-| 0215-3 | Discovery known-alias decisions | **A** existing weak methods (`title_only`, `title_year`), never proof; **B** new method `known_alias`; **C** no row | **A** |
-| 0215-4 | Activation of each new writer | **A** a D1 control row per writer with a coverage boundary; **B** Worker flags; **C** active from deploy | **A** |
-| 0215-5 | Claim side of an owner revoke | **A** evidence only, the canonical claim unchanged; **B** the revoke also removes the claim | **A** |
-| 0215-6 | Reconstruction import path | **A** one dedicated path for every family; **B** dedicated path only for families without a Film | **A** |
-| 0215-7 | Delivery graph | **A** as Table 6: new EC, ECM, ER, ERM and E3c; per-writer activation operations; E3b narrowed; E2d parked | **A** |
-| 0215-8a | Owner chronology (amends ADR 0213 decision 5) | **A** precedence by `source_order` within one causal scope, `seq` for insertion only, unknown or incomparable order unresolved; **B** keep "higher `seq` wins"; **C** import history before activating live writers | **A** |
-| 0215-8b | Identity of a bridge row (amends ADR 0213 decision 4) | **A** key by the receipt `request_id` in place of the root, root stored outside the key and fixed by the first commit; **B** keep the root in the key; **C** write a bridge row only when a root is handed over | **A** |
+Selected by the owner on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622)). Final disposition of the revised record is pending.
+
+| # | Choice | Selected |
+| --- | --- | --- |
+| 0215-1 | Write path for evidence of a domain step | **A** domain path under the domain's fence |
+| 0215-2 | Bare sightings (`exists`) | **A** not stored now; relation reserved; revisit trigger stated |
+| 0215-3 | Discovery known-alias decisions | **B** a distinct method `known_alias`, never proof, variant kept in `source_scope` |
+| 0215-4 | Activation of each new writer | **A** a D1 control row per writer, drained activation, recorded breaks |
+| 0215-5 | Claim side of an owner revoke | **A** evidence only; the canonical claim unchanged |
+| 0215-6 | Reconstruction import path | **A** one dedicated, manifest-bound path for every family |
+| 0215-7 | Delivery graph | **A** Table 6: EC, ECM, ER, ERM and E3c; per-writer activation; E3b narrowed; E2d parked |
+| 0215-8a | Owner chronology (amends ADR 0213 decision 5) | **A** precedence by `source_order` within one causal scope; unknown or incomparable order unresolved |
+| 0215-8b | Bridge rows | **C** a row only with a causal page-check root, standard rooted key; no rootless live bridge rows |
+
+**Open question Q1 (new, raised by 0215-3 = B): the rank of `known_alias`.** ADR 0213 decision 3 ranks methods by a fixed order, and a new method needs a place in it. It is never proof under every option.
+- **Q1-a.** Same tier as `title_year` for `known_alias_year_runtime`, and as `title_only` for `known_epg_alias` (the rank follows what each variant matched).
+- **Q1-b.** One tier for both, between `title_year` and `title_only`.
+- **Q1-c.** One tier for both, below `title_only`.
+- **Q1-d.** Leave it unranked until the first reader amendment (E4) needs it; readers meanwhile never compare it.
+
+Executor's recommendation: **Q1-a**, because `known_alias_year_runtime` checked year and runtime and `known_epg_alias` checked title only. Q1-d is the minimal option. The decision is the owner's.
 
 ## Follow-ups
 
@@ -387,6 +414,7 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 - Create the EC, ECM, ER, ERM and E3c cards. Narrow AIR-622 to Discovery and park AIR-620 with its reason.
 - Add each card's real prerequisites as bare URLs in native checklists.
 - Copy the relevant rows of Tables 3-5 into each E2 and E3 card.
+- Record the owner's answer to Q1 in this record before its final disposition.
 
 **Candidate follow-ups, not selected.**
 - A bounded live re-verification of the 402 non-minting TMDB claims by the page check of ADR 0166, which would give them `page_check` evidence.
