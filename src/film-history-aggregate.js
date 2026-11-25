@@ -25,7 +25,11 @@
 //           `over_cap`; the reader here re-checks what was reported). A reader filters at the source with `args` (the authorized ids), so unrelated
 //           entries of a shared document are never materialized.
 //   budget  the request's counted 40-statement budget object; a D1-backed reader charges it and throws {code:'budget_exceeded'} when it cannot pay.
-// `recheck(list)` is REQUIRED: it re-reads every token of `list` after all reads (E1) and answers true only when none moved.
+// `recheck(list, {budget, limits})` is REQUIRED and is a source read like the others: it re-reads the token and status (or absence predicate) of every item
+// of `list` after all reads (E1) and answers {tokens:[{source,key,status,token}], bytes, scanned}; the reader compares them with what it read. It charges the
+// same counted budget and answers within `limits.recheck`; a budget error is the typed `budget_exceeded`, never a "move". The shared ratings fence runs after it.
+// The per-source limits are CONTRACTUAL obligations of the adapters the activation card wires (AIR-651): this module checks what an adapter reports against
+// them, it does not prove that an adapter really stopped before materializing.
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -46,6 +50,8 @@ export const HISTORY_SOURCE_LIMITS=Object.freeze({
  diaryHistory:Object.freeze({maxBytes:8000000,maxScanned:100000}),
  diaryState:Object.freeze({maxBytes:50000,maxScanned:1}),
  predictionVersion:Object.freeze({maxBytes:2000000,maxScanned:1}),
+ // The token readback of the E1 recheck: one token per consumed object, never a body.
+ recheck:Object.freeze({maxBytes:100000,maxScanned:256}),
 });
 export const HISTORY_CHANGED_REASONS=['identity_moved','alias_set_changed','coverage_changed','source_changed'];
 
@@ -100,13 +106,20 @@ export function parseHistoryPage({limit,cursor}={}){
 export function factsFromEvidence(seeds,evidence){
  const byKey=new Map();
  let proven=true;
- const put=(factKey,alias,record,overlaid)=>{
+ const put=(factKey,alias,record,overlaid,source=null)=>{
   const held=byKey.get(factKey);
-  // An overlay is the union of its two records, so it supersedes a plain read of the same target key; two plain reads of one key are the same shared bytes.
-  if(!held||(overlaid&&!held.overlaid))byKey.set(factKey,{factKey,aliases:new Set([...(held?.aliases||[]),alias]),record,overlaid});
-  else held.aliases.add(alias);
+  // An overlay is the union of its records, so it supersedes a plain read of the same target key; two plain reads of one key are the same shared bytes.
+  // Two different migrating sources of one target are merged as the union of both and the target (the overlay is idempotent): no source's events are lost.
+  if(!held||(overlaid&&!held.overlaid))byKey.set(factKey,{factKey,aliases:new Set([...(held?.aliases||[]),alias]),record,overlaid,sources:new Set(overlaid?[source.factKey]:[])});
+  else{
+   held.aliases.add(alias);
+   if(overlaid&&!held.sources.has(source.factKey)){held.record=letterboxdFacts.overlay(source.value,held.record);held.sources.add(source.factKey);}
+  }
  };
- const sound=value=>isObject(value)&&(value.ratingHistory===undefined||Array.isArray(value.ratingHistory));
+ // A fact record the history can use: its history is a list of objects, and a rating, when present, is an object with an explicit `value` member (a number,
+ // or null for a known unrated state). A rating without a value member is not a known state.
+ const sound=value=>isObject(value)&&(value.ratingHistory===undefined||Array.isArray(value.ratingHistory)&&value.ratingHistory.every(isObject))
+  &&(value.rating===undefined||value.rating===null||isObject(value.rating)&&Object.hasOwn(value.rating,'value')&&(value.rating.value===null||finite(value.rating.value)));
  for(const seed of seeds){
   const root=evidence?.seedRoots?.[seed],path=evidence?.paths?.[root],start=evidence?.records?.[root];
   if(root===undefined||!path||!start||!sound(start.value)){proven=false;continue;}
@@ -114,7 +127,7 @@ export function factsFromEvidence(seeds,evidence){
   const hop=path[1],end=hop===undefined?null:evidence.records[hop];
   if(!end||end.kind||!sound(end.value)){proven=false;continue;}
   if(start.kind==='redirect')put(hop,seed,end.value,false);
-  else put(hop,seed,letterboxdFacts.overlay(start.value,end.value),true);
+  else put(hop,seed,letterboxdFacts.overlay(start.value,end.value),true,{factKey:root,value:start.value});
  }
  return {facts:[...byKey.values()].map(item=>({factKey:item.factKey,aliases:[...item.aliases].sort(),record:item.record})).sort((a,b)=>a.factKey<b.factKey?-1:1),proven};
 }
@@ -161,10 +174,11 @@ export function buildAliasHistory({lids=[],movies=[],bundles={},facts:factList=[
   if(record?.rating&&!(record.ratingHistory||[]).length)notes.add('rating_history_starts_after_current_value');
  }
  // The legacy diagnostic log: entries of an authorized storage id only; an entry counts once whatever alias it names.
- (Array.isArray(legacyLog)?legacyLog:[]).forEach((entry,i)=>{
+ for(const entry of Array.isArray(legacyLog)?legacyLog:[]){
   const id=String(entry?.filmId);
-  if(known.has(id)){const event=legacy.legacyRatingEvent(entry,i);add(event,'legacy-log',event.identity,[id]);}
- });
+  // The identity uses the entry's ORIGINAL ordinal in the stored log, so filtering upstream never renumbers an event.
+  if(known.has(id)){const event=legacy.legacyRatingEvent(entry,entry.ordinal);add(event,'legacy-log',event.identity,[id]);}
+ }
  // Diary: every entry of every authorized lid; a candidate lid outside the authorized set is excluded and named.
  for(const entry of Object.values(diary?.history?.entries||{})){
   const lid=entry?.identity?.type==='letterboxd_lid'?entry.identity.value:null;
@@ -228,13 +242,21 @@ function reasonOf(error){
 }
 const unavailableHistory=(reason,extra={})=>({history:{status:'unavailable',reason,token:null,tokenStatus:'unavailable',...extra}});
 const nonNegative=value=>Number.isInteger(value)&&value>=0;
+const finite=value=>typeof value==='number'&&Number.isFinite(value);
+const optional=(value,test)=>value===undefined||value===null||test(value);
+const text=value=>typeof value==='string';
+// A stored prediction record: the value that the history reports must be a number; the lineage fields of later writers stay optional.
+const predictionRecord=record=>isObject(record)&&finite(record.predictedRating)&&optional(record.probability4Plus,finite)&&optional(record.confidence,text)&&optional(record.generatedAt,text);
+// The recognized stored shapes. An envelope that holds nothing the history can read (`{}`, a bundle with neither member) is not a source: it is invalid.
 const SHAPES={
- predictions:value=>isObject(value)&&(value.history===undefined||Array.isArray(value.history)&&value.history.every(isObject))&&(value.current==null||isObject(value.current)),
- legacyLog:value=>Array.isArray(value)&&value.every(isObject),
- profile:isObject,
- diaryHistory:value=>isObject(value)&&(value.entries===undefined||isObject(value.entries)),
- diaryState:isObject,
+ predictions:value=>isObject(value)&&(Object.hasOwn(value,'current')||Object.hasOwn(value,'history'))&&optional(value.current,predictionRecord)&&(value.history===undefined||Array.isArray(value.history)&&value.history.every(predictionRecord)),
+ // Entries carry their ORIGINAL ordinal in the stored log (a reader that filters keeps it), unique, so an event never changes identity with the filter.
+ legacyLog:value=>Array.isArray(value)&&value.every(entry=>isObject(entry)&&Number.isInteger(entry.ordinal)&&entry.ordinal>=0)&&new Set(value.map(entry=>entry.ordinal)).size===value.length,
+ profile:value=>isObject(value)&&optional(value.version,finite)&&optional(value.profileHash,text),
+ diaryHistory:value=>isObject(value)&&isObject(value.entries)&&Object.values(value.entries).every(isObject),
+ diaryState:value=>isObject(value)&&text(value.lastOutcome),
 };
+const VERSION_STATUSES=['linked','missing','mismatch','invalid','unreadable','none'];
 const READERS={predictions:'predictionBundle',legacyLog:'legacyLog',profile:'profile',diaryHistory:'diaryHistory',diaryState:'diaryState'};
 // One source answer, checked against the contract. A broken contract (no usable token, no counts, counts over the limits, an unknown status) is a typed
 // failure of the whole history, never an empty source. A recorded value of the wrong shape is `invalid`.
@@ -247,8 +269,16 @@ function accepted(source,result,limits){
  return !SHAPES[source](result.value)?{status:'invalid',token,value:null}:{status,token,value:result.value};
 }
 
+// The token readback of the recheck must name exactly the objects that were read, with the same status and token, within its limits.
+function readbackMatches(expected,readback,limits){
+ if(!isObject(readback)||!Array.isArray(readback.tokens)||!nonNegative(readback.bytes)||!nonNegative(readback.scanned))throw new SourceFailure('history_source_unavailable','recheck');
+ if(readback.bytes>limits.maxBytes||readback.scanned>limits.maxScanned)throw new SourceFailure('history_source_over_cap','recheck');
+ const flat=list=>list.map(item=>JSON.stringify([item?.source,item?.key,item?.status,item?.token])).sort();
+ return JSON.stringify(flat(expected))===JSON.stringify(flat(readback.tokens));
+}
+
 // The sections reader. `sources`: predictionBundle({storageId}), legacyLog({storageIds}), profile({}), diaryHistory({lids}), diaryState({}),
-// predictionVersion({storageId, record}) (page events only, optional) and recheck(list) (required); see the source contract above.
+// predictionVersion({storageId, record}) (page events only, optional) and recheck(list, {budget, limits}) (required); see the source contract above.
 async function readHistorySection(env,resolution,budget,sources,page){
  const set=authorizedAliases(resolution);
  // A cursor of another canonical survivor never applies, whatever else this request can or cannot read; a Film without an authorized alias never issued one.
@@ -330,19 +360,27 @@ async function readOpenHistory(resolution,budget,sources,page,set,ratings,fence)
   if(typeof sources.predictionVersion==='function'){
    const limits=HISTORY_SOURCE_LIMITS.predictionVersion;
    const result=await sources.predictionVersion({storageId:held.storageId,record},{budget,limits});
-   if(!isObject(result)||typeof result.status!=='string'||typeof result.token!=='string'||!result.token.length||!nonNegative(result.bytes)||!nonNegative(result.scanned)||result.bytes>limits.maxBytes||result.scanned>limits.maxScanned)
+   if(!isObject(result)||typeof result.status!=='string'||typeof result.token!=='string'||!result.token.length||!nonNegative(result.bytes)||!nonNegative(result.scanned))
     throw new SourceFailure('history_source_unavailable','predictionVersion');
-   checked=result;checks.push({source:'predictionVersion',key:record.r2Key??held.storageId,status:result.status,token:result.token});
+   if(result.status==='over_cap'||result.bytes>limits.maxBytes||result.scanned>limits.maxScanned)throw new SourceFailure('history_source_over_cap','predictionVersion');
+   if(!VERSION_STATUSES.includes(result.status))throw new SourceFailure('history_source_unavailable','predictionVersion');
+   // Only `linked` certifies a pointer, and only when it names the very pointer and hash this record carries.
+   const named=(!record.r2Key||result.r2Key===record.r2Key)&&(!record.contentSha256||result.contentSha256===record.contentSha256);
+   checked={...result,status:result.status==='linked'&&!named?'invalid':result.status};
+   checks.push({source:'predictionVersion',key:record.r2Key??held.storageId,status:result.status,token:result.token});
   }
   event.version=checked?{status:checked.status,r2Key:checked.r2Key??null,contentSha256:checked.contentSha256??null}
    :{status:'unchecked',r2Key:legacy.historyValue(record,'r2Key'),contentSha256:legacy.historyValue(record,'contentSha256')};
-  if(['missing','mismatch','invalid','unchecked'].includes(event.version.status))versionProblem=true;
+  if(event.version.status!=='linked')versionProblem=true;
  }
- // E1: the coverage reads (which fence the shared fact records) and EVERY source token, version evidence included, are re-read after ALL reads; a
- // difference is `generation_moved`, never a mixed answer. A recheck that is absent was refused above; a recheck that does not say true is a move.
- let held=false;
- try{held=(await fence())&&(await sources.recheck(plain([...list,...checks])))===true;}catch{held=false;}
- if(!held)return unavailableHistory('generation_moved');
+ // E1: every source token, version evidence included, is read back AFTER all reads through the same counted, bounded read interface, and the shared ratings
+ // fence (which fences the fact records) runs AFTER that phase, so a document that moves during the readback is caught. A budget error of the readback is the
+ // typed `budget_exceeded` (it propagates), never a "move"; a readback that differs from what was read is `generation_moved`.
+ const expected=plain([...list,...checks]);
+ const readback=await sources.recheck(expected,{budget,limits:HISTORY_SOURCE_LIMITS.recheck});
+ const same=readbackMatches(expected,readback,HISTORY_SOURCE_LIMITS.recheck);
+ const ratingsHeld=await fence();
+ if(!same||!ratingsHeld)return unavailableHistory('generation_moved');
 
  const unreadable=list.some(item=>item.status==='unreadable'||item.status==='invalid');
  const next=page.offset+page.limit<built.events.length?encodeHistoryCursor(page.offset+page.limit,tokens):null;

@@ -87,22 +87,25 @@ function sourcesOf(s,{unreadable=[],invalid={},fail=null,versions=null,recheck,o
  };
  const live=(kind,value)=>value==null?'absent:'+kind+':authority-g1':tokenOf(value);
  const current=item=>({predictions:()=>live('predictions',s.bundles[item.key]),legacyLog:()=>live('legacyLog',s.legacy),profile:()=>live('profile',s.profile),diaryHistory:()=>live('diaryHistory',s.diary),diaryState:()=>live('diaryState',s.diaryState)})[item.source]();
+ // The token readback of the E1 recheck under its contract: the token and status of every item, within its limits.
+ const readback=list=>({tokens:list.map(item=>item.status==='unreadable'?item:{source:item.source,key:item.key,status:item.status,token:item.source==='predictionVersion'?(s.versionTokens[item.key]??item.token):current(item)}),bytes:100,scanned:list.length});
  const out={
   async predictionBundle({storageId}){
    if(fail==='prediction'){const e=new Error('boom');e.code='prediction_domain_unreadable';throw e;}
    const whole=s.bundles[storageId];return wrap('predictions',whole,whole,whole?(whole.history?.length||0)+(whole.current?1:0):0);
   },
-  async legacyLog({storageIds}){return wrap('legacyLog',s.legacy,(s.legacy||[]).filter(e=>storageIds.includes(String(e.filmId))),(s.legacy||[]).length);},
+  async legacyLog({storageIds}){const all=(s.legacy||[]).map((e,i)=>({...e,ordinal:i}));return wrap('legacyLog',s.legacy,all.filter(e=>storageIds.includes(String(e.filmId))),all.length);},
   async profile(){return wrap('profile',s.profile,s.profile,1);},
   async diaryHistory({lids}){
    const entries=Object.entries(s.diary?.entries||{});
    return wrap('diaryHistory',s.diary,s.diary&&{...s.diary,entries:Object.fromEntries(entries.filter(([,e])=>lids.includes(e?.identity?.value)))},entries.length);
   },
   async diaryState(){return wrap('diaryState',s.diaryState,s.diaryState,1);},
-  async recheck(list){return list.every(item=>item.status==='unreadable'||item.source==='predictionVersion'?(s.versionTokens[item.key]??item.token)===item.token:current(item)===item.token);},
+  async recheck(list){return readback(list);},
   ...(versions?{predictionVersion:versions}:{}),
   put(){throw new Error('history must not write');},delete(){throw new Error('history must not delete');},
  };
+ out.readback=readback;
  if(recheck!==undefined)out.recheck=recheck;
  for(const name of omit)delete out[name];
  return out;
@@ -388,16 +391,33 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
   const out=await history(file,'tmdb_5',s,{limit:100,source});
   assert.deepEqual([out.body.history.status,out.body.history.reason],['unavailable','source_recheck_missing']);
  }
- // A recheck that does not say exactly true, or throws, is a move.
- for(const recheck of [async()=>undefined,async()=>false,async()=>{throw new Error('x');},async()=>'true']){
+ // The readback is a source read under the same contract: a malformed answer or a throw (other than a budget error) is a typed source failure, never a move.
+ for(const recheck of [async()=>undefined,async()=>false,async()=>true,async()=>({}),async()=>({tokens:'x',bytes:0,scanned:0}),async()=>({tokens:[],bytes:-1,scanned:0}),async()=>{throw new Error('x');}]){
   const out=await history(file,'tmdb_5',s,{limit:100,source:{recheck}});
+  assert.deepEqual([out.http,out.body.history.status,out.body.history.reason],[200,'unavailable','history_source_unavailable'],String(recheck));
+ }
+ // A readback that over-reports its work is over its cap.
+ const base=sourcesOf(s);
+ const heavy=await history(file,'tmdb_5',s,{limit:100,source:{recheck:async list=>({...base.readback(list),bytes:HISTORY_SOURCE_LIMITS.recheck.maxBytes+1})}});
+ assert.equal(heavy.body.history.reason,'history_source_over_cap');
+ const many=await history(file,'tmdb_5',s,{limit:100,source:{recheck:async list=>({...base.readback(list),scanned:HISTORY_SOURCE_LIMITS.recheck.maxScanned+1})}});
+ assert.equal(many.body.history.reason,'history_source_over_cap');
+ // A readback that differs from what was read, in token, status, missing or extra items, is a move.
+ for(const alter of [list=>list.map((item,i)=>i===0?{...item,token:'other'}:item),list=>list.map((item,i)=>i===0?{...item,status:'missing'}:item),list=>list.slice(1),list=>[...list,{source:'predictions',key:'zz',status:'recorded',token:'t'}]]){
+  const out=await history(file,'tmdb_5',s,{limit:100,source:{recheck:async list=>{const r=base.readback(list);return {...r,tokens:alter(r.tokens)};}}});
   assert.deepEqual([out.body.history.status,out.body.history.reason],['unavailable','generation_moved']);
  }
- // The recheck receives every consumed token: each prediction bundle, the legacy log, the profile and both Diary objects.
- let seen=null;
- await history(file,'tmdb_5',s,{limit:100,source:{recheck:async list=>{seen=list;return true;}}});
+ // The readback receives the request's real budget object and its limits, and every consumed token: each prediction bundle, the legacy log, the profile and both Diary objects.
+ let seen=null,ctxSeen=null;
+ await history(file,'tmdb_5',s,{limit:100,source:{recheck:async(list,ctx)=>{seen=list;ctxSeen=ctx;return base.readback(list);}}});
  assert.deepEqual(seen.map(i=>i.source).sort(),['diaryHistory','diaryState','legacyLog','predictions','predictions','predictions','profile']);
- assert.ok(seen.every(i=>typeof i.token==='string'&&i.token.length));
+ assert.ok(seen.every(i=>typeof i.token==='string'&&i.token.length&&typeof i.status==='string'));
+ assert.equal(typeof ctxSeen.budget.take,'function');assert.deepEqual(ctxSeen.limits,HISTORY_SOURCE_LIMITS.recheck);
+ // A missing source is read back with its absence predicate and status, so "still absent" is verified, not assumed.
+ let missingSeen=null;
+ const absent={...s,diary:null,diaryState:null};
+ await history(file,'tmdb_5',absent,{limit:100,source:{recheck:async list=>{missingSeen=list.filter(i=>i.status==='missing');return sourcesOf(absent).readback(list);}}});
+ assert.deepEqual(missingSeen.map(i=>[i.source,i.token.startsWith('absent:')]).sort(),[['diaryHistory',true],['diaryState',true]]);
 }
 {
  // Version evidence is inside the fence: a version reader that moves a source (or a ratings document) is caught; the version tokens are rechecked too.
@@ -419,9 +439,21 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  const noToken=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),token:''})}});
  assert.equal(noToken.body.history.reason,'history_source_unavailable');
  const over=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),bytes:HISTORY_SOURCE_LIMITS.predictionVersion.maxBytes+1})}});
- assert.equal(over.body.history.reason,'history_source_unavailable');
+ assert.equal(over.body.history.reason,'history_source_over_cap');
  const mismatch=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),status:'mismatch'})}});
  assert.deepEqual([mismatch.body.history.status,mismatch.body.history.reason],['partial','version_unverified']);
+ // Only `linked` certifies a pointer: every other recognized verdict is page-local partial, `over_cap` and an unrecognized verdict are typed failures, and a
+ // `linked` that names another pointer or hash is invalid.
+ for(const status of ['missing','invalid','unreadable','none']){
+  const out=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),status})}});
+  assert.deepEqual([out.body.history.status,out.body.history.reason],['partial','version_unverified'],status);
+ }
+ assert.equal((await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),status:'over_cap'})}})).body.history.reason,'history_source_over_cap');
+ for(const status of ['weird','LINKED','',42,null])assert.equal((await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),status})}})).body.history.reason,'history_source_unavailable',String(status));
+ for(const wrong of [{r2Key:'enrichment/films/other/versions/x.json'},{contentSha256:'d'.repeat(64)},{r2Key:undefined},{contentSha256:undefined}]){
+  const out=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),...wrong})}});
+  assert.deepEqual([out.body.history.status,out.body.history.reason,out.body.history.events.find(e=>e.identity==='a1|prediction|current|0').version.status],['partial','version_unverified','invalid'],JSON.stringify(wrong));
+ }
  // Without a version reader the pointer is `unchecked`, never `linked` or `none`; versions are read for the events of the page only.
  const unchecked=await history(file,'tmdb_5',s,{limit:100});
  assert.deepEqual([unchecked.body.history.status,unchecked.body.history.events.find(e=>e.identity==='a1|prediction|current|0').version.status],['partial','unchecked']);
@@ -468,6 +500,16 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  assert.equal(out.http,200);
  assert.equal(out.body.sectionsUnavailable,undefined);
  assert.deepEqual([out.body.identity.verdict,out.body.history.status,out.body.history.reason],['found','unavailable','budget_exceeded']);
+ // The recheck readback charges the same budget: exhausting it there is the typed budget_exceeded (not a move), with the identity fence still run.
+ const greedyRecheck={...base,async recheck(list,ctx){while(ctx.budget.take(1));const e=new Error('budget');e.code='budget_exceeded';throw e;}};
+ const outRecheck=await history(file,'tmdb_5',s,{limit:100,sources:greedyRecheck});
+ assert.equal(outRecheck.http,200);
+ assert.equal(outRecheck.body.sectionsUnavailable,undefined);
+ assert.deepEqual([outRecheck.body.identity.verdict,outRecheck.body.history.status,outRecheck.body.history.reason],['found','unavailable','budget_exceeded']);
+ // A fact document that changes during the readback is caught by the shared ratings fence, which runs after the readback.
+ const changingRecheck={...base,async recheck(list,ctx){putRecord(file,'tmdb-5',{letterboxd:'a1',tmdb:'5'},{rating:{value:2,observedAt:d(26),source:'owner',observationId:'late'},ratingHistory:[rating('changed','late',2,26)]});return base.recheck(list,ctx);}};
+ const outChanging=await history(file,'tmdb_5',s,{limit:100,sources:changingRecheck});
+ assert.deepEqual([outChanging.http,outChanging.body.history.status,outChanging.body.history.reason],[200,'unavailable','generation_moved']);
  // The sources receive the request's real budget object and their limits.
  let ctxSeen=null;
  await history(file,'tmdb_5',s,{limit:100,sources:{...base,async profile(args,ctx){ctxSeen=ctx;return base.profile(args,ctx);}}});
@@ -481,7 +523,7 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  // An exception while assembling (here: a record whose field throws) is the typed history unavailable, not the generic sectionsUnavailable, and the
  // ratings fence reservation is consumed: the identity fence still passes and the statement count equals the success path.
  const {file,s}=fixture();
- const bomb={current:null,history:[{get generatedAt(){throw new Error('bomb');}}]};
+ const bomb={current:null,history:[{predictedRating:3,get generatedAt(){throw new Error('bomb');}}]};
  const tweak=(k,o)=>k==='predictions'&&o.value&&o.value.history.length===2?{...o,value:bomb}:o;
  const failed=await history(file,'tmdb_5',s,{limit:100,source:{tweak}});
  assert.equal(failed.http,200);assert.equal(failed.body.sectionsUnavailable,undefined);
@@ -494,7 +536,7 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
 {
  const {file,s}=fixture();
  // A recorded object of the wrong shape (or a null body) is invalid, never an empty bundle: partial, the field unknown.
- for(const bad of [null,[],'text',{history:'x'},{history:[1]},{current:5}]){
+ for(const bad of [null,[],'text',{history:'x'},{history:[1]},{current:5},{},{history:[]}.history,{current:{},history:[]},{current:{predictedRating:'4'},history:[]},{current:{predictedRating:Number.NaN},history:[]},{current:null,history:[{predictedRating:3,probability4Plus:'x'}]},{current:{predictedRating:4,confidence:5},history:[]},{current:{predictedRating:4,generatedAt:20260901},history:[]}]){
   const h=(await history(file,'tmdb_5',s,{limit:100,source:{invalid:{predictions:bad}}})).body.history;
   assert.deepEqual([h.status,h.reason],['partial','source_unreadable'],JSON.stringify(bad));
   assert.equal(h.current.prediction.status,'unknown',JSON.stringify(bad)+': no current prediction is certified');
@@ -511,6 +553,68 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  // Verified missing is "nothing recorded": with complete coverage and a complete Diary the current values are absent.
  const none=await history(world(),'tmdb_5',state(),{limit:100});
  assert.deepEqual([none.body.history.status,none.body.history.current.prediction.status,none.body.history.current.rating.status],['present','absent','absent']);
+}
+{
+ // The recognized stored envelopes, not only primitive objects: a Diary history without entries, a Diary state without an outcome, a profile of the wrong
+ // types and a legacy log whose entries carry no (or a repeated) original ordinal are invalid and never certify a complete history.
+ const {file,s}=fixture();
+ for(const [kind,bad] of [['diaryHistory',{}],['diaryHistory',{schemaVersion:1}],['diaryHistory',{entries:[]}],['diaryHistory',{entries:{k:1}}],['diaryState',{}],['diaryState',{coverage:{reachedEnd:true}}],['diaryState',{lastOutcome:7}],
+  ['profile',{version:'1'}],['profile',{profileHash:5}],['legacyLog',[{filmId:'a1'}]],['legacyLog',[{filmId:'a1',ordinal:0},{filmId:'a2',ordinal:0}]],['legacyLog',[{filmId:'a1',ordinal:-1}]]]){
+  const h=(await history(file,'tmdb_5',s,{limit:100,source:{invalid:{[kind]:bad}}})).body.history;
+  assert.deepEqual([h.status,h.reason],['partial','source_unreadable'],kind+' '+JSON.stringify(bad));
+ }
+ // A Diary history of `{}` with a complete state does not certify present (it is not a recognized envelope); an empty `entries` object does.
+ const emptyEntries=await history(file,'tmdb_5',{...s,diary:{entries:{}}},{limit:100});
+ assert.equal(emptyEntries.body.history.status,'present');
+ // Optional legacy fields stay optional: a bare stored prediction and a profile without a hash are valid.
+ const bare={...s,bundles:{...s.bundles,a1:{current:{predictedRating:3.5},history:[{predictedRating:3}]}},profile:{}};
+ assert.equal((await history(file,'tmdb_5',bare,{limit:100})).body.history.status,'present');
+ // Known values stay visible with partial proof: an invalid bundle does not hide the conflict of the readable ones.
+ const part=(await history(file,'tmdb_5',s,{limit:100,source:{tweak:(k,o)=>k==='predictions'&&o.value&&o.value.history.length===2?{...o,value:{current:{},history:[]},status:'recorded'}:o}})).body.history;
+ assert.equal(part.status,'partial');
+ assert.equal(part.current.prediction.status,'partial');
+ assert.deepEqual(part.current.prediction.values.length,1,'the readable alias value is visible, not certified');
+}
+{
+ // Fact records: a rating needs an explicit `value` member (a number, or null for a known unrated state); anything else is unproven.
+ const ev=(rating_)=>({seedRoots:{'letterboxd:a1':'k'},paths:{k:['k']},records:{k:{etag:'e',value:record('k',{letterboxd:'a1'},{rating:rating_,ratingHistory:[]}),hop:null,kind:null}}});
+ for(const bad of [{},{value:'bad'},{value:Number.NaN},{value:undefined},{observedAt:d(1)},[],'x',5])assert.equal(factsFromEvidence(['letterboxd:a1'],ev(bad)).proven,false,JSON.stringify(bad));
+ for(const good of [undefined,null,{value:null},{value:3.5,observedAt:d(1)}])assert.equal(factsFromEvidence(['letterboxd:a1'],ev(good)).proven,true,JSON.stringify(good));
+ assert.equal(factsFromEvidence(['letterboxd:a1'],{...ev(null),records:{k:{...ev(null).records.k,value:{...ev(null).records.k.value,ratingHistory:[1]}}}}).proven,false,'a history entry that is not an object');
+ // Integration: a stored record whose rating has no value member is unproven; an explicit null value is a known unrated state, present with value null.
+ const bad=world({lids:['a1'],facts:{'tmdb-5':{links:{letterboxd:'a1',tmdb:'5'},extra:{rating:{},ratingHistory:[]}}}});
+ const hb=(await history(bad,'tmdb_5',state(['a1']),{limit:100})).body.history;
+ assert.deepEqual([hb.status,hb.reason,hb.current.rating.status],['partial','ratings_facts_unproven','unknown']);
+ const unrated=world({lids:['a1'],facts:{'tmdb-5':{links:{letterboxd:'a1',tmdb:'5'},extra:{rating:{value:null,observedAt:d(3),source:'owner',observationId:'u'},ratingHistory:[]}}}});
+ const hu=(await history(unrated,'tmdb_5',state(['a1']),{limit:100})).body.history;
+ assert.deepEqual([hu.status,hu.current.rating.status,hu.current.rating.values[0].value],['present','present',null]);
+}
+{
+ // Two distinct migrating sources of one target: the union of both and the target, no silent loss; the same source reached twice changes nothing.
+ const rec=(key,observation,value,day,extra={})=>({value:record(key,{letterboxd:'a1',tmdb:'5'},{ratingHistory:[rating('changed',observation,value,day)],rating:{value,observedAt:d(day),source:'owner',observationId:observation},...extra}),etag:key+'-e',hop:extra.migrating?.to??null,kind:extra.migrating?'migrating':null});
+ const evidence={seedRoots:{'letterboxd:a1':'s1','letterboxd:a2':'s2','tmdb:5':'s1'},paths:{s1:['s1','t'],s2:['s2','t']},
+  records:{s1:rec('s1','m1',3,2,{migrating:{to:'t'}}),s2:rec('s2','m2',4,3,{migrating:{to:'t'}}),t:rec('t','m3',4.5,5)}};
+ const out=factsFromEvidence(['letterboxd:a1','letterboxd:a2','tmdb:5'],evidence);
+ assert.equal(out.proven,true);
+ assert.equal(out.facts.length,1);
+ assert.deepEqual(out.facts[0].aliases,['letterboxd:a1','letterboxd:a2','tmdb:5']);
+ const events=buildAliasHistory({lids:['a1','a2'],facts:out.facts,coverageComplete:true}).events.filter(e=>e.type==='rating').map(e=>e.identity.split('|').slice(1,4).join('|')).sort();
+ assert.deepEqual(events,['rating|a|m1','rating|a|m2','rating|a|m3'],'both sources and the target');
+ assert.equal(factsFromEvidence(['tmdb:5','letterboxd:a1'],evidence).facts[0].record.ratingHistory.length,2,'one source reached through two seeds is one overlay');
+}
+{
+ // The legacy log keeps the ORIGINAL ordinal of an entry in the stored log: filtering upstream never renumbers, so an event does not change identity when
+ // another alias precedes it.
+ const built=buildAliasHistory({lids:['a2'],legacyLog:[{filmId:'a2',ordinal:7,observedAt:d(8),before:1,after:2,source:'scan'}],coverageComplete:true});
+ assert.deepEqual(built.events.map(e=>e.identity),['legacy-log|legacy|7']);
+ const {file,s}=fixture();
+ const h=(await history(file,'tmdb_5',s,{limit:100})).body.history;
+ assert.deepEqual(h.events.filter(e=>e.type==='legacy_rating').map(e=>[e.identity,e.storageIds[0]]),[['legacy-log|legacy|0','a1'],['legacy-log|legacy|1','a2'],['legacy-log|legacy|2','tmdb_5']]);
+ // A Film that only knows tmdb_5 sees the same identity for the same entry.
+ const only=world({lids:[],links:{'tmdb:5':'tmdb-5'},facts:{'tmdb-5':{links:{tmdb:'5'}}}});
+ const so=state([]);so.legacy=s.legacy;
+ const ho=(await history(only,'tmdb_5',so,{limit:100})).body.history;
+ assert.deepEqual(ho.events.filter(e=>e.type==='legacy_rating').map(e=>e.identity),['legacy-log|legacy|2']);
 }
 {
  // Diary completeness: a partial state, a missing state or a missing history is never a complete history.
