@@ -18,7 +18,7 @@ const LetterboxdFacts={
   if(input.expectedVersion==='atomic-off'){throw Object.assign(new Error('x'),{code:'atomic_unavailable'});}
   if(input.expectedVersion==='full')return {state:'backlog_full',results:{a:'backlog_full'}};
   if(input.expectedVersion!=='v1')return {state:'stale_revision',results:{}};
-  return {state:'applied',results:Object.fromEntries(input.lids.map(l=>[l,'requeued'])),version:'v2',entries:Object.fromEntries(input.lids.map(l=>[l,input.doc==='backlog'?{attempts:0}:{attempts:0,reason:input.action==='dismiss'?'owner_dismissed':'owner_requeued'}]))};},
+  return {state:'applied',results:Object.fromEntries(input.lids.map(l=>[l,'requeued'])),version:'v2',entries:Object.fromEntries(input.lids.map(l=>[l,input.createMissing?null:{attempts:0,reason:input.action==='dismiss'?'owner_dismissed':'owner_requeued'}])),backlog:Object.fromEntries(input.lids.map(l=>[l,input.createMissing&&input.action==='requeue'?{attempts:0}:null]))};},
 };
 const ledgerRows=new Map([['withEntry',{lid:'withEntry',state:'pending',attempts:0,lastReason:'owner_requeued'}]]);
 const WatchlistD1={
@@ -71,9 +71,9 @@ assert.equal(ok.body.readback.proven,true,'both sides read back');
 // the Watchlist lane: the row tokens go to the plan, the shared document version is the CAS
 const rows=[{lid:'withEntry',state:'terminal',attempts:6,updatedAt:'t1'}];
 const ledger=await post({action:'requeue',lane:'watchlist_admission',lids:['withEntry'],why:'w',rows,version:'v1'});
-assert.equal(ledger.status,200);assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(c=>c[0]==='plan').at(-1)[1].rows)),rows);assert.equal(calls.at(-1)[1].doc,'diary');
-// the backlog lane writes the backlog document
-const bk=await post({action:'requeue',lane:'diary_backlog',lids:['a'],why:'w',version:'v1'});assert.equal(bk.status,200);assert.equal(calls.at(-1)[1].doc,'backlog');
+assert.equal(ledger.status,200);assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(c=>c[0]==='plan').at(-1)[1].rows)),rows);assert.equal(calls.at(-1)[1].createMissing,false);
+// the report lane may create a backlog record for an id found nowhere; every lane commits the same document
+const bk=await post({action:'requeue',lane:'diary_backlog',lids:['a'],why:'w',version:'v1'});assert.equal(bk.status,200);assert.equal(calls.at(-1)[1].createMissing,true);assert.equal(bk.body.readback.proven,true);
 // a store that cannot batch refuses the whole request, a full backlog is a 409 with nothing committed, a closed ledger plans nothing
 assert.deepEqual(await post({...body,version:'atomic-off'}),{status:503,body:{error:'atomic_unavailable'}});
 const full=await post({...body,lane:'diary_backlog',version:'full'});assert.equal(full.status,409);assert.equal(full.body.committed,false);

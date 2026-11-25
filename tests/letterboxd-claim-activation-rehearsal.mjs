@@ -300,7 +300,7 @@ const settle = async () => {await new Promise(resolve => setTimeout(resolve, 50)
   await Facts.applyDiaryEvidence(env, [{lid: 'Ri2', watchedDate: '2026-11-23', rating: 3, ratingState: 'rated', sourceRef: 'diary:viewing:12'}]);
   page('Ri2', 'rehearsal-i2-2012', '910012', 'Rehearsal I2', 2012);
   let writes = 0;
-  fault = statements => {if (identityWrites(statements) && ++writes === 2) throw new Error('D1_ERROR: handoff write lost');};
+  fault = statements => {if (identityWrites(statements) && ++writes === 3) throw new Error('D1_ERROR: handoff write lost');};
   claimMode.calls = 0; claimMode.hang = true;
   const killed = Identity.resolve(env, [{lid: 'Ri2', slug: 'rehearsal-i2-2012'}], opts());
   for (let i = 0; i < 200 && claimMode.calls === 0; i++) await settle();
@@ -308,7 +308,7 @@ const settle = async () => {await new Promise(resolve => setTimeout(resolve, 50)
   const entry = await pending('Ri2');
   assert.deepEqual([entry?.reason, entry?.tmdb], ['linking', '910012'], 'the link intent survived the lost handoff write');
   assert.deepEqual(claimOf('Ri2'), []);
-  const next = await Identity.resolve(env, [], opts(NOW + 60000));
+  const next = await Identity.resolve(env, [], opts(NOW + 6 * 60000)); // after the cut-off step's check reservation expired
   assert.equal(next.counts.repaired, 1); assert.equal(next.counts.claim, 'complete');
   assert.equal(claimOf('Ri2').length, 1); assert.equal(await pending('Ri2'), undefined);
 }
@@ -318,7 +318,7 @@ const settle = async () => {await new Promise(resolve => setTimeout(resolve, 50)
   await Facts.applyDiaryEvidence(env, [{lid: 'Ri3', watchedDate: '2026-11-23', rating: 5, ratingState: 'rated', sourceRef: 'diary:viewing:13'}]);
   page('Ri3', 'rehearsal-i3-2013', '910013', 'Rehearsal I3', 2013);
   let writes = 0;
-  fault = statements => {if (identityWrites(statements) && ++writes === 3) throw new Error('D1_ERROR: final pending write lost');};
+  fault = statements => {if (identityWrites(statements) && ++writes === 4) throw new Error('D1_ERROR: final pending write lost');};
   const out = await Identity.resolve(env, [{lid: 'Ri3', slug: 'rehearsal-i3-2013'}], opts());
   fault = null;
   assert.equal(out.counts.persistFailed, 1); assert.equal(claimOf('Ri3').length, 1, 'the claim was written');

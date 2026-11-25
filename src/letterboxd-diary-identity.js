@@ -13,6 +13,9 @@ const LetterboxdDiaryIdentity=(()=>{
  const CLAIM_REASON='claim_pending';
  const STEP_LIMIT=3,MAX_ATTEMPTS=6,STEP_BUDGET_MS=40000,WRITE_RESERVE_MS=15000;
  const HOUR=3600000,MINUTE=60000;
+ // AIR-599 (review of PR #1009): the exclusive ownership of ONE source check. Before it reaches the source a step reserves the id on the shared entry (a `reservation` with its check id and an expiry). Another step skips a reserved id
+ // (`in_flight`), so one reservation means at most one real check; a crash leaves a reservation that simply expires; every write of the holder is bound to the reserved entry, so an owner action in between voids it.
+ const RESERVATION_MS=5*MINUTE;
  const LID=/^[A-Za-z0-9_-]{1,80}$/,SLUG=/^[a-z0-9-]{1,200}$/,TMDB=/^[1-9]\d{0,11}$/;
  const iso=ms=>new Date(ms).toISOString();
  // AIR-599 / ADR 0207 decision 4b: ONE classifier for both callers of the check (the Ratings Diary phase and the Watchlist admission step).
@@ -22,7 +25,7 @@ const LetterboxdDiaryIdentity=(()=>{
  //  definite   any other answer that disagrees or cannot be used: +1 attempt, review backoff; owner review at the cap
  //  settled    verified and admitted / present, or dismissed by the owner
  const TRANSPORT_REASONS=new Set(['forbidden','challenge','rate_limited','timeout','network_error','upstream_5xx','tmdb_unavailable','upstream_cooldown']);
- const NOT_NOW_REASONS=new Set(['deferred','unavailable','admission_closed','admission_unavailable','in_flight','admission_skipped','admission_held','diary_cap','epoch_fenced','persist_failed','owner_requeued','entry_changed']);
+ const NOT_NOW_REASONS=new Set(['deferred','unavailable','admission_closed','admission_unavailable','in_flight','admission_skipped','admission_held','diary_cap','epoch_fenced','persist_failed','owner_requeued','entry_changed','checking']);
  const GONE_REASONS=new Set(['not_found']);
  const SETTLED_REASONS=new Set(['verified','linked','owner_dismissed']);
  function classify(reason){
@@ -136,13 +139,11 @@ const LetterboxdDiaryIdentity=(()=>{
  async function resolve(env,items,{clock=()=>Date.now(),remaining=()=>Infinity,fetchImpl=fetch,route='ratings_diary'}={}){
   const counts={considered:0,bridged:0,verified:0,repaired:0,pending:0,deferred:0,skipped:0,checked:0,transport:0,notNow:0,gone:0,definite:0,atCap:0,capRefused:0,backlogFull:0},labels=new Map(),outcomes=new Map();
   const now=clock(),ISO_TIME=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
-  const page=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,{lid:item.lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:true,queuedAt:ISO_TIME.test(String(item.queuedAt||''))?item.queuedAt:iso(now),seed:Number.isInteger(item.attempts)&&item.attempts>0?Math.min(item.attempts,MAX_ATTEMPTS):0}])).values()];
+  const page=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,{lid:item.lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:true,queuedAt:ISO_TIME.test(String(item.queuedAt||''))?item.queuedAt:iso(now),seed:Number.isInteger(item.attempts)&&item.attempts>0?Math.min(item.attempts,MAX_ATTEMPTS):0,reason:typeof item.reason==='string'&&item.reason?item.reason.slice(0,60):null}])).values()];
   const notNowAll=reason=>{for(const item of page)outcomes.set(item.lid,{checked:false,class:'not_now',reason,retryAt:null,attempts:null,streak:null,terminal:false});};
   let stored;
   try{stored=await LetterboxdFacts.readDiaryIdentity(env);}catch{notNowAll('unavailable');return {labels,outcomes,counts:{...counts,skipped:page.length}};}
-  let backlog=null;
-  if(typeof LetterboxdFacts.readDiaryBacklog==='function'){try{backlog=(await LetterboxdFacts.readDiaryBacklog(env)).doc;}catch{backlog=null;}}
-  const backlogIds=backlog&&backlog.ids&&typeof backlog.ids==='object'?backlog.ids:{};
+  const backlogIds=stored.backlog&&typeof stored.backlog==='object'?stored.backlog:{};
   const onPage=new Set(page.map(item=>item.lid));
   // An id waiting in the backlog keeps the queue time it had there.
   for(const item of page)if(backlogIds[item.lid]){if(ISO_TIME.test(String(backlogIds[item.lid].queuedAt||''))&&String(backlogIds[item.lid].queuedAt)<item.queuedAt)item.queuedAt=backlogIds[item.lid].queuedAt;item.fromBacklog=true;item.seed=Math.max(item.seed||0,Number(backlogIds[item.lid].attempts)||0);}
@@ -151,7 +152,8 @@ const LetterboxdDiaryIdentity=(()=>{
   const claimDue=entry=>entry&&entry.reason===CLAIM_REASON&&TMDB.test(String(entry.tmdb||''))&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now;
   const first=entry=>!!(repair(entry)||claimDue(entry));
   const queuePos=entry=>String(entry?.queuedAt||entry?.lastAttemptAt||entry?.nextAttemptAt||'');
-  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&entry.reason!=='owner_dismissed'&&(claimDue(entry)||(repair(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)))
+  const reservedActive=entry=>!!entry&&!!entry.reservation&&Date.parse(entry.reservation.until)>now;
+  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&entry.reason!=='owner_dismissed'&&!reservedActive(entry)&&(claimDue(entry)||(repair(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)))
    .sort(([,x],[,y])=>first(x)!==first(y)?(first(x)?-1:1):queuePos(x)<queuePos(y)?-1:queuePos(x)>queuePos(y)?1:0).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false,queuedAt:queuePos(entry)}));
   // The capacity of the document: every entry it may not evict (all but `owner_dismissed`) holds a place.
   const cap=Number.isInteger(LetterboxdFacts.DIARY_IDENTITY_CAP)?LetterboxdFacts.DIARY_IDENTITY_CAP:200;
@@ -163,7 +165,7 @@ const LetterboxdDiaryIdentity=(()=>{
    .slice(0,Math.max(0,Math.min(slots,STEP_LIMIT*2))).map(([lid,item])=>({lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:false,fromBacklog:true,queuedAt:String(item.queuedAt||iso(now)),seed:Math.min(MAX_ATTEMPTS,Math.max(0,Number(item.attempts)||0))}));
   const order=item=>{const prior=stored.films[item.lid];return {first:first(prior)?0:1,pos:prior?queuePos(prior):item.queuedAt};};
   const wanted=[...page,...due,...intake].map((item,index)=>({item,index,...order(item)})).sort((x,y)=>x.first-y.first||(x.pos<y.pos?-1:x.pos>y.pos?1:0)||x.index-y.index).map(entry=>entry.item);
-  if(!wanted.length){if(backlogRemove.length)await LetterboxdFacts.updateDiaryBacklog(env,{remove:backlogRemove}).catch(()=>null);return {labels,outcomes,counts};}
+  if(!wanted.length){if(backlogRemove.length)await LetterboxdFacts.updateDiaryIdentity(env,{backlogRemove,expectBacklog:Object.fromEntries(backlogRemove.map(lid=>[lid,JSON.stringify(backlogIds[lid])])),expect:Object.fromEntries(backlogRemove.map(lid=>[lid,JSON.stringify(stored.films[lid])]))}).catch(()=>null);return {labels,outcomes,counts};}
   let links;
   try{links=await LetterboxdFacts.diaryLinks(env,wanted.map(item=>item.lid));}catch{notNowAll('unavailable');return {labels,outcomes,counts:{...counts,skipped:wanted.length}};}
   const set={},clear=[],claimPairs=[],checked=new Set(),settled=new Map();let fetched=0,stopped=false,gate=null;
@@ -172,6 +174,9 @@ const LetterboxdDiaryIdentity=(()=>{
   // while this step waited on the source is therefore never overwritten by a stale absolute replacement (that outcome is `entry_changed`: not now, no attempt).
   const base=new Map(Object.entries(stored.films).map(([id,entry])=>[id,JSON.stringify(entry)]));
   const expectOf=lids=>Object.fromEntries([...lids].map(lid=>[lid,base.get(lid)??null]));
+  // The backlog records as this step read them, and the check reservations this step holds.
+  const baseB=Object.fromEntries(Object.entries(backlogIds).map(([id,record])=>[id,JSON.stringify(record)]));
+  const mine=new Map();
   try{gate=await CanonicalCatalogReader.catalogReaderGate(env);}catch{gate=null;}
   const open=!!gate&&gate.mode==='d1'&&gate.state==='open';
   const newCheckId=()=>typeof crypto!=='undefined'&&typeof crypto.randomUUID==='function'?crypto.randomUUID():String(now)+':'+Math.random().toString(36).slice(2);
@@ -183,7 +188,7 @@ const LetterboxdDiaryIdentity=(()=>{
    let attempts=before,streak=streakBefore,next=now,checkId=cur?.checkId||null;
    if(intent||cls==='not_now'){/* no attempt, place kept, due at the next run */}
    else if(cls==='transport'){streak=streakBefore+1;next=now+transportDelayMs(streak);}
-   else{attempts=before+1;streak=0;next=now+reviewDelayMs(attempts);checkId=newCheckId();}
+   else{attempts=before+1;streak=0;next=now+reviewDelayMs(attempts);checkId=cur?.reservation?.checkId||newCheckId();}
    set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{})};
    counts.pending++;
   };
@@ -201,7 +206,7 @@ const LetterboxdDiaryIdentity=(()=>{
   // after a partial commit leaves an entry that a later ordinary step repairs (review of PR #720). If it cannot be written, nothing is written (fail closed). No attempt is charged here.
   const intend=async(item,tmdb)=>{
    const cur=stored.films[item.lid]||null;
-   const value={reason:'linking',class:'intent',slug:item.slug||null,tmdb:String(tmdb),attempts:Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streak:Number(cur?.streak)||0,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route};
+   const value={reason:'linking',class:'intent',slug:item.slug||null,tmdb:String(tmdb),attempts:Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streak:Number(cur?.streak)||0,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route,...(cur?.reservation?{reservation:cur.reservation}:{})};
    try{
     const out=await LetterboxdFacts.updateDiaryIdentity(env,{set:{[item.lid]:value},expect:expectOf([item.lid])});
     if(out?.refused?.includes(item.lid)||out?.conflicts?.includes(item.lid))return false;
@@ -220,11 +225,27 @@ const LetterboxdDiaryIdentity=(()=>{
    if(claimLive)set[lid]={reason:CLAIM_REASON,class:'intent',slug:null,tmdb:String(tmdb),attempts:0,streak:0,queuedAt:(cur&&queuePos(cur))||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now)};
    else clear.push(lid);
   };
+  // The reservation (see RESERVATION_MS): one compare-and-swap that, for an id taken from the backlog or new to the document, also creates its entry and removes its backlog record, bound to what this step read of BOTH.
+  // -> 'ok' | 'conflict' (the entry or backlog record moved: an owner action, another caller's check or intake) | 'refused' (no place: the id stays in the backlog) | 'error'.
+  const reserve=async(item,prior)=>{
+   const lid=item.lid,eff=Math.max(Number(prior?.attempts)||0,item.seed||0),fromBacklog=Object.hasOwn(baseB,lid);
+   const reservation={checkId:newCheckId(),until:iso(now+RESERVATION_MS),route};
+   const entry=prior?{...prior,attempts:eff,slug:item.slug||prior.slug||null,reservation}:{reason:'checking',class:'not_now',slug:item.slug||null,attempts:eff,streak:0,queuedAt:item.queuedAt||iso(now),lastAttemptAt:null,nextAttemptAt:iso(now),route,reservation};
+   try{
+    const out=await LetterboxdFacts.updateDiaryIdentity(env,{set:{[lid]:entry},expect:expectOf([lid]),expectBacklog:{[lid]:baseB[lid]??null},backlogRemove:fromBacklog?[lid]:[],backlogOnRefuse:{[lid]:{slug:item.slug||null,queuedAt:item.queuedAt||iso(now),attempts:eff}}});
+    if(out?.conflicts?.includes(lid))return 'conflict';
+    if(out?.refused?.includes(lid))return 'refused';
+    stored.films[lid]=entry;base.set(lid,JSON.stringify(entry));delete baseB[lid];mine.set(lid,reservation.checkId);
+    return 'ok';
+   }catch{counts.persistFailed=1;return 'error';}
+  };
   for(const item of wanted){
    const lid=item.lid,own=links.get(lid)||{};
    const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
    // The film slug of the same Diary row is kept on the shared entry: a caller that has none (a pruned first-seen snapshot) never turns it into `slug_missing`.
    if(!item.slug&&typeof prior?.slug==='string'&&SLUG.test(prior.slug))item.slug=prior.slug;
+   // Another step holds this id's check reservation: it is neither checked nor written by this one (an expired reservation, left by a crashed step, is free).
+   if(reservedActive(prior)&&!mine.has(lid)){counts.deferred++;outcomes.set(lid,{checked:false,class:'not_now',reason:'in_flight',retryAt:prior.reservation.until,attempts:attempts,streak:Number(prior.streak)||0,terminal:false});continue;}
    // Already linked: nothing to check. A pending entry on a linked id is a bridge that failed after the alias and the record link were committed (review of PR #720):
    // the committed projection is repaired (no outbound request, no admission, no new fact) and the entry is cleared only when that succeeded.
    if(own.tmdb){
@@ -256,9 +277,16 @@ const LetterboxdDiaryIdentity=(()=>{
     continue;
    }
    // Not due (backoff, or at the attempt cap): left as it is; the outcome is the stored entry (copied by the Watchlist ledger, never charged again).
-   if(prior&&(attempts>=MAX_ATTEMPTS||Date.parse(prior.nextAttemptAt)>now)){
+   // The cap applies to the EFFECTIVE count: the entry's, the caller's row budget and the backlog record's, whichever is larger. At the cap nothing is requested; the count is held on the entry so that every store agrees.
+   const eff=Math.max(attempts,item.seed||0);
+   if(!prior&&eff>=MAX_ATTEMPTS){
+    if(place(item)){set[lid]={reason:String(item.reason||'at_cap').slice(0,64),class:'definite',slug:item.slug||null,attempts:eff,streak:0,queuedAt:item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route};counts.deferred++;}
+    continue;
+   }
+   if(prior&&(eff>=MAX_ATTEMPTS||Date.parse(prior.nextAttemptAt)>now)){
+    if(eff>attempts&&!set[lid])set[lid]={...prior,attempts:eff};
     // An intent whose alias never committed is an ordinary source retry: at the cap it stops being served as a repair.
-    if(attempts>=MAX_ATTEMPTS&&LINK_REASONS.has(prior.reason))set[lid]={...prior,...(set[lid]||{}),reason:'link_interrupted',class:'definite'};
+    if(eff>=MAX_ATTEMPTS&&LINK_REASONS.has(prior.reason))set[lid]={...prior,...(set[lid]||{}),reason:'link_interrupted',class:'definite'};
     if(item.onPage&&item.slug&&prior.slug!==item.slug)set[lid]={...prior,...(set[lid]||{}),slug:item.slug};
     counts.deferred++;continue;
    }
@@ -282,6 +310,13 @@ const LetterboxdDiaryIdentity=(()=>{
    // 2. A bounded source check, only for an id that is due and only while the lease leaves room.
    if(!item.slug){record(item,'slug_missing');continue;}
    if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS){defer(item,prior);continue;}
+   // Exclusive ownership of this check before any request (see RESERVATION_MS): at most one real check per reservation, whatever else runs.
+   {
+    const taken=await reserve(item,stored.films[lid]||null);
+    if(taken==='conflict'){counts.entryChanged=(counts.entryChanged||0)+1;outcomes.set(lid,{checked:false,class:'not_now',reason:'entry_changed',retryAt:null,attempts:null,streak:null,terminal:false});continue;}
+    if(taken==='refused'){counts.capRefused++;outcomes.set(lid,{checked:false,class:'not_now',reason:'diary_cap',retryAt:null,attempts:item.seed||0,streak:0,terminal:false});continue;}
+    if(taken==='error'){counts.deferred++;continue;}
+   }
    fetched++;counts.checked++;checked.add(lid);
    let outcome;
    try{outcome=await checkOne(env,item,{clock,fetchImpl,remaining});}catch(error){outcome={state:'pending',reason:'check_failed'};}
@@ -311,8 +346,18 @@ const LetterboxdDiaryIdentity=(()=>{
   let persisted=true,refused=[],conflicted=[];
   // A real check that reached the source and got an answer (gone, definite or settled; not a transport stop) is the Monitor's proof of progress.
   const answered=[...checked].some(lid=>settled.has(lid)||(set[lid]&&['gone','definite'].includes(classify(set[lid].reason))));
-  try{const clearNow=clear.filter(lid=>stored.films[lid]);const out=await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clearNow,expect:expectOf([...Object.keys(set),...clearNow]),...(answered?{checkedAt:iso(now)}:{})});refused=Array.isArray(out?.refused)?out.refused:[];conflicted=Array.isArray(out?.conflicts)?out.conflicts:[];counts.entryChanged=conflicted.length||undefined;}catch{counts.persistFailed=1;persisted=false;}
-  for(const lid of refused){const item=wanted.find(candidate=>candidate.lid===lid);backlogAdd[lid]={slug:item?.slug||null,queuedAt:item?.queuedAt||iso(now),attempts:item?.seed||0};counts.capRefused++;}
+  // The backlog ids that now have an entry (this step's, or one that already existed) leave it in the same write, bound to the record this step read.
+  for(const item of wanted)if(Object.hasOwn(baseB,item.lid)&&!backlogAdd[item.lid]&&(set[item.lid]||settled.has(item.lid)||stored.films[item.lid]))backlogRemove.push(item.lid);
+  {
+   const removeNow=[...new Set(backlogRemove)].filter(lid=>Object.hasOwn(baseB,lid));
+   const hints=Object.fromEntries(wanted.map(item=>[item.lid,{slug:item.slug||null,queuedAt:item.queuedAt||iso(now),attempts:item.seed||0}]));
+   try{
+    const clearNow=clear.filter(lid=>stored.films[lid]);
+    const out=await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clearNow,backlogAdd,backlogRemove:removeNow,backlogOnRefuse:hints,expect:expectOf([...Object.keys(set),...clearNow,...removeNow]),expectBacklog:Object.fromEntries([...Object.keys(backlogAdd),...removeNow].map(lid=>[lid,baseB[lid]??null])),...(answered?{checkedAt:iso(now)}:{})});
+    refused=Array.isArray(out?.refused)?out.refused:[];conflicted=Array.isArray(out?.conflicts)?out.conflicts:[];counts.entryChanged=(counts.entryChanged||0)+conflicted.length||undefined;counts.backlogFull+=Array.isArray(out?.full)?out.full.length:0;
+   }catch{counts.persistFailed=1;persisted=false;}
+  }
+  for(const lid of refused)counts.capRefused++;
   // The explicit outcome of every id this step was asked about (and of the ids it serviced on its own).
   for(const item of wanted){
    const lid=item.lid;
@@ -327,11 +372,6 @@ const LetterboxdDiaryIdentity=(()=>{
    if(n>=MAX_ATTEMPTS&&cls!=='settled'&&checked.has(lid))counts.atCap++;
    if(checked.has(lid)){const key=cls==='not_now'||cls==='intent'?'notNow':cls;counts[key]=(counts[key]||0)+1;}
    outcomes.set(lid,{checked:checked.has(lid),class:cls,reason:entry.reason,retryAt:entry.nextAttemptAt??null,attempts:n,streak:Number(entry.streak)||0,terminal:n>=MAX_ATTEMPTS&&cls!=='settled',...(entry.checkId&&checked.has(lid)?{checkId:entry.checkId}:{})});
-  }
-  // The backlog: refused ids are kept recoverable; ids that now have an entry (or were settled) leave it. A full backlog is counted (`backlog_full`).
-  for(const item of wanted)if(item.fromBacklog&&!backlogAdd[item.lid]&&(persisted&&(set[item.lid]||settled.has(item.lid))||stored.films[item.lid]))backlogRemove.push(item.lid);
-  if((Object.keys(backlogAdd).length||backlogRemove.length)&&typeof LetterboxdFacts.updateDiaryBacklog==='function'){
-   try{const out=await LetterboxdFacts.updateDiaryBacklog(env,{add:backlogAdd,remove:[...new Set(backlogRemove)]});counts.backlogFull+=Array.isArray(out?.full)?out.full.length:0;}catch{counts.persistFailed=1;}
   }
   // ADR 0184: the canonical Letterboxd claim of the ids whose Ratings link is now durable (after the facts and the settled pending document). Never throws, never delays the rating or the Event.
   // INACTIVE (the module's activation constant is off): nothing is requested and nothing is stored. ACTIVE: an id whose claim is not proved (refused, unknown, deferred, failed, not attempted for budget or cap) keeps a bounded

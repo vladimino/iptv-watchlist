@@ -486,8 +486,8 @@ export async function dueAdmissions(source,{now=Date.now(),limit=3,ageBefore=nul
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  const cap=Math.min(Math.max(Number.isInteger(limit)?limit:3,1),20);
- const shape=row=>({lid:row.lid,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),firstSeenAt:row.first_seen_at??null,attempts:Number(row.attempts),lastReason:row.last_reason});
- const COLUMNS='a.lid AS lid, a.first_seen_snapshot_id AS first_seen_snapshot_id, a.first_seen_version AS first_seen_version, a.attempts AS attempts, a.last_reason AS last_reason, s.committed_at AS first_seen_at';
+ const shape=row=>({lid:row.lid,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),firstSeenAt:row.first_seen_at??null,attempts:Number(row.attempts),lastReason:row.last_reason,updatedAt:row.updated_at});
+ const COLUMNS='a.lid AS lid, a.first_seen_snapshot_id AS first_seen_snapshot_id, a.first_seen_version AS first_seen_version, a.attempts AS attempts, a.last_reason AS last_reason, a.updated_at AS updated_at, s.committed_at AS first_seen_at';
  try{
   const rows=await many(db,"SELECT "+COLUMNS+" FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND (a.next_retry_at IS NULL OR a.next_retry_at<=?) ORDER BY a.first_seen_version, a.lid LIMIT ?",[iso(now),cap]);
   const total=Number((await one(db,"SELECT COUNT(*) AS n FROM watchlist_admission_pending WHERE state='pending'"))?.n);
@@ -529,10 +529,13 @@ export async function admissionInventory(source,{filter='open',after=null,limit=
 // One ledger transition of a `pending` row: still pending with a new retry time (a rate limit does not count an attempt: the caller passes the unchanged count), `resolved` with the writer's receipt
 // reference, or `terminal` (no further automatic retry). Guarded by the authority and the caller's own guards. A row that is no longer pending is left alone (`already`).
 // -> {ok:true,state} | {ok:true,already:true} | {ok:false,reason}
-export async function settleAdmission(source,{lid,state,attempts,nextRetryAt=null,reason=null,resolvedBy=null,now=Date.now()},ctx={}){
+// AIR-599 (review of PR #1009): `expect: {attempts, updatedAt}` is the token of the row as the caller READ it. With it the transition is installed only while the row still holds that token (a fence fails the batch otherwise:
+// `{ok:false,reason:'conflict'}`), so a step that finished its check while an owner `requeue` or `dismiss` changed the row cannot overwrite the owner's decision.
+export async function settleAdmission(source,{lid,state,attempts,nextRetryAt=null,reason=null,resolvedBy=null,now=Date.now(),expect=null},ctx={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  if(typeof lid!=='string'||!lid||!['pending','resolved','terminal'].includes(state)||!Number.isInteger(attempts)||attempts<0)return {ok:false,reason:'shape'};
+ if(expect!==null&&(!Number.isInteger(expect.attempts)||typeof expect.updatedAt!=='string'||!expect.updatedAt))return {ok:false,reason:'shape'};
  if(state==='resolved'&&(typeof resolvedBy!=='string'||!resolvedBy||resolvedBy.length>200))return {ok:false,reason:'shape'};
  if(nextRetryAt!==null&&!Number.isFinite(Date.parse(nextRetryAt)))return {ok:false,reason:'shape'};
  const extra=callerGuards(ctx);
@@ -541,7 +544,8 @@ export async function settleAdmission(source,{lid,state,attempts,nextRetryAt=nul
  if(gate.state!=='d1')return {ok:false,reason:'closed'};
  if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
  const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
-  ["UPDATE watchlist_admission_pending SET state=?, attempts=?, next_retry_at=?, last_reason=?, resolved_by=?, updated_at=? WHERE lid=? AND state='pending'",[state,attempts,state==='pending'?nextRetryAt:null,reason==null?null:String(reason).slice(0,60),state==='resolved'?resolvedBy:null,iso(now),lid]]]);
+  ["UPDATE watchlist_admission_pending SET state=?, attempts=?, next_retry_at=?, last_reason=?, resolved_by=?, updated_at=? WHERE lid=? AND state='pending'"+(expect?' AND attempts=? AND updated_at=?':''),[state,attempts,state==='pending'?nextRetryAt:null,reason==null?null:String(reason).slice(0,60),state==='resolved'?resolvedBy:null,iso(now),lid,...(expect?[expect.attempts,expect.updatedAt]:[])]],
+  ...(expect?[[FENCE,[]]]:[])]);
  if(outcome!=='ok')return {ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
  try{const row=await one(db,'SELECT state FROM watchlist_admission_pending WHERE lid=?',[lid]);return row?.state===state?{ok:true,state}:{ok:true,already:true};}catch{return {ok:false,reason:'unavailable'};}
 }

@@ -6,7 +6,7 @@
 // The contract is docs/reference/domain/identity-work-inventory.md and ADR 0170.
 const IDENTITY_WORK_CURSOR_MAX=6000;
 const IDENTITY_WORK_ADMISSION_CAP=5000;
-const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/imports/<archiveSha256>/rated-candidates.json','letterboxd/imports/ (delimiter list)','film_rated_admission (D1)','watchlist_admission_pending (D1)','letterboxd/facts/scans/diary-identity.json (Ratings documents)','letterboxd/facts/scans/diary-identity-backlog.json (Ratings documents)'];
+const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/imports/<archiveSha256>/rated-candidates.json','letterboxd/imports/ (delimiter list)','film_rated_admission (D1)','watchlist_admission_pending (D1)','letterboxd/facts/scans/diary-identity.json (Ratings documents)'];
 
 function identityWorkPinOf(registryToken,limboPin){
  return ['I1',encodeURIComponent(registryToken),encodeURIComponent(limboPin??'')].join('|');

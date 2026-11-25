@@ -68,14 +68,14 @@ const pendingOf = async (env, lid) => (await Facts.readDiaryIdentity(env)).films
   await Facts.applyDiaryEvidence(env, [{lid: 'Dd1a', watchedDate: '2026-11-17', rating: 4, ratingState: 'rated', sourceRef: 'diary:viewing:7'}]);
   assert.deepEqual(viewRow(db, 'Dd1a'), {watched: 1, actual_rating: 4}); assert.equal(viewRow(db, 'tmdb_900140'), null);
   add('Dd1a', 'fixture-dd1a-2001', '900140', 'Fixture Dd1a', 2001);
-  fault.record = 'Dd1a'; fault.identityWrites = 1;
+  fault.record = 'Dd1a'; fault.identityWrites = 2;
   const first = await Identity.resolve(env, [{lid: 'Dd1a', slug: 'fixture-dd1a-2001'}], opts());
   fault.record = null; fault.identityWrites = null;
   assert.equal(first.counts.persistFailed, 1);
   const intent = await pendingOf(env, 'Dd1a'); assert.equal(intent.reason, 'linking'); assert.equal(intent.tmdb, '900140');
   assert.equal((await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value['tmdb:900140'], 'lb-Dd1a', 'the alias committed');
   assert.equal(viewRow(db, 'tmdb_900140'), null, 'the projection is missing after the partial commit');
-  const later = await Identity.resolve(env, [{lid: 'Oth1', slug: 'oth-1'}], opts(NOW + 1000));
+  const later = await Identity.resolve(env, [{lid: 'Oth1', slug: 'oth-1'}], opts(NOW + 6 * 60000));
   assert.equal(later.counts.verified, 1, 'the surviving intent is served off-page and completes the link');
   assert.deepEqual(viewRow(db, 'tmdb_900140'), {watched: 1, actual_rating: 4}, 'ratings_view now knows the TMDB id: Finds excludes it');
   assert.equal(await pendingOf(env, 'Dd1a'), undefined);
@@ -92,7 +92,7 @@ const pendingOf = async (env, lid) => (await Facts.readDiaryIdentity(env)).films
   const stuck = await pendingOf(env, 'Dd1b'); assert.deepEqual([stuck.reason, stuck.attempts, stuck.tmdb], ['link_failed', 5, '900141'], 'AIR-599: a failed link after a verified page consumes no attempt'); assert.equal(viewRow(db, 'tmdb_900141'), null);
   await Facts.updateDiaryIdentity(env, {set: {Dd1b: {...stuck, attempts: 6}}}); // the repair is served at the source cap too
   const before = calls.length, admitted = applied.length;
-  const later = await Identity.resolve(env, [{lid: 'Oth2', slug: 'oth-2'}], opts(NOW + 1000));
+  const later = await Identity.resolve(env, [{lid: 'Oth2', slug: 'oth-2'}], opts(NOW + 6 * 60000));
   assert.equal(later.counts.repaired, 1); assert.deepEqual(viewRow(db, 'tmdb_900141'), {watched: 1, actual_rating: 3.5}); assert.equal(await pendingOf(env, 'Dd1b'), undefined);
   assert.equal(calls.slice(before).filter(url => url.includes('Dd1b') || url.includes('fixture-dd1b')).length, 0); assert.equal(applied.length, admitted);
 }

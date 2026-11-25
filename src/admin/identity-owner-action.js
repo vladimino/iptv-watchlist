@@ -64,20 +64,22 @@ async function adminIdentityOwnerActionRoute(request,env,url){
  const plan=await WatchlistD1.ownerAdmissionPlan(env,{action:input.action,lids:input.lids,rows:input.rows});
  if(!plan.ok)return adminError(plan.reason==='shape'?'invalid_rows':'ledger_'+plan.reason,plan.reason==='shape'?400:503);
  try{
-  const out=await LetterboxdFacts.ownerAction(env,{doc:input.lane==='diary_backlog'?'backlog':'diary',action:input.action,lids:input.lids,slugs:input.slugs,expectedVersion:input.version,by,why:input.why,at,extra:plan.statements});
+  const out=await LetterboxdFacts.ownerAction(env,{action:input.action,lids:input.lids,slugs:input.slugs,createMissing:input.lane==='diary_backlog',expectedVersion:input.version,by,why:input.why,at,extra:plan.statements});
   if(out.state==='stale_revision')return adminError('stale_revision',409);
   if(out.state==='backlog_full')return json({action:input.action,lane:input.lane,committed:false,results:out.results,backlogFull:true},409);
-  // The readback of BOTH sides, and its proof: after `requeue` every named entry and row is back at 0 attempts (a row `pending`); after `dismiss` every entry is `owner_dismissed` and every row terminal.
+  // The readback of ALL THREE places and its proof: after `requeue` every named entry, backlog record and open ledger row is back at 0 attempts (a row `pending`); after `dismiss` no id is left in the backlog, every entry is
+  // `owner_dismissed` and every touched row is terminal. An id may be named in any lane: the action covers every place that holds it.
   const ledger=await WatchlistD1.admissionRowsOf(env,input.lids).catch(()=>({ok:false}));
   const rows=ledger.ok?new Map(ledger.rows.map(row=>[row.lid,row])):null;
+  const requeue=input.action==='requeue';
   const proven=rows?input.lids.every(lid=>{
-   const entry=out.entries[lid],row=rows.get(lid),touched=plan.tokens.some(token=>token.lid===lid);
-   const requeue=input.action==='requeue';
-   const entryOk=input.lane==='diary_backlog'?(requeue?!!entry&&entry.attempts===0:!entry):(!entry||(requeue?entry.attempts===0:entry.reason==='owner_dismissed'));
-   const rowOk=!touched||(row&&(input.action==='requeue'?row.state==='pending'&&row.attempts===0:row.state==='terminal'&&row.lastReason==='owner_dismissed'));
-   return entryOk&&!!rowOk;
+   const entry=out.entries[lid],record=out.backlog[lid],row=rows.get(lid),touched=plan.tokens.some(token=>token.lid===lid);
+   const entryOk=!entry||(requeue?entry.attempts===0:entry.reason==='owner_dismissed');
+   const backlogOk=requeue?(!record||record.attempts===0):!record;
+   const rowOk=!touched||(row&&(requeue?row.state==='pending'&&row.attempts===0:row.state==='terminal'&&row.lastReason==='owner_dismissed'));
+   return entryOk&&backlogOk&&!!rowOk;
   }):null;
-  return json({action:input.action,lane:input.lane,committed:true,results:out.results,skipped:plan.skipped,readback:{version:out.version,entries:out.entries,rows:ledger.ok?ledger.rows:null,proven}});
+  return json({action:input.action,lane:input.lane,committed:true,results:out.results,skipped:plan.skipped,readback:{version:out.version,entries:out.entries,backlog:out.backlog,rows:ledger.ok?ledger.rows:null,proven}});
  }catch(error){
   if(error&&error.code==='atomic_unavailable')return adminError('atomic_unavailable',503);
   return adminError(typeof error?.code==='string'?error.code:'unavailable',503);

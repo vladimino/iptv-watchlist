@@ -202,7 +202,7 @@ Since AIR-599 ([ADR 0207 decision 4b](../../adr/0207-letterboxd-admissions-coord
 
 ## The Diary identity lane (AIR-599)
 
-`diary_identity` lists the shared Letterboxd check document (`letterboxd/facts/scans/diary-identity.json`) and its bounded backlog (`diary-identity-backlog.json`), read only, in queue order (oldest `queuedAt` first). It is an in-memory lane paged by index like `film`. Keys: `did:<lid>` for an entry, `dbl:<lid>` for a backlog id (an id with an entry is shown once). `source` carries `attempts`, `streak`, `nextRetryAt`, `class`, `slug`, `route`, `checkId`, `requeued` and `queuedAt`.
+`diary_identity` lists the shared Letterboxd check document (`letterboxd/facts/scans/diary-identity.json`: the entries and its bounded backlog), read only, in queue order (oldest `queuedAt` first). It is an in-memory lane paged by index like `film`. Keys: `did:<lid>` for an entry, `dbl:<lid>` for a backlog id (an id with an entry is shown once). `source` carries `attempts`, `streak`, `nextRetryAt`, `class`, `slug`, `route`, `checkId`, `requeued` and `queuedAt`.
 
 | Entry | `disposition` |
 | --- | --- |
@@ -212,4 +212,4 @@ Since AIR-599 ([ADR 0207 decision 4b](../../adr/0207-letterboxd-admissions-coord
 | backed off | `waiting` |
 | backlog id (reason `diary_cap`) | `waiting` |
 
-`coverage.diary_identity` is `{state: 'complete', version, backlogVersion, entries, backlog, cap, backlogCap}` (the two versions are the compare-and-swap tokens of the owner action) or `{state: 'unavailable', reason}`. The owner page shows each ledger and Diary row's class, attempts, transport streak and next check, and the lane's fill. The owner `requeue` and `dismiss` are the separate route [`POST /api/admin/identity-work/owner-action`](../api/admin.md#owner-requeue-and-dismiss-of-the-shared-letterboxd-check-post-apiadminidentity-workowner-action); this `GET` stays read-only.
+`coverage.diary_identity` is `{state: 'complete', version, backlogVersion, entries, backlog, cap, backlogCap}` (the backlog is part of the same document: both versions are its one stored version, the compare-and-swap token of the owner action) or `{state: 'unavailable', reason}`. The owner page shows each ledger and Diary row's class, attempts, transport streak and next check, and the lane's fill. The owner `requeue` and `dismiss` are the separate route [`POST /api/admin/identity-work/owner-action`](../api/admin.md#owner-requeue-and-dismiss-of-the-shared-letterboxd-check-post-apiadminidentity-workowner-action); this `GET` stays read-only.

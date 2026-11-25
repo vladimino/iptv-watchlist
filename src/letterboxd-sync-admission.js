@@ -9,7 +9,7 @@ export const STEP_LIMIT = 3;
 // AIR-599: the age at which a pending row is reported (run record, Monitor). It is not a terminal rule any more.
 export const AGE_REPORT_MS = 14 * 24 * 3600000;
 const SLUG = /^https:\/\/letterboxd\.com\/film\/([a-z0-9-]{1,200})\/$/;
-const emptyCounts = () => ({checked: 0, transport: 0, notNow: 0, gone: 0, definite: 0, atCap: 0, capRefused: 0, backlogFull: 0, resolved: 0, overdue: 0, overdueUnknown: 0});
+const emptyCounts = () => ({checked: 0, transport: 0, notNow: 0, gone: 0, definite: 0, atCap: 0, capRefused: 0, backlogFull: 0, resolved: 0, overdue: 0, overdueUnknown: 0, rowChanged: 0});
 
 export function admissionStep({repository, identity, epochGuard, fenceEnv = env => env}) {
   return async (ctx, {limit = STEP_LIMIT, now = ctx.now()} = {}) => {
@@ -31,7 +31,7 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       if (snapshot === undefined) { const read = await repository.readSnapshot(ctx.env, row.firstSeenSnapshotId); snapshot = read.ok ? read.snapshot : read.reason === 'unavailable' ? 'unavailable' : null; cache.set(row.firstSeenSnapshotId, snapshot); }
       const member = snapshot && snapshot !== 'unavailable' ? snapshot.films.find(film => film.lid === row.lid) : null;
       const slug = member ? SLUG.exec(member.url)?.[1] ?? null : null;
-      const item = {lid: row.lid, slug, attempts: row.attempts, ...(row.firstSeenAt ? {queuedAt: row.firstSeenAt} : {})};
+      const item = {lid: row.lid, slug, attempts: row.attempts, reason: row.lastReason ?? null, ...(row.firstSeenAt ? {queuedAt: row.firstSeenAt} : {})};
       if (!slug) needCurrent.push(item);
       items.push(item);
       if (snapshot === 'unavailable' && !slug) unreadable[row.lid] = true;
@@ -53,7 +53,8 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
     catch { return {resolved: 0, pending: due.pending, terminal: 0, error: 'identity_check_failed', counts}; }
     for (const key of ['capRefused', 'backlogFull']) counts[key] += Number(out?.counts?.[key]) || 0;
     const links = await identity.diaryLinks(ctx.env, offered.map(item => item.lid)).catch(() => new Map());
-    const settle = (row, fields) => repository.settleAdmission(ctx.env, {lid: row.lid, now, ...fields}, {guards});
+    // Every settle carries the row's token as read with the due list (AIR-599, review of PR #1009): a row an owner requeued or dismissed since cannot be overwritten by the outcome of a check that started before.
+    const settle = (row, fields) => repository.settleAdmission(ctx.env, {lid: row.lid, now, ...fields, expect: {attempts: row.attempts, updatedAt: row.updatedAt}}, {guards});
     let resolved = 0, terminal = 0;
     for (const row of due.rows) {
       if (unreadable[row.lid] === true) continue;
@@ -63,11 +64,13 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       if (out?.labels?.has(row.lid) || tmdb || (outcome?.class === 'settled' && outcome.reason !== 'owner_dismissed')) {
         // Verified now, or already linked by another writer's receipt: resolved without a second write.
         const by = ('identity:' + (tmdb || 'verified')).slice(0, 200);
-        if ((await settle(row, {state: 'resolved', attempts: row.attempts, resolvedBy: by})).ok) { resolved++; counts.resolved++; }
+        const done = await settle(row, {state: 'resolved', attempts: row.attempts, resolvedBy: by});
+        if (done.ok) { resolved++; counts.resolved++; } else if (done.reason === 'conflict') counts.rowChanged++;
         continue;
       }
       if (outcome?.reason === 'owner_dismissed') {
-        if ((await settle(row, {state: 'terminal', attempts: row.attempts, reason: 'owner_dismissed'})).ok) terminal++;
+        const done = await settle(row, {state: 'terminal', attempts: row.attempts, reason: 'owner_dismissed'});
+        if (done.ok) terminal++; else if (done.reason === 'conflict') counts.rowChanged++;
         continue;
       }
       // No outcome, or one without a count (not reached, document unreadable): the row stays due and unchanged; no attempt.
@@ -83,6 +86,7 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       const retryAt = typeof outcome.retryAt === 'string' && Number.isFinite(Date.parse(outcome.retryAt)) && Date.parse(outcome.retryAt) > now ? outcome.retryAt : null;
       const result = await settle(row, exhausted ? {state: 'terminal', attempts, reason} : {state: 'pending', attempts, reason, nextRetryAt: retryAt});
       if (result.ok && exhausted && !result.already) terminal++;
+      else if (!result.ok && result.reason === 'conflict') counts.rowChanged++; // an owner action changed the row since the due list was read: the owner's decision stands
     }
     return {resolved, pending: Math.max(0, (due.pending ?? 0) - resolved - terminal), terminal, counts};
   };
