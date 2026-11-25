@@ -14,8 +14,11 @@
 -- Identifiers only. One LIKE pattern, far below the 50-byte D1 limit (see 0021).
 
 -- The refusal inserts id 0, which CHECK (id = 1) always forbids: it aborts the file whether or not the singleton row exists. Accepted is exactly one schema_contract row at
--- version 42, the redirect table with the Film table it points at, the 0040 retirement-ledger index, the 0041 identity evidence ledger with its append-only triggers and
--- the 0042 writer control (its tables, its append-only triggers and the ledger's `source_order` column), the shared no-downgrade trigger, and no object of the new name.
+-- version 42 AND the objects of its immediate predecessors, by name (and, where 0042 REPLACED an object, by a marker of its 0042 text): the redirect table with the Film table it
+-- points at; the 0040 retirement-ledger index; the 0041 identity evidence ledger (its indexes, its append-only, shape, conflict and supersession triggers); the 0042 writer
+-- control (both tables, the unique writer/generation index, the transition, compare-and-swap, control and append-only triggers), the ledger's `source_order` column and its
+-- trigger, the scope index and arrival trigger, and the four ledger triggers 0042 replaced (`known_alias`, Film-bound fencing, the domain path, forward withdrawals); the shared
+-- no-downgrade trigger; and no object of the new name. These are PRESENCE checks, not a claim of full schema integrity, and 0042 itself is not touched.
 INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
@@ -29,14 +32,30 @@ WHERE NOT (
  ) = 6
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_redirect' AND sql LIKE '%to_film_id%')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_identity_evidence' AND sql LIKE '%source_order%')
- AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'tmdb_retirement_decision_movie')
+ AND (
+  SELECT COUNT(*) FROM sqlite_master
+  WHERE type = 'index' AND name IN (
+   'tmdb_retirement_decision_movie',
+   'film_identity_evidence_subject', 'film_identity_evidence_object', 'film_identity_evidence_scope', 'film_identity_evidence_superseded_once',
+   'film_identity_evidence_scope_ref', 'identity_evidence_writer_change_writer'
+  )
+ ) = 7
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'trigger' AND name IN (
-   'film_identity_evidence_no_update', 'film_identity_evidence_no_delete', 'identity_evidence_writer_change_no_update',
-   'identity_evidence_writer_change_no_delete', 'schema_contract_no_downgrade'
+   'film_identity_evidence_insert_open', 'film_identity_evidence_insert_conflict', 'film_identity_evidence_no_update', 'film_identity_evidence_no_delete',
+   'film_identity_evidence_insert_shape', 'film_identity_evidence_film_bound', 'film_identity_evidence_scope_target', 'film_identity_evidence_supersedes_target',
+   'film_identity_evidence_scope_arrival', 'film_identity_evidence_source_order',
+   'identity_evidence_writer_change_apply', 'identity_evidence_writer_change_conflict', 'identity_evidence_writer_change_current',
+   'identity_evidence_writer_change_no_delete', 'identity_evidence_writer_change_no_update',
+   'identity_evidence_writer_insert', 'identity_evidence_writer_update', 'identity_evidence_writer_no_delete',
+   'schema_contract_no_downgrade'
   )
- ) = 5
+ ) = 19
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_insert_shape' AND sql LIKE '%known_alias%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_insert_open' AND sql LIKE '%NEW.film_id IS NOT NULL%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_film_bound' AND sql LIKE '%discovery_observation%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'film_identity_evidence_scope_target' AND sql LIKE '%owner_action%')
  AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'film_redirect_by_target')
 );
 

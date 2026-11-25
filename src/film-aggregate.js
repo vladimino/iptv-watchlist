@@ -484,15 +484,19 @@ async function availabilitySection(db,fence,set){
 // covers (localizationInputsFromRows is the loader's own mapping).
 // Owner ancestry (ADR 0081: an owner_review_entry link is a snapshot a Film merge does not rewrite, so the owner values of a Film are those of every link in the redirect
 // TREE that ends at it): a recursive CTE walks `film_redirect` BACKWARDS from the survivor through `film_redirect_by_target` (migration 0043), whatever alias the request
-// used. It is bounded in depth and in breadth INSIDE the statement: it stops at OWNER_ANCESTOR_DEPTH + 1 levels and at OWNER_ANCESTORS_MAX + 2 rows (the survivor, its
-// ancestors, and one more row that proves an overflow); either overflow is typed (`owner_ancestry_bounded`) and never a partial answer. The edges (child, parent, depth)
+// used. It is bounded in depth, in breadth AND IN WORK inside the statement. A recursive step enqueues every row its query returns for a dequeued parent, so a LIMIT on
+// the CTE alone would cap the OUTPUT while the queue still took every child of a high-fan-out Film. The step therefore does not join `film_redirect` directly: for each
+// dequeued parent it probes the index with its own LIMIT (OWNER_ANCESTORS_MAX + 1 children: more than that under one parent is already an overflow), so the work per parent
+// is constant, and the CTE stops at OWNER_ANCESTOR_DEPTH + 1 levels and at OWNER_ANCESTORS_MAX + 2 dequeued rows (the survivor, its ancestors, and one more row that proves
+// an overflow). Parents dequeued x children probed is therefore constant whatever the fan-out or the depth of the data. Either overflow is typed (`owner_ancestry_bounded`)
+// and never a partial answer. The edges (child, parent, depth)
 // are part of the section token and of its after-read, so a new or removed edge anywhere in the tree moves it; a leaf has no child row, so a child that appears under
 // it appears in the edges too. The owner entries are then found through owner_review_entry_identity, named in the statement (INDEXED BY) so the plan never falls back to the
 // primary-key range of every `film` entry; their order is the planner's, so the section sorts them before it digests or uses them.
 export const OWNER_ANCESTOR_DEPTH=8;
 export const OWNER_ANCESTORS_MAX=64;
-export const DISPLAY_SQL="WITH RECURSIVE anc(id,parent,depth) AS (SELECT ?,NULL,0 UNION ALL SELECT r.from_id,a.id,a.depth+1 FROM film_redirect r INNER JOIN anc a ON r.to_film_id=a.id WHERE a.depth<=? LIMIT ?) "
- +"SELECT (SELECT json_object('originalTitle',original_title,'canonicalIdentity',canonical_identity) FROM film WHERE id=?) AS film,"
+export const DISPLAY_SQL="WITH RECURSIVE anc(id,parent,depth) AS (SELECT ?,NULL,0 UNION ALL SELECT j.value,a.id,a.depth+1 FROM anc a, json_each((SELECT json_group_array(from_id) FROM (SELECT from_id FROM film_redirect WHERE to_film_id=a.id LIMIT ?))) j WHERE a.depth<=? LIMIT ?) "
++"SELECT (SELECT json_object('originalTitle',original_title,'canonicalIdentity',canonical_identity) FROM film WHERE id=?) AS film,"
  +"(SELECT json_object('year',year,'runtime',runtime,'synopsis',synopsis,'poster',poster,'url',url,'genres',genres_json,'contentSha256',content_sha256,'updatedAt',updated_at) FROM film_metadata WHERE film_id=?) AS metadata,"
  +'(SELECT json_group_array(json_array(id,parent,depth)) FROM anc) AS ancestors,'
  +"(SELECT json_group_array(json_array(kind,source_key,identity_link,identity_state,localization,generation)) FROM (SELECT kind,source_key,identity_link,identity_state,CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.localization') END AS localization,generation FROM owner_review_entry INDEXED BY owner_review_entry_identity WHERE kind='film' AND identity_state='verified' AND identity_link IN (SELECT id FROM anc) LIMIT ?)) AS owner,"
@@ -502,7 +506,7 @@ export const DISPLAY_SQL="WITH RECURSIVE anc(id,parent,depth) AS (SELECT ?,NULL,
 const METADATA_FIELDS=['year','runtime','synopsis','poster','url','genres'];
 async function displaySection(db,fence,resolution){
  const filmId=resolution.filmId;
- const params=[filmId,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,filmId,filmId,OWNER_ENTRIES_MAX+1,filmId,LOCALIZATION_SOURCES_MAX+1,filmId,filmId,CREDITS_MAX+1];
+ const params=[filmId,OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,filmId,filmId,OWNER_ENTRIES_MAX+1,filmId,LOCALIZATION_SOURCES_MAX+1,filmId,filmId,CREDITS_MAX+1];
  const read=x=>({film:json(x.film),metadata:json(x.metadata),ancestors:list(x.ancestors).map(a=>({id:String(a[0]),parent:a[1]==null?null:String(a[1]),depth:Number(a[2])})).sort((l,r)=>l.depth-r.depth||(l.id<r.id?-1:l.id>r.id?1:0)),owner:list(x.owner).sort((l,r)=>JSON.stringify(l)<JSON.stringify(r)?-1:JSON.stringify(l)>JSON.stringify(r)?1:0),sources:list(x.sources),dimension:list(x.dimension),credits:list(x.credits)});
  const s=read(await row(db,DISPLAY_SQL,params));
  const metadata=s.metadata;

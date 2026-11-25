@@ -962,7 +962,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   const hugeWide=wide(OWNER_ANCESTORS_MAX*3);
   const hugeChain=chain(OWNER_ANCESTOR_DEPTH*4);
   const ancestryRows=(file)=>{
-   const params=['film:tmdb:5',OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,'film:tmdb:5','film:tmdb:5',OWNER_ENTRIES_MAX+1,'film:tmdb:5',11,'film:tmdb:5','film:tmdb:5',61];
+   const params=['film:tmdb:5',OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,'film:tmdb:5','film:tmdb:5',OWNER_ENTRIES_MAX+1,'film:tmdb:5',11,'film:tmdb:5','film:tmdb:5',61];
    let i=0;const text=DISPLAY_SQL.replace(/\?/g,()=>{const v=params[i++];return typeof v==='number'?String(v):q(v);});
    return JSON.parse(JSON.parse(sqliteSync(['-json',file],{input:text+';',encoding:'utf8'}).stdout)[0].ancestors);
   };
@@ -970,6 +970,53 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   const deep=ancestryRows(hugeChain);
   assert.equal(Math.max(...deep.map(r=>r[2])),OWNER_ANCESTOR_DEPTH+1,'depth: the CTE stops one level past the bound of a 32-long chain');
   assert.equal(deep.length,OWNER_ANCESTOR_DEPTH+2);
+ }
+ // WORK, not output (review of 8826e92): a recursive step enqueues every row its query returns for a dequeued parent, so a LIMIT on the CTE alone caps the rows
+ // returned while the queue still takes every child of a high-fan-out Film. The step probes the index per parent with its own LIMIT, so the VM work of the statement
+ // does not grow with the fan-out or the depth of the data. Measured as the VM steps the sqlite3 shell reports (`.stats vmstep`), not as rows or plan lines.
+ {
+  const vmSteps=(file,text)=>{const r=sqliteSync([file],{input:'.stats vmstep\n'+text+';\n',encoding:'utf8',maxBuffer:1<<28});const m=/VM-steps: (\d+)/.exec(String(r.stdout));assert.ok(m,'the sqlite3 shell reports VM steps');return Number(m[1]);};
+  // The statement text is the one the MODULE sent to D1 during a real aggregate read (its own parameters), never a rebuilt one.
+  const sentDisplay=async file=>{
+   let captured=null;
+   await readFilmAggregate(env(file,{onQuery:t=>{if(captured===null&&t.includes('WITH RECURSIVE anc'))captured=t;}}),'tmdb_5');
+   assert.ok(captured,'the display statement ran');
+   return captured;
+  };
+  const stepsOf=async file=>vmSteps(file,await sentDisplay(file));
+  const survivor='film:tmdb:5';
+  const star=count=>{const f=world();sqlite(f,`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<${count}) INSERT INTO film_redirect (from_id,to_film_id,at) SELECT 'film:fan:'||i,'${survivor}','${AT}' FROM n;`);return f;};
+  // 64 children (Films) each with `grandchildren` merged-in Films: the survivor's own fan-out is small, every child's is large.
+  const wideDeep=grandchildren=>{
+   const f=world();
+   sqlite(f,`WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<${OWNER_ANCESTORS_MAX}) INSERT INTO film (id,contract_version,updated_at) SELECT 'film:ch:'||i,1,'${AT}' FROM c;
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<${OWNER_ANCESTORS_MAX}) INSERT INTO film_redirect (from_id,to_film_id,at) SELECT 'film:ch:'||i,'${survivor}','${AT}' FROM c;
+    WITH RECURSIVE n(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM n WHERE k<${grandchildren*OWNER_ANCESTORS_MAX}) INSERT INTO film_redirect (from_id,to_film_id,at) SELECT 'film:g:'||k,'film:ch:'||(1+(k%${OWNER_ANCESTORS_MAX})),'${AT}' FROM n;`);
+   return f;
+  };
+  const longChain=length=>{
+   const f=world();
+   sqlite(f,`WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<${length}) INSERT INTO film (id,contract_version,updated_at) SELECT 'film:lc:'||i,1,'${AT}' FROM c;
+    INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lc:1','${survivor}','${AT}');
+    WITH RECURSIVE c(i) AS (SELECT 2 UNION ALL SELECT i+1 FROM c WHERE i<${length}) INSERT INTO film_redirect (from_id,to_film_id,at) SELECT 'film:lc:'||i,'film:lc:'||(i-1),'${AT}' FROM c;`);
+   return f;
+  };
+  // A star: the work is the same for 64, 1 000 and 20 000 children (the old step took every child: 3 000, 12 000, 200 000 steps).
+  const base64=await stepsOf(star(OWNER_ANCESTORS_MAX));
+  for(const count of [1000,20000]){
+   const steps=await stepsOf(star(count));
+   assert.ok(steps<=base64*1.1+500,count+' children: '+steps+' VM steps against '+base64+' for '+OWNER_ANCESTORS_MAX+': the work grows with the fan-out');
+   assert.ok(steps<20000,count+' children: '+steps+' VM steps');
+  }
+  // Fan-out under EVERY dequeued parent: bounded by parents dequeued x children probed, whatever the number of grandchildren.
+  const small=await stepsOf(wideDeep(OWNER_ANCESTORS_MAX+1)),large=await stepsOf(wideDeep(1500));
+  assert.ok(large<=small*1.1+500,'1 500 grandchildren per child: '+large+' VM steps against '+small+' for '+(OWNER_ANCESTORS_MAX+1)+': the work grows with the fan-out');
+  assert.ok(large<150000,'the worst case is a constant: '+large);
+  // A long chain: the walk stops at the depth bound, so 20 and 3 000 ancestors cost the same.
+  const short=await stepsOf(longChain(20)),long=await stepsOf(longChain(3000));
+  assert.ok(long<=short*1.1+200,'a 3 000-long chain: '+long+' VM steps against '+short+' for 20: the work grows with the depth');
+  // The answer is still the bounded, typed overflow, never a partial "complete".
+  assert.deepEqual([(await title(star(20000))).ancestry.status,(await title(wideDeep(1500))).ancestry.status,(await title(longChain(3000))).ancestry.status],['bounded','bounded','bounded']);
  }
  // The owner-entry cap is separate from the ancestry cap: more entries than OWNER_ENTRIES_MAX over a small tree is typed too.
  const entries=world();
@@ -1064,7 +1111,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   assert.deepEqual(scans,[],text.slice(0,160)+'\n'+plan.join('\n'));
   assert.ok(!plan.some(d=>/film_redirect/.test(d)&&/^SCAN /.test(d)),'film_redirect is never scanned');
   if(text.startsWith('WITH RECURSIVE anc')){
-   assert.ok(plan.some(d=>/^SEARCH r USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),'the ancestry step is served by film_redirect_by_target (migration 0043)\n'+plan.join('\n'));
+   assert.ok(plan.some(d=>/^SEARCH film_redirect USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),'the ancestry step is served by film_redirect_by_target (migration 0043)\n'+plan.join('\n'));
    assert.ok(plan.some(d=>/^SEARCH owner_review_entry USING INDEX owner_review_entry_identity \(identity_link=\?\)/.test(d)),'the owner entries are found by identity_link, not by a range of every film entry\n'+plan.join('\n'));
   }
   if(text.startsWith('WITH g AS'))assert.ok(plan.some(d=>/^SEARCH ratings_document USING INDEX sqlite_autoindex_ratings_document_1 \(key=\?\)/.test(d)),'the measure is a primary-key search\n'+plan.join('\n'));

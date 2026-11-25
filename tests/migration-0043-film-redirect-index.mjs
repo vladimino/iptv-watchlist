@@ -62,6 +62,36 @@ for(const [name,statement] of [
  assert.deepEqual(dump(file),before,name+': the whole state is unchanged');
  assert.ok(!objects(file).includes('index:'+INDEX),name+': no index installed');
 }
+// The guard names the objects of its immediate predecessors (review of 8826e92: removing identity_evidence_writer_change_apply, _current or _conflict left every earlier
+// condition true). One refusal per object, with the whole state unchanged: presence checks, not a claim of full schema integrity; 0042 itself is not touched.
+const refusal=(file,name)=>{
+ const before=dump(file),result=run(file,M43);
+ assert.notEqual(result.status,0,name+': the file aborts');
+ assert.deepEqual(dump(file),before,name+': the whole state is unchanged');
+ assert.ok(!objects(file).includes('index:'+INDEX),name+': no index installed');
+};
+const GUARDED_INDEXES=['tmdb_retirement_decision_movie','film_identity_evidence_subject','film_identity_evidence_object','film_identity_evidence_scope','film_identity_evidence_superseded_once','film_identity_evidence_scope_ref','identity_evidence_writer_change_writer'];
+const GUARDED_TRIGGERS=['film_identity_evidence_insert_open','film_identity_evidence_insert_conflict','film_identity_evidence_no_update','film_identity_evidence_no_delete','film_identity_evidence_insert_shape','film_identity_evidence_film_bound','film_identity_evidence_scope_target','film_identity_evidence_supersedes_target','film_identity_evidence_scope_arrival','film_identity_evidence_source_order','identity_evidence_writer_change_apply','identity_evidence_writer_change_conflict','identity_evidence_writer_change_current','identity_evidence_writer_change_no_delete','identity_evidence_writer_change_no_update','identity_evidence_writer_insert','identity_evidence_writer_update','identity_evidence_writer_no_delete','schema_contract_no_downgrade'];
+for(const name of GUARDED_INDEXES){const file=copyOf(v42,'gi');exec(file,'DROP INDEX '+name+';');refusal(file,'a missing index '+name);}
+for(const name of GUARDED_TRIGGERS){const file=copyOf(v42,'gt');exec(file,'DROP TRIGGER '+name+';');refusal(file,'a missing trigger '+name);}
+// The four ledger triggers that 0042 REPLACED: the 0041 version of each is not a complete 0042.
+for(const name of ['film_identity_evidence_insert_shape','film_identity_evidence_insert_open','film_identity_evidence_film_bound','film_identity_evidence_scope_target']){
+ const old41=rows(v41,"SELECT sql FROM sqlite_master WHERE name='"+name+"'")[0].sql;
+ const file=copyOf(v42,'old');exec(file,'DROP TRIGGER '+name+';'+old41+';');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name='"+name+"'")[0].n,1);
+ refusal(file,'the 0041 version of the trigger '+name);
+}
+// The ledger column of 0042: the chain through 0041 plus 0042 without its ALTER TABLE is every named object and no `source_order`.
+{
+ const m42=fs.readFileSync('migrations/0042_identity_evidence_writer_control.sql','utf8');
+ const without=m42.replace(/^ALTER TABLE film_identity_evidence ADD COLUMN source_order.*$/m,'');
+ assert.notEqual(without,m42,'the 0042 column statement was found');
+ const file=copyOf(v41,'nocol');exec(file,without);
+ assert.equal(version(file),42);
+ assert.ok(!/source_order/.test(rows(file,"SELECT sql FROM sqlite_master WHERE name='film_identity_evidence'")[0].sql),'the ledger lacks the column');
+ for(const name of GUARDED_TRIGGERS)assert.ok(objects(file).includes('trigger:'+name),name+' is present: only the column is missing');
+ refusal(file,'a ledger without the 0042 source_order column');
+}
 {
  const early=copyOf(v42,'early');exec(early,'CREATE INDEX '+INDEX+' ON film_redirect (to_film_id);');refuse(early,'a pre-existing index of the same name');
  const shape=copyOf(v42,'shape');exec(shape,'CREATE INDEX '+INDEX+' ON film_redirect (at);');refuse(shape,'a same-named index of another shape');
@@ -114,20 +144,20 @@ assert.equal(Number(rows(after,'SELECT COUNT(*) AS n FROM film_redirect')[0].n),
 
 // ---- 3. the real ancestry statement of the display section ----------------------------------------------------------------------------------------------
 const bind=id=>{
- const params=[id,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,id,id,OWNER_ENTRIES_MAX+1,id,11,id,id,61];let i=0;
+ const params=[id,OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,id,id,OWNER_ENTRIES_MAX+1,id,11,id,id,61];let i=0;
  const text=DISPLAY_SQL.replace(/\?/g,()=>{const v=params[i++];return typeof v==='number'?String(v):q(v);});
  assert.equal(i,params.length,'every parameter is bound');return text;
 };
 const ancestry=(file,text)=>JSON.parse(rows(file,text)[0].ancestors).map(r=>JSON.stringify(r)).sort();
-const readsRedirect=lines=>lines.filter(d=>/film_redirect\b|\br\b/.test(d)&&/^(SCAN|SEARCH) r\b/.test(d));
+const readsRedirect=lines=>lines.filter(d=>/^(SCAN|SEARCH) film_redirect\b/.test(d));
 const survivors={survivorWithBranches:'film:s:7',leafOnly:'film:l3:5',middle:'film:l1:9',deep:'film:l2:11',notAFilm:'film:none:1'};
 for(const [name,id] of Object.entries(survivors)){
  const text=bind(id),b=plan(before,text),a=plan(after,text);
  const stepBefore=readsRedirect(b).join('|'),stepAfter=readsRedirect(a).join('|');
  assert.ok(!/USING INDEX film_redirect_by_target/.test(stepBefore),name+': before 0043 there is no such index\n'+b.join('\n'));
- assert.ok(/SCAN r\b|AUTOMATIC/.test(stepBefore+'|'+b.join('|')),name+': before 0043 the redirect table is scanned or auto-indexed per query\n'+b.join('\n'));
- assert.ok(a.some(d=>/^SEARCH r USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),name+': after 0043 the ancestry step is a SEARCH by the new index\n'+a.join('\n'));
- assert.ok(!a.some(d=>/^SCAN r\b/.test(d))&&!a.some(d=>/AUTOMATIC/.test(d)),name+': after 0043 no scan and no automatic index of the redirect table\n'+a.join('\n'));
+ assert.ok(/SCAN film_redirect\b|AUTOMATIC/.test(stepBefore+'|'+b.join('|')),name+': before 0043 the redirect table is scanned or auto-indexed per query\n'+b.join('\n'));
+ assert.ok(a.some(d=>/^SEARCH film_redirect USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),name+': after 0043 the ancestry step is a SEARCH by the new index\n'+a.join('\n'));
+ assert.ok(!a.some(d=>/^SCAN film_redirect\b/.test(d))&&!a.some(d=>/AUTOMATIC/.test(d)),name+': after 0043 no scan and no automatic index of the redirect table\n'+a.join('\n'));
  const scans=a.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN (a|anc)$/.test(d));
  assert.deepEqual(scans,[],name+': no base-table scan\n'+a.join('\n'));
  assert.deepEqual(ancestry(after,text),ancestry(before,text),name+': the statement returns the same ancestry rows');
