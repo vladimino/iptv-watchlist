@@ -2828,6 +2828,7 @@ async function routeRequest(request,env,execution){
   if(url.pathname==='/api/admin/channels'||url.pathname.startsWith('/api/admin/channels/'))return await adminChannelsRoute(request,env,url);
   if(url.pathname==='/api/admin/limbo')return await adminLimboRoute(request,env,url);
   if(url.pathname==='/api/admin/identity-work')return await adminIdentityWorkRoute(request,env,url);
+  if(url.pathname==='/api/admin/identity-work/owner-action')return await adminIdentityOwnerActionRoute(request,env,url); // AIR-599: owner requeue/dismiss of the shared Letterboxd check
   if(url.pathname==='/api/admin/posters')return await adminPostersRoute(request,env,url);
   if(url.pathname==='/api/admin/prediction-recovery')return await adminPredictionRecoveryRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/prediction-recovery-intent/'))return await adminPredictionRecoveryIntentRoute(request,env,url);

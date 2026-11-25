@@ -8,7 +8,7 @@ import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import * as WatchlistD1 from '../src/watchlist-d1.js';
-import {admissionStep,STEP_LIMIT,AGE_MAX_MS,AGE_MAX_VERSIONS} from '../src/letterboxd-sync-admission.js';
+import {admissionStep,STEP_LIMIT,AGE_REPORT_MS} from '../src/letterboxd-sync-admission.js';
 import {effectWriters} from '../src/letterboxd-sync-effects.js';
 
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lbadm-'));
@@ -26,11 +26,14 @@ const ctx=env=>({env,epoch:1,now:()=>NOW,deadline:NOW+600000});
 async function publish(env,list,id,at){const r=await WatchlistD1.publishSnapshot(env,list,{scanId:id,observedAt:at,runId:'r-'+id,slotKey:'k'},{now:Date.parse(at)});assert.equal(r.ok,true,JSON.stringify(r));return r;}
 const ledger=db=>Object.fromEntries(db.sql('SELECT lid,state,attempts,next_retry_at,last_reason,resolved_by FROM watchlist_admission_pending').map(r=>[r.lid,r]));
 
-function identity({labels=[],entries={},links={},max=3,throws=false}={}){
- const calls={resolve:[],links:0};
+// AIR-599: the fake check answers like the real one: an explicit outcome per id, copied by the ledger. `entries` are outcomes {reason,attempts,nextAttemptAt,class?}.
+const CLASS={rate_limited:'transport',forbidden:'transport',challenge:'transport',timeout:'transport',upstream_5xx:'transport',network_error:'transport',deferred:'not_now',diary_cap:'not_now',not_found:'gone',owner_dismissed:'settled'};
+function identity({labels=[],entries={},links={},max=3,throws=false,counts={}}={}){
+ const calls={resolve:[],links:0,routes:[]};
  return {calls,MAX_ATTEMPTS:max,
-  resolve:async(env,items,opts)=>{calls.resolve.push(items.map(i=>i.lid+':'+i.slug));if(throws)throw new Error('x');return {labels:new Map(labels.map(l=>[l,{}])),counts:{}};},
-  readIdentity:async()=>({films:entries}),
+  resolve:async(env,items,opts)=>{calls.resolve.push(items.map(i=>i.lid+':'+i.slug));calls.routes.push(opts.route);calls.items=items;if(throws)throw new Error('x');
+   const outcomes=new Map();for(const item of items){const e=entries[item.lid];if(e)outcomes.set(item.lid,{checked:true,class:e.class||CLASS[e.reason]||'definite',reason:e.reason,retryAt:e.nextAttemptAt??null,attempts:e.attempts,streak:e.streak||0,terminal:e.attempts>=max});}
+   return {labels:new Map(labels.map(l=>[l,{}])),counts,outcomes};},
   diaryLinks:async(env,lids)=>{calls.links++;return new Map(lids.filter(l=>links[l]).map(l=>[l,{tmdb:links[l]}]));}};
 }
 const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuard})(ctx(env),{limit:3,now:NOW});
@@ -40,14 +43,16 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  const {db}=open(),env={DB:db};
  await publish(env,[film(0),film(1),film(2),film(3),film(4)],'s1','2026-11-21T09:40:00.000Z');
  assert.equal(Object.keys(ledger(db)).length,5);
- const id=identity({labels:['f0'],entries:{f1:{reason:'review',attempts:1,nextAttemptAt:'2026-11-22T00:00:00.000Z'},f2:{reason:'rate_limited',attempts:1,nextAttemptAt:'2026-11-21T14:00:00.000Z'}}});
+ const id=identity({labels:['f0'],entries:{f1:{reason:'review',attempts:1,nextAttemptAt:'2026-11-22T00:00:00.000Z'},f2:{reason:'rate_limited',attempts:0,streak:1,nextAttemptAt:'2026-11-21T14:00:00.000Z'}}});
  const out=await step(env,id);
  assert.deepEqual(id.calls.resolve,[['f0:film-0','f1:film-1','f2:film-2']],'three ids, slugs from the member URLs, in ledger order');
+ assert.deepEqual(id.calls.routes,['watchlist_admission'],'the check is told its caller');
  assert.equal(STEP_LIMIT,3);
  const l=ledger(db);
  assert.equal(l.f0.state,'resolved');assert.match(l.f0.resolved_by,/^identity:/);
  assert.deepEqual([l.f1.state,l.f1.attempts,l.f1.next_retry_at,l.f1.last_reason],['pending',1,'2026-11-22T00:00:00.000Z','review']);
- assert.deepEqual([l.f2.state,l.f2.attempts],['pending',0],'a transport stop does not use up an attempt');
+ assert.deepEqual([l.f2.state,l.f2.attempts,l.f2.next_retry_at,l.f2.last_reason],['pending',0,'2026-11-21T14:00:00.000Z','rate_limited'],'a transport stop does not use up an attempt and waits for its backoff');
+ assert.deepEqual([out.counts.transport,out.counts.definite],[1,1]);
  assert.equal(l.f3.state,'pending');assert.equal(l.f3.attempts,0);
  assert.deepEqual([out.resolved,out.terminal],[1,0]);
  // The next step: f1 and f2 are not due yet (retry times in the future / f2 at 14:00), so the next ones go.
@@ -70,10 +75,12 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  const out=await step(env,fail(3));assert.deepEqual([ledger(db).f0.state,ledger(db).f0.attempts,ledger(db).f0.last_reason],['terminal',3,'tmdb_mismatch']);assert.equal(out.terminal,1);
  const id=identity();const again=await step(env,id);assert.equal(id.calls.resolve.length,0,'a terminal row is not due');assert.equal(again.resolved,0);
 }
-// 4. A member without a usable film URL has no slug: counted, backed off, eventually terminal; no identity call is made for it.
+// 4. A member without a usable film URL has no slug: charged once on the shared entry, backed off, eventually terminal.
 {
  const {db}=open(),env={DB:db};await publish(env,[{id:'f0',title:'F0',year:2000,url:'https://letterboxd.com/film/UPPER_case/'}],'s1','2026-11-21T09:40:00.000Z');
- const id=identity();await step(env,id);assert.equal(id.calls.resolve.length,0);assert.deepEqual([ledger(db).f0.state,ledger(db).f0.attempts,ledger(db).f0.last_reason],['pending',1,'slug_missing']);
+ const id=identity({entries:{f0:{reason:'slug_missing',attempts:1,nextAttemptAt:'2026-11-22T00:00:00.000Z'}}});await step(env,id);
+ // AIR-599: the row is offered without a slug and the check charges `slug_missing` on the shared entry, once; the ledger copies it.
+ assert.deepEqual(id.calls.resolve,[['f0:null']]);assert.deepEqual([ledger(db).f0.state,ledger(db).f0.attempts,ledger(db).f0.last_reason],['pending',1,'slug_missing']);
 }
 // 5. A step that is not reached (budget, facts not durable yet) leaves the row due and unchanged; a throwing bridge is an error that changes no row.
 {
@@ -108,48 +115,49 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  await admissionStep({repository:WatchlistD1,identity:id,epochGuard,fenceEnv:(e,epoch)=>({...e,fenced:true,epoch})})(ctx(env),{});
  assert.deepEqual([seen.fenced,seen.epoch],[true,1]);
 }
-// 7c. Review (ADR 0186 decision 5): a bounded AGE. A transport deferral never uses an attempt, so an id the source can never answer would stay pending for ever; past the age bound it becomes terminal with the reason
-// `age_exceeded`, before any source request, and then waits for an owner decision. The age is the first-seen snapshot's commit time; when that snapshot is already pruned the age is bounded by versions instead.
+// 7c. AIR-599 / ADR 0207 decision 4b: age no longer ends a row. A row pending longer than 14 days under a transport outage is NOT terminated (no `age_exceeded`), keeps its attempts and its place, and is
+// REPORTED (`overdue`). Its queue position (first-seen version) stays ahead of newer rows.
 {
  const {db}=open(),env={DB:db};
  await publish(env,[film(0),film(1)],'old','2026-11-01T09:40:00.000Z');
  await WatchlistD1.publishSnapshot(env,[film(0),film(1),film(2)],{scanId:'new',observedAt:'2026-11-20T09:40:00.000Z',runId:'r',slotKey:'k'},{now:Date.parse('2026-11-20T09:40:00.000Z')});
- const id=identity({entries:{f2:{reason:'rate_limited',attempts:1,nextAttemptAt:'2026-11-21T12:00:00.000Z'}}});
+ const id=identity({entries:{f0:{reason:'forbidden',attempts:0,streak:3,nextAttemptAt:'2026-11-21T13:00:00.000Z'},f1:{reason:'rate_limited',attempts:0,streak:2,nextAttemptAt:'2026-11-21T12:30:00.000Z'},f2:{reason:'rate_limited',attempts:0,nextAttemptAt:'2026-11-21T12:15:00.000Z'}}});
  const out=await step(env,id);
- assert.deepEqual(id.calls.resolve,[['f2:film-2']],'only the young id reaches the source; the aged ones never do');
+ assert.deepEqual(id.calls.resolve,[['f0:film-0','f1:film-1','f2:film-2']],'the old rows are still checked, oldest first');
  const l=ledger(db);
- assert.deepEqual([l.f0.state,l.f0.last_reason,l.f1.state,l.f1.last_reason],['terminal','age_exceeded','terminal','age_exceeded']);
- assert.deepEqual([l.f2.state,l.f2.attempts],['pending',0],'the young id keeps waiting without using an attempt');
- assert.equal(out.terminal,2);
- assert.ok(NOW-Date.parse('2026-11-01T09:40:00.000Z')>AGE_MAX_MS&&NOW-Date.parse('2026-11-20T09:40:00.000Z')<AGE_MAX_MS);
- const again=identity();await step(env,again);assert.ok(!again.calls.resolve.flat().some(x=>/^f[01]:/.test(x)),'terminal is final: never retried automatically');
+ assert.deepEqual([l.f0.state,l.f0.attempts,l.f0.last_reason,l.f1.state,l.f1.attempts],['pending',0,'forbidden','pending',0],'no termination by age, no attempt for a transport stop');
+ assert.ok(!Object.values(l).some(row=>row.last_reason==='age_exceeded'));
+ assert.equal(out.terminal,0);assert.equal(out.counts.overdue,2,'the two rows older than 14 days are reported');assert.equal(out.counts.transport,3);
+ assert.ok(NOW-Date.parse('2026-11-01T09:40:00.000Z')>AGE_REPORT_MS&&NOW-Date.parse('2026-11-20T09:40:00.000Z')<AGE_REPORT_MS);
+ assert.equal(fs.readFileSync('src/letterboxd-sync-admission.js','utf8').includes("'age_exceeded'"),false,'age_exceeded is no longer a terminal reason');
 }
+// 7d. AIR-599: one shared check budget. The ledger COPIES the entry's count from the outcome (never adds to it): a stale entry is never charged again, a repeated settle (a restart between the check and
+// the settle) changes nothing, and the cap is applied to the shared count. A 404 is `gone` and counts; six of them make a visible terminal row.
 {
- // The first-seen snapshot was pruned: the age falls back to versions.
- const {db,file}=open(),env={DB:db};
- await publish(env,[film(0)],'s1','2026-11-21T08:00:00.000Z');
- const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
- sql("UPDATE watchlist_admission_pending SET first_seen_snapshot_id='pruned' WHERE lid='f0';");
- for(let i=1;i<=AGE_MAX_VERSIONS;i++)await publish(env,[film(0),film(100+i)],'s'+(i+1),'2026-11-21T0'+(Math.min(i,9))+':30:00.000Z');
- const id=identity();await step(env,id);
- assert.equal(ledger(db).f0.state,'terminal');assert.equal(ledger(db).f0.last_reason,'age_exceeded');assert.ok(!id.calls.resolve.flat().includes('f0:film-0'));
+ const {db}=open(),env={DB:db};await publish(env,[film(0)],'s1','2026-11-21T09:40:00.000Z');
+ const stale=identity({entries:{f0:{reason:'tmdb_mismatch',attempts:2,nextAttemptAt:'2026-11-22T00:00:00.000Z',class:'definite'}}});
+ await step(env,stale);assert.equal(ledger(db).f0.attempts,2);
+ const later=Date.parse('2026-11-22T01:00:00.000Z');
+ await admissionStep({repository:WatchlistD1,identity:stale,epochGuard})({...ctx(env),now:()=>later},{now:later});
+ assert.equal(ledger(db).f0.attempts,2,'the same outcome copied twice charges nothing (restart between check and settle, stale entry)');
+ const six=identity({entries:{f0:{reason:'not_found',attempts:6,nextAttemptAt:'2026-11-24T00:00:00.000Z'}},max:6});
+ const out=await admissionStep({repository:WatchlistD1,identity:six,epochGuard})({...ctx(env),now:()=>later+48*3600000},{now:later+48*3600000});
+ assert.deepEqual([ledger(db).f0.state,ledger(db).f0.attempts,ledger(db).f0.last_reason],['terminal',6,'not_found'],'six real checks: terminal and visible');assert.equal(out.counts.atCap,1);assert.equal(out.counts.gone,1);
 }
-// 7d. Review (age bound): a pending row already past the age bound whose retry time is in the FUTURE still becomes terminal today (it is selected regardless of its retry time); a deferral still uses no attempt.
+// 7d2. AIR-599: the Watchlist caller at a full Diary document gets `diary_cap`: not now, no attempt, its row keeps its place (due again at the next run).
 {
- const {db,file}=open(),env={DB:db};
- await publish(env,[film(0),film(1)],'old','2026-11-01T09:40:00.000Z');
- const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
- sql("UPDATE watchlist_admission_pending SET next_retry_at='2026-11-22T12:00:00.000Z', attempts=1 WHERE lid='f0';");
- sql("UPDATE watchlist_admission_pending SET next_retry_at='2026-11-22T12:00:00.000Z', attempts=0, last_reason='deferred' WHERE lid='f1';");
- const id=identity();const out=await step(env,id);
- assert.deepEqual([ledger(db).f0.state,ledger(db).f0.last_reason,ledger(db).f1.state,ledger(db).f1.last_reason],['terminal','age_exceeded','terminal','age_exceeded'],'both are older than the bound: terminal although neither is due');
- assert.deepEqual([ledger(db).f0.attempts,ledger(db).f1.attempts],[1,0],'terminal by age uses no attempt');
- assert.equal(id.calls.resolve.length,0,'no source request for an aged row');assert.equal(out.terminal,2);
- // A young row with a future retry stays untouched (not due, not aged).
- const {db:db2,file:file2}=open(),env2={DB:db2};
- await publish(env2,[film(0)],'young','2026-11-20T09:40:00.000Z');
- const r=sqliteSync(['-bail',file2],{input:"UPDATE watchlist_admission_pending SET next_retry_at='2026-11-22T12:00:00.000Z' WHERE lid='f0';"});assert.equal(r.status,0);
- const id2=identity();await step(env2,id2);assert.equal(ledger(db2).f0.state,'pending');assert.equal(id2.calls.resolve.length,0);
+ const {db}=open(),env={DB:db};await publish(env,[film(0)],'s1','2026-11-21T09:40:00.000Z');
+ const id=identity({entries:{f0:{reason:'diary_cap',attempts:0,nextAttemptAt:null}},counts:{capRefused:1}});
+ const out=await step(env,id);
+ assert.deepEqual([ledger(db).f0.state,ledger(db).f0.attempts,ledger(db).f0.next_retry_at,ledger(db).f0.last_reason],['pending',0,null,'diary_cap']);assert.equal(out.counts.capRefused,1);assert.equal(out.counts.notNow,1);
+ // the row's attempts are offered as the seed of a new shared entry (the ledger's count is not reset by a missing entry)
+ assert.deepEqual(id.calls.items.map(i=>[i.lid,i.attempts]),[['f0',0]]);
+}
+// 7d3. AIR-599: the owner dismissed the shared entry: the row is terminal `owner_dismissed`, no attempt.
+{
+ const {db}=open(),env={DB:db};await publish(env,[film(0)],'s1','2026-11-21T09:40:00.000Z');
+ await step(env,identity({entries:{f0:{reason:'owner_dismissed',attempts:1,nextAttemptAt:null}}}));
+ assert.deepEqual([ledger(db).f0.state,ledger(db).f0.last_reason],['terminal','owner_dismissed']);
 }
 // 7e. Review (owner visibility): the inventory read filters IN SQL and pages by keyset, so a terminal row behind more than a thousand historical rows is reachable and a full walk loses and repeats nothing.
 {
@@ -172,6 +180,24 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  const history=await WatchlistD1.admissionInventory(env,{filter:'history',limit:100,now:NOW});assert.ok(history.rows.every(r=>r.state==='resolved'||r.state==='superseded'));
  assert.deepEqual(await WatchlistD1.admissionInventory(env,{filter:'nope'}),{ok:false,reason:'shape'});
  assert.deepEqual(await WatchlistD1.admissionInventory(env,{filter:'all',after:{version:'x',lid:'a'}}),{ok:false,reason:'shape'});
+}
+// 7f. AIR-599: the owner requeue / dismiss of ledger rows. One compare-and-swap batch on (state, attempts, updated_at): a stale token writes nothing; an `age_exceeded` row is requeued only while its id is still on
+// the current Watchlist; the readback shows the new state.
+{
+ const {db,file}=open(),env={DB:db};
+ await publish(env,[film(0),film(1)],'s1','2026-11-21T09:40:00.000Z');
+ const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ sql("UPDATE watchlist_admission_pending SET state='terminal', attempts=6, last_reason='forbidden', updated_at='t1' WHERE lid='f0';");
+ sql("UPDATE watchlist_admission_pending SET state='terminal', attempts=1, last_reason='age_exceeded', updated_at='t2' WHERE lid='f1';");
+ sql("INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('gone1','x',1,'terminal',2,NULL,'age_exceeded',NULL,'t3');");
+ assert.deepEqual(await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[{lid:'f0',state:'terminal',attempts:5,updatedAt:'t1'}],now:NOW}),{ok:false,reason:'stale_revision'},'a stale token is refused');
+ assert.equal(ledger(db).f0.state,'terminal');
+ assert.deepEqual(await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[{lid:'gone1',state:'terminal',attempts:2,updatedAt:'t3'}],now:NOW}),{ok:false,reason:'stale_revision'},'an age_exceeded id no longer on the Watchlist is not requeued');
+ const out=await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[{lid:'f0',state:'terminal',attempts:6,updatedAt:'t1'},{lid:'f1',state:'terminal',attempts:1,updatedAt:'t2'}],now:NOW});
+ assert.equal(out.ok,true);assert.deepEqual(out.rows.map(r=>[r.lid,r.state,r.attempts,r.lastReason,r.nextRetryAt]).sort(),[['f0','pending',0,'owner_requeued',null],['f1','pending',0,'owner_requeued',null]]);
+ const d=await WatchlistD1.ownerAdmissionAction(env,{action:'dismiss',rows:[{lid:'f0',state:'pending',attempts:0,updatedAt:new Date(NOW).toISOString()}],now:NOW+1000});
+ assert.deepEqual(d.rows.map(r=>[r.state,r.lastReason]),[['terminal','owner_dismissed']]);
+ assert.deepEqual(await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[]}),{ok:false,reason:'shape'});
 }
 // 8. Module hygiene: no SQL, no table, no EPG or Discovery state of its own.
 {

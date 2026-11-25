@@ -475,11 +475,12 @@ export async function recordEffectAttempt(source,{snapshotId,effect,progress},ct
 
 // ---- the admission ledger (ADR 0186 decision 5) ---------------------------------------------------------------------------
 // The due rows of the durable ledger of Letterboxd ids that still need a Film: `pending` and due (`next_retry_at` null or past), oldest first-seen version first, bounded. Read only.
+// AIR-599: the admission step no longer passes `ageBefore`/`ageVersions` (age does not end a row); it passes `overdueBefore` and reads the `overdue` count instead.
 // `ageBefore` (an ISO time) and `ageVersions` select, REGARDLESS of their retry time, the pending rows whose first-seen snapshot is older than the age bound (committed before `ageBefore`; when that snapshot is
 // already pruned, first seen at least `ageVersions` versions ago): they are returned as `aged` so the age bound cannot be postponed by a retry time in the future.
 // `firstSeenAt` is the commit time of the snapshot that first listed the id; it is null when that snapshot was already pruned (then `currentVersion` still bounds its age by versions).
 // -> {ok:true,rows:[{lid,firstSeenSnapshotId,firstSeenVersion,firstSeenAt,attempts,lastReason}],aged:[...same shape],pending,currentVersion} | {ok:false,reason}
-export async function dueAdmissions(source,{now=Date.now(),limit=3,ageBefore=null,ageVersions=null,agedLimit=20}={}){
+export async function dueAdmissions(source,{now=Date.now(),limit=3,ageBefore=null,ageVersions=null,agedLimit=20,overdueBefore=null}={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  const cap=Math.min(Math.max(Number.isInteger(limit)?limit:3,1),20);
@@ -493,7 +494,10 @@ export async function dueAdmissions(source,{now=Date.now(),limit=3,ageBefore=nul
   if(typeof ageBefore==='string'&&Number.isFinite(Date.parse(ageBefore))&&Number.isInteger(ageVersions)&&ageVersions>0&&Number.isInteger(version)){
    aged=(await many(db,"SELECT "+COLUMNS+" FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND ((s.committed_at IS NOT NULL AND s.committed_at<?) OR (s.committed_at IS NULL AND a.first_seen_version<=?)) ORDER BY a.first_seen_version, a.lid LIMIT ?",[ageBefore,version-ageVersions,Math.min(Math.max(Number.isInteger(agedLimit)?agedLimit:20,1),50)])).map(shape);
   }
-  return {ok:true,rows:rows.map(shape),aged,pending:total,currentVersion:Number.isInteger(version)?version:null};
+  // AIR-599: the number of pending rows whose first-seen snapshot committed before `overdueBefore` (reported, never terminated). A pruned snapshot is not counted here.
+  let overdue=null;
+  if(typeof overdueBefore==='string'&&Number.isFinite(Date.parse(overdueBefore)))overdue=Number((await one(db,"SELECT COUNT(*) AS n FROM watchlist_admission_pending a JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND s.committed_at<?",[overdueBefore]))?.n)||0;
+  return {ok:true,rows:rows.map(shape),aged,pending:total,overdue,currentVersion:Number.isInteger(version)?version:null};
  }catch{return {ok:false,reason:'unavailable'};}
 }
 // The ledger as the owner's identity work inventory reads it (ADR 0170): rows with the title and year of the film as its first-seen snapshot listed it, in keyset order (first-seen version, lid), READ PAGE BY PAGE.
@@ -535,6 +539,45 @@ export async function settleAdmission(source,{lid,state,attempts,nextRetryAt=nul
   ["UPDATE watchlist_admission_pending SET state=?, attempts=?, next_retry_at=?, last_reason=?, resolved_by=?, updated_at=? WHERE lid=? AND state='pending'",[state,attempts,state==='pending'?nextRetryAt:null,reason==null?null:String(reason).slice(0,60),state==='resolved'?resolvedBy:null,iso(now),lid]]]);
  if(outcome!=='ok')return {ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
  try{const row=await one(db,'SELECT state FROM watchlist_admission_pending WHERE lid=?',[lid]);return row?.state===state?{ok:true,state}:{ok:true,already:true};}catch{return {ok:false,reason:'unavailable'};}
+}
+// AIR-599: the ledger facts of the Monitor (read only): pending rows that are due now, and pending rows whose first-seen snapshot committed before `overdueBefore` (reported, never terminated).
+// -> {ok:true,pendingDue,overdue} | {ok:false,reason}
+export async function admissionReport(source,{now=Date.now(),overdueBefore}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ try{
+  const due=await one(db,"SELECT COUNT(*) AS n FROM watchlist_admission_pending WHERE state='pending' AND (next_retry_at IS NULL OR next_retry_at<=?)",[iso(now)]);
+  const late=await one(db,"SELECT COUNT(*) AS n FROM watchlist_admission_pending a JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND s.committed_at<?",[overdueBefore]);
+  return {ok:true,pendingDue:Number(due?.n)||0,overdue:Number(late?.n)||0};
+ }catch{return {ok:false,reason:'unavailable'};}
+}
+// AIR-599 / ADR 0207 decision 4b: the owner `requeue` and `dismiss` of ledger rows, existing columns only. Each row names the compare-and-swap token the owner saw (`state`, `attempts`, `updatedAt`);
+// ONE fenced batch: every row must still match its token, or nothing is written (`stale_revision`). `requeue` sets a pending or terminal row back to `pending` (attempts 0, due now,
+// `last_reason = owner_requeued`); a row terminal as `age_exceeded` only while its id is still on the current Watchlist. `dismiss` makes the row terminal as `owner_dismissed`.
+// -> {ok:true,rows:[readback]} | {ok:false,reason:'stale_revision'|'shape'|'closed'|'writes_held'|'unavailable'}
+export async function ownerAdmissionAction(source,{action,rows,now=Date.now()}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!['requeue','dismiss'].includes(action)||!Array.isArray(rows)||!rows.length||rows.length>50)return {ok:false,reason:'shape'};
+ if(rows.some(row=>typeof row?.lid!=='string'||!row.lid||row.lid.length>100||!['pending','terminal'].includes(row.state)||!Number.isInteger(row.attempts)||row.attempts<0||typeof row.updatedAt!=='string'||!row.updatedAt))return {ok:false,reason:'shape'};
+ if(new Set(rows.map(row=>row.lid)).size!==rows.length)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const stamp=iso(now),statements=[authorityGuard(gate.generation)];
+ const onList="EXISTS (SELECT 1 FROM watchlist_member m JOIN watchlist_current c ON c.id=1 AND m.snapshot_id=c.snapshot_id WHERE m.lid=watchlist_admission_pending.lid)";
+ for(const row of rows){
+  if(action==='requeue')statements.push(["UPDATE watchlist_admission_pending SET state='pending', attempts=0, next_retry_at=NULL, last_reason='owner_requeued', resolved_by=NULL, updated_at=? WHERE lid=? AND state=? AND attempts=? AND updated_at=? AND state IN ('pending','terminal') AND (state='pending' OR last_reason IS NULL OR last_reason<>'age_exceeded' OR "+onList+")",[stamp,row.lid,row.state,row.attempts,row.updatedAt]]);
+  else statements.push(["UPDATE watchlist_admission_pending SET state='terminal', next_retry_at=NULL, last_reason='owner_dismissed', resolved_by=NULL, updated_at=? WHERE lid=? AND state=? AND attempts=? AND updated_at=? AND state IN ('pending','terminal')",[stamp,row.lid,row.state,row.attempts,row.updatedAt]]);
+  statements.push([FENCE,[]]);
+ }
+ const outcome=await fenced(db,statements);
+ if(outcome==='conflict')return {ok:false,reason:'stale_revision'};
+ if(outcome!=='ok')return {ok:false,reason:'unavailable'};
+ try{
+  const read=await many(db,'SELECT lid,state,attempts,next_retry_at,last_reason,updated_at FROM watchlist_admission_pending WHERE lid IN ('+rows.map(()=>'?').join(',')+')',rows.map(row=>row.lid));
+  return {ok:true,rows:read.map(row=>({lid:row.lid,state:row.state,attempts:Number(row.attempts),nextRetryAt:row.next_retry_at??null,lastReason:row.last_reason??null,updatedAt:row.updated_at}))};
+ }catch{return {ok:true,rows:null};}
 }
 // An id that left the Watchlist before it was resolved is `superseded` (not retried); a returning id reopens through the next promotion's ledger insert. -> {ok:true} | {ok:false,reason}
 export async function supersedeAdmissions(source,{lids,now=Date.now()},ctx={}){

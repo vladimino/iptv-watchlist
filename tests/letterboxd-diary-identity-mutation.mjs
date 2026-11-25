@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 const SOURCE = fs.readFileSync('src/letterboxd-diary-identity.js', 'utf8');
 const MUTANTS = [
   ['slug is not compared', "if(evidence.path!=='/film/'+slug+'/')return {state:'unresolved',reason:'slug_mismatch'};", ''],
-  ['a missing slug is requested', "if(!item.slug){set[lid]=entry(item,'slug_missing',attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}", ''],
+  ['a missing slug is requested', "if(!item.slug){record(item,'slug_missing');continue;}", ''],
   ['shortlink mismatch passes', "if(evidence.shortlinkPresent&&evidence.shortCode!==lid)return {state:'unresolved',reason:'shortlink_mismatch'};", ''],
   ['canonical mismatch passes', "if(evidence.canonicalPath&&evidence.canonicalPath!==evidence.path)return {state:'unresolved',reason:'canonical_mismatch'};", ''],
   ['two TMDB ids pass', "if(evidence.tmdbIds.length>1)return {state:'unresolved',reason:'tmdb_multiple'};", ''],
@@ -19,10 +19,10 @@ const MUTANTS = [
   ['step cap is ignored', "fetched>=STEP_LIMIT||", ''],
   ['lease budget is ignored', "||remaining()<STEP_BUDGET_MS", ''],
   ['a transport stop does not stop the step', "if(outcome.stop)stopped=true;", ''],
-  ['an id without a record is bridged', "if(!own.factKey){counts.skipped++;continue;}", ''],
+  ['an id without a record is bridged', "if(!own.factKey){counts.skipped++;", "if(false){counts.skipped++;"],
   ['a conflicting bridge is overridden', "if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){", "if(false){"],
   ['an existing receipt for another code is accepted', "if(admitted==='conflict'||admitted==='other_code')", "if(false)"],
-  ['an admission failure is not a pending', "}catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}", "}catch(error){throw error;}"],
+  ['an admission failure is not a pending', "}catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'", "}catch(error){throw error;outcome={state:'pending',reason:error?.code==='admission_identity_held'"],
   ['a skipped writer counts as an admission', "if(!out||out.state!=='complete')return false;", "if(!out)return false;"],
   ['a failed count is ignored', "if(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0)||Number(out.deferred||0))return false;", ''],
   ['any unit counts as an admission', "unit.kind==='film_admission'&&['applied','already','noop'].includes(unit.state)", 'true'],
@@ -36,13 +36,21 @@ const MUTANTS = [
   ['a linked id with a pending entry is cleared without a repair', "if(!prior){clear.push(lid);continue;}", "{clear.push(lid);continue;}"],
   ['a failed repair clears the entry', "else{counts.skipped++;}}catch{counts.skipped++;}", "else{counts.skipped++;}}catch{clear.push(lid);}"],
   ['a step-cap deferral resets the entry', "remaining()<STEP_BUDGET_MS){defer(item,prior);continue;}", "remaining()<STEP_BUDGET_MS){defer(item,null);continue;}"],
-  ['the link intent is not required before the effects', "if(!(await intend(item,outcome.verdict.tmdb,attempts+1)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});", ''],
+  ['the link intent is not required before the effects', "if(!(await intend(item,outcome.verdict.tmdb)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});", ''],
   ['a repair is held back by the source cap', "(repair(entry)||typeof entry.slug", "(false||typeof entry.slug"],
   ['a confirmed link_failed is not completed locally', "if(prior&&prior.reason==='link_failed'&&TMDB.test(String(prior.tmdb||''))){", "if(false){"],
   ['link_failed loses its verified movie id', "...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})", ''],
-  ['an interrupted intent stays a repair forever', "if(attempts>=MAX_ATTEMPTS&&LINK_REASONS.has(prior.reason))set[lid]={...prior,...(set[lid]||{}),reason:'link_interrupted'};", ''],
-  ['a deferred id is dropped', "if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};", ''],
-  ['the slug is not kept for the retry', "slug:item.slug||null,attempts,lastAttemptAt:iso(now)", "slug:null,attempts,lastAttemptAt:iso(now)"],
+  ['an interrupted intent stays a repair forever', "if(attempts>=MAX_ATTEMPTS&&LINK_REASONS.has(prior.reason))set[lid]={...prior,...(set[lid]||{}),reason:'link_interrupted',class:'definite'};", ''],
+  ['a deferred id is dropped', "if(!prior&&(item.slug||item.fromBacklog))set[item.lid]={reason:'deferred'", "if(false)set[item.lid]={reason:'deferred'"],
+  ['the slug is not kept for the retry', "slug:item.slug||cur?.slug||null,attempts,streak", "slug:null,attempts,streak"],
+  // AIR-599 / ADR 0207 decision 4b: the one retry contract.
+  ['a transport stop is charged as an attempt', "else if(cls==='transport'){streak=streakBefore+1;", "else if(false){streak=streakBefore+1;"],
+  ['a not-now outcome is charged as an attempt', "if(intent||cls==='not_now'){", "if(intent){"],
+  ['a 404 is not gone', "if(result.status===404||result.status===410)return 'not_found';", ''],
+  ['a 5xx is not transport', "if(result.status>=500)return 'upstream_5xx';", ''],
+  ['a full document still checks a new id', "if(slots>0){slots--;return true;}", "{return true;}"],
+  ['the queue position is ignored', "x.first-y.first||(x.pos<y.pos?-1:x.pos>y.pos?1:0)||x.index-y.index", "x.first-y.first||x.index-y.index"],
+  ['a dismissed entry is checked again', "if(prior&&prior.reason==='owner_dismissed'){settled.set(lid,'owner_dismissed');continue;}", ''],
 ];
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'air489-'));
 let killed = 0;

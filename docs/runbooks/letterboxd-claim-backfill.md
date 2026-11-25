@@ -5,7 +5,7 @@ Applies to the module `src/canonical-letterboxd-claim.js`, whose producer is act
 ## Activation of the producer path
 
 The Ratings flows offer their durable links to the claim module. The module acts only while the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is `true`; the activation PR sets it to `true`. While inactive, the flows write nothing for claims and store nothing. While active:
-- an unproved id keeps a bounded `claim_pending` entry in the Diary identity document; after six attempts it stays visible and is no longer served;
+- an unproved id keeps a bounded `claim_pending` entry in the Diary identity document; after six attempts it stays visible and is no longer served. Since AIR-599 the document never evicts a `claim_pending` entry to make room (only `owner_dismissed` entries are evictable; a new id waits in the backlog instead), the entry keeps its queue position, and it is listed in the `diary_identity` lane of `/admin/identity` ([contract](../reference/integrations/letterboxd-ratings.md#one-retry-contract-for-both-callers-air-599-adr-0207-decision-4b));
 - the baseline import offers verified entries only, and a replay of a committed chunk re-offers it;
 - reverting the line stops new claims, but claims already written stay (see Rollback).
 

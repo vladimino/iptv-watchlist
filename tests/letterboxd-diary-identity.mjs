@@ -69,6 +69,7 @@ const opts = (extra = {}) => ({clock: () => NOW, remaining: () => 120000, fetchI
 const items = (...lids) => lids.map(([lid, slug]) => ({lid, slug}));
 const recordOf = lid => records.get('letterboxd/facts/films/lb-' + lid + '.json');
 const pending = () => records.get(Facts.DIARY_IDENTITY_KEY)?.films || {};
+const putDoc = films => {records.set(Facts.DIARY_IDENTITY_KEY, {schemaVersion: 1, films}); etags.set(Facts.DIARY_IDENTITY_KEY, String(++rev));};
 
 // 1. verified: facts kept, Film admitted through the existing writer, movie id linked, label returned, receipt marked, idempotent.
 reset(); await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
@@ -88,7 +89,7 @@ assert.equal(net.calls.length, before, 'a bridged id is not requested again'); a
 // 2. 403 is a pending with a retry time, not a refusal; no request inside the backoff; a later run retries; the rating is untouched.
 reset(); await seed('Aj8u', 4); site.set('Aj8u', {status: 403});
 out = await Identity.resolve(env, items(['Aj8u', 'fixture-beta-2024']), opts());
-assert.equal(out.counts.pending, 1); assert.equal(pending().Aj8u.reason, 'forbidden'); assert.equal(pending().Aj8u.attempts, 1);
+assert.equal(out.counts.pending, 1); assert.equal(pending().Aj8u.reason, 'forbidden'); assert.equal(pending().Aj8u.attempts, 0, 'AIR-599: a 403 consumes no attempt'); assert.equal(pending().Aj8u.streak, 1); assert.equal(pending().Aj8u.class, 'transport');
 assert.ok(Date.parse(pending().Aj8u.nextAttemptAt) > NOW); assert.equal(recordOf('Aj8u').rating.value, 4); assert.equal(recordOf('Aj8u').links.tmdb, null);
 let calls = net.calls.length; out = await Identity.resolve(env, items(['Aj8u', 'fixture-beta-2024']), opts({clock: () => NOW + 60000}));
 assert.equal(net.calls.length, calls); assert.equal(out.counts.deferred, 1);
@@ -114,7 +115,7 @@ const refusals = [
 for (const [reason, arrange, slug] of refusals) {
   reset(); await seed('Gam1', 2.5); arrange('Gam1');
   out = await Identity.resolve(env, items(['Gam1', slug]), opts());
-  const expected = reason === 'challenge' ? 'challenge' : reason;
+  const expected = reason === 'tmdb_fetch_failed' ? 'not_found' : reason; // AIR-599: a TMDB 404 is `not_found` (gone)
   assert.equal(pending().Gam1?.reason, expected, reason); if (reason === 'slug_missing') assert.equal(net.calls.length, 0, 'no request without the same-row slug'); assert.equal(canonical.applied.length, 0, reason + ' admits nothing');
   assert.equal(recordOf('Gam1').links.tmdb, null, reason); assert.equal(recordOf('Gam1').rating.value, 2.5, reason);
   assert.equal(records.has('letterboxd/admissions/verified-films.json'), false, reason + ' writes no receipt');
@@ -193,7 +194,7 @@ out = await Identity.resolve(env, items(['Slw1', 'fixture-slw-2014']), opts({rem
 assert.equal(pending().Slw1.reason, 'timeout'); assert.equal(canonical.applied.length, 0); assert.equal(net.calls.length, 1, 'the page and TMDB are not requested past the budget');
 reset(); await seed('Slw2', 3); add('Slw2', 'fixture-slw-2013', '900071', 'Fixture Slw2', 2013); slow.on = 'detail'; slow.left = 120000;
 out = await Identity.resolve(env, items(['Slw2', 'fixture-slw-2013']), opts({remaining: () => slow.left}));
-assert.equal(pending().Slw2.reason, 'budget'); assert.equal(canonical.applied.length, 0); assert.equal(recordOf('Slw2').links.tmdb, null); assert.equal(records.has('letterboxd/admissions/verified-films.json'), false, 'no receipt without the write reserve');
+assert.equal(pending().Slw2.reason, 'deferred', 'AIR-599: no write reserve is not-now (no attempt)'); assert.equal(pending().Slw2.attempts, 0); assert.equal(canonical.applied.length, 0); assert.equal(recordOf('Slw2').links.tmdb, null); assert.equal(records.has('letterboxd/admissions/verified-films.json'), false, 'no receipt without the write reserve');
 reset(); await seed('Slw3', 3); add('Slw3', 'fixture-slw-2012', '900072', 'Fixture Slw3', 2012);
 out = await Identity.resolve(env, items(['Slw3', 'fixture-slw-2012']), opts({remaining: () => Identity.STEP_BUDGET_MS - 1})); assert.equal(net.calls.length, 0); assert.equal(pending().Slw3.reason, 'deferred');
 
@@ -205,7 +206,7 @@ for (const [name, interrupt] of interruptions) {
   reset(); await seed('Tmp1', 3); add('Tmp1', 'fixture-tmp-2011', '900080', 'Fixture Tmp', 2011); interrupt();
   out = await Identity.resolve(env, items(['Tmp1', 'fixture-tmp-2011']), opts());
   assert.equal(net.calls.length, 0, name + ': no outbound check while the authority is unavailable'); assert.equal(canonical.applied.length, 0, name);
-  assert.deepEqual({...pending().Tmp1}, {reason: 'deferred', slug: 'fixture-tmp-2011', attempts: 0, lastAttemptAt: null, nextAttemptAt: new Date(NOW).toISOString()}, name);
+  assert.deepEqual({...pending().Tmp1}, {reason: 'deferred', class: 'not_now', slug: 'fixture-tmp-2011', attempts: 0, streak: 0, queuedAt: new Date(NOW).toISOString(), lastAttemptAt: null, nextAttemptAt: new Date(NOW).toISOString()}, name);
   // a second interrupted step keeps the entry as it is (no attempt consumed)
   await Identity.resolve(env, [], opts({clock: () => NOW + 1000})); assert.equal(pending().Tmp1.attempts, 0, name); assert.equal(net.calls.length, 0, name);
   canonical.gate = {mode: 'd1', state: 'open', generation: 2}; canonical.bridgeThrows = null;
@@ -234,6 +235,11 @@ for (const variant of ['backoff', 'held gate']) {
   assert.equal(out.counts.verified, 1, variant + ': off-page retry once due'); assert.equal(recordOf('Slg1').links.tmdb, '900090', variant); assert.equal(pending().Slg1, undefined, variant);
 }
 
+// AIR-599: the same upgrade when the entry is already DUE but the authority is held (the step defers it): the new slug is saved, nothing is charged.
+reset(); await seed('Slg2', 3); await Identity.resolve(env, items(['Slg2', null]), opts()); canonical.gate = {mode: 'existing', state: 'held', generation: 2};
+await Identity.resolve(env, items(['Slg2', 'fixture-slg2-2009']), opts({clock: () => NOW + 13 * 3600000}));
+assert.deepEqual([pending().Slg2.slug, pending().Slg2.attempts], ['fixture-slg2-2009', 1], 'a due entry deferred by a held authority keeps the newly seen slug'); canonical.gate = {mode: 'd1', state: 'open', generation: 2};
+
 // 15. review of PR #720 (fourth), P1: a bridge that failed after the alias and the record link were committed (the projection threw once) leaves a pending entry on an already-linked id.
 // A later ordinary step on a DIFFERENT page repairs the projection (no request, no second admission, no new fact) and clears the entry only then.
 reset(); fail.view = 0; await seed('Prj1', 3.5); add('Prj1', 'fixture-prj-2008', '900110', 'Fixture Prj', 2008); fail.view = 1;
@@ -257,8 +263,21 @@ reset(); fail.view = 0; for (const lid of ['Frs1', 'Frs2', 'Frs3', 'Old1']) awai
 for (const [i, lid] of ['Frs1', 'Frs2', 'Frs3'].entries()) add(lid, 'fixture-frs' + (i + 1) + '-2006', String(900120 + i), 'Fixture ' + lid, 2006);
 const oldEntry = {reason: 'forbidden', slug: 'old-one', attempts: 5, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'};
 await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Old1: oldEntry}}));
+site.set('Old1', {status: 429});
 out = await Identity.resolve(env, items(['Frs1', 'fixture-frs1-2006'], ['Frs2', 'fixture-frs2-2006'], ['Frs3', 'fixture-frs3-2006'], ['Old1', 'old-one']), opts());
-assert.equal(out.counts.verified, 3); assert.equal(out.counts.deferred, 1); assert.deepEqual(pending().Old1, oldEntry, 'attempts, reason and backoff are not reset by a deferral');
+// AIR-599: one stable queue order. The older retained id (queued at its last attempt, 10:00) runs before the new page ids; its 429 stops the step's requests,
+// consumes no attempt and keeps its place; the page ids are deferred (no attempt) behind it.
+assert.equal(out.counts.checked, 1); assert.equal(out.counts.verified, 0); assert.equal(out.counts.deferred, 3);
+assert.deepEqual([pending().Old1.reason, pending().Old1.attempts, pending().Old1.streak, pending().Old1.queuedAt], ['rate_limited', 5, 1, oldEntry.lastAttemptAt], 'a transport stop keeps the attempts and the place');
+for (const lid of ['Frs1', 'Frs2', 'Frs3']) assert.deepEqual([pending()[lid].reason, pending()[lid].attempts], ['deferred', 0], lid);
+
+// AIR-599: a due entry deferred behind a transport stop of an older one keeps its attempts, reason and queue position.
+reset(); for (const lid of ['Qa01', 'Qb01']) await seed(lid, 3); site.set('Qa01', {status: 429}); site.set('Qb01', {status: 404});
+putDoc({Qa01: {reason: 'not_found', slug: 'qa', attempts: 2, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'},
+  Qb01: {reason: 'not_found', slug: 'qb', attempts: 3, streak: 0, queuedAt: '2026-11-02T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
+out = await Identity.resolve(env, [], opts());
+assert.deepEqual([pending().Qa01.reason, pending().Qa01.attempts, pending().Qb01.reason, pending().Qb01.attempts, pending().Qb01.queuedAt], ['rate_limited', 2, 'not_found', 3, '2026-11-02T00:00:00.000Z'], 'the older id runs first; the deferred one is unchanged');
+assert.equal(net.calls.filter(url => url.includes('Qb01')).length, 0);
 
 // 17. review of PR #720 (fifth), P1: a durable link intent precedes every non-atomic effect, so a lost final pending write after a partial commit is still repaired off-page.
 const prjView = tmdb => records.get('enrichment/view-index.json')?.['tmdb_' + tmdb];
@@ -275,7 +294,8 @@ assert.equal(net.calls.filter(url => url.includes('Crs1') || url.includes('fixtu
 reset(); fail.view = 0; fail.identity = null; await seed('Cap6', 3); add('Cap6', 'fixture-cap6-2004', '900131', 'Fixture Cap6', 2004);
 await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Cap6: {reason: 'forbidden', slug: 'fixture-cap6-2004', attempts: 5, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'}}}));
 fail.view = 1; await Identity.resolve(env, items(['Cap6', 'fixture-cap6-2004']), opts());
-assert.deepEqual([pending().Cap6.reason, pending().Cap6.attempts], ['link_failed', 6]); crsCalls = net.calls.length;
+assert.deepEqual([pending().Cap6.reason, pending().Cap6.attempts], ['link_failed', 5], 'AIR-599: a verified page whose link failed consumes no attempt');
+{const doc = records.get(Facts.DIARY_IDENTITY_KEY); doc.films.Cap6.attempts = Identity.MAX_ATTEMPTS; records.set(Facts.DIARY_IDENTITY_KEY, doc);} crsCalls = net.calls.length; // the repair is served at the cap too
 out = await Identity.resolve(env, items(['Other5', 'other-5']), opts({clock: () => NOW + 1000}));
 assert.equal(out.counts.repaired, 1, 'the cap on source attempts does not stop a repair'); assert.equal(prjView('900131').watched, true); assert.equal(pending().Cap6, undefined);
 assert.equal(net.calls.slice(crsCalls).filter(url => url.includes('Cap6') || url.includes('fixture-cap6')).length, 0); assert.equal(canonical.applied.length, 1);
@@ -378,5 +398,88 @@ reset(); claimCalls.length = 0; claimStub.mode = 'complete'; await seed('Brg1', 
 out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts({remaining: () => 1000})); assert.equal(claimCalls.length, 0); assert.equal(pending().Brg1.reason, 'claim_pending'); assert.equal(pending().Brg1.attempts, 0);
 delete ctx.CanonicalLetterboxdClaim; reset(); await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
 out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts()); assert.equal(out.counts.bridged, 1); assert.equal(out.counts.claim, undefined); assert.deepEqual(Object.keys(pending()), []);
+
+// ---- AIR-599 / ADR 0207 decision 4b: one retry contract for both callers ----
+const backlogOf = () => records.get(Facts.DIARY_BACKLOG_KEY)?.ids || {};
+// (a) transport (403, challenge, 429, timeout, 5xx, network) consumes no attempt, keeps the place and backs off 15 min · 2^(streak − 1); a 404 consumes one; six 404s are terminal and visible.
+for (const [name, arrange, reason] of [['403', lid => site.set(lid, {status: 403}), 'forbidden'], ['challenge', lid => site.set(lid, {status: 403, headers: {'cf-mitigated': 'challenge'}}), 'challenge'], ['429', lid => site.set(lid, {status: 429}), 'rate_limited'],
+  ['5xx', lid => site.set(lid, {status: 503}), 'upstream_5xx'], ['tmdb 5xx', lid => {add(lid, 'fixture-t5-2001', '900201', 'Fixture T5', 2001); tmdbDocs.set('900201', () => http(502, ''));}, 'upstream_5xx'],
+  ['network', lid => {site.set(lid, {landing: 'fixture-net'}); const handler = net.handler; net.handler = async (url, init) => {if (url.includes('boxd.it/' + lid)) {net.handler = handler; throw new TypeError('network down');} return handler(url, init);};}, 'network_error']]) {
+  reset(); await seed('Trn1', 3); arrange('Trn1');
+  out = await Identity.resolve(env, items(['Trn1', 'fixture-t5-2001']), opts({route: 'watchlist_admission'}));
+  const entry = pending().Trn1;
+  assert.deepEqual([entry.reason, entry.class, entry.attempts, entry.streak, entry.queuedAt], [reason, 'transport', 0, 1, new Date(NOW).toISOString()], name);
+  assert.equal(entry.nextAttemptAt, new Date(NOW + 15 * 60000).toISOString(), name + ': first transport backoff is 15 min');
+  const outcome = out.outcomes.get('Trn1'); assert.deepEqual([outcome.checked, outcome.class, outcome.attempts, outcome.terminal], [true, 'transport', 0, false], name);
+  assert.equal(entry.route, 'watchlist_admission', name);
+}
+assert.equal(Identity.transportDelayMs(6), 8 * 3600000, 'the transport backoff is capped at 8 h'); assert.equal(Identity.transportDelayMs(9), 8 * 3600000);
+reset(); await seed('Gon1', 3); site.set('Gon1', {status: 404}); let when = NOW;
+for (let i = 0; i < 8; i++) {out = await Identity.resolve(env, items(['Gon1', 'x']), opts({clock: () => when})); when += 3 * 24 * 3600000;}
+assert.deepEqual([pending().Gon1.reason, pending().Gon1.class, pending().Gon1.attempts], ['not_found', 'gone', 6], 'six 404s, then no more checks');
+assert.equal(net.calls.filter(url => url.includes('Gon1')).length, 6); assert.equal(out.outcomes.get('Gon1').terminal, true, 'terminal and visible, never dropped');
+assert.equal(Identity.visibleClass(pending().Gon1), 'needs_owner_review');
+// a real check after a transport streak resets the streak
+reset(); await seed('Rst1', 3); putDoc({Rst1: {reason: 'rate_limited', class: 'transport', slug: 'x', attempts: 2, streak: 4, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'}}); site.set('Rst1', {status: 404});
+await Identity.resolve(env, [], opts()); assert.deepEqual([pending().Rst1.attempts, pending().Rst1.streak, pending().Rst1.queuedAt], [3, 0, '2026-11-01T00:00:00.000Z']); assert.match(pending().Rst1.checkId, /.+/);
+// (b) one check budget for both callers: a real check charged once whichever caller runs it; the other caller inside the backoff makes no request and gets the same count.
+reset(); await seed('Shr1', 3); site.set('Shr1', {status: 404});
+out = await Identity.resolve(env, items(['Shr1', 'x']), opts({route: 'watchlist_admission'})); assert.equal(pending().Shr1.attempts, 1);
+const callsShr = net.calls.length;
+out = await Identity.resolve(env, items(['Shr1', 'x']), opts({clock: () => NOW + 60000, route: 'ratings_diary'}));
+assert.equal(net.calls.length, callsShr, 'not due for the other caller either'); assert.equal(pending().Shr1.attempts, 1, 'charged once');
+assert.deepEqual([out.outcomes.get('Shr1').checked, out.outcomes.get('Shr1').attempts], [false, 1]);
+// an intent written by one caller is resumed by the other
+reset(); fail.identity = 1; await seed('Res1', 3); add('Res1', 'fixture-res-2000', '900202', 'Fixture Res', 2000); canonical.failWith = 'canonical_write_unknown';
+await Identity.resolve(env, items(['Res1', 'fixture-res-2000']), opts({route: 'watchlist_admission'})); fail.identity = null; canonical.failWith = null;
+assert.deepEqual([pending().Res1.reason, pending().Res1.route], ['linking', 'watchlist_admission']);
+out = await Identity.resolve(env, items(['Oth9', 'oth-9']), opts({clock: () => NOW + 1000, route: 'ratings_diary'})); assert.equal(out.counts.verified, 1); assert.equal(recordOf('Res1').links.tmdb, '900202');
+// a stale Sync epoch at the admission batch (the writer's `letterboxd_epoch_fence`) is not now: no attempt
+reset(); await seed('Epo1', 3); add('Epo1', 'fixture-epo-2000', '900203', 'Fixture Epo', 2000); canonical.failWith = 'letterboxd_epoch_fence';
+await Identity.resolve(env, items(['Epo1', 'fixture-epo-2000']), opts()); canonical.failWith = null;
+assert.deepEqual([pending().Epo1.reason, pending().Epo1.class, pending().Epo1.attempts], ['epoch_fenced', 'not_now', 0]);
+// (c) the cap: 200 entries the step may not evict (link intents, pending claims, transport-retained, below-cap, at-cap) refuse a NEW id: no check, backlog, `cap_refused`.
+reset(); await seed('New1', 3); add('New1', 'fixture-new-2000', '900204', 'Fixture New', 2000);
+{const films = {}; const kinds = ['linking', 'link_failed', 'claim_pending', 'forbidden', 'not_found'];
+  for (let i = 0; i < 200; i++) {const reason = kinds[i % 5]; films['K' + String(i).padStart(3, '0')] = {reason, slug: 'k-' + i, tmdb: reason === 'not_found' || reason === 'forbidden' ? undefined : '9' + String(i).padStart(5, '0'), attempts: i % 10 === 4 ? 6 : 1, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-17T00:00:00.000Z', nextAttemptAt: '2026-11-30T00:00:00.000Z'};}
+  putDoc(films);}
+const callsCap = net.calls.length;
+out = await Identity.resolve(env, items(['New1', 'fixture-new-2000']), opts());
+assert.equal(net.calls.length, callsCap, 'no check for an id without a place'); assert.equal(out.counts.capRefused, 1); assert.deepEqual({...out.outcomes.get('New1')}, {checked: false, class: 'not_now', reason: 'diary_cap', retryAt: null, attempts: 0, streak: 0, terminal: false});
+assert.equal(Object.keys(pending()).length, 200, 'nothing evicted'); assert.deepEqual(Object.keys(backlogOf()), ['New1']); assert.equal(backlogOf().New1.slug, 'fixture-new-2000');
+// the write path refuses too: an added id above the cap is returned in `refused`, no existing entry is dropped
+const refusedWrite = await Facts.updateDiaryIdentity(env, {set: {Zzz1: {reason: 'deferred', slug: 'z', attempts: 0, lastAttemptAt: null, nextAttemptAt: new Date(NOW).toISOString()}}});
+assert.deepEqual([...refusedWrite.refused], ['Zzz1']); assert.equal(Object.keys(pending()).length, 200);
+// new page ids do not overtake: when a place returns (the owner dismisses one entry), the backlog id enters first, before a newer page id
+const {version: v1} = await Facts.readDiaryIdentityVersioned(env);
+const dismissed = await Facts.ownerDiaryAction(env, {action: 'dismiss', lids: ['K004'], expectedVersion: v1, by: 'owner@example.test', why: 'test', at: new Date(NOW).toISOString()});
+assert.equal(dismissed.state, 'applied'); assert.equal(dismissed.entries.K004.reason, 'owner_dismissed');
+await seed('Pg01', 3); add('Pg01', 'fixture-pg01-2000', '900205', 'Fixture Pg01', 2000);
+out = await Identity.resolve(env, items(['Pg01', 'fixture-pg01-2000']), opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.verified, 1, 'the backlog id is checked first'); assert.equal(recordOf('New1').links.tmdb, '900204'); assert.deepEqual(Object.keys(backlogOf()), ['Pg01'], 'the newer page id waits in the backlog');
+assert.equal(pending().K004, undefined, 'the dismissed (settled) entry was the one evicted');
+// (d) owner requeue / dismiss: compare-and-swap on the stored version, readback; a stale version is refused and writes nothing.
+reset(); putDoc({Leg1: {reason: 'forbidden', slug: 'l', attempts: 6, lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
+const {version: v2} = await Facts.readDiaryIdentityVersioned(env);
+out = await Identity.resolve(env, [], opts()); assert.equal(pending().Leg1.attempts, 6, 'a legacy entry exhausted by old transport charges keeps its count until the owner requeues it');
+const stale = await Facts.ownerDiaryAction(env, {action: 'requeue', lids: ['Leg1'], expectedVersion: 'not-the-version', by: 'o', why: 'w', at: 'a'});
+assert.equal(stale.state, 'stale_revision'); assert.equal(pending().Leg1.attempts, 6);
+const req = await Facts.ownerDiaryAction(env, {action: 'requeue', lids: ['Leg1', 'Abs1'], expectedVersion: v2, by: 'owner@example.test', why: 'transport exhausted', at: '2026-11-17T16:00:00.000Z'});
+assert.deepEqual({...req.results}, {Leg1: 'requeued', Abs1: 'absent'});
+assert.deepEqual([req.entries.Leg1.attempts, req.entries.Leg1.streak, req.entries.Leg1.queuedAt, req.entries.Leg1.reason, req.entries.Leg1.requeued.why], [0, 0, '2026-11-10T00:00:00.000Z', 'owner_requeued', 'transport exhausted']);
+assert.notEqual(req.version, v2);
+// a requeue of a reported id without an entry creates its backlog record; a dismiss of a backlog id removes it
+const {version: b0} = await Facts.readDiaryBacklog(env);
+const created = await Facts.ownerBacklogAction(env, {action: 'requeue', lids: ['Rep1'], slugs: {Rep1: 'rep-1'}, expectedVersion: b0, by: 'o', why: 'report', at: '2026-11-17T16:00:00.000Z'});
+assert.deepEqual([created.state, created.results.Rep1, created.entries.Rep1.slug], ['applied', 'created', 'rep-1']);
+assert.equal((await Facts.ownerBacklogAction(env, {action: 'dismiss', lids: ['Rep1'], expectedVersion: b0, by: 'o', why: 'x', at: 'a'})).state, 'stale_revision');
+assert.equal((await Facts.ownerBacklogAction(env, {action: 'dismiss', lids: ['Rep1'], expectedVersion: created.version, by: 'o', why: 'x', at: 'a'})).results.Rep1, 'dismissed');
+// a dismissed entry is never checked again
+reset(); await seed('Dis1', 3); site.set('Dis1', {status: 404}); putDoc({Dis1: {reason: 'owner_dismissed', class: 'settled', slug: 'd', attempts: 2, lastAttemptAt: 'x', nextAttemptAt: null}});
+out = await Identity.resolve(env, items(['Dis1', 'd']), opts()); assert.equal(net.calls.length, 0); assert.deepEqual([out.outcomes.get('Dis1').class, out.outcomes.get('Dis1').reason], ['settled', 'owner_dismissed']);
+// (e) under a not-open authority (the A1 `closed` analogue): no attempt and no termination
+reset(); await seed('Cls1', 3); canonical.gate = {mode: 'existing', state: 'held', generation: 2};
+for (let i = 0; i < 10; i++) await Identity.resolve(env, items(['Cls1', 'c']), opts({clock: () => NOW + i * 86400000}));
+assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred']);
 
 console.log('letterboxd-diary-identity: ok');

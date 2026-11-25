@@ -635,5 +635,28 @@ async function putPayload(env,runId,report){
  assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:603'"),'603');
 }
 
+// AIR-599 / ADR 0207 decision 4b: through the Letterboxd Sync's fenced env (producerFence kind `letterboxd`) the admission batch and its receipt transitions assert the Sync epoch.
+// A stale epoch admits nothing (no Film, no admission row, no applied receipt); the running epoch admits as before; another fence kind is not bound by these writers.
+{
+ const file=database('open');
+ assert.equal(sqlite(file,"INSERT INTO letterboxd_sync_mode (id,mode,target,from_mode,epoch,drain,quarantine_reason,quarantined_at,changed_at,revision,write_id) VALUES (1,'cloudflare',NULL,'switching',5,NULL,NULL,NULL,'"+T0+"',1,'w')").status,0);
+ const stale={...envOf(file),producerFence:{kind:'letterboxd',epoch:4}};
+ const out=await applyRatedAdmissionRetention(stale,{event:'diary:stale',admissions:[{receiptKey:'tmdb_604',receipt:receipt(604)}],now:()=>T}).catch(error=>({thrown:error.code}));
+ assert.ok(out.thrown||out.state!=='complete'||Number(out.failed||0)+Number(out.unknown||0)+Number(out.refused||0)>0,'a stale epoch is not a complete admission: '+JSON.stringify(out));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='604'"),0,'a stale Sync epoch admits nothing');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:604'"),0);
+ assert.equal(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE state='applied'"),0);
+ await assert.rejects(()=>FA.admitRatedFilm(stale,{receiptKey:'tmdb_604',receipt:receipt(604),expectedRevision:0,at:T,requestId:'req-stale'}),error=>error.code==='letterboxd_epoch_fence','the writer names the moved epoch');
+ const running={...envOf(file),producerFence:{kind:'letterboxd',epoch:5}};
+ const ok=await applyRatedAdmissionRetention(running,{event:'diary:running',admissions:[{receiptKey:'tmdb_604',receipt:receipt(604)}],now:()=>T2});
+ assert.equal(ok.state,'complete',JSON.stringify(ok));assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:604'"),'604');
+ // the switch away (mode no longer `cloudflare`) fences the same epoch too
+ assert.equal(sqlite(file,"UPDATE letterboxd_sync_mode SET mode='switching',target='external',epoch=6,revision=2 WHERE id=1").status,0);
+ await assert.rejects(()=>FA.admitRatedFilm(running,{receiptKey:'tmdb_605',receipt:receipt(605),expectedRevision:0,at:T,requestId:'req-moved'}),error=>error.code==='letterboxd_epoch_fence');
+ // another producer fence kind is not bound by the admission writer (unchanged behaviour of other producers)
+ const other=await FA.admitRatedFilm({...envOf(file),producerFence:{kind:'dictionary'}},{receiptKey:'tmdb_605',receipt:receipt(605),expectedRevision:0,at:T,requestId:'req-other'});
+ assert.equal(other.admitted,true);
+}
+
 console.log('canonical-rated-admission-producer: ok');
 void applyFilmAdmission;void ratedAdmissionRegistry;void UNIT_CAP;void resolveExistingRetentionFilm;void RATED_ADMISSION_ORIGIN;void FILM_ADMISSION_OPERATION;void FILM_RETENTION_OPERATION;void ratedAdmissionRecord;void departedWatchlistLids;void watchlistRetentionWork;void assertRatedAdmissionAccepted;void ratedAdmissionSliceSettled;

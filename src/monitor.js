@@ -60,8 +60,23 @@ const Monitor=(()=>{
  const letterboxdFacts=(env,now)=>guarded(async()=>{
   if(typeof LetterboxdSync==='undefined'||!env?.DB)return null;
   const model=await LetterboxdSync.readModel(env,{now});
-  return model.mode==='external'?null:model;
+  return model.mode==='external'?null:{...model,identityCheck:await identityCheckFacts(env,now)};
  });
+ // AIR-599 / ADR 0207 decision 4b: ONE fact reader of the shared Letterboxd check (both callers), read only: the newest real check that got an answer, the due Diary entries, the backlog (any id in it was
+ // refused by a full document: `cap_refused`; at its bound: `backlog_full`), the due ledger rows and the ledger rows pending longer than 14 days. A missing `lastCheckAt` falls back to the newest charged
+ // check of the entries; with neither, the age is unknown and not reported as stale.
+ const identityCheckFacts=async(env,now)=>{
+  if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdDiaryIdentity==='undefined'||typeof LetterboxdFacts.readDiaryBacklog!=='function')return null;
+  try{
+   const [doc,backlog]=await Promise.all([LetterboxdFacts.readDiaryIdentity(env),LetterboxdFacts.readDiaryBacklog(env).then(read=>read.doc)]);
+   const entries=Object.values(doc.films||{}).filter(Boolean),cap=LetterboxdDiaryIdentity.MAX_ATTEMPTS;
+   const dueEntries=entries.filter(entry=>entry.reason!=='owner_dismissed'&&(Number(entry.attempts)||0)<cap&&!(Date.parse(entry.nextAttemptAt)>now)).length;
+   const charged=entries.filter(entry=>['gone','definite'].includes(LetterboxdDiaryIdentity.classify(entry.reason))).map(entry=>String(entry.lastAttemptAt||'')).filter(Boolean).sort();
+   const ledger=typeof WatchlistD1!=='undefined'&&typeof WatchlistD1.admissionReport==='function'?await WatchlistD1.admissionReport(env,{now,overdueBefore:new Date(now-14*86400000).toISOString()}):{ok:false};
+   const backlogCount=Object.keys(backlog.ids||{}).length;
+   return {lastCheckAt:typeof doc.lastCheckAt==='string'?doc.lastCheckAt:charged.at(-1)||null,dueEntries,atCap:entries.filter(entry=>entry.reason!=='owner_dismissed'&&(Number(entry.attempts)||0)>=cap).length,backlog:backlogCount,backlogFull:backlogCount>=LetterboxdFacts.DIARY_BACKLOG_CAP,ledgerDue:ledger.ok?ledger.pendingDue:null,overdue:ledger.ok?ledger.overdue:null};
+  }catch{return {error:'unreadable'};}
+ };
  // AIR-556. Prediction progress is confirmed work only, read through the same helpers as the Footer (enrichment.js: queue slices, retry budget, run
  // history, one 60-minute no-progress threshold). Progress is a productive batch or a drained run that proved an empty queue, taken from the run history,
  // the queue's own last batch and this document's stored clock (AIR-596, ADR 0210). A heartbeat, `already_running`, a noop wake-up, a queue recount, a moved

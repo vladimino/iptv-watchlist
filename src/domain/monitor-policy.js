@@ -206,6 +206,17 @@ export function evaluateLetterboxd(model, now) {
     else if (outcome === 'rate_limited') { if (STATE_RANK[state] < STATE_RANK.delayed) state = 'delayed'; issues.push(issue(key + '_rate_limited', 'delayed', 'letterboxd', label + ' was rate limited in the last Letterboxd slot')); }
   };
   if (health !== 'failed') { sourceIssue('letterboxd_ratings', 'Ratings', model.sources?.ratings?.lastOutcome); sourceIssue('letterboxd_watchlist', 'the Watchlist', model.sources?.watchlist?.lastOutcome); }
+  // AIR-599 / ADR 0207 decision 4b: the shared Letterboxd check (Diary and Watchlist callers). Three conditions: no answered check for 24 h while ids are due, a ledger row pending longer than 14 days,
+  // and any id refused by the full check document (`cap_refused`, kept in the backlog) or a full backlog (`backlog_full`). An unreadable fact is reported, never read as "nothing due".
+  const check = model.identityCheck;
+  if (check && check.error) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_identity_check_unreadable', 'degraded', 'letterboxd', 'The Letterboxd identity check state could not be read')); }
+  else if (check) {
+    const due = (check.dueEntries || 0) + (check.backlog || 0) + (check.ledgerDue || 0);
+    const last = Date.parse(check.lastCheckAt || '');
+    if (due > 0 && Number.isFinite(last) && now - last > 24 * 3600000) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_identity_check_stale', 'degraded', 'letterboxd', 'No Letterboxd identity check got an answer for 24 hours while ids are due', metrics({due, lastCheckAt: check.lastCheckAt}))); }
+    if (Number.isInteger(check.overdue) && check.overdue > 0) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_admission_overdue', 'degraded', 'letterboxd', 'Watchlist admission rows have been pending for more than 14 days', metrics({overdue: check.overdue}))); }
+    if (check.backlog > 0) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue(check.backlogFull ? 'letterboxd_identity_backlog_full' : 'letterboxd_identity_cap_refused', 'degraded', 'letterboxd', check.backlogFull ? 'The Letterboxd identity check backlog is full' : 'The Letterboxd identity check document is full; ids wait in the backlog', metrics({backlog: check.backlog}))); }
+  }
   if (Number.isInteger(model.eventsPending) && model.eventsPending >= 8) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_events_backlog', 'degraded', 'letterboxd', 'Letterboxd slot Events are waiting for delivery', metrics({eventsPending: model.eventsPending}))); }
   const all = worst(issues);
   return {stream: 'letterboxd', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null, slot: model.slot?.key ?? null, eventsPending: model.eventsPending ?? null}};

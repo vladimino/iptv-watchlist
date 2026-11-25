@@ -89,7 +89,8 @@ const pendingOf = async (env, lid) => (await Facts.readDiaryIdentity(env)).films
   await Facts.updateDiaryIdentity(env, {set: {Dd1b: {reason: 'forbidden', slug: 'fixture-dd1b-2000', attempts: 5, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'}}});
   add('Dd1b', 'fixture-dd1b-2000', '900141', 'Fixture Dd1b', 2000);
   fault.record = 'Dd1b'; await Identity.resolve(env, [{lid: 'Dd1b', slug: 'fixture-dd1b-2000'}], opts()); fault.record = null;
-  const stuck = await pendingOf(env, 'Dd1b'); assert.deepEqual([stuck.reason, stuck.attempts, stuck.tmdb], ['link_failed', 6, '900141']); assert.equal(viewRow(db, 'tmdb_900141'), null);
+  const stuck = await pendingOf(env, 'Dd1b'); assert.deepEqual([stuck.reason, stuck.attempts, stuck.tmdb], ['link_failed', 5, '900141'], 'AIR-599: a failed link after a verified page consumes no attempt'); assert.equal(viewRow(db, 'tmdb_900141'), null);
+  await Facts.updateDiaryIdentity(env, {set: {Dd1b: {...stuck, attempts: 6}}}); // the repair is served at the source cap too
   const before = calls.length, admitted = applied.length;
   const later = await Identity.resolve(env, [{lid: 'Oth2', slug: 'oth-2'}], opts(NOW + 1000));
   assert.equal(later.counts.repaired, 1); assert.deepEqual(viewRow(db, 'tmdb_900141'), {watched: 1, actual_rating: 3.5}); assert.equal(await pendingOf(env, 'Dd1b'), undefined);

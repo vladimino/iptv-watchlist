@@ -135,7 +135,24 @@ assert.deepEqual(['unknown_type', 'unknown_disposition', 'unknown_include', 'inv
 }
 // ---- the Watchlist admission lane (ADR 0186 decision 5) ----
 {
-  assert.deepEqual(W.IDENTITY_LANES, ['film', 'epg_observation', 'watchlist_admission', 'letterboxd_rated_candidate'], 'the ledger lane sits before the archive lane');
+  assert.deepEqual(W.IDENTITY_LANES, ['film', 'epg_observation', 'watchlist_admission', 'diary_identity', 'letterboxd_rated_candidate'], 'the ledger and Diary lanes sit before the archive lane');
+  // AIR-599 / ADR 0207 decision 4b: the Diary check entries and the backlog, in queue order, with class, streak and next retry; at the cap the owner decides; a dismissed entry is resolved.
+  const NOWD = Date.parse('2026-11-25T12:00:00.000Z');
+  const diary = {films: {
+    capA: {reason: 'not_found', class: 'gone', attempts: 6, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-20T00:00:00.000Z', nextAttemptAt: '2026-11-22T00:00:00.000Z', slug: 'a'},
+    trnB: {reason: 'forbidden', class: 'transport', attempts: 1, streak: 4, queuedAt: '2026-11-02T00:00:00.000Z', lastAttemptAt: '2026-11-25T11:00:00.000Z', nextAttemptAt: '2026-11-25T13:00:00.000Z', slug: 'b'},
+    dueC: {reason: 'deferred', class: 'not_now', attempts: 0, streak: 0, queuedAt: '2026-11-03T00:00:00.000Z', lastAttemptAt: null, nextAttemptAt: '2026-11-25T11:00:00.000Z', slug: 'c'},
+    disD: {reason: 'owner_dismissed', class: 'settled', attempts: 6, queuedAt: '2026-10-01T00:00:00.000Z', lastAttemptAt: '2026-11-24T00:00:00.000Z', nextAttemptAt: null, slug: 'd'},
+  }};
+  const backlog = {ids: {bklE: {slug: 'e', queuedAt: '2026-11-04T00:00:00.000Z'}, dueC: {slug: 'c', queuedAt: '2026-11-03T00:00:00.000Z'}}};
+  const dRows = W.diaryRows(diary, backlog, {nowMs: NOWD, maxAttempts: 6});
+  assert.deepEqual(dRows.map(row => [row.key, row.disposition, row.source.class, row.source.streak]), [
+    ['did:disD', 'resolved', 'settled', 0], ['did:capA', 'needs_owner_review', 'needs_owner_review', 0], ['did:trnB', 'waiting', 'transport', 4], ['did:dueC', 'retryable', 'not_now', 0], ['dbl:bklE', 'waiting', 'not_now', 0]],
+  'queue order; a backlog id that already has an entry is shown once');
+  assert.equal(dRows.at(-1).reason, 'diary_cap');
+  const lRows = W.admissionRows([{lid: 'trnB', state: 'pending', attempts: 1, lastReason: 'forbidden', nextRetryAt: '2026-11-25T13:00:00.000Z', updatedAt: 'u', firstSeenVersion: 3}, {lid: 'capA', state: 'terminal', attempts: 6, lastReason: 'not_found'}], {nowMs: NOWD, classify: reason => reason === 'forbidden' ? 'transport' : 'gone', diary});
+  assert.deepEqual(lRows.map(row => [row.source.class, row.source.streak, row.source.nextRetryAt]), [['transport', 4, '2026-11-25T13:00:00.000Z'], ['needs_owner_review', 0, null]]);
+  assert.deepEqual(lRows[0].source.revision, {state: 'pending', attempts: 1, updatedAt: 'u'}, 'the compare-and-swap token of a ledger row');
   assert.equal(W.laneEnabled(q('type=watchlist_admission'), 'watchlist_admission'), true); assert.equal(W.laneEnabled(q('type=watchlist_admission'), 'film'), false);
   const base = {lid: 'f1', attempts: 2, nextRetryAt: null, lastReason: null, resolvedBy: null, firstSeenSnapshotId: 'snap1', firstSeenVersion: 3, firstSeenAt: iso(2), updatedAt: iso(1), title: 'Heat', year: 1995};
   const d = row => W.admissionDisposition(row, NOW);

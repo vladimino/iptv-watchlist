@@ -218,6 +218,9 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-check-legacy-report.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-activation-rehearsal.mjs": {
   "suite": "core"
  },
@@ -465,6 +468,9 @@ export const FILES={
   "note": "8,312-film write stays in core. newTrips*350<60000 is a cap on round trips at a fixed 350ms model, not the runner clock. localMs is only logged."
  },
  "discovery-archive-import.mjs": {
+  "suite": "core"
+ },
+ "admin-identity-owner-action.mjs": {
   "suite": "core"
  },
  "admin-identity-revoke-page.mjs": {

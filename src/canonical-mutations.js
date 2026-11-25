@@ -70,6 +70,7 @@ async function commit(env,gate,statements,entities,tail=[]){
    let again;
    try{again=await readAuthority(env);}catch{throw failed('film_person_unavailable',error);}
    if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_fence',error);
+   if(await letterboxdEpochMoved(db,gate))throw failed('letterboxd_epoch_fence',error);
    for(const entity of entities){
     if(await current(db,entity.kind,entity.id)!==entity.expected)throw failed('film_person_revision_conflict',error);
    }
@@ -84,8 +85,20 @@ async function commit(env,gate,statements,entities,tail=[]){
 }
 
 // The pieces the other fenced writers of the canonical domain reuse (the localization source writer); not a second API.
-export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,bindProducerFence,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
+export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,bindProducerFence,bindLetterboxdFence,letterboxdEpochMoved,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
 
+// AIR-599 / ADR 0207 decision 4b: ONLY the Letterboxd producer fence (kind `letterboxd`, the Sync epoch) is bound by the writers that did not bind a producer fence before
+// (the rated admission and the receipt transitions). Any other fence kind on the env is left alone there, so no other producer's batches change.
+function bindLetterboxdFence(env,gate){
+ if(env&&env.producerFence&&env.producerFence.kind==='letterboxd')gate.producerFence=env.producerFence;
+ return gate;
+}
+// After a failed CHECK: true when the batch carried the Letterboxd fence and the Sync epoch it asserted is no longer the running one.
+async function letterboxdEpochMoved(db,gate){
+ const fence=gate&&gate.producerFence;
+ if(!fence||fence.kind!=='letterboxd')return false;
+ try{const row=await one(db,"SELECT 1 AS ok FROM letterboxd_sync_mode WHERE id=1 AND mode='cloudflare' AND epoch=?",[fence.epoch]);return !row;}catch{return false;}
+}
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
  if(gate.producerFence)out.push(...fenceStatements(gate.producerFence));

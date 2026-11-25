@@ -61,7 +61,21 @@ for(const bad of [null,undefined,{error:true}]){const r=Policy.evaluateLetterbox
 {
  const text=fs.readFileSync('src/monitor.js','utf8');
  assert.match(text,/letterboxdFacts=\(env,now\)=>guarded/);
- assert.match(text,/model\.mode==='external'\?null:model/);
+ assert.match(text,/model\.mode==='external'\?null:\{\.\.\.model,identityCheck:await identityCheckFacts\(env,now\)\}/);
  assert.match(text,/!env\?\.DB\)return null/);
+}
+// 8. AIR-599 / ADR 0207 decision 4b: one fact reader of the shared Letterboxd check, three conditions.
+{
+ const H=3600000,check=extra=>model({identityCheck:{lastCheckAt:new Date(NOW-2*H).toISOString(),dueEntries:0,atCap:0,backlog:0,backlogFull:false,ledgerDue:0,overdue:0,...extra}});
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check(),NOW)),[],'a recent check and nothing waiting is healthy');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:new Date(NOW-25*H).toISOString()}),NOW)),[],'an old check with nothing due is not stale');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:new Date(NOW-25*H).toISOString(),ledgerDue:2}),NOW)),['letterboxd_identity_check_stale']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:new Date(NOW-25*H).toISOString(),dueEntries:1}),NOW)),['letterboxd_identity_check_stale']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:null,dueEntries:1}),NOW)),[],'an unknown age is not reported as stale');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({overdue:3}),NOW)),['letterboxd_admission_overdue']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:4}),NOW)),['letterboxd_identity_cap_refused']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:2000,backlogFull:true}),NOW)),['letterboxd_identity_backlog_full']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(model({identityCheck:{error:'unreadable'}}),NOW)),['letterboxd_identity_check_unreadable']);
+ assert.equal(Policy.evaluateLetterboxd(check({overdue:1}),NOW).state,'degraded');
 }
 console.log('letterboxd-sync-monitor ok');
