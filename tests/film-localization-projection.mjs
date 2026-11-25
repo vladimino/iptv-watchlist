@@ -445,7 +445,7 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  assert.equal((await write({DB:d1Standin(file4)},file4,[src('tmdb','x',T1)])).reason,'protected_row_differs');
 }
 
-// ---- 6. C1: a ranked title write creates the minimal identity row with titleSource, under the same CAS ----
+// ---- 6. C1-1 (ADR 0220): a ranked title write creates the minimal identity row as a titleSource CARRIER with the neutral status `unresolved`, under the same CAS; no verdict is computed ----
 {
  const file=database();seedFilm(file);
  const env={DB:d1Standin(file)};
@@ -456,18 +456,45 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  assert.ok(out.changes.includes('dimension:identity')&&out.changes.includes('titleSource'),JSON.stringify(out));
  assert.ok(!out.skipped.some(item=>item.reason==='no_identity_row'),'the rank is no longer dropped');
  const row=dimRow(file,'identity');
- assert.deepEqual([row.status,row.authority,row.value,JSON.parse(row.provenance_json)],['found',null,null,{titleSource:{source:'tmdb',at:T}}]);
+ assert.deepEqual([row.status,row.authority,row.value,JSON.parse(row.provenance_json)],['unresolved',null,null,{titleSource:{source:'tmdb',at:T}}],'a carrier: neutral status, titleSource only, no authority, no value');
  assert.equal(one(file,"SELECT original_title FROM film WHERE id="+q(FID)),'Heat');
  // replay: nothing left to write; a lower source cannot overwrite the now-ranked title
  assert.equal(await W.filmFactsPresent(env,input),true);
  const lower=await W.writeFilmFacts(env,{...input,requestId:'t-2',expectedRevision:revision(file),film:{contractVersion:1,originalTitle:'Heat EPG',source:'epg'}});
  assert.ok(lower.skipped.some(item=>item.reason==='lower_precedence'));
- // a Film with a competing claim gets the informational verdict `conflict`
- const file2=database();seedFilm(file2);seedFilm(file2,OTHER,'9999');
- exec(file2,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q(FID)+",'letterboxd','28nq',1,0,NULL),("+q(OTHER)+",'letterboxd','28nq',0,1,NULL)");
- const env2={DB:d1Standin(file2)};
- await W.writeFilmFacts(env2,{...input,expectedRevision:0});
- assert.equal(dimRow(file2,'identity').status,'conflict');
+ // NO VERDICT is computed or stored: whatever the claims say (an unsettled tmdb_tv claim, a competing letterboxd claim, a retired movie claim, a clean Film), the carrier status is the same
+ // and the writer reads no claim for it (the ADR 0216 read-side resolver stays the sole verdict mechanism)
+ const claimSets={
+  clean:[],
+  competing:[[FID,'letterboxd','28nq',1,0],[OTHER,'letterboxd','28nq',0,1]],
+  unsettledTv:[[FID,'tmdb_tv','5050',0,0]],
+  retiredMovie:[[FID,'tmdb','1656',0,1]],
+ };
+ const seen=[];
+ for(const [label,claims] of Object.entries(claimSets)){
+  const f=database();seedFilm(f);seedFilm(f,OTHER,'9999');
+  for(const [film,scheme,value,trusted,conflicting] of claims){
+   if(scheme==='tmdb')exec(f,"UPDATE film_external_id SET trusted="+trusted+",conflicting="+conflicting+" WHERE film_id="+q(film)+" AND scheme='tmdb'");
+   else exec(f,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q(film)+","+q(scheme)+","+q(value)+","+trusted+","+conflicting+",NULL)");
+  }
+  const queries=[];
+  const e={DB:d1Standin(f,{onQuery:async text=>{queries.push(text);}})};
+  await W.writeFilmFacts(e,{...input,expectedRevision:0});
+  seen.push([label,dimRow(f,'identity').status]);
+  assert.ok(!queries.some(text=>/film_external_id/.test(text)&&/INSERT INTO film_dimension|SELECT\s+\?/.test(text)),label+': the carrier insert reads no claim');
+ }
+ assert.deepEqual(seen.map(item=>item[1]),['unresolved','unresolved','unresolved','unresolved'],JSON.stringify(seen));
+ // compatibility: the status is in the vocabularies of the AIR-660 parity classifier and the existing identity readers, and the row classifies as CONTROL (titleSource), never stale_copy or unknown_legacy
+ const {KNOWN_STATUSES,classifyRow}=await load('domain/film-dimension-parity.js');
+ assert.ok(KNOWN_STATUSES.identity.includes('unresolved'));
+ const carrierFile=database();seedFilm(carrierFile);
+ await W.writeFilmFacts({DB:d1Standin(carrierFile)},{...input,expectedRevision:0});
+ const carrier=rows(carrierFile,"SELECT * FROM film_dimension WHERE dimension='identity' AND film_id="+q(FID))[0];
+ const verdicts=[{verdict:'found'},{verdict:'conflict'},{verdict:'unavailable'}];
+ for(const identity of verdicts){
+  const out=classifyRow(carrier,{identity,metadata:{status:'unknown'},localization:{status:'unknown',resolved:null},prediction:{fingerprint:{status:'unknown'},prediction:{status:'unknown'}}});
+  assert.equal(out.class,'control',identity.verdict+': a titleSource carrier is control whatever the derived verdict is');
+ }
  // an unranked source fills an empty title but creates no row (it ranks nothing)
  const file3=database();seedFilm(file3);
  const env3={DB:d1Standin(file3)};
