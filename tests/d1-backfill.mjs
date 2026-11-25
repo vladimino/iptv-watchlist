@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {withImportFence} from './import-fence-helper.mjs';
+import {sessionSql,withImportFence} from './import-fence-helper.mjs';
 import {createHash} from 'node:crypto';
 import {spawn,spawnSync} from 'node:child_process';
 import fs from 'node:fs';
@@ -28,12 +28,15 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-backfill-'));
 // Every run needs schema v3: 0001, the staging tables of 0002 and the candidate show identity of 0003.
 const v1Migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
 // AIR-661: an import target also carries the ADR 0218 stage-2 fence, or the import refuses it (import_target_unfenced; proved below).
+const rawMigration=['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n');
 const migration=withImportFence(['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'));
 const ACCOUNT='0123456789abcdef0123456789abcdef',TOKEN='test-d1-token';
 const TARGET='11111111-1111-4111-8111-111111111111';
 const at='2026-10-26T01:00:00.000Z',later='2026-10-26T05:00:00.000Z';
 
-function sqlite(file,input,{json=false}={}){return sqliteSync([...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});}
+// AIR-661: a fixture write into a fenced target goes through the import session (the target's write gate); schema scripts and reads are untouched.
+const fixtureWrite=input=>{const body=input.replace(/^PRAGMA foreign_keys=ON;\n/,'');return /^\s*(INSERT|UPDATE|DELETE)\b/i.test(body)&&!/offline_import_session/.test(body)?sessionSql(body):input;};
+function sqlite(file,input,{json=false}={}){input=fixtureWrite(input);return sqliteSync([...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});}
 function freshDatabase(name,{schema=true}={}){const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});if(schema){const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+migration);assert.equal(result.status,0,result.stderr);}else{const result=sqlite(file,'SELECT 1;');assert.equal(result.status,0,result.stderr);}return file;}
 function count(file,sql){const result=sqlite(file,sql,{json:true});assert.equal(result.status,0,result.stderr);const rows=result.stdout.trim()?JSON.parse(result.stdout):[];return rows[0]?.n??0;}
 
@@ -236,15 +239,15 @@ try{
  assert.equal(count(targetFile,"SELECT rating*10 AS n FROM actual_rating WHERE film_id='film:heat-1995'"),45,'no rollback write landed');
  assert.equal((await runBackfill({snapshot:revised.directory,mode:'d1',target,output:output('mark-again'),sleep:noSleep})).identity.baseline,'same_baseline');
  // Two different baselines recorded at the same instant are ambiguous, never resolved by guessing.
- sqlite(targetFile,"INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('manifest.json','twin-sha','database','"+TARGET+"','2026-10-26T06:00:00.000Z');");
+ sqlite(targetFile,sessionSql("INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('manifest.json','twin-sha','database','"+TARGET+"','2026-10-26T06:00:00.000Z');"));
  assert.deepEqual((await runBackfill({snapshot:revised.directory,mode:'d1',target,output:output('twin'),sleep:noSleep})).stopReasons,['baseline_ambiguous']);
- sqlite(targetFile,"DELETE FROM import_receipt WHERE source_sha256='twin-sha';");
+ sqlite(targetFile,sessionSql("DELETE FROM import_receipt WHERE source_sha256='twin-sha';"));
 
  // Duplicate receipts are a no-op; a stale receipt (old checksum, nothing superseding it) and a foreign receipt block class A.
  {
-  const duplicate=sqlite(targetFile,"PRAGMA foreign_keys=ON;\nINSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) SELECT source_key,source_sha256,target_table,target_id,imported_at FROM import_receipt LIMIT 1 ON CONFLICT DO NOTHING;");
+  const duplicate=sqlite(targetFile,sessionSql("INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) SELECT source_key,source_sha256,target_table,target_id,imported_at FROM import_receipt LIMIT 1 ON CONFLICT DO NOTHING;"));
   assert.equal(duplicate.status,0,duplicate.stderr);
-  sqlite(targetFile,"INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('enrichment/films/heat-1995/fingerprint.json','old-print-sha','fingerprint_payload','film:other','"+at+"'), ('enrichment/films/ghost/actual.json','ghost-sha','actual_rating','film:ghost','"+at+"');");
+  sqlite(targetFile,sessionSql("INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('enrichment/films/heat-1995/fingerprint.json','old-print-sha','fingerprint_payload','film:other','"+at+"'), ('enrichment/films/ghost/actual.json','ghost-sha','actual_rating','film:ghost','"+at+"');"));
   const audited=await runBackfill({snapshot:revised.directory,mode:'d1',target,delta:true,output:output('audit'),sleep:noSleep});
   assert.equal(audited.status,'completed');
   assert.equal(audited.result.receipts.stale.some(item=>item.sourceSha256==='old-print-sha'),true);
@@ -252,14 +255,14 @@ try{
   assert.equal(audited.result.classes.A.blockers.includes('receipts_stale'),true);
   assert.equal(audited.result.classes.A.blockers.includes('receipts_foreign'),true);
   assert.equal(audited.result.claimsFullParity,false);
-  sqlite(targetFile,"DELETE FROM import_receipt WHERE source_sha256 IN ('old-print-sha','ghost-sha');");
+  sqlite(targetFile,sessionSql("DELETE FROM import_receipt WHERE source_sha256 IN ('old-print-sha','ghost-sha');"));
  }
  // A database identity receipt naming another database is a conflict, even with the right uuid and name configured.
  {
-  sqlite(targetFile,"INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('manifest.json','"+revised.aggregateSha256+"','database','33333333-3333-4333-8333-333333333333','"+at+"');");
+  sqlite(targetFile,sessionSql("INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('manifest.json','"+revised.aggregateSha256+"','database','33333333-3333-4333-8333-333333333333','"+at+"');"));
   const conflicted=await runBackfill({snapshot:revised.directory,mode:'d1',target,delta:true,output:output('conflict-db'),sleep:noSleep});
   assert.deepEqual(conflicted.stopReasons,['database_identity_conflict']);
-  sqlite(targetFile,"DELETE FROM import_receipt WHERE target_id='33333333-3333-4333-8333-333333333333';");
+  sqlite(targetFile,sessionSql("DELETE FROM import_receipt WHERE target_id='33333333-3333-4333-8333-333333333333';"));
  }
 
  // A write whose response is lost is not retried: the run stops, and the next run reconciles through the read-back.
@@ -297,7 +300,7 @@ try{
   // A success body that omits the statement results is not proof the batch landed, and that run does not send it again.
   let partialArmed=true,partialSql=null;
   fiveFake.hooks.push(({database,write,sql,phase})=>{if(partialArmed&&phase==='after'&&database===TARGET&&write){partialArmed=false;partialSql=sql;return 'partial';}});
-  sqlite(fiveFile,'DELETE FROM import_receipt;');
+  sqlite(fiveFile,sessionSql('DELETE FROM import_receipt;'));
   const beforePartial=fiveFake.calls.length;
   const partial=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('partial-body'),sleep:noSleep});
   assert.deepEqual(partial.stopReasons,['write_uncertain']);
@@ -310,7 +313,7 @@ try{
   // A 503 on a write is just as uncertain and is not retried either.
   let writeBusy=true;
   fiveFake.hooks.push(({database,write,phase})=>{if(writeBusy&&phase==='before'&&database===TARGET&&write){writeBusy=false;return 503;}});
-  sqlite(fiveFile,'DELETE FROM import_receipt;');
+  sqlite(fiveFile,sessionSql('DELETE FROM import_receipt;'));
   const busy=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('five-busy'),sleep:noSleep});
   assert.deepEqual(busy.stopReasons,['write_uncertain']);
   await fiveFake.stop();
@@ -434,14 +437,20 @@ try{
   assert.deepEqual(v1Only.stopReasons,['schema_missing']);
   assert.ok(v1Only.noGo.details.missing.includes('generation_stage'));
   const wrongVersion=stagedDatabase('staged-version');
-  assert.equal(sqlite(wrongVersion,'UPDATE schema_contract SET version=2;').status,0);
+  assert.equal(sqlite(wrongVersion,sessionSql('UPDATE schema_contract SET version=2;')).status,0);
   const versionReport=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:wrongVersion,output:output('staged-version'),sleep:noSleep,stagedGeneration:true});
   assert.deepEqual(versionReport.stopReasons,['schema_version_mismatch']);
   assert.equal(count(wrongVersion,'SELECT COUNT(*) AS n FROM import_receipt'),0,'nothing is written before the fence passes');
+  // AIR-661: a frozen schema-4 target without the offline import contract is refused before the identity receipt or any other write.
+  const unfenced=path.join(root,'staged-unfenced.sqlite');fs.rmSync(unfenced,{force:true});assert.equal(sqlite(unfenced,'PRAGMA foreign_keys=ON;\n'+rawMigration).status,0);
+  const unfencedReport=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:unfenced,output:output('staged-unfenced'),sleep:noSleep,stagedGeneration:true});
+  assert.deepEqual(unfencedReport.stopReasons,['import_target_unfenced']);
+  assert.equal(count(unfenced,'SELECT COUNT(*) AS n FROM import_receipt'),0,'no identity receipt on an unfenced target');
+  assert.equal(count(unfenced,'SELECT COUNT(*) AS n FROM film'),0);
 
   // A stage this baseline does not own stops the run as a NO-GO with its reason, and its cleanup is approval-gated.
   const owned=stagedDatabase('staged-owned');
-  assert.equal(sqlite(owned,"PRAGMA foreign_keys=ON;\nINSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at) VALUES ('run-1','"+snapshot.aggregateSha256+"','published',NULL,NULL,'loading','someone-else',1,1,1,0,0,'"+at+"','"+at+"');").status,0);
+  assert.equal(sqlite(owned,sessionSql("INSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at) VALUES ('run-1','"+snapshot.aggregateSha256+"','published',NULL,NULL,'loading','someone-else',1,1,1,0,0,'"+at+"','"+at+"');")).status,0);
   const ownedReport=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:owned,output:output('staged-owned'),sleep:noSleep,stagedGeneration:true});
   assert.equal(ownedReport.status,'no_go');
   assert.deepEqual(ownedReport.stopReasons,['stage_owned_elsewhere']);

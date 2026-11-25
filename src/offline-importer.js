@@ -3,7 +3,7 @@
 // Identity follows the shared canonicalFilmId rule and evidence keys follow the resolver's candidateEvidence rule;
 // both are supplied by the caller, so this module never carries a second copy of either rule.
 import {catalogMetadata,creditRoster} from './enrichment-projection.js';
-import {FILM_DIMENSION_IMPORT_FENCE,replaceableIdentity,verifyImportFence} from './film-dimension-import-fence.js';
+import {OFFLINE_IMPORT_CONTRACT_TABLE,openImportSession,replaceableIdentity,verifyImportFence} from './film-dimension-import-fence.js';
 export {catalogMetadata,creditRoster};
 
 // ADR 0034 bounded discovery ledger: the archive pointer, the write-once manifest versions and segment versions are a second source
@@ -244,15 +244,23 @@ export function refusal(batch){
  return {stopped:true,stopReasons:[...new Set(blockers.map(item=>item.reason))],blockers,applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,superseded:0,partial:0,uncheckpointed:0,pending:0,ledger:[],coverage,parity:{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'import_stopped'},receipts:null,classes:acceptanceClasses({inventory:batch?.inventory,coverage,counts:{},ledger:[],stopped:true}),claimsFullParity:false};
 }
 
+// AIR-661 / ADR 0218 decision 7: the target contract is read before any write (version, session table, every fence trigger), and every write of the
+// run goes through the import session, so an importer that predates the contract cannot write the same target at all.
 export async function importBatch(db,repositories,batch){
+ if(!batch?.importedAt)throw new Error('importedAt is required');
+ const refused=refusal(batch);
+ if(refused)return refused;
+ const fence=await verifyImportFence(db);
+ if(!fence.ok)return refusal({...batch,blockers:[{reason:fence.reason,targetTable:OFFLINE_IMPORT_CONTRACT_TABLE,targetId:'1',detail:fence.missing?fence.missing.slice(0,20):fence.version??null}]});
+ const session=openImportSession(db,{now:()=>batch.importedAt});
+ try{return await importUnits(db,repositories,batch);}
+ finally{session.close();}
+}
+async function importUnits(db,repositories,batch){
  const importedAt=batch?.importedAt;
  if(!importedAt)throw new Error('importedAt is required');
  const refused=refusal(batch);
  if(refused)return refused;
- // AIR-661 / ADR 0218 decision 7: the target is read before any mutation. A target without the stage-2 fence is refused, so an old importer and
- // this one never share a database.
- const fence=await verifyImportFence(db);
- if(!fence.ok)return refusal({...batch,blockers:[{reason:fence.reason,targetTable:'film_dimension',targetId:FILM_DIMENSION_IMPORT_FENCE}]});
  const units=batch.units||[];
  const limit=batch.limit??null;
  const ledgerRows=[];

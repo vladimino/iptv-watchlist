@@ -8,7 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
-import {FILM_DIMENSION_IMPORT_FENCE_SQL} from '../src/film-dimension-import-fence.js';
+import {withOfflineImportFence} from '../src/film-dimension-import-fence.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {actualUnit,classifyObject,isArchiveKey,readDiscoveryArchive,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal,supersededPayloads} from '../src/offline-importer.js';
@@ -199,8 +199,8 @@ async function main(){
  // Fail closed: an unknown key or a stored decision that disagrees with the derived evidence stops the run before the database is touched.
  const refused=refusal(batch);
  if(refused){console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,fingerprintVersions:batch.fingerprintVersions,...refused,note}));process.exit(3);}
- if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,[...['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')),FILM_DIMENSION_IMPORT_FENCE_SQL].join('\n'));}
- // A file this command did not just create must already carry the ADR 0218 stage-2 fence; importBatch refuses it otherwise (import_target_unfenced).
+ if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,withOfflineImportFence(['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')).join('\n')));}
+ // A file this command did not just create must already carry the offline import contract (ADR 0218 stage 2); importBatch refuses it otherwise.
  const db=openSqlite(databasePath);
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
  const result=await importBatch(db,repositories,{...batch,importedAt:batch.finishedAt});

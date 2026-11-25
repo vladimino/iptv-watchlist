@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {withImportFence} from './import-fence-helper.mjs';
+import {sessioned,withImportFence} from './import-fence-helper.mjs';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -25,7 +25,7 @@ const identityFor=films=>identityResolver({canonicalize:rules.canonicalFilmId,fi
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-offline-import-'));
 const database=path.join(root,'import.sqlite');
 exec(database,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
-const db=openSqlite(database);
+const db=sessioned(openSqlite(database));
 const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
 const at='2026-10-19T01:00:00.000Z';
 const later='2026-10-21T01:00:00.000Z';
@@ -180,7 +180,7 @@ assert.equal((await repositories.epg.readDecision('heat|1995')).current.status,'
 
 const partFile=path.join(root,'partial.sqlite');
 exec(partFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
-const partDb=openSqlite(partFile);
+const partDb=sessioned(openSqlite(partFile));
 const partRepos={canonical:createCanonicalRepository(partDb),epg:createEpgRepository(partDb),prediction:createPredictionRepository(partDb)};
 const partPerson=person('person:actor/zz-part','actor/zz-part',at);
 const partFilm=film('film:zz-part','Partial Title',at);
@@ -231,7 +231,7 @@ assert.equal(classifyObject('epg/guide.xml.gz'),'unmapped');
 assert.equal(projected.records.some(record=>record.key==='enrichment/films/zz-omit/predictions.json'&&record.disposition==='unportable'),true);
 const omitFile=path.join(root,'omit.sqlite');
 exec(omitFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
-const omitDb=openSqlite(omitFile);
+const omitDb=sessioned(openSqlite(omitFile));
 const omitRepos={canonical:createCanonicalRepository(omitDb),epg:createEpgRepository(omitDb),prediction:createPredictionRepository(omitDb)};
 const omitted=await importBatch(omitDb,omitRepos,{inventory:inventory({finishedAt:at,aggregateSha256:'sha-omit',keys:sourceKeys}),importedAt:at,units:[
  {family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-omit-film',targetTable:'film',targetId:omitFilm.id,unportable:false,input:{film:omitFilm,watchlist:true}},
@@ -242,7 +242,7 @@ assert.equal(omitted.claimsFullParity,false);
 
 const fullFile=path.join(root,'full.sqlite');
 exec(fullFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
-const fullDb=openSqlite(fullFile);
+const fullDb=sessioned(openSqlite(fullFile));
 const fullRepos={canonical:createCanonicalRepository(fullDb),epg:createEpgRepository(fullDb),prediction:createPredictionRepository(fullDb)};
 const fullPerson=person('person:actor/zz-full','actor/zz-full',at);
 const fullFilm=film('film:zz-full','Full Title',at);
@@ -338,7 +338,7 @@ for(const bad of [{r2Key:'r2/prediction/new',contentSha256:SHA_NEW},{r2Key:'enri
 
 const emptyFile=path.join(root,'empty-show.sqlite');
 exec(emptyFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
-const emptyDb=openSqlite(emptyFile);
+const emptyDb=sessioned(openSqlite(emptyFile));
 const emptyRepos={canonical:createCanonicalRepository(emptyDb),epg:createEpgRepository(emptyDb),prediction:createPredictionRepository(emptyDb)};
 const emptyFilm=film('film:zz-empty','Empty Title',at);
 await importBatch(emptyDb,emptyRepos,{importedAt:at,units:[
@@ -356,7 +356,7 @@ assert.equal((await verifyParity(emptyDb,emptySpec)).mismatched.some(item=>item.
 
 const hashFile=path.join(root,'hash.sqlite');
 exec(hashFile,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
-const hashDb=openSqlite(hashFile);
+const hashDb=sessioned(openSqlite(hashFile));
 const hashRepos={canonical:createCanonicalRepository(hashDb),epg:createEpgRepository(hashDb),prediction:createPredictionRepository(hashDb)};
 const hashFilm=film('film:zz-hash','Hash Title',at);
 const hashRun=await importBatch(hashDb,hashRepos,{importedAt:at,units:[
@@ -440,7 +440,7 @@ for(let index=0;index<volumeCount;index++){
 }
 volumeSql.push('COMMIT');
 const volumeDatabase=path.join(root,'volume.sqlite');
-exec(volumeDatabase,withImportFence(fs.readFileSync('migrations/0001_schema_v1.sql','utf8')));
+exec(volumeDatabase,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
 exec(volumeDatabase,volumeSql.join(';\n'));
 const volumeRows=await snapshotSqlite(volumeDatabase).all('SELECT id,role_id,contract_version FROM person ORDER BY id');
 assert.equal(volumeRows.length,volumeCount);
@@ -538,7 +538,7 @@ assert.equal(legacyRun.resumed,bounded.applied);
 assert.equal(legacyRun.ledger.some(item=>item.reason==='reference_missing'),false,JSON.stringify(legacyRun.ledger));
 assert.equal(legacyRun.conflicts,0,JSON.stringify(legacyRun.ledger));
 
-const legacyHandle=snapshotSqlite(legacyDb);
+const legacyHandle=sessioned(snapshotSqlite(legacyDb));
 // A catalog film keyed tmdb_<id> in epg/discovered-films.json carries its TMDB credits into its Film, and a watchlist Film
 // with the same verified TMDB id gets the catalog's TMDB credits beside its Letterboxd ones (the shared-Film evidence
 // of ADR 0009 and AIR-201); before the fix both catalog rosters were empty.

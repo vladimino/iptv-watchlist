@@ -54,7 +54,7 @@ The batch runner v2 may also write one create-only R2 object per prediction vers
 
 A fingerprint or prediction bundle stored under a retired Film id, whose survivor holds its own newer payload, is not imported: the importer records it as superseded by the canonical payload and leaves the object in R2 ([ADR-0029](../adr/0029-superseded-redirect-payloads.md)). This is a ledger rule inside the offline import and changes no node or arrow above.
 
-Since ADR 0218 stage 2 ([AIR-661](https://trello.com/c/1Rv634jd)) the offline import writes a Film's `identity` row only, keeps control and unknown legacy rows and the title they protect, leaves `metadata`, `fingerprint` and `prediction` dimension rows untouched, and refuses a target without the `film_dimension_import_fence` trigger (migration 0040, not applied); its retirement refuses a Film holding a protected row. These are rules inside the offline import and change no node or arrow above; see the [D1 schema contract](../reference/data/d1-schema.md).
+Since ADR 0218 stage 2 ([AIR-661](https://trello.com/c/1Rv634jd)) the offline import writes only to a target carrying the offline import target contract (a write gate keyed on its own session, never installed on production D1), keeps control and unknown-legacy identity and localization rows and the title they protect, leaves `metadata`, `fingerprint` and `prediction` dimension rows untouched, and its retirement refuses a Film holding a protected row. These are rules inside the offline import and change no node or arrow above; see the [D1 schema contract](../reference/data/d1-schema.md).
 
 Two R2 families stay R2-only and add no row ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)):
 

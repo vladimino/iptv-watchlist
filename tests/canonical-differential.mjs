@@ -209,7 +209,9 @@ await scenario('first_write',{...both({persons:PEOPLE(),films:[film()]}),accepts
 // 9. Redirects: a Film that replaces a retired one (the retired Film holds the trusted TMDB id the survivor carries). The projector writes the survivor with the link; the
 // canonical path creates the survivor shell, merges (mergeFilms) and then writes the survivor's facts. Same ids, aliases, credits and redirect row.
 const RETIRED='film:legacy:604',SURVIVOR='film:tmdb:603';
-const retired=film({id:RETIRED,canonicalIdentity:'tmdb:603',externalIds:[ext('tmdb','603')],aliases:[{kind:'title',value:'Matrix Alt',provenance:null}],credits:[{personId:'person:tmdb:1',role:'director',ordinal:0}],watchlist:false,sync:null,body:null});
+// AIR-661 (ADR 0218 decision 6): the projector repository's retirement (W3) keeps every localization row that carries a value, so the retired Film
+// here holds an empty one, which both paths may delete.
+const retired=film({id:RETIRED,localization:loc({status:'missing',value:null,source:null,sourceVersion:null,provenance:null}),canonicalIdentity:'tmdb:603',externalIds:[ext('tmdb','603')],aliases:[{kind:'title',value:'Matrix Alt',provenance:null}],credits:[{personId:'person:tmdb:1',role:'director',ordinal:0}],watchlist:false,sync:null,body:null});
 const survivor=film({id:SURVIVOR,credits:[{personId:'person:tmdb:1',role:'director',ordinal:0},{personId:'person:tmdb:2',role:'actor',ordinal:0}]});
 const merged=await scenario('redirect_merge_retired_into_survivor',{setup:seedProjector({persons:PEOPLE(),films:[retired]}),
  projector:file=>projectorApply(file,{persons:[],films:[{...survivor,redirects:[{from:RETIRED,to:SURVIVOR,at:T2}]}]}),

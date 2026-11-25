@@ -14,8 +14,7 @@ import {createHash} from 'node:crypto';
 import {classifyRow,identityVerdict,localizationFacts,metadataFacts,predictionFacts,retiredMovieIds,usableField,summarize,PARITY_CLASSES} from '../src/domain/film-dimension-parity.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-dimension-parity-'));
-// Legacy fingerprint and prediction rows predate the ADR 0218 stage-2 import fence (0040), which refuses every new one: the fixtures are built without it.
-const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).filter(name=>name!=='0040_film_dimension_import_fence.sql').sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
+const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});assert.equal(r.status,0,r.stderr);};
 const q=value=>value==null?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";
 const AT='2026-11-20T10:00:00.000Z';

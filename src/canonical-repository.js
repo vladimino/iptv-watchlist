@@ -138,7 +138,8 @@ async function planFilm(db,input){
   if(ownerRow&&ownerRow.film_id!==id&&!releasing.has(ownerRow.film_id))throw new Error('identity_collision');
  }
  const kept=owner==='enrichment'&&input.credits!==undefined&&watchlist===true?await db.all("SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? AND person_id LIKE 'person:tmdb!_%' ESCAPE '!' ORDER BY role,ordinal",[id]):[];
- return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,owner,kept,updatedAt:updatedAtOf(guarded)};
+ // AIR-661: a reviewed row guardReviewed held is left byte-identical (no rewrite with the stored value).
+ return {film:guarded,localizationHeld:guarded!==film,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,owner,kept,updatedAt:updatedAtOf(guarded)};
 }
 
 async function planPerson(db,input){
@@ -159,7 +160,7 @@ async function planRetirement(db,redirect){
  if(!current){
   // ADR 0218 decision 6 (W3): a Film holding a lock, a reviewed/owner row, a titleSource or an unknown_legacy row is not retired until a review
   // route has settled it.
-  const rows=await db.all('SELECT dimension,status,provenance_json,authority FROM film_dimension WHERE film_id=? ORDER BY dimension',[from]);
+  const rows=await db.all('SELECT dimension,status,provenance_json,authority,value FROM film_dimension WHERE film_id=? ORDER BY dimension',[from]);
   const held=rows.map(row=>({dimension:row.dimension,reasons:protectedReasons(row)})).filter(row=>row.reasons.length);
   if(held.length){const error=new Error('film_retirement_protected_rows');error.code='film_retirement_protected_rows';error.rows=held;throw error;}
  }
@@ -185,9 +186,11 @@ async function writeFilm(db,plan){
  // byte-identical until the separately authorized stage 6; their states are derived (ADR 0218 decision 2).
  if(film.identity){
   await db.run(`DELETE FROM film_dimension WHERE film_id=? AND dimension='identity' AND ${REPLACEABLE_IDENTITY_SQL}`,[film.id]);
-  await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO NOTHING',dimensionParams(film.id,importedIdentity(film.identity)));
+  await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO NOTHING',dimensionParams(film.id,importedDimension(film.identity)));
  }
- await db.run(localizationUpsert('film_dimension','film_id'),dimensionParams(film.id,film.localization));
+ // ADR 0218 stage 2: a Film-specific guard (Persons keep localizationUpsert). Only a replaceable row is overwritten by an automatic value; a reviewed
+ // row only by the review upgrade rules; an owner or unknown_legacy row never. No processing field is imported.
+ if(!plan.localizationHeld)await db.run(FILM_LOCALIZATION_UPSERT(),dimensionParams(film.id,importedDimension(film.localization)));
  if(plan.credits!==undefined)for(const credit of plan.credits){
   if(credit.role!=='director'&&credit.role!=='actor')throw new Error('Credit role is invalid');
   await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES (?,?,?,?)'+(plan.keepHistory?' ON CONFLICT(film_id,person_id,role) DO NOTHING':''),[film.id,requiredPerson(credit.personId),credit.role,credit.ordinal]);
@@ -358,9 +361,11 @@ function metadataView(row){return {schemaVersion:row.schema_version,year:row.yea
 function updatedAtOf(entity){return entity.localization?.updatedAt||entity.identity?.updatedAt;}
 function json(value){return value==null?null:JSON.stringify(value);}
 function parseJson(value){return value?JSON.parse(value):null;}
+const FILM_LOCALIZATION_UPSERT=()=>`INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO UPDATE SET status=excluded.status,source=excluded.source,source_version=excluded.source_version,provenance_json=excluded.provenance_json,value=excluded.value,authority=excluded.authority,last_error=excluded.last_error,failure_reason=excluded.failure_reason,retry_at=excluded.retry_at,attempts=excluded.attempts,next_action=excluded.next_action,updated_at=excluded.updated_at WHERE ${REPLACEABLE_LOCALIZATION_SQL} OR (${REVIEWED_LOCALIZATION_KNOWN} AND ((authority='owner' AND excluded.status='reviewed' AND excluded.authority='owner') OR (COALESCE(authority,'')<>'owner' AND excluded.status='reviewed' AND (excluded.authority IN ('dictionary','owner') OR excluded.source='dictionary'))))`;
 const identityHeld=()=>`EXISTS (SELECT 1 FROM film_dimension WHERE film_id=excluded.id AND dimension='identity' AND NOT ${REPLACEABLE_IDENTITY_SQL})`;
-// The imported identity row: no processing fields (ADR 0218 F2) and no titleSource (an import ranks no title).
-function importedIdentity(state){
+// An imported identity or localization row: no processing fields (ADR 0218 F2) and no titleSource (an import ranks no title).
+function importedDimension(state){
+ if(!state)return state;
  const provenance=state.provenance&&typeof state.provenance==='object'&&!Array.isArray(state.provenance)?Object.fromEntries(Object.entries(state.provenance).filter(([key])=>key!=='titleSource')):state.provenance;
  return {...state,provenance,lastError:null,failureReason:null,retryAt:null,attempts:0,nextAction:null};
 }
@@ -391,9 +396,17 @@ const allowedAuthority=dimension=>dimension==='localization'?LOCALIZATION_AUTHOR
 // replaceableIdentity below; a test runs both over the same rows.
 export const REPLACEABLE_IDENTITY_SQL=`(status IN (${sqlList(DIMENSION_STATUSES.identity.filter(status=>status!=='reviewed'))}) AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
 
-// SQL predicate of a row that W3 must not delete: a lock or any reviewed/owner row, a titleSource, or an unknown_legacy shape (unknown status,
-// unreadable provenance, an authority no writer of that dimension sets). The JS twin is protectedReasons below.
-export const PROTECTED_ROW_SQL=`(status='reviewed' OR authority='owner' OR ${PROVENANCE_HELD}=1 OR CASE dimension ${Object.entries(DIMENSION_STATUSES).map(([dimension,statuses])=>{const allowed=allowedAuthority(dimension);return `WHEN '${dimension}' THEN (status NOT IN (${sqlList(statuses)}) OR NOT (${noAuthority}${allowed.length?` OR authority IN (${sqlList(allowed)})`:''}))`;}).join(' ')} ELSE 1 END)`;
+// SQL predicate of a localization row W2 may replace: a missing or provisional row with no authority and a readable provenance. A reviewed row is
+// replaced only through the review upgrade rules of the upsert below; an owner or dictionary authority on a non-reviewed row, an unknown status or an
+// unreadable provenance is unknown_legacy (stage-1 parity) and is never replaced by an import. The JS twin is replaceableLocalization.
+export const REPLACEABLE_LOCALIZATION_SQL=`(status IN ('missing','provisional') AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
+const REVIEWED_LOCALIZATION_KNOWN=`(status='reviewed' AND (${noAuthority} OR authority IN (${sqlList(LOCALIZATION_AUTHORITY)})) AND ${PROVENANCE_HELD}=0)`;
+
+// SQL predicate of a row that W3 must not delete: a lock or any reviewed/owner row, a titleSource, an unknown_legacy shape (unknown status,
+// unreadable provenance, an authority no writer of that dimension sets), and every localization row that carries a value or an authority. W3 cannot
+// prove a localization row is a stale copy (that needs the source rows, the owner entries and the projection of the stage-1 reader), so it keeps
+// every such row, the sole-record provisional title included, until a review route settles it. The JS twin is protectedReasons below.
+export const PROTECTED_ROW_SQL=`(status='reviewed' OR authority='owner' OR ${PROVENANCE_HELD}=1 OR CASE dimension WHEN 'localization' THEN NOT (status='missing' AND (value IS NULL OR value='') AND ${noAuthority}) ${Object.entries(DIMENSION_STATUSES).filter(([dimension])=>dimension!=='localization').map(([dimension,statuses])=>{const allowed=allowedAuthority(dimension);return `WHEN '${dimension}' THEN (status NOT IN (${sqlList(statuses)}) OR NOT (${noAuthority}${allowed.length?` OR authority IN (${sqlList(allowed)})`:''}))`;}).join(' ')} ELSE 1 END)`;
 
 const fenceParse=text=>{if(text==null)return {ok:true,value:null};try{return {ok:true,value:JSON.parse(text)};}catch{return {ok:false};}};
 const fencePlain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
@@ -407,6 +420,14 @@ export function replaceableIdentity(row){
  return DIMENSION_STATUSES.identity.includes(row.status)&&row.status!=='reviewed'&&!fenceFilled(row.authority);
 }
 
+export function replaceableLocalization(row){
+ if(!row)return true;
+ const provenance=fenceParse(row.provenance_json);
+ if(!provenance.ok||(provenance.value!=null&&!fencePlain(provenance.value)))return false;
+ if(fencePlain(provenance.value)&&provenance.value.titleSource!==undefined)return false;
+ return (row.status==='missing'||row.status==='provisional')&&!fenceFilled(row.authority);
+}
+
 // The reasons a row is protected from W3, empty when it is not.
 export function protectedReasons(row){
  const reasons=[];
@@ -417,6 +438,11 @@ export function protectedReasons(row){
  if(row.authority==='owner')reasons.push('owner_authority');
  const known=DIMENSION_STATUSES[row.dimension];
  if(!known||!known.includes(row.status))reasons.push('unknown_status');
+ if(row.dimension==='localization'){
+  if(fenceFilled(row.authority)&&row.status!=='reviewed')reasons.push('localization_authority_not_reviewed');
+  if(!(row.status==='missing'&&!fenceFilled(row.value)&&!fenceFilled(row.authority)))reasons.push('localization_unproved');
+  return [...new Set(reasons)];
+ }
  const allowed=allowedAuthority(row.dimension);
  if(fenceFilled(row.authority)&&!allowed.includes(row.authority))reasons.push('unknown_authority');
  return reasons;
