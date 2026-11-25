@@ -16,6 +16,8 @@ A generation has a phase of `published` or `withheld`. `published_generation` is
 
 `film_metadata.payload_json` is the watchlist and `parseFilm` record: year, runtime, genres, synopsis, poster, and url. `film_person_credit` orders the director and the cast. `film_dimension` remains the lifecycle status and is not that record. `people.json` remains the name cache, not the credit edges.
 
+Proposed [ADR 0218](../../adr/0218-film-lifecycle-dimensions-revision.md) (not decided) classifies every `film_dimension` column as control, copy or unknown legacy; until it is decided this contract is unchanged.
+
 `candidate_decision` is the AIR-48 decision: status, catalog film id, optional Film reference, TMDB id, identity source, provenance, and the attempt fields. `candidate_decision_history` keeps the decision it replaced. `score_result` is not that decision. A verified or terminal ambiguous decision does not need a score row.
 
 Fingerprint, profile, and prediction bodies stay immutable R2 objects addressed by `r2_key` and `content_sha256`. `prediction_history.payload_json` is the full former prediction, and its `r2_key` names that version. It does not point at the mutable `predictions.json` bundle. A localization conflict keeps `source`, `provenance_json`, and `authority` beside the value and reason.
