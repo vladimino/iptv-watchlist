@@ -138,4 +138,4 @@ flowchart LR
 
 ## Film readiness (accepted target)
 
-Accepted [ADR 0218](../adr/0218-film-lifecycle-dimensions-revision.md) (accepted target, not implemented) defines `displayReady`, `catalogReady` and `predictionReady` as ordered predicates over the [ADR 0216](../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) aggregate sections (`true`, `false`, `unknown`, `not_applicable`). Readiness gates no route, producer or eligibility. Today no read model reads it; only the domain diagnostics compute it.
+Accepted [ADR 0218](../adr/0218-film-lifecycle-dimensions-revision.md) (accepted target, not implemented) defines `displayReady`, `catalogReady` and `predictionReady` as ordered predicates over the [ADR 0216](../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) aggregate sections (`true`, `false`, `unknown`, `not_applicable`). Readiness gates no route, producer or eligibility. Today no read model reads it; only the domain diagnostics compute it. The pure derivation `src/film-readiness.js` ([AIR-665](https://trello.com/c/EgOYnLRE)) is delivered dormant: not in the bundle, no consumer calls it, no read model switches to it.

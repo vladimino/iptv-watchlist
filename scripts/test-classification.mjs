@@ -343,6 +343,9 @@ export const FILES={
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
+ "film-readiness.mjs": {
+  "suite": "core"
+ },
  "canonical-readiness-classes.mjs": {
   "suite": "core"
  },
