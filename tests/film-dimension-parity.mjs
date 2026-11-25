@@ -379,4 +379,22 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
 }
 
 fs.rmSync(root,{recursive:true,force:true});
+
+// ADR 0218 D1 (AIR-662): a marked owner projection is a projection of the owner decision, not an independent owner input; an unmarked legacy owner row keeps its control.
+{
+ const marked={film_id:'film:p',dimension:'localization',status:'reviewed',source:'owner',source_version:'owner_review',provenance_json:'{"authority":"owner","projection":"owner_review","entries":["k"]}',value:'Жара',authority:'owner',updated_at:AT};
+ const legacy={...marked,provenance_json:'{"authority":"owner"}'};
+ const none=localizationFacts({row:marked,sources:[],ownerValues:[],ownerAvailable:true});
+ assert.deepEqual([none.status,none.resolved.tier],['unknown','none'],'the marked row is not an owner input once no entry backs it');
+ assert.equal(localizationFacts({row:legacy,sources:[],ownerValues:[],ownerAvailable:true}).resolved.tier,'owner','an unmarked legacy owner row is still the owner');
+ const facts=(row,owner)=>({identity:{verdict:'found'},localization:localizationFacts({row,sources:[],ownerValues:owner,ownerAvailable:true})});
+ const stale=classifyRow(marked,facts(marked,[]));
+ assert.deepEqual([stale.class,stale.reasons],['control',['owner_projection_stale']]);
+ const backed=classifyRow(marked,facts(marked,[{value:'Жара'}]));
+ assert.deepEqual([backed.class,backed.reasons],['agree',['owner_projection']]);
+ const unproved=classifyRow(marked,{identity:{verdict:'found'},localization:localizationFacts({row:marked,sources:[],ownerValues:[],ownerAvailable:false})});
+ assert.deepEqual([unproved.class,unproved.reasons],['control',['owner_projection_unproved']]);
+ assert.equal(classifyRow(legacy,facts(legacy,[])).reasons[0],'owner_applied');
+}
+
 console.log('film-dimension-parity: ok');
