@@ -11,7 +11,7 @@
 //   `unknown_legacy`. Both are retained by every later stage; only `stale_copy` can ever be a retirement candidate, and stage 6 narrows it further.
 // - A missing dimension row is never a negative, and a missing metadata provenance is never an explicit null: without film_metadata_field
 //   (ADR 0214 PV1, not live) no metadata field is ever `absent`.
-import {resolveLocalization} from '../localization-sources.js';
+import {isOwnerProjection,resolveLocalization} from '../localization-sources.js';
 
 export const PARITY_CLASSES=Object.freeze(['agree','stale_copy','control','unknown_legacy']);
 export const PARITY_DIMENSIONS=Object.freeze(['identity','metadata','localization','fingerprint','prediction']);
@@ -142,7 +142,10 @@ export function localizationFacts({row=null,sources=[],ownerValues=[],ownerAvail
  const input={owner:null,reviewed:null,automatic:sources.map(item=>({source:item.source,value:item.value,sourceVersion:item.source_version??null,provenance:parseJson(item.provenance_json).value,observedAt:item.observed_at??null}))};
  if(distinct.length)input.owner={value:distinct[0],at:null};
  const sole=!!row&&row.status==='provisional'&&!filled(row.authority)&&filled(row.value)&&filled(row.source)&&!sources.some(item=>item.source===row.source);
- if(row?.status==='reviewed'&&filled(row.value)){
+ // ADR 0218 D1 (AIR-662): a marked owner projection is a projection of the owner_review_entry decision read above, never an independent owner input: with the evidence read
+ // (ownerAvailable) its removal or change leaves the row stale. An unmarked legacy owner/reviewed row keeps its control.
+ if(isOwnerProjection(row)){/* not an input */}
+ else if(row?.status==='reviewed'&&filled(row.value)){
   if(row.authority==='owner'&&!input.owner)input.owner={value:row.value,at:row.updated_at??null};
   else if(row.authority!=='owner')input.reviewed={value:row.value,source:row.source||'dictionary',at:row.updated_at??null};
  }else if(sole)input.automatic.push({source:row.source,value:row.value,sourceVersion:row.source_version??null,provenance:parseJson(row.provenance_json).value,observedAt:row.updated_at??null});
@@ -202,6 +205,17 @@ export function classifyRow(row,facts={}){
    if(titleSource)reasons.push('title_source_outside_identity');
    // strong() protects every owner-authority row; an owner or dictionary authority on a non-reviewed row has no writer and is never an automatic candidate.
    if(row.status!=='reviewed'&&filled(row.authority)&&LOCALIZATION_AUTHORITIES.has(row.authority))reasons.push(row.authority==='owner'?'owner_authority_not_reviewed':'dictionary_authority_not_reviewed');
+   // A marked owner projection (the row the projection-aware writer materialized from an owner decision) is a copy of owner_review_entry, never an independent owner authority:
+   // `agree` while the current decision still resolves to its value; otherwise `control` (kept, NEVER a stale_copy, so never retirement-eligible) as a stale or unproved
+   // projection, the handoff to the separate reconciler (AIR-663). Missing or unavailable owner evidence is never read as a proved revocation.
+   if(isOwnerProjection(row)&&!reasons.length){
+    const loc=facts.localization;
+    if(proof==='unavailable'||!loc||loc.status==='unavailable'||loc.status==='conflict'){reasons.push('owner_projection_unproved');return done('control');}
+    if(loc.resolved?.tier==='owner'&&loc.resolved.value===(row.value??'').trim()){reasons.push('owner_projection');return done('agree');}
+    reasons.push('owner_projection_stale');
+    notes.push('expected_'+(loc.resolved?.tier??'none'));
+    return done('control',{expected:{tier:loc.resolved?.tier??'none',source:loc.resolved?.source??null}});
+   }
    if(row.status==='reviewed'&&!reasons.length){
     reasons.push(row.authority==='owner'?'owner_applied':'reviewed_applied');
     const loc=facts.localization;

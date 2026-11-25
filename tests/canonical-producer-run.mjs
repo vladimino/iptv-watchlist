@@ -30,17 +30,17 @@ const sortedEq=(actual,expected,message)=>assert.deepEqual([...actual].sort(),[.
 // ---- 1. The classification table ----
 {
  const byClass=cls=>Object.entries(R.ERROR_CLASSES).filter(([,value])=>value===cls).map(([code])=>code);
- sortedEq(byClass(CLASS.UNIT),['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history'],'unit-specific');
- sortedEq(byClass(CLASS.PERMANENT),['film_person_invalid','film_person_bounded','dictionary_source_ambiguous'],'permanent');
+ sortedEq(byClass(CLASS.UNIT),['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history','film_person_metadata_locked','localization_owner_moved','localization_inputs_moved'],'unit-specific');
+ sortedEq(byClass(CLASS.PERMANENT),['film_person_invalid','film_person_bounded','dictionary_source_ambiguous','localization_replay_mismatch','localization_invalid'],'permanent');
  sortedEq(byClass(CLASS.RECOVERABLE),['no_identity_row','needs_trusted_tmdb_id','film_person_reference','film_person_redirect','dictionary_identity_ambiguous','owner_review_inconsistent'],'recoverable');
  sortedEq(byClass(CLASS.KEPT),['owner_kept','reviewed_kept','unranked_kept','identity_mismatch','snapshot_already_applied','absent','credits_absent_from_source'],'kept');
  sortedEq(byClass(CLASS.UNCLASSIFIED),['unclassified'],'unclassified');
- for(const code of ['film_person_unavailable','film_person_held','film_person_not_open','film_person_fence','film_person_run_mismatch','producer_store_missing','producer_run_unreadable','producer_cas_lost','producer_source_generation_mismatch','producer_slice_commit_failed','producer_strike_commit_failed','producer_marker_unreadable','producer_transport','producer_timeout','producer_storage','owner_review_check_failed'])assert.equal(R.ERROR_CLASSES[code],CLASS.SYSTEMIC,code+' is systemic');
+ for(const code of ['film_person_unavailable','film_person_held','film_person_not_open','film_person_fence','film_person_run_mismatch','producer_store_missing','producer_run_unreadable','producer_cas_lost','producer_source_generation_mismatch','producer_slice_commit_failed','producer_strike_commit_failed','producer_marker_unreadable','producer_transport','producer_timeout','producer_storage','owner_review_check_failed','localization_owner_unavailable','localization_source_unavailable'])assert.equal(R.ERROR_CLASSES[code],CLASS.SYSTEMIC,code+' is systemic');
  assert.deepEqual(R.classifyProducerError({code:'producer_source_generation_mismatch'}),{...R.classifyProducerError({code:'producer_cas_lost'}),code:'producer_source_generation_mismatch'},'the generation mismatch keeps its code and the pass-level stop of the other systemic codes');
  assert.ok(Object.isFrozen(R.ERROR_CLASSES),'the table is frozen');
  assert.ok(Object.values(R.ERROR_CLASSES).every(value=>Object.values(CLASS).includes(value)));
  // EXHAUSTIVE over the producer path: every code a planner, an adapter, a writer or the receipt layer raises (a `failed('code')` literal) or a dictionary conflict reason has a class. A new code without a row fails here.
- const files=['canonical-epg-producer','canonical-epg-person-producer','canonical-dictionary-producer','canonical-person-adapters','canonical-person-mutation-producer','canonical-producer-adapters','canonical-person-state','canonical-film-writers','canonical-mutations','canonical-receipts','receipt-operation-key','canonical-producers','film-person-authority','canonical-producer-store'];
+ const files=['canonical-epg-producer','canonical-epg-person-producer','canonical-dictionary-producer','canonical-person-adapters','canonical-person-mutation-producer','canonical-producer-adapters','canonical-person-state','canonical-film-writers','film-localization-projection','canonical-metadata-sync-producer','canonical-mutations','canonical-receipts','receipt-operation-key','canonical-producers','film-person-authority','canonical-producer-store'];
  const found=new Map();
  for(const file of files){
   const text=fs.readFileSync(path.resolve('src',file+'.js'),'utf8');
@@ -565,10 +565,11 @@ const rowOf=(extra={})=>R.resultRow({...PASS,state:'open',attempts:3,...extra});
  const unit={kind:'film_facts',id:'film:1',digest:await R.dictionaryUnitDigest(plan1.units[0])};
  const fpUnit=u=>({kind:u.kind,id:u.id,unitDigest:u.digest});
  const fingerprint=await R.planFingerprint({origin:'dictionary',event:plan1.event,units:[fpUnit(unit)]});
- // (a) dictionary snapshot unchanged: no_identity_row refused; the identity row is created; the same snapshot is eventually applied
+ // (a) dictionary snapshot unchanged: no_identity_row refused; the identity row is created; the same snapshot is eventually applied.
+ // ADR 0218 C1: the planner no longer names no_identity_row (the writer creates the identity row in the same batch); a recoverable row stored before C1 keeps settling under these rules.
  const snapshotNoIdentity=buildDictionaryInput({film:{contract_version:1,original_title:null,canonical_identity:null,updated_at:AT},dimensions:{identity:null,localization:null},trustedTmdb:[]},plan1.units[0],{at:AT});
- assert.ok(snapshotNoIdentity.conflicts.some(c=>c.reason==='no_identity_row'),'the planner names no_identity_row');
- const noIdentity=snapshotNoIdentity.conflicts.find(c=>c.reason==='no_identity_row').reason;
+ assert.equal(snapshotNoIdentity.outcome,'proceed');assert.ok(!snapshotNoIdentity.conflicts.some(c=>c.reason==='no_identity_row'),'ADR 0218 C1: the planner no longer names no_identity_row');
+ const noIdentity='no_identity_row';
  assert.equal(R.classOfCode(noIdentity),CLASS.RECOVERABLE);
  const stamp0=await R.prereqStamp('no_identity_row',{film:it('film:1',4),identity:null});
  const row=R.resultRow({origin:'dictionary',runKey:'d1',passNo:1,fingerprint,unit,state:'refused_recoverable',code:noIdentity,prereqStamp:stamp0,at:AT});
