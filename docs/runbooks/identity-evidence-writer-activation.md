@@ -1,6 +1,6 @@
 # Identity evidence writer activation and break recording (ADR 0215 decision 4; operator contract of card EC, AIR-637)
 
-**Status:** the operator code and the migration are delivered **dormant**. Migration `0042_identity_evidence_writer_control.sql` is **not applied** (card ECM is a separate production GO) and no writer exists yet (cards E2a-E2c). Nothing here authorizes a production operation: **every step below is an owner-approved production operation with its own GO and readback** (L2/L3 of [authorization](../process/authorization-and-escalation.md)). Read the present state live; this page is a contract, not a status.
+**Status:** the operator code and the migration are delivered **dormant**. Migration `0042_identity_evidence_writer_control.sql` is **not applied** (card ECM is a separate production GO) and the first writer, `discovery_decision` (card E2a, AIR-617), is delivered **dormant** in the Discovery decision write (`writeDecisionDelta`, `writeDecisions`); the other writers are cards E2b-E2d. Nothing here authorizes a production operation: **every step below is an owner-approved production operation with its own GO and readback** (L2/L3 of [authorization](../process/authorization-and-escalation.md)). Read the present state live; this page is a contract, not a status.
 
 ## What the control is
 
@@ -35,6 +35,16 @@ The row is written by the ADR 0184 claim unit inside the claim's own canonical b
 - **Drain evidence for `pending -> on`** must show that only versions containing the bridge writer can commit a claim: one deployment at 100% built from a commit that contains AIR-618, and no Diary or Watchlist step, Ratings import chunk or owner backfill of an older version still running. An elapsed interval alone is not evidence.
 - **Coverage is about eligible commits only:** a rooted claim write committed while the writer was `on` has its row (or the same key already present); a rootless write, a backfill, a replay or a claim that was applied by an attempt whose hand-over was lost is outside coverage and never counts as a gap or a refutation. A missing row for a key means no eligible commit for it in an unbroken `on` interval, never "not checked".
 - **Rollback:** switch the writer `off` first (`deactivate`); rows written stay as history. The activation is one part of the shared package with the ADR 0215 writers, after the ECM apply, and needs its own owner GO; it is not part of the code card.
+
+## The `discovery_decision` writer (card E2a, AIR-617)
+
+Delivered dormant inside the Discovery decision write; see [Discovery and resolution](../architecture/discovery-and-resolution.md#identity-evidence-on-the-decision-write-e2a-adr-0215-dormant) for the exact row. Activation is one part of the shared activation package of the three E2 writers, each with its own gates; this card authorizes none of it.
+
+- **Preconditions (all separate owner GOs):** the writer's code deployed at 100%; M1 (0039-0041) and ECM (0042) applied and read back (a plain apply of 0041 with 0042 pending applies both, see above); `readWriter` shows `off` (no row) before the first transition.
+- **Drain (step 2):** no Discovery Workflow instance of an older version and no older request running. A Discovery decision committed by an older version while `pending` writes **no row**, so it is never inside a claimed interval; that is why `on` waits for the drain proof.
+- **Readback after `pending` and after `on`:** the control row and its change row (above), plus a bounded read that each new **eligible** check of the interval (a decision that became `verified`, changed source or id, or reconfirmed a duration) has its `discovery_scan` row (by observation key, method and scope), and that no row was created for a deferral, a policy exclusion, an owner decision or an inherited verification. A row for a key may legitimately predate a later failed or unchanged step (the same key is one immutable row), so "no matching row exists" is not a check for those steps. Natural acceptance is a later chunk or revalidation writing a row in its own batch; do not run a Discovery chunk, sync or backfill just to produce one.
+- **Failure signals:** `discovery_fence` on a decision write that previously committed (a same-key row with another semantic identity, or an activation flip racing the batch: the next chunk replans); `discovery_unavailable` with a damaged control schema (the decision write fails closed rather than commit a silent gap).
+- **Rollback:** set the writer `off` with `deactivate`; history stays. Never roll the code back to a version without the writer while `pending` or `on`; if it happened, record a `break` from the deployment history. A code rollback leaves rows and control untouched.
 
 ## Rules
 

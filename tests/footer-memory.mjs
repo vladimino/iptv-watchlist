@@ -15,7 +15,7 @@ import {spawnSync} from 'node:child_process';
 import {webcrypto} from 'node:crypto';
 import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {scoped,scopedReplacing,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedReplacing,scopedEpgPriority,scopedDiscoveryAuthority,loadDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {nodeSqliteOrSkip,nonFunctional} from './suite-gate.mjs';
 
@@ -236,7 +236,7 @@ assert.equal(counted.body.lastRun.added,2);assert.equal(counted.body.lastRun.fai
  const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,ReadableStream,crypto:webcrypto,console:{log(){},warn(){},error(){}},setTimeout,clearTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},fetch:async()=>{throw new Error('the footer makes no request');}});
  vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),world);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader',IMPORT),world);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),world);
- vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scopedEpgPriority(),world);vm.runInContext(scopedDiscoveryAuthority(),world);
+ vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scopedEpgPriority(),world);loadDiscoveryAuthority(script=>vm.runInContext(script,world));
  vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),world);vm.runInContext(scoped('src/ratings-d1.js','RatingsD1'),world);
  for(const source of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(source,'utf8').replace('export default','globalThis.worker='),world);
  const reads2=[];
