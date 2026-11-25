@@ -950,6 +950,9 @@ export const FILES={
  "film-localization-projection.mjs": {
   "suite": "core"
  },
+ "film-localization-reconciler.mjs": {
+  "suite": "core"
+ },
  "film-person-backfill.mjs": {
   "suite": "core"
  },
