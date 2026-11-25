@@ -483,6 +483,48 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  assert.deepEqual(bare.owner,{value:'Жара',at:T},'no owner evidence read: the marked row is still an owner input');
  const read=(await loadLocalizationInputs({DB:d1Standin(file3)},'film',[FID],{ownerRead:true})).get(FID);
  assert.equal(read.owner,null,'owner evidence read by the caller: the marked row is not an input');
+ // THE OWNER EVIDENCE MUST BE AUTHORITATIVE before a marked row is suppressed: the real readFilms and parity reader over r2, held, unreadable and moved owner evidence
+ const marked=async(setup=()=>{})=>{
+  const f=database();seedFilm(f);addOwner(f);
+  await write({DB:d1Standin(f)},f,[src('tmdb','Схватка',T1)]);
+  ownerCommit(f,{value:null});          // the decision is gone from the entries
+  setup(f);
+  return f;
+ };
+ // d1 marker, entries read at one generation: authoritative, the marked row is suppressed (a proved revocation)
+ let f=await marked();
+ assert.equal((await titleOf(f)).tier,'automatic');
+ // held writes are readable (the existing read contract): authoritative too
+ f=await marked(x=>exec(x,"UPDATE owner_review_authority SET writes='held' WHERE id=1"));
+ assert.equal((await titleOf(f)).tier,'automatic');
+ // an r2 marker: the entries are not authoritative, the marked row stays an owner input (unproved, never a proved revocation)
+ f=await marked(x=>exec(x,"UPDATE owner_review_authority SET mode='r2' WHERE id=1"));
+ let t=await titleOf(f);
+ assert.deepEqual([t.value,t.tier],['Жара','owner']);
+ // an unreadable owner marker table: the same
+ f=await marked(x=>exec(x,"ALTER TABLE owner_review_authority RENAME TO owner_review_authority_gone"));
+ t=await titleOf(f);
+ assert.deepEqual([t.value,t.tier],['Жара','owner']);
+ // the marker MOVES while the entries are read: not a proof
+ f=await marked();
+ let moved=false;
+ const movingEnv={DB:d1Standin(f,{onQuery:async text=>{if(!moved&&/FROM owner_review_entry/.test(text)){moved=true;exec(f,"UPDATE owner_review_authority SET generation=generation+1 WHERE id=1;UPDATE owner_review_entry SET generation=generation+1");}}})};
+ t=(await readFilms(movingEnv,[FID])).items.get(FID).title;
+ assert.deepEqual([moved,t.value,t.tier],[true,'Жара','owner'],'a moved marker is unproved: the marked row is kept');
+ // a torn row generation (an entry stamped with another generation than the stable marker): not a proof either
+ f=await marked();
+ addOwner(f,{value:'Другая',generation:99});
+ exec(f,"DELETE FROM owner_review_entry WHERE source_key='tmdb_1656'");
+ exec(f,"INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','torn',"+q(ownerPayload('Другая'))+","+q(FID)+",'verified',99)");
+ t=await titleOf(f);
+ assert.equal(t.value,'Другая','the entry is still the owner value; the proof only gates the suppression of the marked row');
+ // parity: held writes and unreadable owner evidence are unproved (never a revocation); a torn row generation is refused like a moved marker
+ f=await marked(x=>exec(x,"UPDATE owner_review_authority SET writes='held' WHERE id=1"));
+ row=await parityOf(f);
+ assert.deepEqual([row.class,row.reasons],['control',['owner_projection_unproved']]);
+ f=await marked();
+ exec(f,"INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','torn',"+q(ownerPayload('Другая'))+","+q(FID)+",'verified',99)");
+ await assert.rejects(()=>readDimensionParity({DB:d1Standin(f)}),code('owner_review_generation_moved'));
  // an UNMARKED legacy owner row keeps its control after the entry is gone: owner_applied, and the derived reader still resolves it as the owner
  const file4=database();seedFilm(file4);reviewedRow(file4,{value:'Жара',authority:'owner',source:'owner'});
  row=await parityOf(file4);

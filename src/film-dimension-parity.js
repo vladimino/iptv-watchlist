@@ -150,7 +150,9 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  if(before.owner.available&&passedSurvivors.length){
   const links=await ancestors(db,passedSurvivors);
   const all=[...new Set([...links.values()].flat())];
-  const entries=await chunked(db,"SELECT source_key,identity_link,identity_state,payload_json FROM owner_review_entry WHERE kind='film' AND identity_state='verified' AND identity_link IN (/*ids*/) ORDER BY source_key",all);
+  const entries=await chunked(db,"SELECT source_key,identity_link,identity_state,payload_json,generation FROM owner_review_entry WHERE kind='film' AND identity_state='verified' AND identity_link IN (/*ids*/) ORDER BY source_key",all);
+  // A consumed row stamped with another generation than the stable marker is a torn owner snapshot, not proof (the same refusal as a moved marker).
+  if(entries.some(row=>Number(row.generation)!==before.owner.generation))throw failed('owner_review_generation_moved');
   const candidates=ownerCandidatesFromEntries(entries);
   owners=new Map(passedSurvivors.map(id=>[id,links.get(id).flatMap(link=>candidates.get(link)||[])]));
  }
