@@ -352,6 +352,12 @@ export const FILES={
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
+ "upstream-cooldown-callers.mjs": {
+  "suite": "core"
+ },
+ "removal-ratings-cooldown.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },

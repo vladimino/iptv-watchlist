@@ -202,7 +202,8 @@ export async function run(env,{now=Date.now()}={}){
   const payload=result?.payload||{},status=result?.status||0;
   if(status===200){
    summary=fold(summary,payload);
-   if(payload.retryAt){stop='rate_limit';nextRetryAt=Date.parse(payload.retryAt)||now+BUSY_RETRY_MS;break;}
+   // AIR-604 (ADR 0211 decision 5): a shared-cooldown skip sent no request. It waits for the cooldown end and charges neither a retry attempt nor the rate-limit streak.
+   if(payload.retryAt){stop=payload.cooldown===true?'cooldown':'rate_limit';nextRetryAt=Date.parse(payload.retryAt)||now+BUSY_RETRY_MS;break;}
    if(payload.done===true){outcome='completed';cursor=null;break;}
    const moved=typeof payload.nextCursor==='string'&&payload.nextCursor!==(cursor||'');
    if(!moved){stop='stuck';nextRetryAt=now+BUSY_RETRY_MS;break;}
@@ -213,7 +214,7 @@ export async function run(env,{now=Date.now()}={}){
  }
  if(outcome!=='completed'&&nextRetryAt==null){stop='budget';nextRetryAt=now;}
  summary={...summary,deferredBusy:summary.deferredBusy+busy,durationMs:summary.durationMs+Math.max(0,Date.now()-t0)};
- if(outcome!=='completed'){attempts+=stop==='budget'?0:1;streak=stop==='rate_limit'?streak+1:0;}else streak=0;
+ if(outcome!=='completed'){attempts+=stop==='budget'||stop==='cooldown'?0:1;streak=stop==='rate_limit'?streak+1:0;}else streak=0;
  const exhausted=outcome!=='completed'&&attempts>=RETRY_CAP;
  const status=outcome==='completed'?'completed':exhausted?'failed':'pending';
  // 4. Commit the result and append the immutable event in ONE compare-and-swap; the rotation keeps only undelivered entries of the old week.
