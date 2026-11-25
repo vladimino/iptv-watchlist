@@ -33,4 +33,6 @@ fi
 echo '[AIR-514] pre-push: running core and non-functional suites'
 # The per-file limit is a hang guard. On a busy laptop the heaviest mutation files (canonical-producer-driver-mutation*.mjs: about 110 s on CI,
 # 280-850 s locally under load) pass the runner's 300 s default, so the hook allows 30 minutes per file unless TEST_TIMEOUT_MS is set. CI is unchanged.
-TEST_TIMEOUT_MS="${TEST_TIMEOUT_MS:-1800000}" npm run test:all
+# The non-functional measurement files (wall time, memory, latency budgets) run one at a time after the parallel phase: beside the mutation files on a busy
+# laptop they miss their bounds although each passes alone. The mutation files still run in parallel. CI and the nightly workflow are unchanged.
+TEST_TIMEOUT_MS="${TEST_TIMEOUT_MS:-1800000}" npm run test:all -- --isolate-measurements
