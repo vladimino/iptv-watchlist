@@ -57,7 +57,7 @@ export const GAPS=Object.freeze([
 // (a spec with readback, replay and atomic:true), and the Worker bundle must then carry this module (a test checks both). Today the registry is empty, so none is wired.
 export const PRODUCER_WIRING=Object.freeze([
  Object.freeze({name:'epg_commit',site:'Producer Workflow chain from EpgOrchestration.ensure (canonical-producer-workflow.js)',requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])}),
- Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
+ Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict','film_localization_projection'])}),
  Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
  Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, letterboxd-facts.js, worker.js persistScan)',requires:Object.freeze(['film_admission','film_retention'])}),
 ]);

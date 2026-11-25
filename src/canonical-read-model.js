@@ -62,7 +62,7 @@ async function ownerEntries(db,kind,links){
  const out=[];
  for(let at=0;at<links.length;at+=CANONICAL_READ_CHUNK){
   const chunk=links.slice(at,at+CANONICAL_READ_CHUNK);
-  try{out.push(...await many(db,"SELECT kind,source_key,identity_link,identity_state,payload_json FROM owner_review_entry WHERE kind=? AND identity_state='verified' AND identity_link IN ("+chunk.map(()=>'?').join(',')+') ORDER BY source_key',[kind,...chunk]));}
+  try{out.push(...await many(db,"SELECT kind,source_key,identity_link,identity_state,payload_json,generation FROM owner_review_entry WHERE kind=? AND identity_state='verified' AND identity_link IN ("+chunk.map(()=>'?').join(',')+') ORDER BY source_key',[kind,...chunk]));}
   catch(error){throw failed('canonical_read_owner_unavailable',error);}
  }
  return out;
@@ -96,10 +96,31 @@ async function retiredIds(db,survivors){
  return links;
 }
 
+// ADR 0218 D1 (AIR-662): the owner evidence of a Film read is AUTHORITATIVE only when the owner-review marker is d1 (writes open or held, the marker semantics of owner-review-d1.js) at the SAME
+// generation before and after the entries are read, and every consumed row carries that generation. Only then may a marked owner projection row be read as a stale projection
+// (no entry backing it = revoked). An r2 or absent marker, an unreadable table, a moved marker or a torn row generation is unproved: the marked row stays an owner input (never a proved revocation).
+async function ownerMarker(db){
+ try{
+  const rows=await many(db,'SELECT mode,generation,writes FROM owner_review_authority WHERE id=1');
+  const row=rows[0];
+  return row&&row.mode==='d1'&&(row.writes==='open'||row.writes==='held')?{generation:Number(row.generation)}:null;
+ }catch{return null;}
+}
+async function filmOwnerEvidence(db,links){
+ const before=await ownerMarker(db);
+ const entries=await ownerEntries(db,'film',links);
+ const after=await ownerMarker(db);
+ const authoritative=!!before&&!!after&&before.generation===after.generation&&entries.every(row=>Number(row.generation)===before.generation);
+ return {entries,authoritative};
+}
+
 async function resolved(env,db,kind,list){
  if(!list.length)return new Map();
  const links=kind==='film'?await retiredIds(db,list):new Map(list.map(id=>[id,[id]]));
- const [inputs,entries]=await Promise.all([loadLocalizationInputs(env,kind,list),ownerEntries(db,kind,[...new Set([...links.values()].flat())])]);
+ const linkList=[...new Set([...links.values()].flat())];
+ // Person behaviour is unchanged: no marked projection exists there and the proof is not asked.
+ const {entries,authoritative}=kind==='film'?await filmOwnerEvidence(db,linkList):{entries:await ownerEntries(db,kind,linkList),authoritative:false};
+ const inputs=await loadLocalizationInputs(env,kind,list,{ownerRead:authoritative});
  const candidates=ownerCandidatesFromEntries(entries);
  const out=new Map();
  for(const id of list){
