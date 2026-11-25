@@ -1082,6 +1082,9 @@ export const FILES={
  "identity-evidence-writer.mjs": {
   "suite": "core"
  },
+ "identity-evidence-discovery-decision.mjs": {
+  "suite": "core"
+ },
  "identity-work-inventory.mjs": {
   "suite": "core"
  },

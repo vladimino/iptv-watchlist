@@ -1,6 +1,7 @@
 // AIR-637 / ADR 0215 (Accepted), card EC: the identity evidence writer control and the domain-path insert helper (migration 0042, a file only).
-// DORMANT: nothing in the Worker imports this module, it is not bundled, and no route, Workflow, cron or producer calls it. Cards E2a and E2c wire the Discovery writers to
-// `domainEvidenceStatements`; the owner-approved activation operation calls `changeWriter`. A writer with no control row is `off`, so until then nothing is written.
+// DORMANT: the only Worker code that imports this module is the Discovery decision write (card E2a, AIR-617: `src/discovery-authority.js` appends `domainEvidenceStatements` to its own batch);
+// card E2c wires the owner writer the same way. No route, Workflow, cron or producer calls `changeWriter`: only the owner-approved activation operation does. A writer with no control row
+// is `off`, so until then nothing is written.
 // Nothing here READS the ledger to decide anything (ADR 0213 decision 8).
 //
 // What it provides:
@@ -123,15 +124,20 @@ const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND 
 // It does not test `changes() = 1`: a valid duplicate changes nothing. The assertion passes when the writer is `off` or absent, or the row with the key has the planned
 // semantic identity, so it passes for a new row and a valid duplicate and fails for a missing row (the writer flipped to `on`... or the insert was skipped) and for a
 // mismatching row, including a matching owner row with another causal position.
-export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=fenced.assertSql}={}){
+// `when` (AIR-617, optional) is one caller condition `{sql,params}` over rows of this database: the row is inserted only while it holds, and the assertion then requires the row only
+// while it holds (the Discovery decision writer passes "no decision with this hash is stored yet", the very condition of its history row, so a write that records no new decision
+// claims no check). It is evaluated INSIDE the batch, before the caller's own statements change those rows, and is never request input.
+export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=fenced.assertSql,when=null}={}){
  if(!plan||!plain(plan.row)||!/^[0-9a-f]{64}$/.test(plan.evidenceKey||'')||!DOMAIN_WRITERS[plan.writer])throw failed('identity_evidence_out_of_slice');
  if(typeof requestId!=='string'||!REQUEST.test(requestId))throw invalid('request_id');
  const recorded=instant(at,'at');
+ if(when!==null&&(!plain(when)||typeof when.sql!=='string'||!when.sql||!Array.isArray(when.params)))throw invalid('when');
  if(await identityEvidenceControlStatus(env)==='absent')return [[assertSql(ABSENT),[]]];
  const r=plan.row;
- const insert=[INSERT,[plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
-  r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer]];
- const assertion=[assertSql('NOT '+ACTIVE+' OR EXISTS ('+SAME+')'),[plan.writer,plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,
+ const gate=when?' AND ('+when.sql+')':'',gateParams=when?when.params:[];
+ const insert=[when?INSERT.replace(' ON CONFLICT',' AND ('+when.sql+') ON CONFLICT'):INSERT,[plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
+  r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer,...gateParams]];
+ const assertion=[assertSql('NOT ('+ACTIVE+gate+') OR EXISTS ('+SAME+')'),[plan.writer,...gateParams,plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,
   r.sourceRoot,r.sourceRoot===null?r.reconstructedFrom:null,r.sourceScope,r.scopeEvidenceKey,r.supersedesKey,r.sourceOrder]];
  return [insert,assertion];
 }

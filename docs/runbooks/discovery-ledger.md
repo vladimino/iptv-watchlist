@@ -6,6 +6,10 @@ This page describes how to operate the bounded discovery archive of [ADR 0034](.
 
 **Status of the R2 ledger tools after [ADR 0162](../adr/0162-d1-only-authority-retire-rollback-toolchain.md) and AIR-537.** The ledger and its decisions are D1-owned; the R2 ledger object is a frozen legacy copy. `scripts/discovery-ledger-split.mjs` is an offline snapshot plan and rehearsal: it writes only to a private directory and is kept as historical analysis. `scripts/discovery-ledger-install.mjs` is **read-only since AIR-537**: its former `--apply --approved-production-writes` path (R2 `PutObject` of the plan and a resolver-lease write) is removed, and `--apply` is refused with exit 2 before any request. It remains only as a `GET`/`HEAD` dry-run re-check of a plan against a bucket. The shared S3 client (`createS3Store`, `readInstallCredentials`) now lives in `scripts/r2-s3-store.mjs`, which has no import side effects and is used by `scripts/prediction-domain-production.mjs`. The R2 ledger tools cannot return an authority or recover D1.
 
+## Identity evidence rows on the decision write (E2a, dormant)
+
+The Discovery decision write can append one `film_identity_evidence` row to its own batch ([architecture](../architecture/discovery-and-resolution.md#identity-evidence-on-the-decision-write-e2a-adr-0215-dormant)). It is `off` until an owner-approved activation ([activation runbook](identity-evidence-writer-activation.md)); with it `off` or the control tables absent a decision write is unchanged. This page's recovery procedures do not change: a stuck or failed observation is still recovered by the next eligible chunk, and no recovery step may flip the writer, replay decisions to create rows, or backfill the ledger (history is reconstructed only by the separate, owner-gated import).
+
 ## What the EPG commit writes
 
 Production always takes the **bounded** row. The other rows are historical rollback language of ADR 0034 and offline fixtures; no Worker binding selects them.

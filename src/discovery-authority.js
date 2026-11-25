@@ -8,6 +8,7 @@
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
 import {revokeWriteMatches,originalStillEffective} from './domain/discovery-identity-review.js';
+import {planDomainEvidence,domainEvidenceStatements} from './identity-evidence-writer.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
@@ -26,6 +27,41 @@ function assignedIdentity(decision){
 }
 function assignedRowsDelete(key,previous,next){
  return assignedIdentity(previous)===assignedIdentity(next)&&previous?[]:[[ASSIGNED_ROWS_DELETE,[key]]];
+}
+// AIR-617 / ADR 0215 Table 3 (E2a, DORMANT): the `discovery_decision` identity evidence writer. A decision write that records a NEW decision (a new decision hash: the condition of
+// its history row) appends two statements to its own batch, so the evidence row and the decision commit together or not at all. Only a `verified` decision of a known source
+// writes a row; every other status, deferral, policy exclusion, admission and minting claim writes none, and nothing is invented (no alias text, no response, no Film). The row is
+// written only while the writer's control row is `pending` or `on` (no row = `off`), so until an owner-approved activation this adds an assertion and writes nothing.
+const EVIDENCE_SOURCES=Object.freeze({
+ tmdb_detail:Object.freeze({method:'tmdb_detail_check',scope:null}),
+ known_epg_alias:Object.freeze({method:'known_alias',scope:'known_epg_alias'}),
+ known_alias_year_runtime:Object.freeze({method:'known_alias',scope:'known_alias_year_runtime'}),
+});
+const EVIDENCE_ASSERT=condition=>'UPDATE discovery_cas SET ok=CASE WHEN '+condition+' THEN 1 ELSE 0 END WHERE id=1';
+// Pure. The evidence input of one decision, or null when the decision states no checked identity. The root is the observation key (a re-check of one observation is one root, never
+// independent corroboration); the time is the decision's own `checkedAt`, never the write time. An owner decision, a policy exclusion and a decision without `identitySource` give null.
+export function decisionEvidenceInput(key,decision){
+ if(typeof key!=='string'||!key||!decision||typeof decision!=='object'||decision.status!=='verified'||decision.ownerIdentity)return null;
+ const source=Object.hasOwn(EVIDENCE_SOURCES,decision.identitySource)?EVIDENCE_SOURCES[decision.identitySource]:null;
+ if(!source||decision.tmdbId==null)return null;
+ return {subject:{kind:'discovery_observation',value:key},relation:'candidate_for',object:{kind:mediaKind(decision)==='tv'?'tmdb_tv':'tmdb_movie',value:String(decision.tmdbId)},polarity:'asserts',route:'discovery_scan',
+  method:source.method,sourceRoot:key,sourceScope:source.scope,observedAt:decision.checkedAt};
+}
+// The statements to place BEFORE the history insert of a batch, in the same batch (see above), or [] for a decision without evidence. A value the ledger model refuses (an id or a time
+// outside its shape) is a decision that states no recordable check: no row, the domain step is unchanged. A damaged evidence schema fails the decision write closed.
+async function decisionEvidence(env,key,decision,hash,at){
+ const input=decisionEvidenceInput(key,decision);
+ if(!input)return [];
+ let plan;
+ try{plan=await planDomainEvidence('discovery_decision',input);}
+ catch(error){
+  if(error?.code==='identity_evidence_invalid'||error?.code==='identity_evidence_out_of_slice')return [];
+  throw failed('discovery_unavailable',error);
+ }
+ try{
+  return await domainEvidenceStatements(env,plan,{requestId:'discovery_decision:'+hash,at,assertSql:EVIDENCE_ASSERT,
+   when:{sql:'NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',params:[key,hash]}});
+ }catch(error){throw failed('discovery_unavailable',error);}
 }
 export const LEASE_TTL_MS=90000;
 export const STATEMENT_CAP=40;
@@ -519,12 +555,13 @@ async function writeDecisions(env,map,gate,context){
   if(!decision||typeof decision!=='object'||Array.isArray(decision))throw failed('discovery_conflict');
   const hash=await decisionHash(decision);
   const kind=mediaKind(decision);
+  const evidence=await decisionEvidence(env,key,decision,hash,new Date().toISOString());
   const observation=await one(db,'SELECT evidence_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=?',[key]);
   if(!observation)throw failed('discovery_fence');
   if(decision.evidenceKey!=null&&observation.evidence_key!=null&&observation.evidence_key!==decision.evidenceKey)throw failed('discovery_fence');
   let previous=null;
   try{const stored=await one(db,'SELECT payload_json FROM discovery_decision WHERE observation_key=?',[key]);previous=stored?JSON.parse(stored.payload_json):null;}catch{previous=null;}
-  prepared.push({key,decision,hash,kind,previous});
+  prepared.push({key,decision,hash,kind,previous,evidence});
  }
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
  await commit(db,[
@@ -543,6 +580,7 @@ async function writeDecisions(env,map,gate,context){
  try{
   for(const row of prepared){
    const addition=[
+    ...row.evidence,
     ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[row.key,row.key,gate.generation,new Date().toISOString(),'resolver_chunk',JSON.stringify(row.decision),row.key,row.hash]],
     ['INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(observation_key) DO UPDATE SET programme_run_id=excluded.programme_run_id, generation=excluded.generation, status=excluded.status, attempts=excluded.attempts, evidence_key=excluded.evidence_key, terminal_reason=excluded.terminal_reason, retry_at=excluded.retry_at, tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, film_id=excluded.film_id, decision_hash=excluded.decision_hash, payload_json=excluded.payload_json',[row.key,gate.programmeRunId,gate.generation+1,row.decision.status??null,Number.isInteger(row.decision.attempts)?row.decision.attempts:null,row.decision.evidenceKey??null,row.decision.terminalReason??null,row.decision.retryAt??null,row.decision.tmdbId==null?null:String(row.decision.tmdbId),row.decision.tmdbId==null?null:row.kind,row.decision.filmId??null,row.hash,JSON.stringify(row.decision)]],
     ...assignedRowsDelete(row.key,row.previous,row.decision),
@@ -1376,10 +1414,12 @@ export async function writeDecisionDelta(env,changes,context={}){
   const cas=expected==null?'NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=?)':'EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)';
   const live=' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1) AND EXISTS (SELECT 1 FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=? AND (? IS NULL OR evidence_key IS NULL OR evidence_key=?)) AND '+cas;
   const generation=gate.generation+1,at=new Date().toISOString();
+  const evidenceRows=await decisionEvidence(env,key,next,hash,at);
   try{
    await commit(db,[
     fence(gate,lease,live,[key,evidence,evidence,key,...(expected==null?[]:[expected])]),
     [FENCE_SQL,[]],
+    ...evidenceRows,
     ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[key,key,generation,at,'resolver_chunk',JSON.stringify(next),key,hash]],
     ['INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(observation_key) DO UPDATE SET programme_run_id=excluded.programme_run_id, generation=excluded.generation, status=excluded.status, attempts=excluded.attempts, evidence_key=excluded.evidence_key, terminal_reason=excluded.terminal_reason, retry_at=excluded.retry_at, tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, film_id=excluded.film_id, decision_hash=excluded.decision_hash, payload_json=excluded.payload_json',[key,gate.programmeRunId,generation,next.status??null,Number.isInteger(next.attempts)?next.attempts:null,evidence,next.terminalReason??null,next.retryAt??null,next.tmdbId==null?null:String(next.tmdbId),next.tmdbId==null?null:kind,next.filmId??null,hash,JSON.stringify(next)]],
     [FENCE_SQL,[]],

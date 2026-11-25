@@ -58,5 +58,22 @@ export function scopedEpgPriority(){
 // ADR 0142: the per-slot evidence rule is a pure module scoped in front of the authority, which assigns slots with it.
 // ADR 0178: the identity review module is scoped here too, because the owner write checks a revoke command with it.
 export function scopedDiscoveryAuthority(){
- return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {revokeWriteMatches,originalStillEffective}=DiscoveryIdentity;\nconst {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
+ return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {revokeWriteMatches,originalStillEffective}=DiscoveryIdentity;\nconst {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;\nconst {planDomainEvidence,domainEvidenceStatements}=IdentityEvidenceWriter;');
+}
+// AIR-617 (ADR 0215): the Discovery decision write appends its identity evidence row, so the writer module and what it imports are scoped IN FRONT of the Discovery authority. `FilmPersonAuthority`, `ProducerFence`, `CanonicalMutations` and `CanonicalReceipts`
+// must already be in scope (build.mjs scopes them there, ahead of this call; none of them depends on Discovery; `loadDiscoveryAuthority` below does the same for a test world).
+export function scopedIdentityEvidence(){
+ return scopedImports('src/identity-evidence.js','IdentityEvidence','const {assertWritable,database,failed,one,readAuthority}=FilmPersonAuthority;\nconst {fenced}=CanonicalMutations;\nconst {RETRY_POLICY,defineOperation,digestOf,receiptedWrite,requestIdOf}=CanonicalReceipts;')+'\n'+scopedImports('src/identity-evidence-writer.js','IdentityEvidenceWriter','const {database,failed,many,one}=FilmPersonAuthority;\nconst {fenced}=CanonicalMutations;\nconst {evidenceKeyOf,normalizeEvidence,KNOWN_ALIAS_SCOPES}=IdentityEvidence;');
+}
+
+// AIR-617: the Discovery authority now calls the identity evidence writer, so a test world that loads the authority needs the layers scoped in front of it. `run` is `script=>vm.runInContext(script,world)`.
+// A world that already holds `FilmPersonAuthority` (it loads it for its own reasons) keeps that copy.
+export function loadDiscoveryAuthority(run){
+ if(run('typeof FilmPersonAuthority')==='undefined')run(scoped('src/film-person-authority.js','FilmPersonAuthority'));
+ // The same three scopes, with the same preambles, as build.mjs (which a test reads as text, so it keeps its own copy).
+ run(scoped('src/canonical-producer-fence.js','ProducerFence'));
+ run(scopedImports('src/canonical-mutations.js','CanonicalMutations','const {assertWritable,database,failed,many,one,readAuthority}=FilmPersonAuthority;\nconst {bindProducerFence,fenceStatements}=ProducerFence;'));
+ run(scopedImports('src/canonical-receipts.js','CanonicalReceipts','const {assertWritable,database,failed,many,one,readAuthority}=FilmPersonAuthority;\nconst {fenced}=CanonicalMutations;'));
+ run(scopedIdentityEvidence());
+ run(scopedDiscoveryAuthority());
 }

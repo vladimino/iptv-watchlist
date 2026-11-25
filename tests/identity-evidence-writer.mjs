@@ -564,14 +564,16 @@ const setWriter=async(env,writer,target)=>{
  }
 }
 
-// ===== 7. dormant: nothing in the Worker imports the writer control, nothing reads the ledger or the control =====
+// ===== 7. dormant: only the Discovery decision writer (E2a, AIR-617) imports the helper, nothing calls the operator, nothing reads the ledger or the control =====
 {
  const sources=fs.readdirSync('src',{recursive:true}).filter(name=>String(name).endsWith('.js')).map(name=>path.join('src',String(name)));
  const mentions=sources.filter(name=>/identity_evidence_writer/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(mentions,['src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,[],'nothing imports the writer control: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ assert.deepEqual(importers,['src/discovery-authority.js'],'only the Discovery decision write imports the helper (E2a); no route, Workflow, cron or producer imports the writer control');
+ const operator=sources.filter(name=>name!=='src/identity-evidence-writer.js'&&/\bchangeWriter\b/.test(fs.readFileSync(name,'utf8')));
+ assert.deepEqual(operator,[],'nothing in the Worker calls the activation/break operator: no row of any writer is ever flipped by code');
+ assert.ok(!/changeWriter/.test(fs.readFileSync('build.mjs','utf8')+fs.readFileSync('scripts/bundle-scope.mjs','utf8').replace(/\/\/.*$/gm,'')),'the bundle hands the operator to nothing');
  // The migration is a file only: no code applies it, and the deploy workflow never applies a migration.
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0042_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0042');
