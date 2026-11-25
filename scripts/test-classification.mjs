@@ -224,6 +224,15 @@ export const FILES={
  "letterboxd-admission-closed.mjs": {
   "suite": "core"
  },
+ "letterboxd-admission-documents.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-import.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-archive-apply-d1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-admission-d1.mjs": {
   "suite": "core"
  },

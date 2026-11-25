@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import {execFileSync} from 'node:child_process';
-import {webcrypto} from 'node:crypto';
+import {webcrypto,createHash} from 'node:crypto';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import * as WatchlistD1 from '../src/watchlist-d1.js';
@@ -33,9 +33,15 @@ const OPEN="UPDATE film_person_baseline SET state='loading',reference='t' WHERE 
 const STAMP='2026-11-25T10:00:00.000Z';
 const NOW=Date.parse('2026-11-25T12:00:00.000Z');
 let copies=0;
+// ADR 0222: at marker `d1` the import coordination documents (rated candidates, chunk intent / receipt / candidates result) are D1 Ratings documents behind a complete-import manifest; there is no R2 copy.
+const MANIFEST='letterboxd/imports/documents-manifest.json';
+const sqlText=text=>"'"+String(text).replace(/'/g,"''")+"'";
+const setDocD1=(file,key,value)=>{const body=JSON.stringify(value);sqlite(file,'DELETE FROM ratings_document WHERE key='+sqlText(key)+';INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('+sqlText(key)+',0,'+sqlText(body)+','+sqlText(createHash('sha256').update(body).digest('hex'))+','+sqlText(STAMP)+')');};
+const getDocD1=(file,key)=>{const found=rows(file,'SELECT body FROM ratings_document WHERE key='+sqlText(key)+' ORDER BY part');return found.length?JSON.parse(found.map(row=>row.body).join('')):null;};
+const dbFiles=new Set();
 const fresh=mode=>{
  const file=path.join(root,'c-'+(copies++)+'.sqlite');fs.copyFileSync(template,file);sqlite(file,OPEN);
- if(mode==='d1')sqlite(file,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1;UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'");
+ if(mode==='d1'){sqlite(file,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1;UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'");setDocD1(file,MANIFEST,{schemaVersion:1,complete:true});dbFiles.add(file);}
  return file;
 };
 
@@ -70,6 +76,7 @@ vm.runInContext(bundle.slice(start,end),ctx);
 for(const file of ['src/domain/tmdb-tv-identity.js','src/sources.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace(/^export default/m,'globalThis.x='),ctx);
 vm.runInContext(scoped('src/letterboxd-match.js','LetterboxdMatch')+'\n'+scopedReplacing('src/letterboxd-identity.js','LetterboxdIdentity','const normTitle=LetterboxdMatch.normTitle;\n')+'\n'+scoped('src/domain/letterboxd-rated-admission.js','LetterboxdRatedAdmission')+'\n'+scoped('src/domain/letterboxd-import-registry.js','LetterboxdImportRegistry'),ctx);
 for(const file of ['src/letterboxd-facts.js','src/letterboxd-rated-candidates.js','src/letterboxd-diary-identity.js'])vm.runInContext(fs.readFileSync(file,'utf8'),ctx);
+vm.runInContext(scoped('src/letterboxd-admission-documents.js','LetterboxdAdmissionDocuments'),ctx);
 vm.runInContext("globalThis.derivedViewIndex=async env=>RatingsD1.overlayView(env,{});globalThis.viewIndexD1Version=async env=>'d1:r'+(await RatingsD1.readRatingsAuthority(env?.DB??null,env)).generation;",ctx);
 const Facts=vm.runInContext('LetterboxdFacts',ctx),Identity=vm.runInContext('LetterboxdDiaryIdentity',ctx),D1=vm.runInContext('LetterboxdAdmissionD1',ctx),Candidates=vm.runInContext('LetterboxdRatedCandidates',ctx);
 const ADMISSIONS='letterboxd/admissions/verified-films.json';
@@ -79,7 +86,7 @@ const opts=extra=>({clock:()=>NOW,remaining:()=>120000,fetchImpl,...extra});
 const admissionRows=file=>rows(file,'SELECT film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,verified_at,request_id FROM film_rated_admission ORDER BY film_id');
 const receipts=(file,prefix=null)=>rows(file,prefix?"SELECT request_id,state,operation_key FROM canonical_write_receipt WHERE operation_key LIKE '"+prefix+"%' ORDER BY created_at,request_id":"SELECT request_id,state,operation_key FROM canonical_write_receipt WHERE operation='film_admission' ORDER BY created_at,request_id");
 const evidence=file=>rows(file,'SELECT subject_value,object_value,route,method,source_root,request_id,film_id FROM film_identity_evidence ORDER BY seq');
-const reset=()=>{r2.clear();etags.clear();site.clear();movies.clear();calls.length=0;puts.length=0;};
+const reset=()=>{for(const db of dbFiles)sqlite(db,"DELETE FROM ratings_document WHERE key LIKE 'letterboxd/imports/%' AND key<>"+sqlText(MANIFEST));r2.clear();etags.clear();site.clear();movies.clear();calls.length=0;puts.length=0;};
 
 // ===== A. at r2 the delivered legacy path is unchanged: the R2 receipt entry, the legacy receipt, no evidence row, no operation key =====
 {
@@ -166,8 +173,11 @@ const file=fresh('d1'),env=world(file);
 {
  const SHA='d'.repeat(64),KEY='letterboxd/imports/'+SHA+'/rated-candidates.json';
  const candidateDoc=(code,name='Fixture Rated',year=2018)=>({schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[code]:{code,state:'pending',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name,year,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:null}},checkpoint:{cursor:null,stopped:null}});
- const seedDoc=(code,name,year)=>{r2.set(KEY,candidateDoc(code,name,year));etags.set(KEY,String(++rev));};
- const rowOf=code=>r2.get(KEY).candidates[code];
+ const seedDoc=(code,name,year)=>setDocD1(file,KEY,candidateDoc(code,name,year));
+ const rowOf=code=>getDocD1(file,KEY).candidates[code];
+ // the delivered R2 path (marker r2) keeps its R2 document
+ const seedDocR2=(code,name,year)=>{r2.set(KEY,candidateDoc(code,name,year));etags.set(KEY,String(++rev));};
+ const rowOfR2=code=>r2.get(KEY).candidates[code];
  // d1
  reset();
  seedDoc('rt1');add('rt1','fixture-rated-2018','900010','Fixture Rated',2018);
@@ -182,7 +192,7 @@ const file=fresh('d1'),env=world(file);
  assert.equal(rows(file,"SELECT source_scope FROM film_identity_evidence WHERE subject_value='rt1'")[0].source_scope,SHA,'and the archive scope: a second archive is its own evidence');
  assert.deepEqual([rowOf('rt1').state,rowOf('rt1').enrichment],['verified','done'],'verified with nothing left to enrich: W5 and W6 no longer write the R2 entry');
  // a verified row still waiting for enrichment (verified at r2) is settled without a page request and without an R2 write
- const doc=r2.get(KEY);doc.candidates.rt1.enrichment='pending';r2.set(KEY,doc);etags.set(KEY,String(++rev));calls.length=0;puts.length=0;
+ const doc=getDocD1(file,KEY);doc.candidates.rt1.enrichment='pending';setDocD1(file,KEY,doc);calls.length=0;puts.length=0;
  const retired=await Candidates.identityStep(env,{sha:SHA,fetchImpl,code:'rt1'});
  assert.equal(retired.reason,'enrichment_retired',JSON.stringify(retired));assert.deepEqual(calls,[],'no request');assert.equal(rowOf('rt1').enrichment,'done');
  assert.equal(puts.includes(ADMISSIONS),false,'no R2 admissions write');
@@ -200,21 +210,21 @@ const file=fresh('d1'),env=world(file);
  // at r2: the delivered legacy step (R2 receipt entry, legacy row, no evidence, no keyed receipt)
  reset();
  const old=fresh('r2'),oldEnv=world(old);
- seedDoc('rt3','Fixture Rated Three',2019);add('rt3','fixture-rated-2019','900011','Fixture Rated Three',2019);
+ seedDocR2('rt3','Fixture Rated Three',2019);add('rt3','fixture-rated-2019','900011','Fixture Rated Three',2019);
  const legacy=await Candidates.identityStep(oldEnv,{sha:SHA,fetchImpl});
  assert.equal(legacy.verified,true,JSON.stringify(legacy));
  assert.ok(r2.get(ADMISSIONS)?.films?.tmdb_900011,'r2: the legacy R2 entry');
  assert.equal(admissionRows(old).find(item=>item.source_code==='rt3').receipt_key,ADMISSIONS);
  assert.equal(evidence(old).length,0);assert.ok(receipts(old).every(item=>item.operation_key===null));
- assert.equal(rowOf('rt3').enrichment,'pending','r2: enrichment is still pending (legacy)');
+ assert.equal(rowOfR2('rt3').enrichment,'pending','r2: enrichment is still pending (legacy)');
 }
 
 // ===== E2. review of PR #1018 (P1): an `admitting` row is recovered from DURABLE STATE and a REAL reacquisition, never from its stored intent =====
 {
  const SHA='e'.repeat(64),KEY='letterboxd/imports/'+SHA+'/rated-candidates.json';
  const row=(code,tmdb,path,name,year,extra={})=>({code,state:'admitting',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name,year,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:'pending',intendedTmdb:tmdb,filmPath:path,...extra});
- const seedRow=r=>{r2.set(KEY,{schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[r.code]:r},checkpoint:{cursor:null,stopped:null}});etags.set(KEY,String(++rev));};
- const rowOf=code=>r2.get(KEY).candidates[code];
+ const seedRow=r=>setDocD1(file,KEY,{schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[r.code]:r},checkpoint:{cursor:null,stopped:null}});
+ const rowOf=code=>getDocD1(file,KEY).candidates[code];
  const boxdCalls=()=>calls.filter(url=>url.includes('boxd.it')||url.includes('api.themoviedb.org')).length;
  const hasPending=(code,id,future)=>sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('"+id+"','film_admission','rated_admission_retention','film','film:tmdb:900070','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()+(future?3600000:-3600000)).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:"+code+"')");
  const step=(e=env,code=undefined)=>Candidates.identityStep(e,{sha:SHA,fetchImpl,...(code?{code}:{})});
@@ -317,8 +327,9 @@ const file=fresh('d1'),env=world(file);
  reset();
  seedRow(row('rc7','900077','/film/fixture-rc-77/','Fixture RI',2006));add('rc7','fixture-rc-77','900078','Fixture RI',2006);
  let moved=0;
- const watching={...env,DB:d1Standin(file,{onQuery:async text=>{
-  if(!moved&&/CASE WHEN/.test(text)&&/operation_key/.test(text)&&/admission:lid:rc7/.test(text)){moved++;hasPending('rc7','late-r7',false);}
+ // ADR 0222: the terminal review and the history assertion are ONE batch. The history moves immediately BEFORE that batch runs; the whole batch (document included) must then be refused.
+ const watching={...env,DB:d1Standin(file,{onBatch:async list=>{
+  if(!moved&&list.some(item=>/ratings_document/.test(item.text)&&item.text.includes(KEY))&&list.some(item=>/admission:lid:rc7/.test(item.text))){moved++;hasPending('rc7','late-r7',false);}
  }})};
  const held=await step(watching);
  assert.equal(moved,1,'the history moved between the reconcile and the terminal write');
@@ -402,8 +413,9 @@ const file=fresh('d1'),env=world(file);
   const ADD=(lid,tmdb)=>D1.admitVerifiedFilm(env,{kind:'lid',lid,receipt:{tmdb,archiveSha256:'a'.repeat(64),title:'Held',year:1981},now:()=>new Date(NOW).toISOString()});
   assert.equal((await ADD('Bz6','700020')).outcome,'admitted');
   let movedAt=0;
-  const watching={...env,DB:d1Standin(file,{onQuery:async text=>{
-   if(!movedAt&&/CASE WHEN/.test(text)&&/operation_key/.test(text)&&/admission:lid:Bz6/.test(text)){
+  // ADR 0222: the receipt document and the history assertion are one batch; the history moves immediately before that batch, which is refused whole.
+  const watching={...env,DB:d1Standin(file,{onBatch:async list=>{
+   if(!movedAt&&list.some(item=>/chunks\/6\.receipt\.json/.test(item.text))&&list.some(item=>/admission:lid:Bz6/.test(item.text))){
     movedAt++;
     sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('late-6','film_admission','rated_admission_retention','film','film:tmdb:700020','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()-3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:Bz6')");
    }

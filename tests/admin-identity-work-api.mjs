@@ -342,6 +342,43 @@ limboItems = [issue('tmdb_1', 'stalled', 3 * DAY), issue('tmdb_2', 'pending', 8 
   context.Date.now = realNow; limboItemsFn = null;
 }
 
+// ---- ADR 0222: at marker `d1` the candidate documents are D1 Ratings documents: the archive list and the document come from D1 (the seam is tested in letterboxd-admission-documents.mjs), R2 is not read, the registry projection is frozen ----
+{
+  reset();
+  const d1Docs = new Map();
+  let route = 'd1';
+  const stub = {
+    MANIFEST_KEY: 'letterboxd/imports/documents-manifest.json',
+    documentRoute: async () => {if (route === 'closed') {const error = new Error('letterboxd_admission_closed'); error.code = 'letterboxd_admission_closed'; throw error;} if (route === 'unreadable') throw new Error('letterboxd_admission_unavailable'); return {d1: route === 'd1'};},
+    readDocument: async (_env, key) => ({value: d1Docs.get(key) ?? null, etag: 'd1-etag'}),
+    listCandidateArchives: async () => ({shas: [...d1Docs.keys()].filter(key => key.endsWith('/rated-candidates.json')).map(key => key.split('/')[2]).sort(), truncated: false}),
+  };
+  context.LetterboxdAdmissionDocuments = stub;
+  seed(docKey(SHA.B), doc(SHA.B, [candidate('Bb1', 'pending')]));            // a stale R2 copy must NOT be read at d1
+  d1Docs.set(docKey(SHA.A), doc(SHA.A, [candidate('Aa1', 'pending'), candidate('Aa2', 'needs_review', {reason: 'duplicate_tmdb'})]));
+  tally.gets.length = 0; tally.heads.length = 0; tally.lists.length = 0;
+  const result = await lbc();
+  assert.equal(result.status, 200, JSON.stringify(result.body).slice(0, 300));
+  assert.deepEqual(result.body.rows.map(row => row.key).sort(), ['lbc:' + SHA.A + ':Aa1', 'lbc:' + SHA.A + ':Aa2'], 'the rows come from the D1 document');
+  const lane = result.body.coverage.letterboxd_rated_candidate;
+  assert.equal(lane.page.state, 'read_whole');assert.equal(lane.page.archiveSha256, SHA.A);assert.equal(lane.page.documentEtag, 'd1-etag');
+  assert.deepEqual([tally.gets.length, tally.heads.length, tally.lists.length], [0, 0, 0], 'no R2 read, head or list at d1: no fallback and no registry projection');
+  assert.equal(lane.counts.state, 'absent', 'the registry projection is frozen: it is not the estimate source at d1');
+  // an unreadable marker: unavailable states, never the R2 copy
+  route = 'unreadable'; tally.gets.length = 0;
+  const unreadable = await lbc('&archive=' + SHA.B);
+  assert.equal(unreadable.status, 200);
+  assert.equal(unreadable.body.coverage.letterboxd_rated_candidate.page.state, 'unreadable');
+  assert.deepEqual(unreadable.body.rows, []);
+  assert.equal(docReads().length, 0, 'an unreadable marker never reads the R2 copy');
+  // under `closed` the R2 objects are quiescent and still the record
+  route = 'closed'; tally.gets.length = 0;
+  const closed = await lbc('&archive=' + SHA.B);
+  assert.deepEqual(closed.body.rows.map(row => row.key), ['lbc:' + SHA.B + ':Bb1'], 'closed: R2 is still the record');
+  delete context.LetterboxdAdmissionDocuments;
+  reset();
+}
+
 // ---- the read-only boundary over the whole file ----
 assert.equal(tally.puts + tally.deletes + tally.fetches, 0, 'no write, no delete, no outbound request in any request above');
 assert.ok(tally.lists.every(options => options.delimiter === '/' && options.limit === 1000), 'the only list is the bounded delimiter listing');

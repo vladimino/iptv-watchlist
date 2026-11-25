@@ -90,3 +90,18 @@ There is no switch to close the route; stop by making no further remote call, si
 ## Enrichment stopped after a verified Film (AIR-354)
 
 A code that is `verified` with `enrichment` pending keeps its admission even when the metadata step stops. `/admin/letterboxd` states the two facts separately: the Film is already admitted, and the last enrichment stopped with a reason. `shortlink_mismatch` means the page carries a shortlink for another code and stays a blocker. A page with no shortlink tag no longer stops by itself; `admission_unproven` means the stored admission no longer proves the code, and `admission_changed` means the admission changed during the write, so nothing was stored. Pressing «Дозаполнить метаданные» again repeats only the enrichment step. It does not re-run identity. Do not run production enrichment for `103U` or `10TQ` without a separate owner GO; the 5 Nov 2026 state of both codes is a historical observation, not a current readback.
+
+## Import coordination documents at the admission cutover (ADR 0222; target, not current)
+
+Owner option B ([ADR 0222](../adr/0222-letterboxd-import-coordination-documents-in-d1.md)): at marker `letterboxd_admission_authority = d1` the rated-candidates document, the inferred chunk intent / receipt documents and the archive-apply candidates result are D1 Ratings documents, not R2 objects. The delivery (card A1, [AIR-602](https://trello.com/c/7W5kAMK9)) is the dormant adapter and the offline-tested mechanism `src/letterboxd-admission-documents-import.js`; **nothing here is run by a deploy, and no step below is authorized until the owner approves the exact plan of card A2 ([AIR-608](https://trello.com/c/MSlOAAGR))**.
+
+Order inside the A2 plan, under marker `closed` and after the drain of every old writer (owner archive and baseline commit, the rated identity step, replay):
+
+1. **Quiesce.** No caller writes under `closed` (the guards refuse), and no invocation of a version older than A1 is still running (the drain evidence of ADR 0207 decision 1).
+2. **Snapshot.** `inventory` lists `letterboxd/imports/` (at most 5,000 keys; a truncated listing blocks) and reads only the moved families. `planImport` freezes the cohort and prints the manifest digest. A blocked plan (unparseable, oversized or unknown document) is fixed first; nothing is imported from it.
+3. **Import** (`importDocuments`, marker `closed` asserted in every batch). Idempotent: resend after a lost response; a document already in D1 with the same SHA-256 is skipped; a different one stops as `diverged` (never overwritten: roll back and re-import). The complete manifest is written last.
+4. **Parity** (`verifyParity`) immediately before the flip: `equal` is required. `r2_drift` means a late writer touched R2 after the snapshot: abort, roll back, take a new snapshot. A late PUT after the flip cannot be a coordination write (the guards refuse it).
+5. **Flip** `closed -> d1` in the admission step of the A2 plan; the d1 readers need the manifest, so a flip without a complete import fails closed.
+6. **Rollback before the flip:** `rollbackImport` (marker `r2` or `closed`) deletes the D1 copies and the manifest in one batch; R2 was never changed, nothing is lost. **After the flip:** no rollback; roll-forward on code that honours the marker.
+
+What a reader sees after the flip: the D1 documents only (an absent key is absent after a complete import); `registry.json` is neither written nor read as authority; the old R2 documents are frozen history.
