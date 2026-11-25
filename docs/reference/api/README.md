@@ -13,6 +13,7 @@ Current interface contracts, not a grant of production writer access:
 - [Read-only per-film prediction, rating and Diary viewing history](film-history.md)
 - [Read-only prediction quality: prospective metrics and calibration](prediction-quality.md)
 - [Prediction assessment contract (Accepted architecture, ADR 0132; implemented in code, no caller)](prediction-assessment.md)
+- [FilmAggregateV1: the unified read of one Film (internal, dormant; ADR 0216)](film-aggregate.md)
 - [Read-only D1 catalog views: persons, filmographies, duplicate review, and one derived Person identity read](d1-catalog.md)
 - [Degraded reads from R2 mirrors and the write fence: when a temporary storage failure may be answered read-only from the compatibility mirrors, the additive response fields, the film identity rules and the server-side degraded-origin fence (ADR 0177)](degraded-reads.md)
 - [GET and HEAD read side effects: route inventory, MCP read tools, scenarios and the baseline of the reads that still write](read-side-effects.md)
