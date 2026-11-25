@@ -12,12 +12,19 @@ const signing=await webcrypto.subtle.generateKey(RSA,true,['sign','verify']),rog
 const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),kid:'kid-1',alg:'RS256',use:'sig'};
 const fetch=async url=>{if(String(url)===TEAM+'/cdn-cgi/access/certs')return Response.json({keys:[publicJwk]});throw new Error('unexpected network '+url);};
 const calls=[];
+// The route plans the ledger rows, then commits the document AND those statements in one `ownerAction` call (the atomic cross-store write is proved on a real D1 in tests/letterboxd-owner-action-atomic.mjs).
 const LetterboxdFacts={
- ownerDiaryAction:async(env,input)=>{calls.push(['diary',input]);return input.expectedVersion==='v1'?{state:'applied',results:Object.fromEntries(input.lids.map(l=>[l,'requeued'])),version:'v2',entries:{}}:{state:'stale_revision',results:{}};},
- ownerBacklogAction:async(env,input)=>{calls.push(['backlog',input]);return {state:'applied',results:{},version:'b2',entries:{}};},
- readDiaryIdentityVersioned:async()=>({doc:{films:{withEntry:{attempts:6}}},version:'v1'}),
+ ownerAction:async(env,input)=>{calls.push(['action',input]);
+  if(input.expectedVersion==='atomic-off'){throw Object.assign(new Error('x'),{code:'atomic_unavailable'});}
+  if(input.expectedVersion==='full')return {state:'backlog_full',results:{a:'backlog_full'}};
+  if(input.expectedVersion!=='v1')return {state:'stale_revision',results:{}};
+  return {state:'applied',results:Object.fromEntries(input.lids.map(l=>[l,'requeued'])),version:'v2',entries:Object.fromEntries(input.lids.map(l=>[l,input.doc==='backlog'?{attempts:0}:{attempts:0,reason:input.action==='dismiss'?'owner_dismissed':'owner_requeued'}]))};},
 };
-const WatchlistD1={ownerAdmissionAction:async(env,input)=>{calls.push(['ledger',input]);return {ok:true,rows:input.rows.map(r=>({lid:r.lid,state:'pending',attempts:0}))};}};
+const ledgerRows=new Map([['withEntry',{lid:'withEntry',state:'pending',attempts:0,lastReason:'owner_requeued'}]]);
+const WatchlistD1={
+ ownerAdmissionPlan:async(env,input)=>{calls.push(['plan',input]);if(env.ledgerClosed)return {ok:false,reason:'closed'};return {ok:true,statements:[['STMT',[]]],tokens:(input.rows||[]).map(r=>({lid:r.lid})),skipped:[]};},
+ admissionRowsOf:async(env,lids)=>({ok:true,rows:lids.filter(l=>ledgerRows.has(l)).map(l=>ledgerRows.get(l))}),
+};
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
 const adminError=(code,status)=>json({error:code},status);
 const context=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextEncoder,TextDecoder,AbortSignal,atob,crypto:webcrypto,fetch,console,LetterboxdFacts,WatchlistD1,json,adminError,ISSUE_CODES:[]});
@@ -54,15 +61,22 @@ assert.equal((await post(body,{token:await jwt({claims:{exp:Math.floor(Date.now(
 assert.deepEqual(await post(body,{token:await jwt({claims:{email:'someone@example.test'}})}),{status:403,body:{error:'not_owner'}},'another subject');
 assert.equal(calls.length,0,'nothing was read or written by a refused request');
 // body validation
-for(const [bad,code] of [[{...body,action:'reset'},'invalid_action'],[{...body,lane:'film'},'invalid_lane'],[{...body,lids:[]},'invalid_lids'],[{...body,lids:Array.from({length:51},(_,i)=>'a'+i)},'invalid_lids'],[{...body,lids:['a','a']},'invalid_lids'],[{...body,why:''},'invalid_why'],[{action:'requeue',lane:'diary_identity',lids:['a'],why:'w'},'version_required'],[{action:'requeue',lane:'watchlist_admission',lids:['a'],why:'w'},'rows_required']])assert.equal(parse(bad).error,code,code);
+for(const [bad,code] of [[{...body,action:'reset'},'invalid_action'],[{...body,lane:'film'},'invalid_lane'],[{...body,lids:[]},'invalid_lids'],[{...body,lids:Array.from({length:51},(_,i)=>'a'+i)},'invalid_lids'],[{...body,lids:['a','a']},'invalid_lids'],[{...body,why:''},'invalid_why'],[{action:'requeue',lane:'diary_identity',lids:['a'],why:'w'},'version_required'],[{action:'requeue',lane:'watchlist_admission',lids:['a'],why:'w',version:'v1'},'rows_required'],[{action:'requeue',lane:'watchlist_admission',lids:['a'],why:'w'},'version_required']])assert.equal(parse(bad).error,code,code);
 assert.equal((await post({...body,action:'reset'})).status,400);
-// the CAS and the readback
+// the CAS, the atomic commit and the readback of BOTH stores
 assert.deepEqual(await post({...body,version:'v0'}),{status:409,body:{error:'stale_revision'}});
-const ok=await post();assert.equal(ok.status,200);assert.equal(ok.body.readback.version,'v2');assert.equal(calls.at(-1)[1].by,'owner@example.test','the owner subject is recorded');assert.equal(calls.at(-1)[1].why,'transport exhausted');
-// a ledger row with a shared entry needs the Diary version; the row token travels to the ledger CAS
+let ok=await post();assert.equal(ok.status,200);assert.equal(ok.body.committed,true);assert.equal(ok.body.readback.version,'v2');
+assert.equal(calls.at(-1)[1].by,'owner@example.test','the owner subject is recorded');assert.equal(calls.at(-1)[1].why,'transport exhausted');assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1)[1].extra)),[['STMT',[]]],'the ledger statements ride in the same write');
+assert.equal(ok.body.readback.proven,true,'both sides read back');
+// the Watchlist lane: the row tokens go to the plan, the shared document version is the CAS
 const rows=[{lid:'withEntry',state:'terminal',attempts:6,updatedAt:'t1'}];
-assert.deepEqual(await post({action:'requeue',lane:'watchlist_admission',lids:['withEntry'],why:'w',rows}),{status:400,body:{error:'version_required'}});
 const ledger=await post({action:'requeue',lane:'watchlist_admission',lids:['withEntry'],why:'w',rows,version:'v1'});
-assert.equal(ledger.status,200);assert.deepEqual(calls.slice(-2).map(c=>c[0]),['ledger','diary']);assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-2)[1].rows)),rows);
+assert.equal(ledger.status,200);assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(c=>c[0]==='plan').at(-1)[1].rows)),rows);assert.equal(calls.at(-1)[1].doc,'diary');
+// the backlog lane writes the backlog document
+const bk=await post({action:'requeue',lane:'diary_backlog',lids:['a'],why:'w',version:'v1'});assert.equal(bk.status,200);assert.equal(calls.at(-1)[1].doc,'backlog');
+// a store that cannot batch refuses the whole request, a full backlog is a 409 with nothing committed, a closed ledger plans nothing
+assert.deepEqual(await post({...body,version:'atomic-off'}),{status:503,body:{error:'atomic_unavailable'}});
+const full=await post({...body,lane:'diary_backlog',version:'full'});assert.equal(full.status,409);assert.equal(full.body.committed,false);
+const before=calls.length;assert.deepEqual(await post(body,{environment:{...env,ledgerClosed:true}}),{status:503,body:{error:'ledger_closed'}});assert.equal(calls.length,before+1,'only the plan ran');
 assert.match(fs.readFileSync('src/worker.js','utf8'),/url\.pathname==='\/api\/admin\/identity-work\/owner-action'\)return await adminIdentityOwnerActionRoute\(request,env,url\)/);
 console.log('admin-identity-owner-action: ok');

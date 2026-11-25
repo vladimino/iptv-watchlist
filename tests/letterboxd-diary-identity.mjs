@@ -373,6 +373,12 @@ claimStub.mode = 'incomplete'; await Identity.resolve(env, items(), opts({clock:
 assert.equal(claimCalls.length, 1, 'off-page: served by the later ordinary step'); assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001'}]); assert.equal(pending().vMEO.attempts, 2, 'a tried and unproved id counts an attempt');
 claimStub.mode = 'complete'; await Identity.resolve(env, items(), opts({clock: () => NOW + 60 * 3600000}));
 assert.equal(claimCalls.length, 2); assert.deepEqual(Object.keys(pending()), [], 'a proved claim clears the pending state');
+// AIR-599 (review of PR #1009): an owner dismiss that lands while the claim request is in flight is not overwritten by the claim step's own write.
+reset(); claimCalls.length = 0; claimStub.mode = 'incomplete'; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
+await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
+{const original = claimStub.ensureLetterboxdClaims; claimStub.ensureLetterboxdClaims = async (envArg, input) => {const {version} = await Facts.readDiaryIdentityVersioned(env); await Facts.ownerAction(env, {doc: 'diary', action: 'dismiss', lids: ['vMEO'], expectedVersion: version, by: 'o', why: 'w', at: 'a'}); return original(envArg, input);};
+ await Identity.resolve(env, items(), opts({clock: () => NOW + 13 * 3600000})); claimStub.ensureLetterboxdClaims = original;}
+assert.equal(pending().vMEO.reason, 'owner_dismissed', 'the claim step wrote nothing over the owner decision'); claimStub.mode = 'complete';
 // the same backoff and attempt bound hold for an id that is still ON Diary page 1 (an ordinary run never retries early or past the bound)
 reset(); claimCalls.length = 0; claimStub.mode = 'incomplete'; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
 await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts()); assert.equal(claimCalls.length, 1); assert.equal(pending().vMEO.attempts, 1);
@@ -452,7 +458,7 @@ const refusedWrite = await Facts.updateDiaryIdentity(env, {set: {Zzz1: {reason: 
 assert.deepEqual([...refusedWrite.refused], ['Zzz1']); assert.equal(Object.keys(pending()).length, 200);
 // new page ids do not overtake: when a place returns (the owner dismisses one entry), the backlog id enters first, before a newer page id
 const {version: v1} = await Facts.readDiaryIdentityVersioned(env);
-const dismissed = await Facts.ownerDiaryAction(env, {action: 'dismiss', lids: ['K004'], expectedVersion: v1, by: 'owner@example.test', why: 'test', at: new Date(NOW).toISOString()});
+const dismissed = await Facts.ownerAction(env, {doc: 'diary', action: 'dismiss', lids: ['K004'], expectedVersion: v1, by: 'owner@example.test', why: 'test', at: new Date(NOW).toISOString()});
 assert.equal(dismissed.state, 'applied'); assert.equal(dismissed.entries.K004.reason, 'owner_dismissed');
 await seed('Pg01', 3); add('Pg01', 'fixture-pg01-2000', '900205', 'Fixture Pg01', 2000);
 out = await Identity.resolve(env, items(['Pg01', 'fixture-pg01-2000']), opts({clock: () => NOW + 1000}));
@@ -462,18 +468,18 @@ assert.equal(pending().K004, undefined, 'the dismissed (settled) entry was the o
 reset(); putDoc({Leg1: {reason: 'forbidden', slug: 'l', attempts: 6, lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
 const {version: v2} = await Facts.readDiaryIdentityVersioned(env);
 out = await Identity.resolve(env, [], opts()); assert.equal(pending().Leg1.attempts, 6, 'a legacy entry exhausted by old transport charges keeps its count until the owner requeues it');
-const stale = await Facts.ownerDiaryAction(env, {action: 'requeue', lids: ['Leg1'], expectedVersion: 'not-the-version', by: 'o', why: 'w', at: 'a'});
+const stale = await Facts.ownerAction(env, {doc: 'diary', action: 'requeue', lids: ['Leg1'], expectedVersion: 'not-the-version', by: 'o', why: 'w', at: 'a'});
 assert.equal(stale.state, 'stale_revision'); assert.equal(pending().Leg1.attempts, 6);
-const req = await Facts.ownerDiaryAction(env, {action: 'requeue', lids: ['Leg1', 'Abs1'], expectedVersion: v2, by: 'owner@example.test', why: 'transport exhausted', at: '2026-11-17T16:00:00.000Z'});
+const req = await Facts.ownerAction(env, {doc: 'diary', action: 'requeue', lids: ['Leg1', 'Abs1'], expectedVersion: v2, by: 'owner@example.test', why: 'transport exhausted', at: '2026-11-17T16:00:00.000Z'});
 assert.deepEqual({...req.results}, {Leg1: 'requeued', Abs1: 'absent'});
 assert.deepEqual([req.entries.Leg1.attempts, req.entries.Leg1.streak, req.entries.Leg1.queuedAt, req.entries.Leg1.reason, req.entries.Leg1.requeued.why], [0, 0, '2026-11-10T00:00:00.000Z', 'owner_requeued', 'transport exhausted']);
 assert.notEqual(req.version, v2);
 // a requeue of a reported id without an entry creates its backlog record; a dismiss of a backlog id removes it
 const {version: b0} = await Facts.readDiaryBacklog(env);
-const created = await Facts.ownerBacklogAction(env, {action: 'requeue', lids: ['Rep1'], slugs: {Rep1: 'rep-1'}, expectedVersion: b0, by: 'o', why: 'report', at: '2026-11-17T16:00:00.000Z'});
+const created = await Facts.ownerAction(env, {doc: 'backlog', action: 'requeue', lids: ['Rep1'], slugs: {Rep1: 'rep-1'}, expectedVersion: b0, by: 'o', why: 'report', at: '2026-11-17T16:00:00.000Z'});
 assert.deepEqual([created.state, created.results.Rep1, created.entries.Rep1.slug], ['applied', 'created', 'rep-1']);
-assert.equal((await Facts.ownerBacklogAction(env, {action: 'dismiss', lids: ['Rep1'], expectedVersion: b0, by: 'o', why: 'x', at: 'a'})).state, 'stale_revision');
-assert.equal((await Facts.ownerBacklogAction(env, {action: 'dismiss', lids: ['Rep1'], expectedVersion: created.version, by: 'o', why: 'x', at: 'a'})).results.Rep1, 'dismissed');
+assert.equal((await Facts.ownerAction(env, {doc: 'backlog', action: 'dismiss', lids: ['Rep1'], expectedVersion: b0, by: 'o', why: 'x', at: 'a'})).state, 'stale_revision');
+assert.equal((await Facts.ownerAction(env, {doc: 'backlog', action: 'dismiss', lids: ['Rep1'], expectedVersion: created.version, by: 'o', why: 'x', at: 'a'})).results.Rep1, 'dismissed');
 // a dismissed entry is never checked again
 reset(); await seed('Dis1', 3); site.set('Dis1', {status: 404}); putDoc({Dis1: {reason: 'owner_dismissed', class: 'settled', slug: 'd', attempts: 2, lastAttemptAt: 'x', nextAttemptAt: null}});
 out = await Identity.resolve(env, items(['Dis1', 'd']), opts()); assert.equal(net.calls.length, 0); assert.deepEqual([out.outcomes.get('Dis1').class, out.outcomes.get('Dis1').reason], ['settled', 'owner_dismissed']);
@@ -481,5 +487,57 @@ out = await Identity.resolve(env, items(['Dis1', 'd']), opts()); assert.equal(ne
 reset(); await seed('Cls1', 3); canonical.gate = {mode: 'existing', state: 'held', generation: 2};
 for (let i = 0; i < 10; i++) await Identity.resolve(env, items(['Cls1', 'c']), opts({clock: () => NOW + i * 86400000}));
 assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred']);
+
+// ---- AIR-599 review of PR #1009 ----
+// P3: a resolve that read an entry before slow source I/O never overwrites what an owner action (or another caller's check) wrote meanwhile.
+{
+ const slowTo = async (lid, work) => {const handler = net.handler; net.handler = async (url, init) => {if (url.includes('boxd.it/' + lid)) {net.handler = handler; await work(); return http(404, '');} return handler(url, init);};};
+ // (a) an owner requeue lands during an in-flight 404 of an entry at attempts = 5: the 404 charges nothing, the requeue stays.
+ reset(); await seed('Rac1', 3); putDoc({Rac1: {reason: 'not_found', class: 'gone', slug: 'rac', attempts: 5, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
+ await slowTo('Rac1', async () => {const {version} = await Facts.readDiaryIdentityVersioned(env); const r = await Facts.ownerAction(env, {doc: 'diary', action: 'requeue', lids: ['Rac1'], expectedVersion: version, by: 'o', why: 'w', at: '2026-11-17T16:00:30.000Z'}); assert.equal(r.state, 'applied');});
+ out = await Identity.resolve(env, [], opts());
+ assert.deepEqual([pending().Rac1.reason, pending().Rac1.attempts, pending().Rac1.requeued.by], ['owner_requeued', 0, 'o'], 'the owner requeue survives the stale 404');
+ assert.deepEqual([out.outcomes.get('Rac1').class, out.outcomes.get('Rac1').reason, out.outcomes.get('Rac1').attempts], ['not_now', 'entry_changed', null], 'the step reports the lost race and charges nothing'); assert.equal(out.counts.entryChanged, 1);
+ // (b) an owner dismiss during the check: the dismissed entry is not resurrected.
+ reset(); await seed('Rac2', 3); putDoc({Rac2: {reason: 'forbidden', class: 'transport', slug: 'rac', attempts: 1, streak: 2, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
+ await slowTo('Rac2', async () => {const {version} = await Facts.readDiaryIdentityVersioned(env); await Facts.ownerAction(env, {doc: 'diary', action: 'dismiss', lids: ['Rac2'], expectedVersion: version, by: 'o', why: 'w', at: '2026-11-17T16:00:30.000Z'});});
+ await Identity.resolve(env, [], opts()); assert.equal(pending().Rac2.reason, 'owner_dismissed');
+ // (c) two overlapping resolves of the same id: one charge, the other is `entry_changed` (different check ids never collapse into one count).
+ reset(); await seed('Rac3', 3); site.set('Rac3', {status: 404});
+ const inner = []; await slowTo('Rac3', async () => {inner.push(await Identity.resolve(env, items(['Rac3', 'rac']), opts()));});
+ const outer = await Identity.resolve(env, items(['Rac3', 'rac']), opts());
+ assert.equal(pending().Rac3.attempts, 1, 'one real check charged once, whichever overlapped'); assert.equal(outer.outcomes.get('Rac3').reason, 'entry_changed');
+ // (d) the link intent is fail-closed on a moved entry: no admission starts over a dismissed entry.
+ reset(); await seed('Rac4', 3); add('Rac4', 'fixture-rac4-2000', '900301', 'Fixture Rac4', 2000); putDoc({Rac4: {reason: 'forbidden', class: 'transport', slug: 'fixture-rac4-2000', attempts: 0, streak: 1, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-10T00:00:00.000Z'}});
+ const handler4 = net.handler; net.handler = async (url, init) => {const out = await handler4(url, init); if (url.includes('api.themoviedb.org')) {const {version} = await Facts.readDiaryIdentityVersioned(env); await Facts.ownerAction(env, {doc: 'diary', action: 'dismiss', lids: ['Rac4'], expectedVersion: version, by: 'o', why: 'w', at: 'a'});} return out;};
+ const appliedBefore = canonical.applied.length; await Identity.resolve(env, [], opts());
+ assert.equal(canonical.applied.length, appliedBefore, 'no admission over an entry the owner dismissed during the check'); assert.equal(pending().Rac4.reason, 'owner_dismissed');
+}
+// P4: an id refused at the cap keeps the attempts of its Watchlist row; the other caller materializes the entry with them, not with 0.
+{
+ reset(); await seed('Bud9', 3); site.set('Bud9', {status: 404});
+ {const films = {}; for (let i = 0; i < 200; i++) films['F' + String(i).padStart(3, '0')] = {reason: 'forbidden', class: 'transport', slug: 'f', attempts: 1, streak: 1, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-17T00:00:00.000Z', nextAttemptAt: '2026-11-30T00:00:00.000Z'}; putDoc(films);}
+ out = await Identity.resolve(env, [{lid: 'Bud9', slug: 'bud9', attempts: 5}], opts({route: 'watchlist_admission'}));
+ assert.equal(out.outcomes.get('Bud9').reason, 'diary_cap'); assert.equal(backlogOf().Bud9.attempts, 5, 'the backlog keeps the row budget');
+ const {version} = await Facts.readDiaryIdentityVersioned(env); await Facts.ownerAction(env, {doc: 'diary', action: 'dismiss', lids: ['F000'], expectedVersion: version, by: 'o', why: 'w', at: 'a'});
+ out = await Identity.resolve(env, items(['Other1', 'other-1']), opts({clock: () => NOW + 1000, route: 'ratings_diary'}));
+ assert.equal(pending().Bud9.attempts, 6, 'the Diary caller materializes the entry with the row budget: one 404 reaches the cap, not 1'); assert.equal(out.outcomes.get('Bud9').terminal, true);
+ // an owner reset is intentional: requeue of the backlog id sets the budget to 0
+ reset(); putDoc({}); const created = await Facts.ownerAction(env, {doc: 'backlog', action: 'requeue', lids: ['Bud8'], slugs: {}, expectedVersion: null, by: 'o', why: 'w', at: 'a'}); assert.equal(backlogOf().Bud8.attempts, 0);
+}
+// P4b: an entry the other caller already materialized with fewer attempts than the Watchlist row holds is raised to the row's budget by the next real check.
+{
+ reset(); await seed('Bud7', 3); site.set('Bud7', {status: 404});
+ putDoc({Bud7: {reason: 'not_found', class: 'gone', slug: 'b7', attempts: 1, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
+ out = await Identity.resolve(env, [{lid: 'Bud7', slug: 'b7', attempts: 5}], opts({route: 'watchlist_admission'}));
+ assert.deepEqual([pending().Bud7.attempts, out.outcomes.get('Bud7').terminal], [6, true], 'the row budget (5) and the new 404 make 6');
+}
+// P1: a caller without a slug (the first-seen snapshot is gone) is served by the slug the shared entry already holds, never `slug_missing`.
+{
+ reset(); await seed('Slp1', 3); add('Slp1', 'fixture-slp1-2000', '900302', 'Fixture Slp1', 2000);
+ putDoc({Slp1: {reason: 'forbidden', class: 'transport', slug: 'fixture-slp1-2000', attempts: 2, streak: 1, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-10T00:00:00.000Z'}});
+ out = await Identity.resolve(env, [{lid: 'Slp1', slug: null, attempts: 2}], opts({route: 'watchlist_admission'}));
+ assert.equal(out.counts.verified, 1, 'the stored slug carried the check'); assert.equal(pending().Slp1, undefined);
+}
 
 console.log('letterboxd-diary-identity: ok');

@@ -11,6 +11,7 @@ import * as WatchlistD1 from '../src/watchlist-d1.js';
 import {admissionStep,STEP_LIMIT,AGE_REPORT_MS} from '../src/letterboxd-sync-admission.js';
 import {effectWriters} from '../src/letterboxd-sync-effects.js';
 
+const AGE_KEEP=WatchlistD1.LIMITS.keepSnapshots;
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lbadm-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
@@ -181,8 +182,8 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  assert.deepEqual(await WatchlistD1.admissionInventory(env,{filter:'nope'}),{ok:false,reason:'shape'});
  assert.deepEqual(await WatchlistD1.admissionInventory(env,{filter:'all',after:{version:'x',lid:'a'}}),{ok:false,reason:'shape'});
 }
-// 7f. AIR-599: the owner requeue / dismiss of ledger rows. One compare-and-swap batch on (state, attempts, updated_at): a stale token writes nothing; an `age_exceeded` row is requeued only while its id is still on
-// the current Watchlist; the readback shows the new state.
+// 7f. AIR-599 (review of PR #1009): the owner requeue / dismiss of ledger rows is PLANNED here (one statement per row, each with its compare-and-swap token and a fence) and committed by the caller in the same D1 batch
+// as the shared document. A stale token fails the WHOLE batch; an `age_exceeded` id no longer on the Watchlist is not requeued.
 {
  const {db,file}=open(),env={DB:db};
  await publish(env,[film(0),film(1)],'s1','2026-11-21T09:40:00.000Z');
@@ -190,14 +191,63 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  sql("UPDATE watchlist_admission_pending SET state='terminal', attempts=6, last_reason='forbidden', updated_at='t1' WHERE lid='f0';");
  sql("UPDATE watchlist_admission_pending SET state='terminal', attempts=1, last_reason='age_exceeded', updated_at='t2' WHERE lid='f1';");
  sql("INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('gone1','x',1,'terminal',2,NULL,'age_exceeded',NULL,'t3');");
- assert.deepEqual(await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[{lid:'f0',state:'terminal',attempts:5,updatedAt:'t1'}],now:NOW}),{ok:false,reason:'stale_revision'},'a stale token is refused');
- assert.equal(ledger(db).f0.state,'terminal');
- assert.deepEqual(await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[{lid:'gone1',state:'terminal',attempts:2,updatedAt:'t3'}],now:NOW}),{ok:false,reason:'stale_revision'},'an age_exceeded id no longer on the Watchlist is not requeued');
- const out=await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[{lid:'f0',state:'terminal',attempts:6,updatedAt:'t1'},{lid:'f1',state:'terminal',attempts:1,updatedAt:'t2'}],now:NOW});
- assert.equal(out.ok,true);assert.deepEqual(out.rows.map(r=>[r.lid,r.state,r.attempts,r.lastReason,r.nextRetryAt]).sort(),[['f0','pending',0,'owner_requeued',null],['f1','pending',0,'owner_requeued',null]]);
- const d=await WatchlistD1.ownerAdmissionAction(env,{action:'dismiss',rows:[{lid:'f0',state:'pending',attempts:0,updatedAt:new Date(NOW).toISOString()}],now:NOW+1000});
- assert.deepEqual(d.rows.map(r=>[r.state,r.lastReason]),[['terminal','owner_dismissed']]);
- assert.deepEqual(await WatchlistD1.ownerAdmissionAction(env,{action:'requeue',rows:[]}),{ok:false,reason:'shape'});
+ const run=async plan=>{assert.equal(plan.ok,true,JSON.stringify(plan));try{await db.batch(plan.statements.map(([q,params])=>db.prepare(q).bind(...params)));return 'ok';}catch(error){return String(error.message||error);}};
+ // read plan: the open rows of the ids, a row that cannot be requeued by rule is skipped and named
+ const read=await WatchlistD1.ownerAdmissionPlan(env,{action:'requeue',lids:['f0','gone1','none'],now:NOW});
+ assert.deepEqual(read.tokens.map(t=>t.lid),['f0']);assert.deepEqual(read.skipped,[{lid:'gone1',reason:'not_on_watchlist'}]);
+ // stale token: the whole batch fails and nothing changes
+ const stale=await WatchlistD1.ownerAdmissionPlan(env,{action:'requeue',lids:['f0','f1'],rows:[{lid:'f0',state:'terminal',attempts:5,updatedAt:'t1'},{lid:'f1',state:'terminal',attempts:1,updatedAt:'t2'}],now:NOW});
+ assert.notEqual(await run(stale),'ok');assert.deepEqual([ledger(db).f0.state,ledger(db).f1.state],['terminal','terminal'],'one stale token refuses both rows');
+ // explicit tokens of an age_exceeded id off the Watchlist: refused whole
+ const off=await WatchlistD1.ownerAdmissionPlan(env,{action:'requeue',lids:['gone1'],rows:[{lid:'gone1',state:'terminal',attempts:2,updatedAt:'t3'}],now:NOW});
+ assert.notEqual(await run(off),'ok');assert.equal(ledger(db).gone1.state,'terminal');
+ const ok=await WatchlistD1.ownerAdmissionPlan(env,{action:'requeue',lids:['f0','f1'],rows:[{lid:'f0',state:'terminal',attempts:6,updatedAt:'t1'},{lid:'f1',state:'terminal',attempts:1,updatedAt:'t2'}],now:NOW});
+ assert.equal(await run(ok),'ok');
+ const back=await WatchlistD1.admissionRowsOf(env,['f0','f1']);
+ assert.deepEqual(back.rows.map(r=>[r.lid,r.state,r.attempts,r.lastReason,r.nextRetryAt]).sort(),[['f0','pending',0,'owner_requeued',null],['f1','pending',0,'owner_requeued',null]]);
+ const dismiss=await WatchlistD1.ownerAdmissionPlan(env,{action:'dismiss',lids:['f0'],now:NOW+1000});assert.equal(await run(dismiss),'ok');
+ assert.deepEqual([ledger(db).f0.state,ledger(db).f0.last_reason],['terminal','owner_dismissed']);
+ assert.deepEqual(await WatchlistD1.ownerAdmissionPlan(env,{action:'requeue',lids:[]}),{ok:false,reason:'shape'});
+ // a closed authority plans nothing
+ sql("UPDATE watchlist_authority SET mode='epg' WHERE id=1;");assert.deepEqual(await WatchlistD1.ownerAdmissionPlan(env,{action:'requeue',lids:['f0']}),{ok:false,reason:'closed'});
+}
+// 7g. AIR-599 (review of PR #1009): snapshot retention keeps the HEADER of the first-seen snapshot of an open ledger row (its authoritative age) and trims only its members, changes and effects; the 14-day report and the
+// slug survive real pruning. A legacy row whose snapshot is already gone has an UNKNOWN age, counted apart, never dropped; unavailable evidence is not absence.
+{
+ const {db,file}=open(),env={DB:db};
+ await publish(env,[film(0)],'s1','2026-10-01T09:40:00.000Z');
+ for(let i=1;i<=AGE_KEEP+2;i++)await publish(env,[film(0),film(100+i)],'s'+(i+1),'2026-11-'+String(10+i).padStart(2,'0')+'T09:40:00.000Z');
+ const drain=async()=>{for(let i=0;i<60;i++){const next=(await WatchlistD1.pendingEffects(env)).effects[0];if(!next)break;const w=effectWriters({repository:WatchlistD1,facts:{applyWatchlistScan:async()=>({})},retention:{UNIT_CAP:2,writerOpen:async()=>false},removal:{enqueue:async()=>{}},tmdbOf:async()=>new Map(),removalRef:async(e,s)=>({eventKey:'events/items/0000000000001-x.json',sourceRunId:s.runId,at:s.observedAt}),epochGuard});const receipt=await w[next.effect]({env,epoch:1,now:()=>NOW},next);await WatchlistD1.completeEffect(env,{snapshotId:next.snapshotId,effect:next.effect,receipt},{now:NOW,guards:[epochGuard()]});}};
+ await drain();
+ for(let i=0;i<6;i++)assert.equal((await WatchlistD1.pruneSnapshots(env)).ok,true);
+ const firstSeen=db.sql("SELECT first_seen_snapshot_id AS id FROM watchlist_admission_pending WHERE lid='f0'")[0].id;
+ const heads=db.sql("SELECT snapshot_id FROM watchlist_snapshot WHERE snapshot_id='"+firstSeen+"'");
+ assert.equal(heads.length,1,'the first-seen snapshot of the open row f0 keeps its header');
+ assert.equal(db.sql("SELECT COUNT(*) AS n FROM watchlist_member WHERE snapshot_id='"+firstSeen+"'")[0].n,0,'its members are trimmed like any old snapshot\'s');
+ const report=await WatchlistD1.admissionReport(env,{now:NOW,overdueBefore:new Date(NOW-14*86400000).toISOString()});
+ assert.deepEqual([report.ok,report.overdue,report.overdueUnknown],[true,1,0],'f0 is still reported overdue after real pruning (age from the kept header)');
+ assert.equal(report.oldestWorkAt,'2026-10-01T09:40:00.000Z');
+ // the slug comes from the CURRENT snapshot's member when the first one has no members left; an unreadable read leaves the row due and unchanged
+ const id=identity({entries:{f0:{reason:'rate_limited',attempts:0,nextAttemptAt:'2026-11-22T00:00:00.000Z'}}});
+ await step(env,id);
+ assert.ok(id.calls.resolve.flat().includes('f0:film-0'),'slug of the current snapshot member: '+JSON.stringify(id.calls.resolve));
+ // a legacy row whose first-seen snapshot is already gone: unknown age, counted apart
+ const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ sql("INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('legacy','pruned',1,'pending',1,NULL,'forbidden',NULL,'t');");
+ const legacy=await WatchlistD1.admissionReport(env,{now:NOW,overdueBefore:new Date(NOW-14*86400000).toISOString()});
+ assert.equal(legacy.overdueUnknown,1,'a legacy row of unknown age is counted, never dropped');
+ // evidence read failure is not absence: the repository answers unavailable for the first-seen snapshot, the row is not offered and not charged
+ const flaky={...WatchlistD1,readSnapshot:async()=>({ok:false,reason:'unavailable'}),currentMemberUrls:async()=>({ok:false,reason:'unavailable'})};
+ const idU=identity();const outU=await admissionStep({repository:flaky,identity:idU,epochGuard})(ctx(env),{limit:3,now:NOW});
+ assert.equal(idU.calls.resolve.length,0,'unreadable evidence: nothing is offered');assert.ok(outU.counts.notNow>=1);
+ assert.deepEqual([ledger(db).legacy.attempts,ledger(db).f0.attempts],[1,0]);
+}
+// 7h. AIR-599 (review of PR #1009): the row keeps the attempts it already holds when the shared entry (materialized by the other caller) has fewer.
+{
+ const {db}=open(),env={DB:db};await publish(env,[film(0)],'s1','2026-11-21T09:40:00.000Z');
+ const sqlFile=db.sql;db.sql("UPDATE watchlist_admission_pending SET attempts=5, last_reason='forbidden' WHERE lid='f0'");
+ await step(env,identity({entries:{f0:{reason:'not_found',attempts:1,nextAttemptAt:'2026-11-22T00:00:00.000Z'}}}));
+ assert.equal(ledger(db).f0.attempts,5,'the row is never lowered by a fresher, smaller shared count');void sqlFile;
 }
 // 8. Module hygiene: no SQL, no table, no EPG or Discovery state of its own.
 {

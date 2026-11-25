@@ -239,7 +239,8 @@ export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
  return {owned:true,saved:{etag}};
 }
 
-export async function casOwned(env,key,empty,apply){
+// AIR-599 (review of PR #1009): `extra` is a list of caller [sql, params] statements that ride in the SAME batch as the document write (and are rolled back with it), for a write that must be atomic with another D1 table.
+export async function casOwned(env,key,empty,apply,{extra:callerExtra=[]}={}){
  if(!ratingsMutableKey(key))return {owned:false};
  const gate=await requireOpen(env);
  if(!gate.open)return {owned:false};
@@ -248,7 +249,7 @@ export async function casOwned(env,key,empty,apply){
   const base=current.value??clone(empty);
   const next=await apply(clone(base),current.etag);
   if(next==null)return {owned:true,result:{value:base,changed:false}};
-  const extra=key.startsWith('letterboxd/facts/films/')?await viewWrites(gate.db,[next]):[];
+  const extra=[...(key.startsWith('letterboxd/facts/films/')?await viewWrites(gate.db,[next]):[]),...callerExtra];
   const saved=await putOwned(env,key,current.etag,next,{extra});
   if(!saved.owned)throw failed('ratings_domain_not_authoritative');
   if(saved.saved)return {owned:true,result:{value:next,changed:true}};

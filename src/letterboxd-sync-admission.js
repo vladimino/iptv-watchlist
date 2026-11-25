@@ -9,7 +9,7 @@ export const STEP_LIMIT = 3;
 // AIR-599: the age at which a pending row is reported (run record, Monitor). It is not a terminal rule any more.
 export const AGE_REPORT_MS = 14 * 24 * 3600000;
 const SLUG = /^https:\/\/letterboxd\.com\/film\/([a-z0-9-]{1,200})\/$/;
-const emptyCounts = () => ({checked: 0, transport: 0, notNow: 0, gone: 0, definite: 0, atCap: 0, capRefused: 0, backlogFull: 0, resolved: 0, overdue: 0});
+const emptyCounts = () => ({checked: 0, transport: 0, notNow: 0, gone: 0, definite: 0, atCap: 0, capRefused: 0, backlogFull: 0, resolved: 0, overdue: 0, overdueUnknown: 0});
 
 export function admissionStep({repository, identity, epochGuard, fenceEnv = env => env}) {
   return async (ctx, {limit = STEP_LIMIT, now = ctx.now()} = {}) => {
@@ -19,25 +19,44 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
     if (!due.ok) return {resolved: 0, pending: null, terminal: 0, error: 'ledger_unreadable'};
     const counts = emptyCounts();
     counts.overdue = Number(due.overdue) || 0;
+    counts.overdueUnknown = Number(due.overdueUnknown) || 0;
     if (!due.rows.length) return {resolved: 0, pending: due.pending ?? 0, terminal: 0, counts};
-    // The film slug of each id comes from the snapshot that first listed it (its member URL), never from a title. A row without one is still offered: the check charges `slug_missing` on the entry, once.
-    const items = [];
+    // The film slug of each id comes from the Watchlist itself, never from a title: the snapshot that first listed the id (its member URL), else the CURRENT snapshot's member of the same id (the first one may be pruned),
+    // else the slug the shared entry already holds (resolve falls back to it). A read that FAILS is unavailable evidence, not absence: that row is left due and unchanged this step (no attempt); only an answered read that
+    // has no slug anywhere lets the check record `slug_missing`.
+    const items = [], unreadable = {}, needCurrent = [];
     const cache = new Map();
     for (const row of due.rows) {
       let snapshot = cache.get(row.firstSeenSnapshotId);
-      if (snapshot === undefined) { const read = await repository.readSnapshot(ctx.env, row.firstSeenSnapshotId); snapshot = read.ok ? read.snapshot : null; cache.set(row.firstSeenSnapshotId, snapshot); }
-      const member = snapshot?.films.find(film => film.lid === row.lid);
+      if (snapshot === undefined) { const read = await repository.readSnapshot(ctx.env, row.firstSeenSnapshotId); snapshot = read.ok ? read.snapshot : read.reason === 'unavailable' ? 'unavailable' : null; cache.set(row.firstSeenSnapshotId, snapshot); }
+      const member = snapshot && snapshot !== 'unavailable' ? snapshot.films.find(film => film.lid === row.lid) : null;
       const slug = member ? SLUG.exec(member.url)?.[1] ?? null : null;
-      items.push({lid: row.lid, slug, attempts: row.attempts, ...(row.firstSeenAt ? {queuedAt: row.firstSeenAt} : {})});
+      const item = {lid: row.lid, slug, attempts: row.attempts, ...(row.firstSeenAt ? {queuedAt: row.firstSeenAt} : {})};
+      if (!slug) needCurrent.push(item);
+      items.push(item);
+      if (snapshot === 'unavailable' && !slug) unreadable[row.lid] = true;
     }
+    if (needCurrent.length && typeof repository.currentMemberUrls === 'function') {
+      const current = await repository.currentMemberUrls(ctx.env, needCurrent.map(item => item.lid));
+      for (const item of needCurrent) {
+        if (!current.ok) { unreadable[item.lid] = true; continue; }
+        unreadable[item.lid] = false;
+        const slug = current.urls.has(item.lid) ? SLUG.exec(current.urls.get(item.lid))?.[1] ?? null : null;
+        if (slug) item.slug = slug;
+      }
+    }
+    const offered = items.filter(item => unreadable[item.lid] !== true);
+    counts.notNow += items.length - offered.length;
+    if (!offered.length) return {resolved: 0, pending: due.pending ?? 0, terminal: 0, counts};
     let out;
-    try { out = await identity.resolve(fenceEnv(ctx.env, ctx.epoch), items, {clock: ctx.now, remaining: () => Math.max(0, ctx.deadline - ctx.now()), route: 'watchlist_admission'}); }
+    try { out = await identity.resolve(fenceEnv(ctx.env, ctx.epoch), offered, {clock: ctx.now, remaining: () => Math.max(0, ctx.deadline - ctx.now()), route: 'watchlist_admission'}); }
     catch { return {resolved: 0, pending: due.pending, terminal: 0, error: 'identity_check_failed', counts}; }
     for (const key of ['capRefused', 'backlogFull']) counts[key] += Number(out?.counts?.[key]) || 0;
-    const links = await identity.diaryLinks(ctx.env, items.map(item => item.lid)).catch(() => new Map());
+    const links = await identity.diaryLinks(ctx.env, offered.map(item => item.lid)).catch(() => new Map());
     const settle = (row, fields) => repository.settleAdmission(ctx.env, {lid: row.lid, now, ...fields}, {guards});
     let resolved = 0, terminal = 0;
     for (const row of due.rows) {
+      if (unreadable[row.lid] === true) continue;
       const outcome = out?.outcomes instanceof Map ? out.outcomes.get(row.lid) : null;
       const tmdb = links.get(row.lid)?.tmdb;
       if (outcome?.checked) counts.checked++;
@@ -56,7 +75,8 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       const cls = outcome.class === 'intent' ? 'not_now' : outcome.class;
       counts[cls === 'not_now' ? 'notNow' : cls] = (counts[cls === 'not_now' ? 'notNow' : cls] || 0) + 1;
       // The shared count, copied (never added to). At the cap the row is terminal and visible; it waits for the owner.
-      const attempts = outcome.attempts;
+      // The shared count, but never below the row's own: a row that already holds attempts (a legacy row, or an id the other caller materialized without it) keeps them. An owner requeue resets the row AND the entry.
+      const attempts = Math.max(outcome.attempts, row.attempts);
       const exhausted = attempts >= identity.MAX_ATTEMPTS;
       if (exhausted) counts.atCap++;
       const reason = String(outcome.reason || 'unresolved');

@@ -30,7 +30,8 @@ function identityOwnerRequest(body){
  const lids=body.lids;
  if(!Array.isArray(lids)||!lids.length||lids.length>50||lids.some(lid=>typeof lid!=='string'||!IDENTITY_OWNER_LID.test(lid))||new Set(lids).size!==lids.length)return {error:'invalid_lids'};
  if(typeof body.why!=='string'||!body.why.trim()||body.why.length>200)return {error:'invalid_why'};
- if(!Object.hasOwn(body,'version')&&lane!=='watchlist_admission')return {error:'version_required'};
+ // The shared check document (or the backlog) is written in every request, atomically with the ledger rows: its stored version is always the compare-and-swap token.
+ if(!Object.hasOwn(body,'version'))return {error:'version_required'};
  if(Object.hasOwn(body,'version')&&body.version!==null&&(typeof body.version!=='string'||!body.version||body.version.length>200))return {error:'invalid_version'};
  let rows=null;
  if(lane==='watchlist_admission'){
@@ -56,29 +57,29 @@ async function adminIdentityOwnerActionRoute(request,env,url){
  if(parsed.error)return adminError(parsed.error,400);
  const input=identityOwnerRequest(parsed.value);
  if(input.error)return adminError(input.error,400);
- if(typeof LetterboxdFacts==='undefined')return adminError('reader_unavailable',503);
+ if(typeof LetterboxdFacts==='undefined'||typeof WatchlistD1==='undefined')return adminError('reader_unavailable',503);
  const at=new Date().toISOString(),by=access.by;
+ // ONE atomic commit (review of PR #1009): the shared check document (or the backlog) and the ledger rows of the SAME ids change in one D1 batch. The ledger rows are planned first (their tokens either come from the
+ // request, for the Watchlist lane, or are read now), the write then carries them as `extra`; a moved document, a moved row or a store that cannot batch refuses everything and nothing is written.
+ const plan=await WatchlistD1.ownerAdmissionPlan(env,{action:input.action,lids:input.lids,rows:input.rows});
+ if(!plan.ok)return adminError(plan.reason==='shape'?'invalid_rows':'ledger_'+plan.reason,plan.reason==='shape'?400:503);
  try{
-  if(input.lane==='diary_identity'){
-   const out=await LetterboxdFacts.ownerDiaryAction(env,{action:input.action,lids:input.lids,expectedVersion:input.version,by,why:input.why,at});
-   if(out.state==='stale_revision')return adminError('stale_revision',409);
-   return json({action:input.action,lane:input.lane,results:out.results,readback:{version:out.version,entries:out.entries}});
-  }
-  if(input.lane==='diary_backlog'){
-   const out=await LetterboxdFacts.ownerBacklogAction(env,{action:input.action,lids:input.lids,slugs:input.slugs,expectedVersion:input.version,by,why:input.why,at});
-   if(out.state==='stale_revision')return adminError('stale_revision',409);
-   return json({action:input.action,lane:input.lane,results:out.results,backlogFull:out.state==='backlog_full',readback:{version:out.version,entries:out.entries}},out.state==='backlog_full'?409:200);
-  }
-  // A ledger row: its shared Diary entry (when one exists) is reset or settled with it, so the next step copies the owner's count instead of the old one. The Diary version is then required.
-  const diary=await LetterboxdFacts.readDiaryIdentityVersioned(env);
-  const withEntry=input.lids.filter(lid=>diary.doc.films[lid]);
-  if(withEntry.length&&input.version===undefined)return adminError('version_required',400);
-  if(withEntry.length&&(input.version??null)!==(diary.version??null))return adminError('stale_revision',409);
-  if(typeof WatchlistD1==='undefined')return adminError('repository_unavailable',503);
-  const ledger=await WatchlistD1.ownerAdmissionAction(env,{action:input.action,rows:input.rows});
-  if(!ledger.ok)return adminError(ledger.reason,ledger.reason==='stale_revision'?409:ledger.reason==='shape'?400:503);
-  let entries=null;
-  if(withEntry.length){const out=await LetterboxdFacts.ownerDiaryAction(env,{action:input.action,lids:withEntry,expectedVersion:diary.version,by,why:input.why,at});entries=out.state==='applied'?{version:out.version,entries:out.entries}:{state:out.state};}
-  return json({action:input.action,lane:input.lane,readback:{rows:ledger.rows,diary:entries}});
- }catch(error){return adminError(typeof error?.code==='string'?error.code:'unavailable',503);}
+  const out=await LetterboxdFacts.ownerAction(env,{doc:input.lane==='diary_backlog'?'backlog':'diary',action:input.action,lids:input.lids,slugs:input.slugs,expectedVersion:input.version,by,why:input.why,at,extra:plan.statements});
+  if(out.state==='stale_revision')return adminError('stale_revision',409);
+  if(out.state==='backlog_full')return json({action:input.action,lane:input.lane,committed:false,results:out.results,backlogFull:true},409);
+  // The readback of BOTH sides, and its proof: after `requeue` every named entry and row is back at 0 attempts (a row `pending`); after `dismiss` every entry is `owner_dismissed` and every row terminal.
+  const ledger=await WatchlistD1.admissionRowsOf(env,input.lids).catch(()=>({ok:false}));
+  const rows=ledger.ok?new Map(ledger.rows.map(row=>[row.lid,row])):null;
+  const proven=rows?input.lids.every(lid=>{
+   const entry=out.entries[lid],row=rows.get(lid),touched=plan.tokens.some(token=>token.lid===lid);
+   const requeue=input.action==='requeue';
+   const entryOk=input.lane==='diary_backlog'?(requeue?!!entry&&entry.attempts===0:!entry):(!entry||(requeue?entry.attempts===0:entry.reason==='owner_dismissed'));
+   const rowOk=!touched||(row&&(input.action==='requeue'?row.state==='pending'&&row.attempts===0:row.state==='terminal'&&row.lastReason==='owner_dismissed'));
+   return entryOk&&!!rowOk;
+  }):null;
+  return json({action:input.action,lane:input.lane,committed:true,results:out.results,skipped:plan.skipped,readback:{version:out.version,entries:out.entries,rows:ledger.ok?ledger.rows:null,proven}});
+ }catch(error){
+  if(error&&error.code==='atomic_unavailable')return adminError('atomic_unavailable',503);
+  return adminError(typeof error?.code==='string'?error.code:'unavailable',503);
+ }
 }

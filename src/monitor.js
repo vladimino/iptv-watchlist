@@ -69,12 +69,18 @@ const Monitor=(()=>{
   if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdDiaryIdentity==='undefined'||typeof LetterboxdFacts.readDiaryBacklog!=='function')return null;
   try{
    const [doc,backlog]=await Promise.all([LetterboxdFacts.readDiaryIdentity(env),LetterboxdFacts.readDiaryBacklog(env).then(read=>read.doc)]);
-   const entries=Object.values(doc.films||{}).filter(Boolean),cap=LetterboxdDiaryIdentity.MAX_ATTEMPTS;
-   const dueEntries=entries.filter(entry=>entry.reason!=='owner_dismissed'&&(Number(entry.attempts)||0)<cap&&!(Date.parse(entry.nextAttemptAt)>now)).length;
-   const charged=entries.filter(entry=>['gone','definite'].includes(LetterboxdDiaryIdentity.classify(entry.reason))).map(entry=>String(entry.lastAttemptAt||'')).filter(Boolean).sort();
-   const ledger=typeof WatchlistD1!=='undefined'&&typeof WatchlistD1.admissionReport==='function'?await WatchlistD1.admissionReport(env,{now,overdueBefore:new Date(now-14*86400000).toISOString()}):{ok:false};
-   const backlogCount=Object.keys(backlog.ids||{}).length;
-   return {lastCheckAt:typeof doc.lastCheckAt==='string'?doc.lastCheckAt:charged.at(-1)||null,dueEntries,atCap:entries.filter(entry=>entry.reason!=='owner_dismissed'&&(Number(entry.attempts)||0)>=cap).length,backlog:backlogCount,backlogFull:backlogCount>=LetterboxdFacts.DIARY_BACKLOG_CAP,ledgerDue:ledger.ok?ledger.pendingDue:null,overdue:ledger.ok?ledger.overdue:null};
+   const D=LetterboxdDiaryIdentity,cap=D.MAX_ATTEMPTS;
+   const entries=Object.values(doc.films||{}).filter(Boolean).filter(entry=>entry.reason!=='owner_dismissed');
+   // Work still owed an answer: an entry below the cap that is due now, or retained after a transport or not-now outcome (its retry time may be in the future: it is waiting, not done).
+   const owed=entries.filter(entry=>(Number(entry.attempts)||0)<cap&&(!(Date.parse(entry.nextAttemptAt)>now)||['transport','not_now','intent'].includes(D.classify(entry.reason))));
+   const stamp=entry=>String(entry.queuedAt||entry.lastAttemptAt||'');
+   const charged=entries.filter(entry=>['gone','definite'].includes(D.classify(entry.reason))).map(entry=>String(entry.lastAttemptAt||'')).filter(Boolean).sort();
+   const ledger=typeof WatchlistD1!=='undefined'&&typeof WatchlistD1.admissionReport==='function'?await WatchlistD1.admissionReport(env,{now,overdueBefore:new Date(now-14*86400000).toISOString(),retainedReasons:[...D.TRANSPORT_REASONS]}):{ok:false};
+   const backlogEntries=Object.values(backlog.ids||{}).filter(Boolean);
+   const backlogCount=backlogEntries.length;
+   // The oldest place of any owed work: the baseline of "never answered" (every owed item has a durable queue time: its entry, its backlog record or its first-seen snapshot header).
+   const times=[...owed.map(stamp),...backlogEntries.map(item=>String(item.queuedAt||'')),ledger.ok&&ledger.oldestWorkAt?String(ledger.oldestWorkAt):''].filter(Boolean).sort();
+   return {lastCheckAt:typeof doc.lastCheckAt==='string'?doc.lastCheckAt:charged.at(-1)||null,work:owed.length+backlogCount+(ledger.ok?ledger.pendingDue:0),oldestWorkAt:times[0]||null,atCap:entries.filter(entry=>(Number(entry.attempts)||0)>=cap).length,backlog:backlogCount,backlogFull:backlogCount>=LetterboxdFacts.DIARY_BACKLOG_CAP,ledgerUnreadable:!ledger.ok,overdue:ledger.ok?ledger.overdue:null,overdueUnknown:ledger.ok?ledger.overdueUnknown:null};
   }catch{return {error:'unreadable'};}
  };
  // AIR-556. Prediction progress is confirmed work only, read through the same helpers as the Footer (enrichment.js: queue slices, retry budget, run

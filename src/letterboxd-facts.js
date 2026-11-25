@@ -134,11 +134,13 @@ function recordRatingChange(record,incoming,effective){
   if(key===FACTS_KEYS.viewIndex)return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
   return readRawJSON(env,key);
  }
- async function casJSON(env,key,empty,apply){
+ async function casJSON(env,key,empty,apply,{extra=[]}={}){
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
-   try{const owned=await RatingsD1.casOwned(env,key,empty,apply);if(owned.owned)return owned.result;}
+   try{const owned=await RatingsD1.casOwned(env,key,empty,apply,{extra});if(owned.owned)return owned.result;}
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
   }
+  // AIR-599: statements that must commit with the document exist only on the D1-owned store; the R2 stand-in has no batch, so such a write is refused whole, never half done.
+  if(extra.length)throw new FactsError('atomic_unavailable','The document store cannot commit the write atomically');
   if(key===FACTS_KEYS.viewIndex)throw new FactsError('view_index_not_owned','The view index has no raw store; it is written only through the D1 ratings domain');
   for(let attempt=0;attempt<5;attempt++){
    const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
@@ -678,15 +680,18 @@ function recordRatingChange(record,incoming,effective){
  // set: {lid:{reason,...}}, clear: [lid]. Above the cap the settled entries leave first, oldest `lastAttemptAt` first. When the cap is still exceeded, the ids this
  // call would ADD (not present before) are refused and returned in `refused`: the caller keeps them recoverable in the backlog. An existing entry is never dropped.
  // `checkedAt` (AIR-599): the time of a real check that reached the source and got an answer; kept as `lastCheckAt` (the newest) for the Monitor.
- async function updateDiaryIdentity(env,{set={},clear=[],checkedAt=null}={}){
-  if(!Object.keys(set).length&&!clear.length&&!checkedAt)return {changed:false,refused:[]};
-  let refused=[];
+ // `expect` (AIR-599, review of PR #1009): {lid: JSON text of the entry the caller read, or null for none}. An id is written or cleared only while the stored entry still equals it; the others are returned in
+ // `conflicts` and left as they are, so a stale replacement never overwrites an owner `requeue` / `dismiss` or another caller's check that landed in between.
+ async function updateDiaryIdentity(env,{set={},clear=[],expect=null,checkedAt=null}={}){
+  if(!Object.keys(set).length&&!clear.length&&!checkedAt)return {changed:false,refused:[],conflicts:[]};
+  let refused=[],conflicts=[];
   const out=await casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{}},current=>{
-   const before=current.films||{},films={...before};let changed=false;refused=[];
+   const before=current.films||{},films={...before};let changed=false;refused=[];conflicts=[];
+   const moved=lid=>expect&&Object.hasOwn(expect,lid)&&(Object.hasOwn(before,lid)?JSON.stringify(before[lid]):null)!==expect[lid];
    let lastCheckAt=typeof current.lastCheckAt==='string'?current.lastCheckAt:null;
    if(checkedAt&&ISO.test(checkedAt)&&(!lastCheckAt||checkedAt>lastCheckAt)){lastCheckAt=checkedAt;changed=true;}
-   for(const lid of clear)if(films[lid]){delete films[lid];changed=true;}
-   for(const [lid,item] of Object.entries(set)){if(!LID.test(lid))continue;if(JSON.stringify(films[lid])!==JSON.stringify(item)){films[lid]=item;changed=true;}}
+   for(const lid of clear){if(moved(lid)){conflicts.push(lid);continue;}if(films[lid]){delete films[lid];changed=true;}}
+   for(const [lid,item] of Object.entries(set)){if(!LID.test(lid))continue;if(moved(lid)){conflicts.push(lid);continue;}if(JSON.stringify(films[lid])!==JSON.stringify(item)){films[lid]=item;changed=true;}}
    let ids=Object.keys(films);
    if(ids.length>DIARY_IDENTITY_CAP){
     const settled=ids.filter(id=>diaryEvictable(films[id])).sort((a,b)=>String(films[a].lastAttemptAt||'')<String(films[b].lastAttemptAt||'')?-1:1);
@@ -700,7 +705,7 @@ function recordRatingChange(record,incoming,effective){
    }
    return changed?{schemaVersion:1,films,...(lastCheckAt?{lastCheckAt}:{})}:null;
   });
-  return {...(out||{}),refused};
+  return {...(out||{}),refused,conflicts};
  }
  // AIR-599: the bounded backlog of ids the full document could not take (ADR 0207 decision 4b). Same Ratings document store, no migration. {lid:{slug,queuedAt,requeued?}}.
  const DIARY_BACKLOG_KEY=FACTS_PREFIX+'scans/diary-identity-backlog.json',DIARY_BACKLOG_CAP=2000;
@@ -715,56 +720,57 @@ function recordRatingChange(record,incoming,effective){
    for(const [lid,item] of Object.entries(add)){
     if(!LID.test(lid)||ids[lid])continue;
     if(Object.keys(ids).length>=DIARY_BACKLOG_CAP){full.push(lid);continue;}
-    ids[lid]={slug:typeof item?.slug==='string'&&/^[a-z0-9-]{1,200}$/.test(item.slug)?item.slug:null,queuedAt:ISO.test(String(item?.queuedAt||''))?item.queuedAt:new Date().toISOString(),...(item?.requeued?{requeued:item.requeued}:{})};changed=true;
+    ids[lid]={slug:typeof item?.slug==='string'&&/^[a-z0-9-]{1,200}$/.test(item.slug)?item.slug:null,queuedAt:ISO.test(String(item?.queuedAt||''))?item.queuedAt:new Date().toISOString(),attempts:Number.isInteger(item?.attempts)&&item.attempts>0?Math.min(item.attempts,6):0,...(item?.requeued?{requeued:item.requeued}:{})};changed=true;
    }
    return changed?{schemaVersion:1,ids}:null;
   });
   return {...(out||{}),full};
  }
- // AIR-599: the owner `requeue` and `dismiss` of Diary entries and backlog ids (ADR 0207 decision 4b). One compare-and-swap of the document whose stored version the
- // owner saw: a moved document refuses the whole request (`stale_revision`) and nothing is written. `requeue` resets `attempts` and `streak` to 0, keeps `queuedAt`
- // and records who, when and why; `dismiss` settles the entry as `owner_dismissed` (evictable). Returns {state:'applied'|'stale_revision'|'refused',results,version}.
- async function ownerDiaryAction(env,{action,lids,expectedVersion,by,why,at}){
-  const results={};let stale=false;
-  await casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{}},(current,etag)=>{
-   if((etag??null)!==(expectedVersion??null)){stale=true;return null;}
-   const films={...(current.films||{})};let changed=false;
-   for(const lid of lids){
-    const entry=films[lid];
-    if(!entry){results[lid]='absent';continue;}
+ // AIR-599 / ADR 0207 decision 4b: the owner `requeue` and `dismiss` of Diary entries and backlog ids. ONE compare-and-swap of the document whose stored version the owner saw, in ONE batch with `extra` (the statements of
+ // the Watchlist ledger rows of the same ids, built by the caller): both stores commit or neither does. A moved document, or a moved ledger row (the statements carry its token), refuses the whole request (`stale_revision`,
+ // nothing written). The document is written even when none of the ids has an entry, so the ledger statements always ride in a batch. Without a D1-owned store the write is refused whole (`atomic_unavailable`).
+ // `requeue` resets `attempts` and `streak` to 0, keeps `queuedAt` and records who, when and why; `dismiss` settles the entry as `owner_dismissed`.
+ async function ownerAction(env,{doc,action,lids,slugs={},expectedVersion,by,why,at,extra=[]}){
+  const results={};let stale=false,full=false;
+  const key=doc==='backlog'?DIARY_BACKLOG_KEY:DIARY_IDENTITY_KEY,empty=doc==='backlog'?{schemaVersion:1,ids:{}}:{schemaVersion:1,films:{}};
+  try{
+   await casJSON(env,key,empty,(current,etag)=>{
+    if((etag??null)!==(expectedVersion??null)){stale=true;return null;}
     const requeued={by,at,why};
-    if(action==='requeue'){
-     const reason=LINK_REASONS_FACTS.has(entry.reason)||entry.reason==='claim_pending'?entry.reason:'owner_requeued';
-     films[lid]={...entry,reason,class:'not_now',attempts:0,streak:0,queuedAt:entry.queuedAt||entry.lastAttemptAt||at,nextAttemptAt:at,requeued};
-    }else films[lid]={...entry,reason:'owner_dismissed',class:'settled',nextAttemptAt:null,lastAttemptAt:at,requeued:{...requeued,action:'dismiss'}};
-    results[lid]=action==='requeue'?'requeued':'dismissed';changed=true;
-   }
-   return changed?{...current,schemaVersion:1,films}:null;
-  });
+    if(doc==='backlog'){
+     const ids={...(current.ids||{})};full=false;
+     for(const lid of lids){
+      if(action==='dismiss'){results[lid]=ids[lid]?'dismissed':'absent';delete ids[lid];continue;}
+      if(ids[lid]){ids[lid]={...ids[lid],attempts:0,requeued};results[lid]='requeued';continue;}
+      if(Object.keys(ids).length>=DIARY_BACKLOG_CAP){full=true;results[lid]='backlog_full';continue;}
+      ids[lid]={slug:typeof slugs[lid]==='string'&&/^[a-z0-9-]{1,200}$/.test(slugs[lid])?slugs[lid]:null,queuedAt:at,attempts:0,requeued};results[lid]='created';
+     }
+     if(full)return null; // a full backlog refuses the whole request: nothing is written, the ledger rows stay as they are
+     return {...current,schemaVersion:1,ids,ownerActionAt:at};
+    }
+    const films={...(current.films||{})};
+    for(const lid of lids){
+     const entry=films[lid];
+     if(!entry){results[lid]='absent';continue;}
+     if(action==='requeue'){
+      const reason=LINK_REASONS_FACTS.has(entry.reason)||entry.reason==='claim_pending'?entry.reason:'owner_requeued';
+      films[lid]={...entry,reason,class:'not_now',attempts:0,streak:0,queuedAt:entry.queuedAt||entry.lastAttemptAt||at,nextAttemptAt:at,requeued};results[lid]='requeued';
+     }else{films[lid]={...entry,reason:'owner_dismissed',class:'settled',nextAttemptAt:null,lastAttemptAt:at,requeued:{...requeued,action:'dismiss'}};results[lid]='dismissed';}
+    }
+    return {...current,schemaVersion:1,films,ownerActionAt:at};
+   },{extra});
+  }catch(error){
+   // Nothing was written: the batch is atomic. Contention (the document moved, or a ledger row's token did not hold) is the owner's to re-read.
+   if(error&&error.code==='write_contention')return {state:'stale_revision',results:{}};
+   throw error;
+  }
   if(stale)return {state:'stale_revision',results:{}};
+  if(full)return {state:'backlog_full',results};
+  if(doc==='backlog'){const after=await readDiaryBacklog(env);return {state:'applied',results,version:after.version,entries:Object.fromEntries(lids.map(lid=>[lid,after.doc.ids[lid]??null]))};}
   const after=await readDiaryIdentityVersioned(env);
   return {state:'applied',results,version:after.version,entries:Object.fromEntries(lids.map(lid=>[lid,after.doc.films[lid]??null]))};
  }
  const LINK_REASONS_FACTS=new Set(['linking','link_failed']);
- // The backlog side of the owner actions, compare-and-swap on the backlog's stored version. `requeue` of an id without a backlog record creates one (an id from the
- // read-only owner report); `dismiss` removes the record. Returns {state:'applied'|'stale_revision'|'backlog_full',results,version}.
- async function ownerBacklogAction(env,{action,lids,slugs={},expectedVersion,by,why,at}){
-  const results={};let stale=false,full=false;
-  await casJSON(env,DIARY_BACKLOG_KEY,{schemaVersion:1,ids:{}},(current,etag)=>{
-   if((etag??null)!==(expectedVersion??null)){stale=true;return null;}
-   const ids={...(current.ids||{})};let changed=false;
-   for(const lid of lids){
-    if(action==='dismiss'){if(ids[lid]){delete ids[lid];results[lid]='dismissed';changed=true;}else results[lid]='absent';continue;}
-    if(ids[lid]){ids[lid]={...ids[lid],requeued:{by,at,why}};results[lid]='requeued';changed=true;continue;}
-    if(Object.keys(ids).length>=DIARY_BACKLOG_CAP){full=true;results[lid]='backlog_full';continue;}
-    ids[lid]={slug:typeof slugs[lid]==='string'&&/^[a-z0-9-]{1,200}$/.test(slugs[lid])?slugs[lid]:null,queuedAt:at,requeued:{by,at,why}};results[lid]='created';changed=true;
-   }
-   return changed?{...current,schemaVersion:1,ids}:null;
-  });
-  if(stale)return {state:'stale_revision',results:{}};
-  const after=await readDiaryBacklog(env);
-  return {state:full?'backlog_full':'applied',results,version:after.version,entries:Object.fromEntries(lids.map(lid=>[lid,after.doc.ids[lid]??null]))};
- }
 
  // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries are offered: an INFERRED link (ADR 0104) is a title/year match, not proof of the lid, so it is never offered, and the claim planner refuses a pair the import marked as inferred (`identity`, or its `inferredPairs` entry written before the alias) whichever flow offers it (since ADR 0192 no unlink can withdraw such a link; a mistaken one is repaired case by case). Never throws into the import. Inactive until the
  // claim module's activation line is turned on. A replay of a committed chunk offers it again: that is the recovery of an interrupted claim (the import is owner-driven, so a replay is its ordinary retry).
@@ -865,5 +871,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,DIARY_IDENTITY_KEY,DIARY_IDENTITY_CAP,DIARY_BACKLOG_KEY,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,updateDiaryBacklog,ownerDiaryAction,ownerBacklogAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,DIARY_IDENTITY_KEY,DIARY_IDENTITY_CAP,DIARY_BACKLOG_KEY,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,updateDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

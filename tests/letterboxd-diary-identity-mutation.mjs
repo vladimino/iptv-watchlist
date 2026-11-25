@@ -50,6 +50,15 @@ const MUTANTS = [
   ['a 5xx is not transport', "if(result.status>=500)return 'upstream_5xx';", ''],
   ['a full document still checks a new id', "if(slots>0){slots--;return true;}", "{return true;}"],
   ['the queue position is ignored', "x.first-y.first||(x.pos<y.pos?-1:x.pos>y.pos?1:0)||x.index-y.index", "x.first-y.first||x.index-y.index"],
+  // Review of PR #1009: writes bound to the entry as read; the budget survives the backlog; the stored slug serves a caller without one.
+  ['the final write ignores a moved entry', "expect:expectOf([...Object.keys(set),...clearNow])", "expect:null"],
+  ['the link intent ignores a moved entry', "if(out?.refused?.includes(item.lid)||out?.conflicts?.includes(item.lid))return false;", "if(out?.refused?.includes(item.lid))return false;"],
+  ['the claim write ignores a moved entry', "expect:Object.fromEntries([...Object.keys(claimSet),...claimClear].map(lid=>[lid,afterStep(lid)]))", "expect:null"],
+  ['a lost race is charged as a check', "if(conflicted.includes(lid)){outcomes.set(lid,{checked:checked.has(lid),class:'not_now',reason:'entry_changed',retryAt:null,attempts:null,streak:null,terminal:false});continue;}", ""],
+  ['the backlog forgets the row budget', "backlogAdd[item.lid]={slug:item.slug||null,queuedAt:item.queuedAt||iso(now),attempts:item.seed||0};", "backlogAdd[item.lid]={slug:item.slug||null,queuedAt:item.queuedAt||iso(now),attempts:0};"],
+  ['a backlog intake starts from zero', "seed:Math.min(MAX_ATTEMPTS,Math.max(0,Number(item.attempts)||0))}));", "seed:0}));"],
+  ['the row budget is not applied to the entry', "const before=Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streakBefore", "const before=cur?Number(cur.attempts)||0:item.seed||0,streakBefore"],
+  ['the stored slug is not used', "if(!item.slug&&typeof prior?.slug==='string'&&SLUG.test(prior.slug))item.slug=prior.slug;", ""],
   ['a dismissed entry is checked again', "if(prior&&prior.reason==='owner_dismissed'){settled.set(lid,'owner_dismissed');continue;}", ''],
 ];
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'air489-'));
