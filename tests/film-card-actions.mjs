@@ -184,7 +184,7 @@ same('[...state.genres]',['Драма']);
 same('[...state.mechanics]',['heist']);
 window.history.forward();
 same('[...state.channels].sort()',['Второй','Первый']);
-assert.equal(run('state.sort'),'relevance','no explicit sort and a query: relevance after Forward');
+assert.equal(run('state.sort'),'personal','no explicit sort and a query: the default «Для меня» after Forward (AIR-626: a query never switches the sort)');
 assert.equal(fetches,0);
 assert.equal(run('films[0].shows[0].channel'),'Альфа');
 console.log('Film card actions: confirmed Letterboxd link, channel OR filter, history and display order passed');
