@@ -531,7 +531,7 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  const mentions=sources.filter(name=>fs.readFileSync(name,'utf8').includes('film_identity_evidence'));
  assert.deepEqual(mentions,['src/identity-evidence-import.js','src/identity-evidence-writer.js','src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader); the dormant import path of card ER (AIR-639) is the third');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,['src/identity-evidence-import.js','src/identity-evidence-writer.js'],'only the dormant writer-control (card EC) and import (card ER) modules import the writer: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ assert.deepEqual(importers,['src/discovery-owner-evidence.js','src/identity-evidence-import.js','src/identity-evidence-writer.js'],'only the writer-control (card EC), the import (card ER) and the Discovery owner writer (card E2c, dormant by its control row) import the model: no route, Workflow, cron or producer calls it');
+ assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence-import'),'the Worker bundle does not include the import path; E2c bundles the model and the writer control for the owner write');
 }
 console.log('identity evidence ledger: ok');
