@@ -11,6 +11,8 @@
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 import {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions} from './canonical-catalog-reader.js';
+import {admissionClosedError,admissionRoute,authorityAssertion,d1BatchCondition,legacyBatchCondition,readAdmissionAuthority} from './letterboxd-admission-authority.js';
+import {evidenceInsertStatement} from './identity-evidence.js';
 const writeFenced=fenced.commit;
 export const RETENTION_WATERMARK_SCHEMA=25;
 
@@ -75,6 +77,13 @@ export async function admitRatedFilm(env,input){
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
  // AIR-599 / ADR 0207 decision 4b: called through the Letterboxd Sync's fenced env, the admission batch asserts the Sync epoch, so a stale Sync epoch cannot admit.
  const gate=fenced.bindLetterboxdFence(env,assertWritable(await readAuthority(env)));
+ // AIR-602 (card A1) / ADR 0207 decision 1: the admission marker is read FRESH at the write. `closed` refuses before any effect; at `d1` the new path of decisions 2 to 6 is the only writer
+ // (`admitRatedFilmD1`, a later part of this card); `r2` (and an absent marker: the migration is not applied) is this legacy path, byte-identical to the delivered one except for ONE more
+ // statement in its fenced batch: the proof that the marker still says `r2` (or still does not exist) at the generation read, so a legacy admission can never land under `closed` or `d1`.
+ const authority=await readAdmissionAuthority(env);
+ const route=admissionRoute(authority);
+ if(route==='closed')throw admissionClosedError(authority.mode);
+ if(route==='d1')return admitRatedFilmD1(env,input,{admission,expected,at,requestId,gate,authority});
  const db=database(env);
  let target,prior,holder;
  try{
@@ -94,6 +103,7 @@ export async function admitRatedFilm(env,input){
  const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
+ statements.push(authorityAssertion(fenced.assertSql,legacyBatchCondition(authority)));
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
  // The identity rows are re-asserted INSIDE the batch (they can change after the read): no row for the typed id may exist except the owner's own
  // trusted one, and exactly that one must exist when an owner was found. An untrusted or conflicting claim that appears, or a row that changes, fails the batch.
@@ -108,6 +118,63 @@ export async function admitRatedFilm(env,input){
  catch(error){
   const message=String(error?.cause?.message||'');
   if(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_rated_admission/i.test(message))throw failed('admission_conflict',error);
+  throw error;
+ }
+ return {id,revision:expected+1,admitted:true,replay:false};
+}
+
+// AIR-602 (card A1) / ADR 0207 decisions 2 and 3, at the marker mode `d1`: the NEW admission writer. It is `admitRatedFilm` with four differences, all inside the one fenced batch:
+// - KEEP-FIRST. An existing row for the same movie id and short code is a no-op whatever the archive, title or year of the new input (`ON CONFLICT DO NOTHING`, never DO UPDATE): the first admitting batch
+//   pins archive, title, year and `verified_at`. Another code on the Film (`other_code_on_film`) or a code held by another Film (`code_on_other_film`) is `admission_conflict`, typed through `error.reason`,
+//   and the same two conditions are asserted INSIDE the batch, so a concurrent writer cannot turn a no-op into a silent overwrite.
+// - PROVENANCE through the evidence ledger (ADR 0213), not a second marker: `input.evidence` is a `planIdentityEvidence` plan and its row is appended to THIS batch (a no-op on an existing key), so the
+//   evidence and the admission commit together or not at all. The row stores the fixed `receipt_key = 'd1'`, which says only "not the R2 receipt".
+// - The batch asserts the marker is `d1` at the generation the caller read (`d1BatchCondition`), so it can never land under `r2` or `closed`, and a flip back is impossible by the trigger.
+// - `verified_at` is the time of the first admitting batch (`at`), not a clock carried by the input: the request identity has no clock in it (see `admissionDigestD1`).
+// A replay (the same pair) opens no batch. Owner and reviewed values, credits, metadata, localization, watchlist membership and the rating are never touched.
+// input: {receiptKey:'tmdb_<n>', receipt:{tmdb, sourceCode, archiveSha256, title, year, ...}, filmId?, expectedRevision, at, requestId, receiptMark?, evidence?}
+export const D1_RECEIPT_KEY='d1';
+async function admitRatedFilmD1(env,input,{admission,expected,at,requestId,gate,authority}){
+ const condition=d1BatchCondition(authority);
+ const db=database(env);
+ let target,prior,holder;
+ try{
+  target=await resolveAdmissionFilm(env,admission.tmdb);
+  prior=await one(db,'SELECT tmdb,source_code FROM film_rated_admission WHERE film_id=?',[target.id]);
+  holder=await one(db,'SELECT film_id FROM film_rated_admission WHERE source_code=?',[admission.sourceCode]);
+ }catch(error){if(unavailable(error)||/no such table/i.test(String(error?.message||'')))throw failed('admission_unavailable',error);throw error;}
+ if(input.filmId!==undefined&&input.filmId!==target.id)throw failed('admission_target_changed');
+ if(target.redirected)throw failed('film_person_redirect');
+ if(target.held){const error=failed('admission_identity_held');error.reason=target.held;throw error;}
+ const conflict=reason=>{const error=failed('admission_conflict');error.reason=reason;return error;};
+ if(holder&&holder.film_id!==target.id)throw conflict('code_on_other_film');
+ if(prior){
+  if(prior.tmdb!==admission.tmdb||prior.source_code!==admission.sourceCode)throw conflict('other_code_on_film');
+  // Keep-first: the same pair is admitted already. Nothing is written and nothing is overwritten.
+  return {id:target.id,revision:target.revision,admitted:false,replay:true,present:true};
+ }
+ const id=target.id;
+ const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
+ const entities=[{kind:'film',id,expected}];
+ const statements=fenced.head(gate,entities);
+ statements.push(authorityAssertion(fenced.assertSql,condition));
+ statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
+ statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id IS ? AND trusted=1 AND conflicting=0))"),[admission.tmdb,target.owner]]);
+ statements.push([fenced.assertSql("(SELECT COUNT(*) FROM film_external_id WHERE scheme='tmdb' AND value=?)=?"),[admission.tmdb,target.owner?1:0]]);
+ statements.push(["INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET canonical_identity=COALESCE(film.canonical_identity,excluded.canonical_identity),original_title=COALESCE(film.original_title,excluded.original_title),updated_at=excluded.updated_at",[id,'tmdb:'+admission.tmdb,admission.title,at]]);
+ statements.push(["INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,'tmdb',?,1,0,?) ON CONFLICT(film_id,scheme,value) DO NOTHING",[id,admission.tmdb,stable({source:'letterboxd_rated_admission',receiptKey:D1_RECEIPT_KEY})]]);
+ statements.push(["INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,'letterboxd_short_code',?,?) ON CONFLICT(film_id,kind,value) DO NOTHING",[id,admission.sourceCode,stable({source:'letterboxd_rated_admission',receiptKey:D1_RECEIPT_KEY})]]);
+ statements.push(["INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO NOTHING",[id,admission.tmdb,admission.sourceCode,admission.archiveSha256,admission.title,admission.year,D1_RECEIPT_KEY,admission.receiptFilmKey,at,requestId,at]]);
+ // Keep-first and the typed conflicts are enforced IN the batch: the insert never updates (`DO NOTHING`), a code held by another Film violates the unique index (typed `code_on_other_film` below), and the
+ // batch's own admission row must exist and be this request's, so a row that appeared after the read above (another code on the Film, an earlier admission of the pair) fails the whole batch instead of being
+ // overwritten or silently kept. With the revision compare-and-swap, a receipt is applied only by the batch that wrote its admission.
+ statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film_rated_admission WHERE film_id=? AND source_code=? AND request_id=?)'),[id,admission.sourceCode,requestId]]);
+ if(input.evidence!==undefined&&input.evidence!==null)statements.push(evidenceInsertStatement(input.evidence,{filmId:id,requestId,at}));
+ statements.push([fenced.BUMP,['film',id,at]]);
+ try{await writeFenced(env,gate,statements,entities,tail);}
+ catch(error){
+  const message=String(error?.cause?.message||'');
+  if(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_rated_admission/i.test(message))throw conflict(/source_code/.test(message)?'code_on_other_film':'other_code_on_film');
   throw error;
  }
  return {id,revision:expected+1,admitted:true,replay:false};

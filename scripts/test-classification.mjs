@@ -218,6 +218,18 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-admission-callers.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-closed.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-authority.mjs": {
+  "suite": "core"
+ },
  "letterboxd-check-legacy-report.mjs": {
   "suite": "core"
  },

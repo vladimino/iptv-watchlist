@@ -127,9 +127,9 @@ assert.deepEqual(objects(after),[...objects(before),'index:'+INDEX].sort(),'exac
 refuse(copyOf(after,'again'),'a second apply on version 43');
 assert.equal(version(migrated(42)),42,'the chain through 0042 ends at version 42');
 assert.ok(!objects(migrated(42)).includes('index:'+INDEX),'the chain through 0042 has no such index');
-assert.equal(version(migrated()),43,'the full chain ends at version 43');
+assert.equal(version(migrated(43)),43,'the chain through 0043 ends at version 43 (0044, AIR-602, follows it)');
 assert.ok(objects(migrated()).includes('index:'+INDEX),'the full chain carries the index');
-assert.ok(objects(migrated(42)).every(name=>objects(migrated()).includes(name)),'0043 keeps every earlier object');
+assert.ok(objects(migrated(42)).every(name=>objects(migrated(43)).includes(name)),'0043 keeps every earlier object');
 
 const shape=rows(after,"SELECT name,\"unique\" AS uniq,partial FROM pragma_index_list('film_redirect')").find(item=>item.name===INDEX);
 assert.equal(shape.uniq,0,'non-unique');assert.equal(shape.partial,0,'not partial');

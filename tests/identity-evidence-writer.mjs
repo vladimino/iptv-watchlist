@@ -571,7 +571,7 @@ const setWriter=async(env,writer,target)=>{
  assert.deepEqual(mentions,['src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(importers,[],'nothing imports the writer control: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence-writer'),'the Worker bundle does not include the writer control (AIR-602 bundles identity-evidence.js, not this module)');
  // The migration is a file only: no code applies it, and the deploy workflow never applies a migration.
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0042_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0042');

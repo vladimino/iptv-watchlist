@@ -44,7 +44,7 @@ const LetterboxdDiaryIdentity=(()=>{
  // Kept for callers that still pass a reason (the claim backoff): a transport reason waits like a transport stop, anything else like a review.
  const delayMs=(reason,attempts)=>classify(reason)==='transport'?transportDelayMs(attempts):reviewDelayMs(attempts);
  // Errors of the admission write that mean "not now" (the writer, its fence or its marker), not "the source said no".
- const ADMISSION_NOT_NOW={film_person_unavailable:'admission_unavailable',film_person_fence:'admission_unavailable',film_person_held:'admission_held',admission_unavailable:'admission_unavailable',canonical_read_unavailable:'admission_unavailable',letterboxd_epoch_fence:'epoch_fenced',operation_key_in_flight:'in_flight',budget:'deferred',intent_unwritten:'deferred'};
+ const ADMISSION_NOT_NOW={letterboxd_admission_closed:'admission_closed',letterboxd_admission_unavailable:'admission_unavailable',film_person_unavailable:'admission_unavailable',film_person_fence:'admission_unavailable',film_person_held:'admission_held',admission_unavailable:'admission_unavailable',canonical_read_unavailable:'admission_unavailable',letterboxd_epoch_fence:'epoch_fenced',operation_key_in_flight:'in_flight',budget:'deferred',intent_unwritten:'deferred'};
  // The source answers of one fetch, split (AIR-599): a 404/410 is `not_found` (gone), a 5xx is `upstream_5xx` (transport), a network failure is `network_error`.
  function pageReason(result){
   if(result.stop)return result.stop==='fetch_failed'&&result.network?'network_error':result.stop;
@@ -122,10 +122,24 @@ const LetterboxdDiaryIdentity=(()=>{
   if(verdict.state!=='verified')return {state:'pending',reason:verdict.reason};
   return {state:'verified',verdict};
  }
+ // The digest of what the page check proved (the same content always gives the same digest). It is the evidence digest of the legacy receipt entry and, at the marker mode `d1`, the source root of the evidence row.
+ const evidenceDigestOf=({lid,slug},verdict)=>sha256({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,source:'letterboxd_diary_page'});
  // The receipt entry, written only after the link intent is durable.
  async function writeReceipt(env,{lid,slug},verdict,clock){
-  const verifiedAt=iso(clock()),evidenceSha256=await sha256({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,source:'letterboxd_diary_page'});
+  const verifiedAt=iso(clock()),evidenceSha256=await evidenceDigestOf({lid,slug},verdict);
   return LetterboxdFacts.admitDiaryFilm(env,{lid,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath,verifiedAt,evidenceSha256});
+ }
+ // AIR-602 / ADR 0207 decisions 2 to 4, at the marker mode `d1`: the admission of a verified id goes through the D1 coordinator (one key `admission:lid:<lid>`, keep-first, the evidence row of THIS page check in the
+ // same batch), not the R2 receipt. The typed outcome is mapped onto this writer's own state: a settled pair (`admitted`, `present`) proceeds to the link; anything else is a pending reason with the class the
+ // table of decision 3 gives it. Returns {confirmed:true} or {confirmed:false, reason}.
+ async function admitAtD1(effectEnv,{lid,slug},verdict,{clock,route,intended=null}){
+  const evidenceSha256=await evidenceDigestOf({lid,slug},verdict);
+  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(effectEnv,{kind:'lid',lid,intent:intended?{tmdb:intended}:null,receipt:{tmdb:verdict.tmdb,archiveSha256:evidenceSha256,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath},
+   evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:evidenceSha256,sourceRef:'diary:'+lid,observedAt:iso(clock())},
+   now:()=>iso(clock())});
+  if(out.outcome==='admitted'||out.outcome==='present')return {confirmed:true};
+  const reasons={source_changed:'source_changed',other_code:'other_code',conflict:'admission_conflict',wait:'in_flight',held:'admission_held',redirect:'admission_held',history_exhausted:'admission_failed',failed:'deferred',unknown:'deferred',deferred:'deferred'};
+  return {confirmed:false,reason:reasons[out.outcome]||'admission_failed'};
  }
 
  // items: [{lid,slug,queuedAt?,attempts?}] of one caller, in its order (the Ratings Diary phase: one Diary page, facts already durable; the Watchlist admission step: its due
@@ -145,6 +159,15 @@ const LetterboxdDiaryIdentity=(()=>{
   const ISO_TIME=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
   const page=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,{lid:item.lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:true,queuedAt:ISO_TIME.test(String(item.queuedAt||''))?item.queuedAt:iso(now),seed:Number.isInteger(item.attempts)&&item.attempts>0?Math.min(item.attempts,MAX_ATTEMPTS):0,reason:typeof item.reason==='string'&&item.reason?item.reason.slice(0,60):null,guard:Array.isArray(item.guard)&&typeof item.guard[0]==='string'&&Array.isArray(item.guard[1])?item.guard:null}])).values()];
   const notNowAll=reason=>{for(const item of page)outcomes.set(item.lid,{checked:false,class:'not_now',reason,retryAt:null,attempts:null,streak:null,terminal:false});};
+  // AIR-602 / ADR 0207 decision 1: the admission marker is read FRESH before anything else. Under `closed` (and while it cannot be read) every id of this step is not-now and NOTHING is written: no source request,
+  // no reservation, no entry, no backlog record (the reasons are not-now: no attempt, the place is kept, no ageing). `r2`, and an absent marker (the migration is not applied), run the code below unchanged.
+  let admissionAtD1=false;
+  if(typeof LetterboxdAdmissionAuthority!=='undefined'){
+   let admission;
+   try{admission=await LetterboxdAdmissionAuthority.admissionRouteNow(env);}catch{notNowAll('admission_unavailable');return {labels,outcomes,counts:{...counts,skipped:page.length}};}
+   if(admission.route==='closed'){notNowAll('admission_closed');return {labels,outcomes,counts:{...counts,skipped:page.length}};}
+   admissionAtD1=admission.route==='d1'&&typeof LetterboxdAdmissionD1!=='undefined';
+  }
   let stored;
   try{stored=await LetterboxdFacts.readDiaryIdentity(env);}catch{notNowAll('unavailable');return {labels,outcomes,counts:{...counts,skipped:page.length}};}
   const backlogIds=stored.backlog&&typeof stored.backlog==='object'?stored.backlog:{};
@@ -352,7 +375,15 @@ const LetterboxdDiaryIdentity=(()=>{
     let confirmed=false;
     try{
      if(remaining()<WRITE_RESERVE_MS)throw Object.assign(new Error('budget'),{code:'budget'});
+     // The movie this id's own durable record named BEFORE this check (a `linking` intent left by an earlier attempt): the reacquired source must name the same one (ADR 0207 decision 4, 4A).
+     const intended=admissionAtD1&&stored.films[lid]&&stored.films[lid].reason==='linking'&&TMDB.test(String(stored.films[lid].tmdb||''))?String(stored.films[lid].tmdb):null;
      if(!(await intend(item,outcome.verdict.tmdb)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});
+     if(admissionAtD1){
+      const effectEnv=guarded(lid)||(()=>{throw Object.assign(new Error('late'),{code:'late'});})();
+      const admitted=await admitAtD1(effectEnv,item,outcome.verdict,{clock,route,intended});
+      confirmed=admitted.confirmed;
+      if(!confirmed)outcome={state:'pending',reason:admitted.reason};
+     }else{
      const admitted=await writeReceipt(guarded(lid)||(()=>{throw Object.assign(new Error('late'),{code:'late'});})(),item,outcome.verdict,clock);
      if(admitted==='conflict'||admitted==='other_code')throw Object.assign(new Error('admission_conflict'),{code:'admission_conflict'});
      const receiptKey='tmdb_'+outcome.verdict.tmdb,{value:receipts}=await LetterboxdFacts.readAdmissionReceipts(env);
@@ -361,6 +392,7 @@ const LetterboxdDiaryIdentity=(()=>{
      const admission=await CanonicalRatedAdmission.applyRatedAdmissionRetention(guarded(lid),{event:'diary:'+lid,admissions:[{receiptKey,receipt}]});
      confirmed=admissionConfirmed(admission);
      if(!confirmed)outcome={state:'pending',reason:admission?.state==='skipped'?'admission_skipped':'admission_not_confirmed'};
+     }
     }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||error?.code||(error?.message==='receipt_missing'?'receipt_missing':'admission_failed')};}
     if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));

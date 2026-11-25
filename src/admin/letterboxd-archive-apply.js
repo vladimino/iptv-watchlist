@@ -200,6 +200,8 @@ async function lbaIdentityStep(request,env,url){
  try{
   const result=await LetterboxdRatedCandidates.identityStep(env,{sha:body.archiveSha256,resume:body.resume===true,code:typeof body.code==='string'?body.code:null});
   if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
+  if(result.error==='admission_closed')return lbaRefuse('admission_closed',409);
+  if(result.error==='admission_unavailable')return json({error:'admission_unavailable'},503);
   if(result.error==='storage_unavailable')return json({error:'storage_unavailable'},503);
   if(result.error)return lbaRefuse('invalid_request',400);
   return json({mode:'identity',writes:result.writes===true,verified:result.verified===true,enriched:result.enriched===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':result.enriched?'enriched':'pending'),reason:result.reason||null,reasons:result.reasons||(result.reason?[result.reason]:[]),reasonKind:result.reasonKind||null,persisted:result.persisted||'none',tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.verified===true?result.rating||null:null,phase:result.phase||null});

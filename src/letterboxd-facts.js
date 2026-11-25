@@ -145,6 +145,9 @@ function recordRatingChange(record,incoming,effective){
   for(let attempt=0;attempt<5;attempt++){
    const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
+   // AIR-602 / ADR 0207 decision 1: the one R2 object of the admission coordination is written only while the marker, read FRESH here, proves `r2` or proves the migration absent. The guard is the last
+   // awaited step before the PUT; `closed`, `d1` and an unreadable marker refuse. (A PUT already past this check cannot be recalled: the activation compares the object before the flip.)
+   if(key==='letterboxd/admissions/verified-films.json'&&typeof LetterboxdAdmissionAuthority!=='undefined')await LetterboxdAdmissionAuthority.guardLegacyWrite(env);
    const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}});
    if(saved!==null)return {value:next,changed:true};
   }
@@ -599,6 +602,27 @@ function recordRatingChange(record,incoming,effective){
   return withdrawn;
  }
 
+ // AIR-602 / ADR 0207 decision 3, at the marker mode `d1`: the admission of ONE inferred item through the D1 coordinator. The evidence row is the `restricts` row of the title and year search (ADR 0213:
+ // never proof). -> 'admitted' | 'present' | 'present_other_code' | 'refused_after_link'; a non-terminal answer stops the chunk before its receipt (the same chunk is re-sent).
+ async function admitInferredAtD1(env,item,origin,chunk){
+  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,receipt:{tmdb:String(item.tmdb),archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year},
+   evidence:{subject:{kind:'letterboxd_lid',value:item.lid},relation:'same_work',object:{kind:'tmdb_movie',value:String(item.tmdb)},polarity:'restricts',route:'letterboxd_export_import',method:'title_year_search',sourceRoot:origin.archiveSha256,sourceRef:'chunk:'+chunk,observedAt:new Date().toISOString()},
+   now:()=>new Date().toISOString()});
+  if(out.outcome==='admitted'||out.outcome==='present')return out.outcome;
+  if(out.outcome==='other_code')return 'present_other_code';
+  if(out.outcome==='conflict')return 'refused_after_link';
+  throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+out.outcome+'): the chunk stops before its receipt');
+ }
+ // A replay at `d1` offers the admission again only for the items its receipt recorded as `admitted` or `present` (the answer is idempotent). A chunk committed before the activation has no such field: it gets no
+ // admission on replay, only its facts and claims (its admissions were proven present at the parity pin).
+ async function replayInferredAdmissionsD1(env,origin,chunk,items,entries){
+  const settled=new Set((entries||[]).filter(entry=>entry&&(entry.admission==='admitted'||entry.admission==='present')).map(entry=>entry.lid));
+  for(const item of items||[]){
+   if(!item?.admit||!item.tmdb||!settled.has(item.lid))continue;
+   const out=await admitInferredAtD1(env,item,origin,chunk);
+   if(out==='refused_after_link')throw new FactsError('admission_not_settled','The recorded admission of '+item.lid+' is now refused');
+  }
+ }
  async function applyCanonicalInferredAdmissions(env,event,origin,items){
   if(typeof CanonicalRatedAdmission==='undefined')return;
   const {value:doc}=await readJSON(env,ADMISSIONS_KEY);
@@ -809,10 +833,20 @@ function recordRatingChange(record,incoming,effective){
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
  async function commitBaselineChunk(env,body){
   const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
+  // AIR-602 / ADR 0207 decision 1: under `closed` a chunk with any `admit` item answers 409 `admission_closed` BEFORE its intent (and before a replay offers its admissions). The check is a fresh read of the
+  // marker; an unreadable marker is `admission_unavailable` (503), never the legacy path. A chunk without an `admit` item admits nothing and is unaffected.
+  let atD1=false;
+  if(typeof LetterboxdAdmissionAuthority!=='undefined'&&items.some(item=>item?.admit)){
+   let admission;
+   try{admission=await LetterboxdAdmissionAuthority.admissionRouteNow(env);}catch{throw new FactsError('admission_unavailable','The admission authority cannot be read');}
+   if(admission.route==='closed')throw new FactsError('admission_closed','Admissions are closed');
+   atD1=admission.route==='d1'&&typeof LetterboxdAdmissionD1!=='undefined';
+  }
   const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
   if(receipt){
    if(receipt.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was committed with other items');
-   await applyCanonicalInferredAdmissions(env,'inferred:'+sha+':'+chunk,origin,items);
+   if(atD1)await replayInferredAdmissionsD1(env,origin,chunk,items,receipt.entries);
+   else await applyCanonicalInferredAdmissions(env,'inferred:'+sha+':'+chunk,origin,items);
    await ensureChunkClaims(env,items,(receipt.entries||[]).map(entry=>({lid:entry.lid,factKey:entry.factKey||null,conflict:!!entry.conflict})));
    return {...receipt,replay:true};
   }
@@ -826,13 +860,23 @@ function recordRatingChange(record,incoming,effective){
   const counts={},films=[],records=[];let conflicts=0;
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb};
-   let admitted=null;
+   let admitted=null,d1Admission=null;
    if(item.admit){
     // The authoritative link conflict is checked BEFORE the admission, so a code that already aliases another movie admits nothing.
     const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
     if(!plannedKey(linkIndex||{},links)){await noteConflict(env,links,'alias_conflict');conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+    if(atD1){
+     // AIR-602 / ADR 0207 decision 3 (table, inferred commit), at the marker mode `d1`: no R2 entry. The pair is classified against D1 BEFORE the link (read only): a code held by another Film is a conflict (no link, no
+     // fact); another code on the Film is `present_other_code` (no admission, the link and the facts proceed); a held or redirected identity is non-terminal (the chunk stops before its receipt). The admission itself
+     // follows the link, so nothing has to be withdrawn when the link conflicts.
+     const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
+     if(plan.outcome==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'conflict'});continue;}
+     if(plan.outcome==='held'||plan.outcome==='redirect')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
+     d1Admission=plan.outcome==='other_code'?'present_other_code':'planned';
+    }else{
     admitted=await admitInferredFilm(env,item,origin);
     if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+    }
    }
    // AIR-559: an inferred pair is marked on its record first, and linked only to that same record.
    const inferredIdentity=item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null;
@@ -848,6 +892,15 @@ function recordRatingChange(record,incoming,effective){
     if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;
    }
+   if(d1Admission==='planned'){
+    const out=await admitInferredAtD1(env,item,origin,chunk);
+    if(out==='refused_after_link'){
+     // The batch refused after the link (a concurrent writer admitted the code for another Film): terminal. No fact and no claim; the inferred-marked link stays (it is never a claim proof, ADR 0184); the entry
+     // is an admission conflict for owner repair.
+     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'refused_after_link'});continue;
+    }
+    d1Admission=out;
+   }
    if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
     const key='tmdb_'+item.tmdb;
     const {value:doc}=await readJSON(env,ADMISSIONS_KEY);
@@ -859,7 +912,7 @@ function recordRatingChange(record,incoming,effective){
    }
    const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:inferredIdentity});
    tally(counts,result.outcomes);records.push(result.record);
-   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
+   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),...(d1Admission?{admission:d1Admission}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
   }
   await projectRecords(env,records);
   // Read back: every fact this import made current is still current, or a greater observation replaced it.
@@ -891,7 +944,7 @@ function recordRatingChange(record,incoming,effective){
    if(action==='commit')return json(await commitBaselineChunk(env,body));
    return json({error:'Not found'},404);
   }catch(error){
-   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409,not_inferred:409}[error.code]||500;return json({error:error.message,code:error.code},status);}
+   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409,not_inferred:409,admission_closed:409,admission_not_settled:409,admission_unavailable:503}[error.code]||500;return json({error:error.message,code:error.code},status);}
    throw error;
   }
  }
