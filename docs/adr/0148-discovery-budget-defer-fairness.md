@@ -53,3 +53,7 @@ Code rollback restores series backoff on zero `checked`. It does not delete `ret
 ## Follow-ups
 
 Natural-run acceptance stays on AIR-492 (`Верификация`). AIR-480 addressed slots remain a separate card.
+
+## Amendment: Workflow chunk budget (AIR-682, 25 November 2026)
+
+The 40 s wall budget in this record, and the rejection of raising it, are superseded in part for a chunk run by the Discovery Workflow, which now has 300 s (Product Owner direct instruction on [AIR-682](https://trello.com/c/UWYTPEDB), 25 November 2026: "сделай задачу на увеличение этого бюджета до 5 минут по моему распоряжению. без экспериментов и обоснований"). The per-key deferral, the 16-request cap and the fairness rules are unchanged and apply to the longer budget. The status stays Accepted.

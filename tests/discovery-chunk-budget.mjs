@@ -211,7 +211,7 @@ if(process.env.CHUNK_BUDGET_ONLY_WALK){console.log('walk report done');process.e
 }
 
 // 5. A lease that is gone is never revived: the chunk fails closed before any write, wherever it finds out.
-async function lostLease({failAt,mutate}){
+async function lostLease({failAt,mutate,budget}){
  const clock={offset:0};
  const state={file:null,fired:false};
  const base=await fixture();
@@ -224,7 +224,7 @@ async function lostLease({failAt,mutate}){
  if(failAt==='heartbeat')lease.lease.expiresAt=Date.now()+30000;
  const statusBefore=statusPayload(base.file),decisionsBefore=decisionCount(base.file);
  let error=null;
- try{await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);}catch(e){error=e;}
+ try{await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,null,null,budget);}catch(e){error=e;}
  assert.ok(error,'the chunk must not complete');
  assert.equal(error.name,'LeaseLostError');
  assert.equal(error.message,'resolver lease lost');
@@ -243,6 +243,17 @@ async function lostLease({failAt,mutate}){
  assert.equal(lost.error.timings.failedAt,'heartbeat');
  assert.equal(lost.error.timings.renewals,1,'the first batch renewed; the next found the lease gone');
  assert.equal(Number(leaseRow(lost.file).expires_at),1,'an expired lease stays expired');
+}
+{
+ // AIR-682: the same loss under the Workflow's 300 s budget still fails closed at the heartbeat.
+ const lost=await lostLease({budget:300000,failAt:'heartbeat',mutate:(text,state)=>{if(/FROM discovery_observation_show/.test(text)){sql(state.file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');state.lease.expiresAt=Date.now()+30000;return true;}return false;}});
+ assert.equal(lost.error.timings.failedAt,'heartbeat');
+ assert.equal(Number(leaseRow(lost.file).expires_at),1,'an expired lease stays expired under a 300 s budget');
+}
+{
+ // AIR-682: another hop took the lease under a 300 s budget: this hop cannot renew or write.
+ const lost=await lostLease({budget:300000,failAt:'heartbeat',mutate:(text,state)=>{if(/FROM discovery_observation_show/.test(text)){sql(state.file,"UPDATE discovery_lease SET lease_id='other-hop', expires_at="+(Date.now()+80000)+' WHERE id=1');state.lease.expiresAt=Date.now()+30000;return true;}return false;}});
+ assert.equal(lost.error.timings.failedAt,'heartbeat');
 }
 {
  // Another hop took the lease during the walk: this hop cannot renew or write.
@@ -1208,6 +1219,34 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
   assert.ok(after.replayMs<=before.replayMs+250,label+': the same rows are not restored more slowly: '+before.replayMs+' -> '+after.replayMs);
  }
  if(process.env.IPTV_PRINT_TIMELINE)console.log(JSON.stringify(rows));
+}
+
+// AIR-682 (owner decision, 25 Nov 2026): a caller that passes a 300 s chunk budget (the Workflow) runs longer than the 40 s default, keeps the 16-call TMDB cap
+// and checkpoints once, inside the budget; a caller that passes none keeps 40 s.
+{
+ const run=async budget=>{
+  const base=await fixture({mix:6});
+  const clock={offset:0};
+  const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=2000;}})};
+  const {context,searched}=chunkContext({clock,respond(url){
+   if(url.pathname.includes('/movie/'))return movieFor(Number(url.pathname.split('/').pop()),'Film mix'+String(Number(url.pathname.split('/').pop())-1000).padStart(2,'0'));
+   const title=url.searchParams.get('query'),index=Number(title.slice(-2));
+   return {results:index<6?[{id:1000+index,title,original_title:title,release_date:'2000-06-01'}]:[]};
+  }});
+  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+  let checkpoints=0;
+  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;},null,budget);
+  assert.equal(checkpoints,1,'one checkpoint');
+  assert.ok(searched.length<=16,'the TMDB call cap is unchanged');
+  await Authority.releaseLease(env,lease.lease);
+  return result;
+ };
+ const short=await run(undefined),long=await run(300000);
+ assert.ok(short.timings.totalMs<=40000,'the default budget is 40 s');
+ assert.ok(long.checked>short.checked,'a 300 s budget resolves more candidates than 40 s: '+long.checked+' vs '+short.checked);
+ assert.ok(long.timings.totalMs<=300000,'the long chunk checkpoints inside 300 s: '+long.timings.totalMs);
+ assert.ok(long.timings.renewals>=1,'the long chunk renews its lease');
+ assert.equal(long.error,null);
 }
 
 console.log('discovery chunk budget ok');

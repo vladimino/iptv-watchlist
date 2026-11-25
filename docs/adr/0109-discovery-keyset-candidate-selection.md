@@ -60,3 +60,7 @@ Code rollback restores the walk. It does not undo decisions already written. Dep
 ## Follow-ups
 
 AIR-410 remains the Events Log tick; this record does not change event delivery. AIR-424 is an independent Predictions `storage_error`. Same-evidence excluded_nonfilm reactivation when only the title screen changes is a later card.
+
+## Amendment: Workflow chunk budget (AIR-682, 25 November 2026)
+
+The 40 s wall budget named above is no longer the budget of a chunk run by the Discovery Workflow: it is 300 s there. The 40 s value remains the default for a caller that passes no budget. Product Owner direct instruction on [AIR-682](https://trello.com/c/UWYTPEDB), 25 November 2026: "сделай задачу на увеличение этого бюджета до 5 минут по моему распоряжению. без экспериментов и обоснований". The value is the owner's; no alternative was evaluated. Keyset selection, scoring, fenced writes, the lease and the 16-request TMDB cap are unchanged. The status of this ADR stays Accepted.
