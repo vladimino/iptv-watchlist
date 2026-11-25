@@ -334,6 +334,12 @@ export const FILES={
  "canonical-read-model.mjs": {
   "suite": "core"
  },
+ "film-aggregate.mjs": {
+  "suite": "core"
+ },
+ "migration-0043-film-redirect-index.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
