@@ -11,9 +11,9 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {
  readFilmAggregate,readSections,handleFilmAggregateRequest,countedDatabase,FILM_AGGREGATE_ROUTE,
- LINK_DOCUMENT_MAX_PARTS,LINK_INDEX_MAX_ENTRIES,FACT_RECORDS_MAX,CANDIDATES_MAX,CURRENT_SHOWS_MAX,CREDITS_MAX,
+ LINK_DOCUMENT_MAX_PARTS,LINK_INDEX_MAX_ENTRIES,FACT_RECORDS_MAX,FACT_RECORD_MAX_PARTS,SETTLEMENT_ROWS_MAX,CANDIDATES_MAX,CURRENT_SHOWS_MAX,CREDITS_MAX,
 } from '../src/film-aggregate.js';
-import {createStatementBudget,REQUEST_STATEMENT_BUDGET} from '../src/film-aggregate-resolver.js';
+import {createStatementBudget,REQUEST_STATEMENT_BUDGET,AUTHORIZED_ALIASES_PER_SCHEME} from '../src/film-aggregate-resolver.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-aggregate-v1-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -211,13 +211,13 @@ function world({lids=['l5'],links=null,records=true}={}){
  const moving=(file,predicate,mutate)=>{let done=false;return env(file,{onQuery:text=>{if(!done&&predicate(text)){done=true;mutate();}}});};
  // EPG generation moves after the availability read.
  const epg=world();show(epg,'l5',1000);
- const e1=moving(epg,t=>t.includes('FROM film_redirect r INNER JOIN anc'),()=>sqlite(epg,"UPDATE published_epg_authority SET generation=generation+1 WHERE id=1"));
+ const e1=moving(epg,t=>t.includes('FROM owner_review_entry'),()=>sqlite(epg,"UPDATE published_epg_authority SET generation=generation+1 WHERE id=1"));
  const o1=await readFilmAggregate(e1,'tmdb_5');
  assert.deepEqual([o1.http,o1.body.availability.status,o1.body.availability.reason],[200,'unavailable','generation_moved']);
  assert.notEqual(o1.body.predictions.status,'unavailable');
  // Test 15b: a show row changes (Discovery assigns a show) without a generation move: availability unavailable.
  const rows=world();show(rows,'l5',1000);
- const e2=moving(rows,t=>t.includes('FROM film_redirect r INNER JOIN anc'),()=>show(rows,'tmdb_5',3000));
+ const e2=moving(rows,t=>t.includes('FROM owner_review_entry'),()=>show(rows,'tmdb_5',3000));
  const o2=await readFilmAggregate(e2,'tmdb_5');
  assert.deepEqual([o2.body.availability.status,o2.body.availability.reason],['unavailable','generation_moved']);
  // Test 25: the link index changes during the read: personal and predictions unavailable generation_moved; other sections stay.
@@ -251,19 +251,26 @@ function world({lids=['l5'],links=null,records=true}={}){
  metadata(file,'film:tmdb:5',{year:1999,genres:['Drama']});
  ownerTitle(file,'k1','film:tmdb:5','Owner Title');
  const out=await read(file,'tmdb_5');
- assert.deepEqual([out.body.display.fields.title.status,out.body.display.fields.title.value,out.body.display.fields.title.provenance],['present','Owner Title','owner']);
+ // The title is never claimed complete while the owner entries of Films merged into the survivor cannot be read without a film_redirect(to_film_id) index.
+ assert.deepEqual([out.body.display.fields.title.status,out.body.display.fields.title.value,out.body.display.fields.title.provenance,out.body.display.fields.title.reason],['partial','Owner Title','owner','owner_ancestors_unproved']);
+ assert.deepEqual(out.body.display.ownerAncestors,{status:'unproved',reason:'film_redirect_target_index_pending'});
  assert.deepEqual([out.body.display.fields.year.status,out.body.display.fields.year.value],['present',1999]);
  assert.deepEqual(out.body.display.fields.genres.value,['Drama']);
  // Test 12: no per-field provenance is delivered (ADR 0214 PF): a missing or null field is unknown, never absent.
  for(const name of ['runtime','synopsis','poster','url'])assert.equal(out.body.display.fields[name].status,'unknown',name);
  assert.equal(out.body.display.status,'partial');
  assert.ok(out.body.display.token.ownerReview.startsWith('sha256:')&&out.body.display.token.metadata);
- // An owner entry of a redirect ancestor (a merged Film) still holds: owner > reviewed > automatic over the chain.
+ // An owner entry of a Film merged into the survivor: read when the request passed through it (the redirect chain, indexed); NOT read otherwise, so the title
+ // is never `present` (no scan of film_redirect on this route, ADR 0216 decision 7).
  const merged=world();film(merged,'film:old:5');sqlite(merged,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);
  ownerTitle(merged,'k2','film:old:5','Ancestor Owner');
- assert.equal((await read(merged,'tmdb_5')).body.display.fields.title.value,'Ancestor Owner');
+ const viaSurvivor=(await read(merged,'tmdb_5')).body.display.fields.title;
+ assert.notEqual(viaSurvivor.value,'Ancestor Owner','an ancestor the request did not pass through is not read');
+ assert.notEqual(viaSurvivor.status,'present');
+ const viaChain=(await read(merged,'film:old:5')).body.display.fields.title;
+ assert.deepEqual([viaChain.status,viaChain.value,viaChain.provenance],['partial','Ancestor Owner','owner'],'the redirect chain of the request is read');
  ownerTitle(merged,'k3','film:tmdb:5','Other Owner');
- assert.equal((await read(merged,'tmdb_5')).body.display.fields.title.status,'conflict','two owner values: no winner');
+ assert.equal((await read(merged,'film:old:5')).body.display.fields.title.status,'conflict','two owner values: no winner');
  // Test 11.
  const e=env(file,{onQuery:text=>{if(text.includes('FROM ratings_document WHERE part=0'))ownerTitle(file,'k1','film:tmdb:5','Changed');}});
  const moved=await readFilmAggregate(e,'tmdb_5');
@@ -541,7 +548,7 @@ function world({lids=['l5'],links=null,records=true}={}){
  assert.equal(stats.written,0);
  assert.equal(fileSha(file),before,'the database is byte-identical');
  assert.equal(e.calls.batches,0);
- const writes=executed.filter(t=>!/^\s*(WITH\s+RECURSIVE\b[\s\S]*?\)\s*)?SELECT\b/i.test(t)||/\b(INSERT|UPDATE|DELETE|REPLACE)\s/i.test(t.replace(/'[^']*'/g,'')));
+ const writes=executed.filter(t=>!/^\s*(WITH\b[\s\S]*?\)\s*)?SELECT\b/i.test(t)||/\b(INSERT|UPDATE|DELETE|REPLACE)\s/i.test(t.replace(/'[^']*'/g,'')));
  assert.deepEqual(writes,[],'only SELECT statements ran');
  // The counted binding refuses a write before it reaches the database.
  const budget=createStatementBudget(5);
@@ -562,16 +569,303 @@ function world({lids=['l5'],links=null,records=true}={}){
  if(fs.existsSync('dist/server/index.js'))assert.ok(!fs.readFileSync('dist/server/index.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the built bundle does not serve the route');
 }
 
-// EXPLAIN QUERY PLAN of every new statement (ADR 0216 decision 7): each lookup is served by an existing index or primary key; the only base-table scan is the
-// owner-ancestor step of the display statement over film_redirect (no index on to_film_id; the same read as the accepted AIR-372 read model).
+// ---- Review of PR #1004 (owner review at 85783f2f): counterexamples, each as a regression ----
+const putRaw=(file,key,text,partBytes=60000)=>{
+ const etag=sha256(text),parts=[];
+ for(let at=0;at<text.length;at+=partBytes)parts.push(text.slice(at,at+partBytes));
+ sqlite(file,`DELETE FROM ratings_document WHERE key=${q(key)};`+parts.map((body,part)=>`INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES (${q(key)},${part},${q(body)},${q(etag)},${q(AT)});`).join(''));
+};
+const BASE_INDEX={'tmdb:5':'tmdb-5','letterboxd:l5':'tmdb-5'};
+const padded=(value,size)=>{const text=JSON.stringify(value);assert.ok(text.length<=size);return text+' '.repeat(size-text.length);};
+// A binding that logs how many PART ROWS (rows that carry a body) each bounded-document statement returned: what the Worker materializes.
+function loggedEnv(file,options){
+ const e=env(file,options),log=[];
+ const DB={calls:e.DB.calls,prepare(sql){const base=e.DB.prepare(sql);return {bind(...params){const st=base.bind(...params);return {text:st.text,first:()=>st.first(),run:()=>st.run(),async all(){const r=await st.all();if(sql.startsWith('WITH g AS'))log.push({text:st.text,bodies:(r.results||[]).filter(x=>x.part!=null).length});return r;}};}};},batch:x=>e.DB.batch(x)};
+ return {env:{...e,DB},log};
+}
+const coverageOf=out=>out.body.predictions.coverage;
+
+// P1 (review 1): the link-document bound is enforced in the statement that materializes it, at the exact boundary, also against a replacement.
+{
+ // Exactly 40 parts and exactly 2 400 000 bytes: inside the bound, coverage complete.
+ const exact=world();putRaw(exact,'letterboxd/facts/links.json',padded(BASE_INDEX,LINK_DOCUMENT_MAX_PARTS*60000));
+ assert.equal(rows_(exact,"SELECT COUNT(*) n FROM ratings_document WHERE key='letterboxd/facts/links.json'"),LINK_DOCUMENT_MAX_PARTS);
+ const inside=loggedEnv(exact);
+ const ok=await readFilmAggregate(inside.env,'tmdb_5');
+ assert.equal(coverageOf(ok).status,'complete');
+ assert.equal(inside.log.find(l=>l.text.includes('links.json')).bodies,LINK_DOCUMENT_MAX_PARTS,'the 40 parts are read');
+ // One byte more: a 41st part. Over the part cap: nothing is materialized.
+ const parts=world();putRaw(parts,'letterboxd/facts/links.json',padded(BASE_INDEX,LINK_DOCUMENT_MAX_PARTS*60000+1));
+ // 40 parts but one byte over the byte cap (parts of 60 001 bytes).
+ const bytes=world();putRaw(bytes,'letterboxd/facts/links.json',padded(BASE_INDEX,LINK_DOCUMENT_MAX_PARTS*60001),60001);
+ assert.equal(rows_(bytes,"SELECT COUNT(*) n FROM ratings_document WHERE key='letterboxd/facts/links.json'"),LINK_DOCUMENT_MAX_PARTS);
+ for(const [name,file] of [['parts',parts],['bytes',bytes]]){
+  const logged=loggedEnv(file);
+  const out=await readFilmAggregate(logged.env,'tmdb_5');
+  assert.deepEqual([name,coverageOf(out).status,coverageOf(out).reason,out.body.predictions.status],[name,'incomplete','discovery_cap','partial']);
+  assert.equal(logged.log.find(l=>l.text.includes('links.json')).bodies,0,name+': no part of an over-cap document is returned to the Worker');
+ }
+ // A valid LARGER document replaces the small one between the marker read and the document read: it is never materialized and never certified.
+ const race=world();
+ let replaced=false;
+ const logged=loggedEnv(race,{onQuery:text=>{if(!replaced&&text.startsWith('WITH g AS')&&text.includes('links.json')){replaced=true;putRaw(race,'letterboxd/facts/links.json',padded(BASE_INDEX,(LINK_DOCUMENT_MAX_PARTS+1)*60000));}}});
+ const raced=await readFilmAggregate(logged.env,'tmdb_5');
+ assert.ok(replaced);
+ assert.deepEqual([coverageOf(raced).status,coverageOf(raced).reason],['incomplete','discovery_cap']);
+ assert.equal(logged.log.find(l=>l.text.includes('links.json')).bodies,0);
+ assert.equal(raced.body.predictions.status,'partial');
+ // A replacement that stays inside the bound but arrives after the read is caught by the after-statement (etag): generation_moved, never complete.
+ const late=world();pointer(late,'l5',3);
+ const e=env(late,{onQuery:text=>{if(text.includes('FROM prediction_pointer')&&!text.includes('MARK'))putRaw(late,'letterboxd/facts/links.json',padded(BASE_INDEX,70000),60000);}});
+ const lateOut=await readFilmAggregate(e,'tmdb_5');
+ assert.equal(lateOut.body.predictions.reason,'generation_moved');
+}
+function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',encoding:'utf8'});return JSON.parse(r.stdout.trim())[0].n;}
+
+// P1 (review 1): the fact-record walk validates shape, key and edges, tracks every root's own chain, and fails closed on anything unproved.
+{
+ const record=(links,records,{lids=['l5']}={})=>{
+  const file=world({lids,links,records:false});
+  for(const [key,text] of Object.entries(records))putRaw(file,'letterboxd/facts/films/'+key+'.json',typeof text==='string'?text:JSON.stringify(text));
+  return file;
+ };
+ const good={schemaVersion:1,factKey:'tmdb-5',links:{letterboxd:'l5',tmdb:'5'},redirectTo:null,migrating:null};
+ const cases=[
+  ['null record','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':'null'})],
+  ['primitive record','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':'5'})],
+  ['array record','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':'[]'})],
+  ['wrong factKey','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,factKey:'tmdb-6'}})],
+  ['links not an object','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:'x'}})],
+  ['self redirect A->A','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,redirectTo:'tmdb-5'}})],
+  ['cycle A->B->A','incomplete','ratings_evidence_unavailable',record({'tmdb:5':'a','letterboxd:l5':'a'},{a:{...good,factKey:'a',redirectTo:'b'},b:{...good,factKey:'b',redirectTo:'a'}})],
+  ['redirect and migration','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,redirectTo:'x',migrating:{to:'y'}}})],
+  ['migration without target','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,migrating:{}}})],
+  ['malformed hop key','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,redirectTo:'a b'}})],
+  // Two seeds on different ends of a chain: seed one reaches a->b, seed two starts at b->c. The chain of the first root is two hops, whatever the other reads.
+  ['second hop hidden by another seed','incomplete','discovery_cap',record({'tmdb:5':'a','letterboxd:s1':'a','letterboxd:s2':'b'},{a:{...good,factKey:'a',redirectTo:'b'},b:{...good,factKey:'b',redirectTo:'c'},c:{...good,factKey:'c'}},{lids:['s1','s2']})],
+  ['two hops from one seed','incomplete','discovery_cap',record({'tmdb:5':'a','letterboxd:l5':'a'},{a:{...good,factKey:'a',redirectTo:'b'},b:{...good,factKey:'b',redirectTo:'c'},c:{...good,factKey:'c'}})],
+  ['hop target read counts against the record cap','incomplete','discovery_cap',record({'tmdb:5':'a','letterboxd:s1':'b','letterboxd:s2':'c','letterboxd:s3':'d'},{a:{...good,factKey:'a',redirectTo:'e'},b:{...good,factKey:'b'},c:{...good,factKey:'c'},d:{...good,factKey:'d'},e:{...good,factKey:'e'}},{lids:['s1','s2','s3']})],
+ ];
+ for(const [name,status,reason,file] of cases){
+  const out=await read(file,'tmdb_5');
+  assert.deepEqual([name,out.http,coverageOf(out).status,coverageOf(out).reason],[name,200,status,reason]);
+  assert.ok(['partial','conflict'].includes(out.body.predictions.status),name+': never a negative');
+  assert.notEqual(out.body.personal.status,'present',name);
+ }
+ // One redirect hop is still followed, both sides counted; a record that carries no factKey is read as the ADR 0184 planner reads it.
+ const one=record({'tmdb:5':'a','letterboxd:l5':'a','letterboxd:zz':'b'},{a:{links:{letterboxd:'l5',tmdb:'5'},redirectTo:'b'},b:{...good,factKey:'b'}});
+ const hop=await read(one,'tmdb_5');
+ assert.deepEqual([coverageOf(hop).reason,coverageOf(hop).notes],['unresolved_candidate',[{candidate:'letterboxd:zz',state:'unresolved'}]]);
+ // The same hop from two roots is read once and followed once per root.
+ const shared=record({'tmdb:5':'a','letterboxd:s1':'a','letterboxd:s2':'a2'},{a:{...good,factKey:'a',redirectTo:'t'},a2:{...good,factKey:'a2',redirectTo:'t'},t:{...good,factKey:'t'}},{lids:['s1','s2']});
+ const sharedOut=await read(shared,'tmdb_5');
+ assert.equal(Object.keys(coverageOf(sharedOut).token.records).length,3);
+ assert.equal(coverageOf(sharedOut).status,'complete');
+ // Fact-record size: exactly 8 parts is read, 9 is not materialized.
+ const exact=record(BASE_INDEX,{'tmdb-5':padded(good,FACT_RECORD_MAX_PARTS*60000)});
+ assert.equal(coverageOf(await read(exact,'tmdb_5')).status,'complete');
+ const big=record(BASE_INDEX,{'tmdb-5':padded(good,FACT_RECORD_MAX_PARTS*60000+1)});
+ const logged=loggedEnv(big);
+ const bigOut=await readFilmAggregate(logged.env,'tmdb_5');
+ assert.deepEqual([coverageOf(bigOut).status,coverageOf(bigOut).reason],['incomplete','discovery_cap']);
+ assert.equal(logged.log.find(l=>l.text.includes('films/tmdb-5.json')).bodies,0,'an over-cap record is not materialized');
+}
+
+// P1 (review 2): alias overflow and unknown per-alias facts never produce a negative.
+{
+ const lids=Array.from({length:AUTHORIZED_ALIASES_PER_SCHEME+1},(_,i)=>'m'+i);
+ const omitted=lids[AUTHORIZED_ALIASES_PER_SCHEME];
+ // Only the omitted ninth lid is listed: the eight read lids are not listed, and that is not proof that none is.
+ const file=world({lids});
+ watchlist(file,[omitted]);
+ const out=await read(file,'tmdb_5');
+ assert.deepEqual([out.body.watchlist.status,out.body.watchlist.source.member,out.body.watchlist.source.reason],['unknown','unknown','alias_overflow']);
+ assert.deepEqual([coverageOf(out).status,coverageOf(out).reason,coverageOf(out).skippedAliases],['incomplete','discovery_cap',true]);
+ assert.equal(out.body.predictions.status,'partial');
+ assert.notEqual(out.body.personal.fields.watched.status,'absent');
+ assert.equal(out.body.personal.status,'partial');
+ // A checked lid that IS listed proves membership even with an overflow (the section is still partial, never complete).
+ const listed=world({lids});watchlist(listed,['m0']);
+ const yes=await read(listed,'tmdb_5');
+ assert.deepEqual([yes.body.watchlist.source.member,yes.body.watchlist.status],[true,'partial']);
+ // Eight lids exactly: no overflow, the negative stays provable.
+ const eight=world({lids:lids.slice(0,AUTHORIZED_ALIASES_PER_SCHEME)});watchlist(eight,['other']);
+ assert.equal((await read(eight,'tmdb_5')).body.watchlist.source.member,false);
+ // Overflow of the movie scheme alone affects the storage-id sections, not the Watchlist (which reads lids).
+ // Mixed negative and unknown rows on two distinct fact keys.
+ const mixed=()=>{const f=world({lids:['x1','x2'],links:{'tmdb:5':'tmdb-5','letterboxd:x1':'tmdb-5','letterboxd:x2':'lb-x2'}});putRecord(f,'lb-x2',{letterboxd:'x2'});view(f,'tmdb_5','tmdb-5',{watched:0,rating:null,known:1});view(f,'x1','tmdb-5',{watched:0,rating:null,known:1});return f;};
+ const unknown=mixed();view(unknown,'x2','lb-x2',{watched:null,known:0});
+ const u=await read(unknown,'tmdb_5');
+ assert.equal(coverageOf(u).status,'complete','coverage itself is complete: the alias is simply unknown');
+ for(const name of ['watched','rating']){
+  assert.equal(u.body.personal.fields[name].status,'partial',name+': an unknown alias is not negative evidence');
+  assert.deepEqual(u.body.personal.fields[name].unknownAliases,['x2']);
+ }
+ assert.equal(u.body.personal.status,'partial');
+ // A genuine known conflict is kept whatever else is unknown.
+ const conflict=mixed();view(conflict,'x2','lb-x2',{watched:1,rating:3,known:1});
+ const c=await read(conflict,'tmdb_5');
+ assert.deepEqual([c.body.personal.fields.watched.status,c.body.personal.fields.rating.status,c.body.personal.status],['conflict','conflict','conflict']);
+ // All aliases proved negative, complete coverage: the negative IS stated.
+ const proved=mixed();view(proved,'x2','lb-x2',{watched:0,rating:null,known:1});
+ const p=await read(proved,'tmdb_5');
+ assert.deepEqual([p.body.personal.fields.watched.status,p.body.personal.fields.watched.value,p.body.personal.fields.rating.status],['present',false,'absent']);
+ // Unknown within one fact key: a row with NULL next to a known row of the same fact is unknown, not a conflict and not a negative.
+ const within=mixed();view(within,'x1','tmdb-5',{watched:null,known:0});view(within,'x2','lb-x2',{watched:0,rating:null,known:1});
+ const w=await read(within,'tmdb_5');
+ assert.deepEqual([w.body.personal.fields.watched.status,w.body.personal.fields.watched.unknownAliases],['partial',['x1']]);
+}
+
+// P1 (review 3): the history link is computed after every fence and from the legacy bridge's own contract.
+{
+ // A stable Film with two trusted movie claims and one lid: the legacy bridge rejects it (tmdbIds.length>1), so no href, whatever the coverage.
+ const multi=world({lids:['l5'],links:{'tmdb:5':'tmdb-5','tmdb:6':'tmdb-5','letterboxd:l5':'tmdb-5'}});
+ claim(multi,'film:tmdb:5','tmdb','6');
+ const m=await read(multi,'l5');
+ assert.equal(m.body.identity.verdict,'found');
+ assert.deepEqual([coverageOf(m).status,m.body.history.status,m.body.history.href],['complete','unavailable',undefined]);
+ // The control: one movie claim and one lid is limited with its href (test 1), through the lid and through tmdb_<n>.
+ const single=world();
+ assert.equal((await read(single,'l5')).body.history.href,'/api/enrichment/history?filmId=l5');
+ // A retired movie claim (the corrected TV Film) is not proved against the bridge, which still counts it: no href.
+ const tv=blank();film(tv,'film:tmdb:123',[['tmdb','123'],['tmdb_tv','123'],['letterboxd','tvA']]);retire(tv,'film:tmdb:123','123','123','tvA');
+ putLinks(tv,{'letterboxd:tvA':'lb-tvA'});putRecord(tv,'lb-tvA',{letterboxd:'tvA'});view(tv,'tvA','lb-tvA',{watched:1,known:0});
+ const t=await read(tv,'tvA');
+ assert.deepEqual([coverageOf(t).status,t.body.history.status,t.body.history.href],['complete','unavailable',undefined]);
+ // History initially limited, then the coverage moves during the read (the ratings link index): the ratings sections are generation_moved AND history
+ // carries no href, though it was computed from a coverage that was complete when first read.
+ const moving=world();pointer(moving,'l5',3);
+ let moved=false;
+ const e=env(moving,{onQuery:text=>{if(!moved&&text.includes('FROM prediction_pointer')){moved=true;putLinks(moving,{...BASE_INDEX,'letterboxd:late':'tmdb-5'});}}});
+ const out=await readFilmAggregate(e,'tmdb_5');
+ assert.ok(moved);
+ assert.deepEqual([out.body.personal.reason,out.body.predictions.reason,out.body.history.status,out.body.history.href],['generation_moved','generation_moved','unavailable',undefined]);
+ // A held ratings domain: history unavailable, no href.
+ const held=world();sqlite(held,"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");
+ assert.deepEqual([(await read(held,'l5')).body.history.status,(await read(held,'l5')).body.history.href],['unavailable',undefined]);
+}
+
+// P1 (review 4): the display title is built from the rows the token covers, one statement, and parity with the loader's own mapping.
+{
+ const locSource=(file,filmId,source,value,{version='v1',observed='2026-11-20T10:00:00.000Z'}={})=>sqlite(file,`INSERT OR REPLACE INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES (${q(filmId)},${q(source)},${q(value)},${q(version)},'{}','req-${source}',${q(observed)},${q(AT)})`);
+ const locDimension=(file,filmId,{status,source=null,value=null,authority=null,version=null})=>sqlite(file,`INSERT OR REPLACE INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,updated_at) VALUES (${q(filmId)},'localization',${q(status)},${q(source)},${q(version)},NULL,${q(value)},${q(authority)},0,${q(AT)})`);
+ // A→B→A between the section's first read and its after-read: the first read sees B, the after-read sees A. One statement each, so the title and its token
+ // are of the same snapshot and the difference is caught (never B with the token of A).
+ const file=world();locSource(file,'film:tmdb:5','tmdb','Title A');
+ let phase=0;
+ const e=env(file,{onQuery:text=>{
+  if(text.includes('FROM owner_review_entry')){phase++;if(phase===1)locSource(file,'film:tmdb:5','tmdb','Title B');else if(phase===2)locSource(file,'film:tmdb:5','tmdb','Title A');}
+ }});
+ const out=await readFilmAggregate(e,'tmdb_5');
+ assert.equal(phase,2);
+ assert.deepEqual([out.body.display.status,out.body.display.reason],['unavailable','generation_moved']);
+ assert.ok(!JSON.stringify(out.body.display).includes('Title B'));
+ // The display consumes exactly one statement for its reads (and one for its fence): the localization rows are not read again.
+ const counted=env(world());await readFilmAggregate(counted,'tmdb_5');
+ // The token changes with any consumed column, including the dimension's source_version, which the mapping reads.
+ const tokenOf=async f=>(await read(f,'tmdb_5')).body.display.token.localization;
+ const base=world();locDimension(base,'film:tmdb:5',{status:'provisional',source:'letterboxd',value:'Prov',version:'1'});
+ const t1=await tokenOf(base);
+ locDimension(base,'film:tmdb:5',{status:'provisional',source:'letterboxd',value:'Prov',version:'2'});
+ assert.notEqual(await tokenOf(base),t1,'dimension source_version is covered by the token');
+ const srcBase=world();locSource(srcBase,'film:tmdb:5','tmdb','Same value',{version:'1'});
+ const s1=await tokenOf(srcBase);
+ locSource(srcBase,'film:tmdb:5','tmdb','Same value',{version:'2'});
+ assert.notEqual(await tokenOf(srcBase),s1,'a source row\'s source_version is covered by the token');
+ locSource(srcBase,'film:tmdb:5','tmdb','Same value',{version:'2',observed:'2026-11-21T10:00:00.000Z'});
+ assert.notEqual(await tokenOf(srcBase),s1,'observed_at is covered by the token');
+ // Parity with the loader: the title is exactly what loadLocalizationInputs + resolveLocalization produce for the same rows (no owner_review_entry rows).
+ const {loadLocalizationInputs,resolveLocalization}=await import('../src/localization-sources.js');
+ const scenarios={
+  automatic_order:f=>{locSource(f,'film:tmdb:5','tmdb','From TMDB');locSource(f,'film:tmdb:5','letterboxd','From Letterboxd');},
+  newer_same_source:f=>{locSource(f,'film:tmdb:5','tmdb','Old');locSource(f,'film:tmdb:5','tmdb','New',{observed:'2026-11-24T10:00:00.000Z'});},
+  reviewed_dictionary:f=>{locSource(f,'film:tmdb:5','tmdb','Auto');locDimension(f,'film:tmdb:5',{status:'reviewed',source:'dictionary',value:'Reviewed',authority:'dictionary'});},
+  owner_dimension:f=>{locSource(f,'film:tmdb:5','tmdb','Auto');locDimension(f,'film:tmdb:5',{status:'reviewed',value:'Owner',authority:'owner'});},
+  provisional_only:f=>{locDimension(f,'film:tmdb:5',{status:'provisional',source:'wikidata',value:'Prov Wiki',version:'7'});},
+  provisional_shadowed:f=>{locSource(f,'film:tmdb:5','wikidata','Source Wiki');locDimension(f,'film:tmdb:5',{status:'provisional',source:'wikidata',value:'Prov Wiki',version:'7'});},
+  nothing:()=>{},
+ };
+ for(const [name,setup] of Object.entries(scenarios)){
+  const f=world();setup(f);
+  const inputs=await loadLocalizationInputs(env(f),'film',['film:tmdb:5']);
+  const expected=resolveLocalization(inputs.get('film:tmdb:5'));
+  const title=(await read(f,'tmdb_5')).body.display.fields.title;
+  assert.deepEqual([name,title.value??null,title.provenance??null],[name,expected.value??null,expected.value?expected.tier:null]);
+ }
+}
+
+// P1 (review 5): a failing section loses only itself; its reservation is given back; the identity fence is unaffected.
+{
+ // A readable but malformed ratings result: personal unavailable, the ratings coverage degrades predictions, every independent section survives.
+ const file=world();pointer(file,'l5',3);watchlist(file,['l5']);show(file,'l5',1000);metadata(file,'film:tmdb:5',{year:1999});
+ const rewrite=sql=>sql.replace(/\(SELECT json_group_array\(json_array\(alias_id[\s\S]*?\) AS view/,"(SELECT '{bad' FROM json_each(?)) AS view");
+ const e=env(file,{rewrite});
+ const out=await readFilmAggregate(e,'tmdb_5');
+ assert.equal(out.http,200);
+ assert.deepEqual([out.body.personal.status,out.body.personal.reason],['unavailable','ratings_unavailable']);
+ assert.deepEqual([out.body.predictions.status,out.body.predictions.coverage.reason],['partial','ratings_evidence_unavailable']);
+ assert.deepEqual(out.body.predictions.current.map(p=>p.storageId),['l5']);
+ assert.deepEqual([out.body.watchlist.status,out.body.availability.status,out.body.display.fields.year.value],['present','present',1999]);
+ assert.equal(out.body.sectionsUnavailable,undefined,'no section_read_failed: the resolver\'s generic fallback is not reached');
+ assert.ok(e.calls.queries<=REQUEST_STATEMENT_BUDGET);
+ // A display processing failure (a malformed result column): display unavailable, the rest intact.
+ const display=env(file,{rewrite:sql=>sql.replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0) AS credits")});
+ const d=await readFilmAggregate(display,'tmdb_5');
+ assert.deepEqual([d.http,d.body.display.status,d.body.display.reason],[200,'unavailable','display_unavailable']);
+ assert.deepEqual([d.body.personal.status,d.body.predictions.status,d.body.watchlist.status,d.body.availability.status],['present','present','present','present']);
+ // Both at once, plus an identity movement during the failure: the whole answer is 503 with no section.
+ let moved=false;
+ const both=env(file,{rewrite:sql=>rewrite(sql).replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0) AS credits"),onQuery:text=>{if(!moved&&text.includes('FROM published_epg_show')){moved=true;claim(file,'film:tmdb:5','letterboxd','late9');}}});
+ const b=await readFilmAggregate(both,'tmdb_5');
+ assert.deepEqual([b.http,b.body.identity.reason,Object.keys(b.body).sort()],[503,'identity_moved',['contract','identity']]);
+ // With both failing and nothing moved the identity fence still runs and the budget holds.
+ const calm=world();
+ const bothCalm=env(calm,{rewrite:sql=>rewrite(sql).replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0) AS credits")});
+ const c=await readFilmAggregate(bothCalm,'tmdb_5');
+ assert.deepEqual([c.http,c.body.personal.reason,c.body.display.reason,c.body.availability.status],[200,'ratings_unavailable','display_unavailable','present']);
+ assert.ok(bothCalm.calls.queries<=REQUEST_STATEMENT_BUDGET);
+ // A section that fails after reserving gives its reservation back: with a budget that has no room to spare the later sections still run.
+ for(let limit=10;limit<=REQUEST_STATEMENT_BUDGET;limit++){
+  const small=env(file,{rewrite});
+  const o=await readFilmAggregate(small,'tmdb_5',{budgetLimit:limit});
+  assert.ok(small.calls.queries<=limit,limit+': '+small.calls.queries);
+ }
+}
+
+// P2 (review): the settlement of the candidates is bounded in SQL before it is materialized; overflow is typed and fail-closed.
+{
+ const links={...BASE_INDEX,'letterboxd:own2':'tmdb-5'};
+ const crowd=world({links});
+ for(let i=0;i<SETTLEMENT_ROWS_MAX+6;i++)film(crowd,'film:crowd:'+i,[['letterboxd','own2',0,0]]);
+ const logged=loggedEnv(crowd);
+ const out=await readFilmAggregate(logged.env,'tmdb_5');
+ assert.deepEqual([coverageOf(out).status,coverageOf(out).reason,out.body.predictions.status],['incomplete','discovery_cap','partial']);
+ assert.equal(coverageOf(out).notes,undefined,'an overflowing settlement names no candidate as settled or open');
+ // Retirement decisions of a candidate movie id over the cap: the same typed overflow.
+ const decisions=world({links:{...BASE_INDEX,'tmdb:77':'tmdb-5'}});
+ film(decisions,'film:other:77',[['tmdb','77']]);
+ // The ledger allows one active retirement per Film, so each decision names its own Film (the ledger retires a movie id whatever Film it names).
+ for(let i=0;i<SETTLEMENT_ROWS_MAX+3;i++){film(decisions,'film:r:'+i);retire(decisions,'film:r:'+i,'77',String(7700+i),'lx'+i);}
+ const d=await read(decisions,'tmdb_5');
+ assert.deepEqual([coverageOf(d).status,coverageOf(d).reason],['incomplete','discovery_cap']);
+ // Within the cap the settlement still decides: one settled candidate is complete.
+ const settled=world({links});film(settled,'film:other:2',[['letterboxd','own2']]);
+ assert.equal(coverageOf(await read(settled,'tmdb_5')).status,'complete');
+}
+
+// EXPLAIN QUERY PLAN of every statement of the aggregate (ADR 0216 decision 7): each lookup is a primary-key or index SEARCH, no base table and no index is
+// scanned (the bound json_each key lists, a constant row, derived tables and the measuring CTE of the bounded document read are the only SCANs). A scan of
+// film_redirect, which has no index on to_film_id, is NOT allowed here and is not read by this route.
 {
  const file=world({links:{'tmdb:5':'tmdb-5','letterboxd:l5':'tmdb-5','letterboxd:own2':'tmdb-5','tmdb:66':'tmdb-5'}});
- film(file,'film:other:2',[['letterboxd','own2']]);watchlist(file,['l5','x']);show(file,'l5',1000);pointer(file,'l5',3);metadata(file,'film:tmdb:5',{year:1});
+ film(file,'film:other:2',[['letterboxd','own2']]);film(file,'film:old:5');sqlite(file,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);
+ watchlist(file,['l5','x']);show(file,'l5',1000);pointer(file,'l5',3);metadata(file,'film:tmdb:5',{year:1});
  const plans=[];
  const e=env(file,{onQuery:t=>{if(/^\s*(WITH|SELECT)/i.test(t)&&!/sqlite_master|schema_contract/.test(t))plans.push(t);}});
- const planned=await readFilmAggregate(e,'tmdb_5');
+ const planned=await readFilmAggregate(e,'film:old:5');
  assert.equal(planned.http,200);
  assert.ok(plans.some(t=>t.includes('film_external_id e ON e.scheme')&&t.includes('tmdb_retirement_decision')),'the settlement statement ran');
+ assert.ok(plans.some(t=>t.includes('FROM owner_review_entry')&&t.includes('film_localization_source')),'the display statement ran');
  const seen=new Set();
  for(const text of plans){
   const shape=text.replace(/'[^']*'/g,"'?'");
@@ -579,9 +873,10 @@ function world({lids=['l5'],links=null,records=true}={}){
   const out=sqliteSync([file],{input:'EXPLAIN QUERY PLAN '+text+';',encoding:'utf8'});
   assert.equal(out.status,0,out.stderr);
   const plan=out.stdout.split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
-  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN anc\b|^SCAN a\b|^SCAN [a-z_]+ USING (COVERING )?INDEX/.test(d));
-  const allowed=scans.filter(d=>/^SCAN r\b/.test(d)&&text.includes('FROM film_redirect r INNER JOIN anc'));
-  assert.deepEqual(scans.filter(d=>!allowed.includes(d)),[],text.slice(0,160)+'\n'+plan.join('\n'));
+  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN g$/.test(d));
+  assert.deepEqual(scans,[],text.slice(0,160)+'\n'+plan.join('\n'));
+  assert.ok(!plan.some(d=>/film_redirect/.test(d)&&/^SCAN /.test(d)),'film_redirect is never scanned');
+  if(text.startsWith('WITH g AS'))assert.ok(plan.some(d=>/^SEARCH ratings_document USING INDEX sqlite_autoindex_ratings_document_1 \(key=\?\)/.test(d)),'the measure is a primary-key search\n'+plan.join('\n'));
  }
  assert.ok(seen.size>=9,'every statement shape was planned: '+seen.size);
 }

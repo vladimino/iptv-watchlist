@@ -85,6 +85,35 @@ export function ownerCandidatesFromEntries(entries){
  for(const list of out.values())list.sort((x,y)=>x.value<y.value?-1:x.value>y.value?1:(x.sourceKey||'')<(y.sourceKey||'')?-1:(x.sourceKey||'')>(y.sourceKey||'')?1:0);
  return out;
 }
+// Pure (AIR-647). The inputs of resolveLocalization from rows that were ALREADY read: `dimensions` are the localization film_dimension rows
+// ({id,status,source,source_version,provenance_json,value,authority,updated_at}) and `sources` the automatic source rows
+// ({id,source,value,source_version,provenance_json,observed_at}). loadLocalizationInputs below is this function over its two reads, so a caller that
+// captured the rows inside its own coherent snapshot (the FilmAggregateV1 display section) resolves exactly what the loader would, from exactly those rows.
+export function localizationInputsFromRows(ids,dimensions,sources,{ownerValues=null}={}){
+ const list=[...new Set(ids||[])];
+ const out=new Map(list.map(id=>[id,{owner:null,reviewed:null,automatic:[]}]));
+ const bySource=new Map();
+ for(const row of sources||[]){
+  const input=out.get(row.id);
+  if(!input)continue;
+  input.automatic.push({source:row.source,value:row.value,sourceVersion:row.source_version,provenance:storedProvenance(row.provenance_json),observedAt:row.observed_at});
+  bySource.set(row.id+'\u0000'+row.source,true);
+ }
+ for(const row of dimensions||[]){
+  const input=out.get(row.id);
+  if(!input)continue;
+  if(row.status==='reviewed'&&row.value){
+   if(row.authority==='owner')input.owner={value:row.value,at:row.updated_at};
+   else input.reviewed={value:row.value,source:row.source||'dictionary',at:row.updated_at};
+  }else if(row.status==='provisional'&&row.value&&row.source&&!RESERVED.has(row.source)&&!bySource.has(row.id+'\u0000'+row.source)){
+   // The legacy provisional dimension is an automatic candidate of its own source; a source row of the same source is the newer record.
+   input.automatic.push({source:row.source,value:row.value,sourceVersion:row.source_version,provenance:storedProvenance(row.provenance_json),observedAt:row.updated_at});
+  }
+ }
+ if(ownerValues)for(const [id,value] of Object.entries(ownerValues instanceof Map?Object.fromEntries(ownerValues):ownerValues)){const input=out.get(id);if(input&&value&&present(value.value))input.owner={value:value.value,at:value.at??null};}
+ return out;
+}
+
 // Read only. The stored inputs of resolveLocalization for entities of one kind: the owner/reviewed/provisional dimension row, the source rows.
 // An owner value comes from `ownerValues` (id -> {value,at}) when the caller read it from owner_review_entry, else from a dimension the owner wrote.
 export async function loadLocalizationInputs(env,kind,ids,{ownerValues=null}={}){
@@ -93,35 +122,18 @@ export async function loadLocalizationInputs(env,kind,ids,{ownerValues=null}={})
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');
  const list=[...new Set(ids||[])];
- const out=new Map(list.map(id=>[id,{owner:null,reviewed:null,automatic:[]}]));
+ const allDimensions=[],allSources=[];
  for(let at=0;at<list.length;at+=LOCALIZATION_READ_CHUNK){
   const chunk=list.slice(at,at+LOCALIZATION_READ_CHUNK),marks=chunk.map(()=>'?').join(',');
-  let dimensions,sources;
   try{
-   [dimensions,sources]=await Promise.all([
+   const [dimensions,sources]=await Promise.all([
     many(db,`SELECT ${spec.column} id,status,source,source_version,provenance_json,value,authority,updated_at FROM ${spec.dimension} WHERE dimension='localization' AND ${spec.column} IN (${marks})`,chunk),
     many(db,`SELECT ${spec.column} id,source,value,source_version,provenance_json,observed_at FROM ${spec.table} WHERE ${spec.column} IN (${marks})`,chunk),
    ]);
+   allDimensions.push(...dimensions);allSources.push(...sources);
   }catch(error){throw failed('localization_source_unavailable',error);}
-  const bySource=new Map();
-  for(const row of sources){
-   const input=out.get(row.id);
-   input.automatic.push({source:row.source,value:row.value,sourceVersion:row.source_version,provenance:storedProvenance(row.provenance_json),observedAt:row.observed_at});
-   bySource.set(row.id+'\u0000'+row.source,true);
-  }
-  for(const row of dimensions){
-   const input=out.get(row.id);
-   if(row.status==='reviewed'&&row.value){
-    if(row.authority==='owner')input.owner={value:row.value,at:row.updated_at};
-    else input.reviewed={value:row.value,source:row.source||'dictionary',at:row.updated_at};
-   }else if(row.status==='provisional'&&row.value&&row.source&&!RESERVED.has(row.source)&&!bySource.has(row.id+'\u0000'+row.source)){
-    // The legacy provisional dimension is an automatic candidate of its own source; a source row of the same source is the newer record.
-    input.automatic.push({source:row.source,value:row.value,sourceVersion:row.source_version,provenance:storedProvenance(row.provenance_json),observedAt:row.updated_at});
-   }
-  }
  }
- if(ownerValues)for(const [id,value] of Object.entries(ownerValues instanceof Map?Object.fromEntries(ownerValues):ownerValues)){const input=out.get(id);if(input&&value&&present(value.value))input.owner={value:value.value,at:value.at??null};}
- return out;
+ return localizationInputsFromRows(list,allDimensions,allSources,{ownerValues});
 }
 
 // The D1 reader for AIR-372. D1 is the allowed source only while the marker is open: r2, prepared, legacy and unreadable states are not
