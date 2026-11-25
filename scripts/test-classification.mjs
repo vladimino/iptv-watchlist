@@ -218,6 +218,12 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "import-fence-helper.mjs": {
+  "suite": "core"
+ },
+ "film-dimension-import-fence.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-activation-rehearsal.mjs": {
   "suite": "core"
  },
@@ -1034,6 +1040,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-writer.mjs": {
   "suite": "core"
  },
  "identity-work-inventory.mjs": {
