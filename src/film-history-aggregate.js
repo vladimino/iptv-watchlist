@@ -3,15 +3,29 @@
 // GET /api/enrichment/history keeps its contract, the aggregate's `history` section stays `limited`/`unavailable`, and no consumer is switched.
 // The consumer migration and any activation are the next card (AIR-651), with its own owner GO. This module reads and writes nothing of its own:
 // the D1 reads are the AIR-646 resolver and the AIR-647 candidate coverage (single plain SELECTs behind the counted binding); every other source
-// is an injected reader that the activation card wires to the owning domain (prediction authority, ratings documents, R2 for the legacy log).
+// is an injected reader that the activation card wires to the owning domain, under the contract below.
 //
 // What it adds over the legacy route (docs/reference/api/film-history.md), exactly the list of decision 6a:
 //  * every typed id of decision 2 is accepted (the resolver), all authorized aliases are read (decision 6b), never a ratings-only key;
 //  * stable event identities `<storageId>|<sourceEventId>` and the deduplication of decision 6 (one fact reachable through two aliases is one event);
 //  * a cursor bound to the canonical survivor, the alias set, the identity read-set digest, the candidate-coverage token and the source tokens;
 //  * typed invalidation `409 history_changed` with `identity_moved`, `alias_set_changed`, `coverage_changed` or `source_changed`;
-//  * `present` only with complete candidate coverage and every source readable; incomplete coverage is `partial`, never `present`.
-// The event shapes are the legacy builders' own (src/domain/film-history.js, loaded below), so the two readers cannot drift apart on a field.
+//  * `present` only with complete candidate coverage, every source readable and valid, and a complete Diary read; otherwise `partial`.
+// The event shapes are the legacy builders' own (src/domain/film-history.js, loaded below), and the one-hop migration overlay is the legacy reader's own
+// (LetterboxdFacts.overlay), so the readers cannot drift apart on a field.
+//
+// Ratings facts are NOT read a second time: the fact records come from the bounded G1 evidence of `readRatings` (the same bytes the coverage read and
+// the after-statement fences), reached only through the proven path of an authorized seed. An injected reader can neither add a record nor change one.
+//
+// Source contract (every injected reader): `reader(args, {budget, limits})` -> {status, token, bytes, scanned, value?}.
+//   status  `recorded` | `missing` | `unreadable` | `over_cap`; a recorded value of the wrong shape is `invalid` (never read as empty).
+//   token   REQUIRED non-empty string for every status: the object's etag, or for `missing` an explicit absence predicate naming the authority and
+//           generation that proves it. A result without a usable token is refused (the history is `unavailable`).
+//   bytes, scanned  what the reader read and examined; they must not exceed `limits` (the reader stops before materializing past them and answers
+//           `over_cap`; the reader here re-checks what was reported). A reader filters at the source with `args` (the authorized ids), so unrelated
+//           entries of a shared document are never materialized.
+//   budget  the request's counted 40-statement budget object; a D1-backed reader charges it and throws {code:'budget_exceeded'} when it cannot pay.
+// `recheck(list)` is REQUIRED: it re-reads every token of `list` after all reads (E1) and answers true only when none moved.
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -22,16 +36,27 @@ import {aliases as authorizedAliases,readRatings,countedDatabase} from './film-a
 export const FILM_HISTORY_AGGREGATE_CONTRACT='film-history-aggregate/v1';
 export const HISTORY_DEFAULT_LIMIT=50;
 export const HISTORY_MAX_LIMIT=100;
-// Work bound of one request: more events than this is `unavailable`, never a silently truncated history.
+// Work bound of one request: more events than this is `unavailable`, never a silently truncated history. It is checked while events are collected.
 export const HISTORY_MAX_EVENTS=10000;
+// Per-source work bounds a reader must honour before it materializes anything (bytes read and entries examined).
+export const HISTORY_SOURCE_LIMITS=Object.freeze({
+ predictions:Object.freeze({maxBytes:1000000,maxScanned:5000}),
+ legacyLog:Object.freeze({maxBytes:4000000,maxScanned:50000}),
+ profile:Object.freeze({maxBytes:200000,maxScanned:1}),
+ diaryHistory:Object.freeze({maxBytes:8000000,maxScanned:100000}),
+ diaryState:Object.freeze({maxBytes:50000,maxScanned:1}),
+ predictionVersion:Object.freeze({maxBytes:2000000,maxScanned:1}),
+});
 export const HISTORY_CHANGED_REASONS=['identity_moved','alias_set_changed','coverage_changed','source_changed'];
 
 const legacy=vm.runInNewContext(fs.readFileSync(new URL('./domain/film-history.js',import.meta.url),'utf8')
  +'\n;({historyTime,historyValue,predictionHistoryEvent,ratingHistoryEvent,legacyRatingEvent,diaryViewingEvent,compareHistoryEvents})',{});
+const letterboxdFacts=vm.runInNewContext(fs.readFileSync(new URL('./letterboxd-facts.js',import.meta.url),'utf8')+'\n;LetterboxdFacts',{});
 const plain=value=>JSON.parse(JSON.stringify(value));
 const digestOf=value=>'sha256:'+createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const eventIdOf=(storageId,sourceEventId)=>storageId+'|'+sourceEventId;
 export {eventIdOf as historyEventId};
+const isObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 
 // ---- cursor ----
 // h1.<offset>.<survivor>.<aliases>.<identity>.<coverage>.<sources>, 12 hex characters per binding.
@@ -67,38 +92,66 @@ export function parseHistoryPage({limit,cursor}={}){
  return {limit:size,offset:parsed.offset,cursor:parsed};
 }
 
+// ---- the fact records of the authorized seeds, from the shared G1 evidence ----
+// One proven path per seed: the seed's fact key, followed one hop by the same rule the coverage walk used. A redirect reads the target (as the legacy
+// route does); a migration reads the overlay of source and target (the legacy overlay), stored under the target key. A seed with no proven path, a record
+// the evidence does not hold, or a record whose history is malformed is UNPROVEN: it contributes nothing and the rating facts are never certified.
+// -> {facts:[{factKey, aliases, record}], proven:boolean}
+export function factsFromEvidence(seeds,evidence){
+ const byKey=new Map();
+ let proven=true;
+ const put=(factKey,alias,record,overlaid)=>{
+  const held=byKey.get(factKey);
+  // An overlay is the union of its two records, so it supersedes a plain read of the same target key; two plain reads of one key are the same shared bytes.
+  if(!held||(overlaid&&!held.overlaid))byKey.set(factKey,{factKey,aliases:new Set([...(held?.aliases||[]),alias]),record,overlaid});
+  else held.aliases.add(alias);
+ };
+ const sound=value=>isObject(value)&&(value.ratingHistory===undefined||Array.isArray(value.ratingHistory));
+ for(const seed of seeds){
+  const root=evidence?.seedRoots?.[seed],path=evidence?.paths?.[root],start=evidence?.records?.[root];
+  if(root===undefined||!path||!start||!sound(start.value)){proven=false;continue;}
+  if(!start.kind){put(root,seed,start.value,false);continue;}
+  const hop=path[1],end=hop===undefined?null:evidence.records[hop];
+  if(!end||end.kind||!sound(end.value)){proven=false;continue;}
+  if(start.kind==='redirect')put(hop,seed,end.value,false);
+  else put(hop,seed,letterboxdFacts.overlay(start.value,end.value),true);
+ }
+ return {facts:[...byKey.values()].map(item=>({factKey:item.factKey,aliases:[...item.aliases].sort(),record:item.record})).sort((a,b)=>a.factKey<b.factKey?-1:1),proven};
+}
+
 // ---- pure assembly over records the caller has already read ----
-// `facts` are the fact records reached from the authorized seeds: [{factKey, aliases:[<link-index alias>], record}]; one fact key reached twice is merged.
-// `bundles` maps an authorized storage id to its prediction bundle. `diary.history` is the stored Diary history; only entries of an authorized lid join.
-export function buildAliasHistory({lids=[],movies=[],bundles={},facts=[],legacyLog=null,diary=null,profile=null,coverageComplete=false,candidateLids=[]}){
+// `facts` are [{factKey, aliases:[<link-index alias>], record}] (see factsFromEvidence). `bundles` maps an authorized storage id to its prediction bundle,
+// or to null when that source was not readable and valid. `diary.history` is the stored Diary history; only entries of an authorized lid join.
+// `proof` says which inputs were readable and valid: {predictions, ratings}; a current value is stated as present/absent only with that proof (and with
+// complete coverage), a known conflict is kept without it.
+const PREDICTION_VALUE_FIELDS=['predictedRating','probability4Plus','confidence'];
+export function buildAliasHistory({lids=[],movies=[],bundles={},facts:factList=[],legacyLog=null,diary=null,profile=null,coverageComplete=false,candidateLids=[],proof={predictions:true,ratings:true}}){
  const storageIds=[...lids,...movies.map(n=>'tmdb_'+n)].sort(),known=new Set(storageIds);
  const byId=new Map(),notes=new Set(),records=new Map();
  const add=(event,storageId,sourceEventId,holders)=>{
-  const identity=eventIdOf(storageId,sourceEventId),next={...plain(event),identity,storageId,storageIds:[...holders].sort()},seen=byId.get(identity);
-  if(!seen){byId.set(identity,next);return next;}
-  // The same fact reached through another alias: one event, every alias that reached it. (A fact key is one record and a source keeps its own event ids unique,
-  // so two different payloads can never share an identity.)
-  seen.storageIds=[...new Set([...seen.storageIds,...next.storageIds])].sort();
-  return seen;
+  const identity=eventIdOf(storageId,sourceEventId),seen=byId.get(identity);
+  if(seen){
+   // The same fact reached through another alias: one event, every alias that reached it.
+   seen.storageIds=[...new Set([...seen.storageIds,...holders])].sort();
+   return seen;
+  }
+  if(byId.size>=HISTORY_MAX_EVENTS){const error=new Error('history_too_large');error.code='history_too_large';throw error;}
+  const next={...plain(event),identity,storageId,storageIds:[...holders].sort()};
+  byId.set(identity,next);
+  return next;
  };
  // Predictions: one bundle per authorized storage id; two events under two aliases stay two events (decision 6).
  for(const storageId of storageIds){
   const bundle=bundles[storageId];
-  if(!bundle||typeof bundle!=='object')continue;
+  if(!isObject(bundle))continue;
   const rows=[...(Array.isArray(bundle.history)?bundle.history:[]).map((record,i)=>({record,position:'history',index:i})),...(bundle.current?[{record:bundle.current,position:'current',index:0}]:[])];
   for(const {record,position,index} of rows){
-   const sourceEventId='prediction|'+position+'|'+index,event=add(legacy.predictionHistoryEvent(record,position,index),storageId,sourceEventId,[storageId]);
-   records.set(event.identity,{record,storageId});
+   const event=add(legacy.predictionHistoryEvent(record,position,index),storageId,'prediction|'+position+'|'+index,[storageId]);
+   records.set(event.identity,{record,storageId,position});
   }
  }
  // Ratings: one fact key is one source of events whatever alias reached it.
- const factsByKey=new Map();
- for(const fact of facts){
-  const held=factsByKey.get(fact.factKey);
-  if(held)held.aliases=[...new Set([...held.aliases,...fact.aliases])].sort();
-  else factsByKey.set(fact.factKey,{factKey:fact.factKey,aliases:[...fact.aliases].sort(),record:fact.record});
- }
- for(const {factKey,aliases,record} of [...factsByKey.values()].sort((a,b)=>a.factKey<b.factKey?-1:1)){
+ for(const {factKey,aliases,record} of factList){
   const seen=new Map();
   for(const entry of Array.isArray(record?.ratingHistory)?record.ratingHistory:[]){
    const id=(entry?.kind==='rolled_back'?'r':'a')+'|'+entry?.observationId,occurrence=seen.get(id)||0;seen.set(id,occurrence+1);
@@ -113,12 +166,11 @@ export function buildAliasHistory({lids=[],movies=[],bundles={},facts=[],legacyL
   if(known.has(id)){const event=legacy.legacyRatingEvent(entry,i);add(event,'legacy-log',event.identity,[id]);}
  });
  // Diary: every entry of every authorized lid; a candidate lid outside the authorized set is excluded and named.
- const diaryEvents=[];
  for(const entry of Object.values(diary?.history?.entries||{})){
   const lid=entry?.identity?.type==='letterboxd_lid'?entry.identity.value:null;
   if(lid===null||!lids.includes(lid))continue;
   const event=legacy.diaryViewingEvent(entry,{lid,via:'authorized_alias'});
-  diaryEvents.push(add(event,lid,event.identity,[lid]));
+  add(event,lid,event.identity,[lid]);
  }
  for(const lid of [...new Set(candidateLids)].sort())if(!lids.includes(lid))notes.add('diary_lid_not_authorized:'+lid);
  const events=[...byId.values()].sort(legacy.compareHistoryEvents);
@@ -139,45 +191,64 @@ export function buildAliasHistory({lids=[],movies=[],bundles={},facts=[],legacyL
   if(viewings.some(e=>e.keyBasis==='viewing_id'&&days.has(e.watchedDate)))notes.add('diary_entries_may_overlap');
  }
  if(!coverageComplete)notes.add('coverage_incomplete');
- // Current values (decision 6): one distinct value is stated only with complete coverage, two are a conflict with each value and its storage id, no winner.
- const field=(values,key)=>{
-  const distinct=new Set(values.map(key));
+ // Current values (decision 6, C2): the VALUES are compared, never the events that carry them. Two different values are a conflict with each value, its
+ // storage identity and its provenance, no winner; equal values with different provenance agree. A single value is `present` and no value is `absent`
+ // only with complete coverage and readable, valid inputs (`proof`); without them they are `partial` and `unknown`, and a known conflict is kept.
+ const field=(values,valueKey,proved)=>{
+  const distinct=new Set(values.map(v=>JSON.stringify(valueKey(v))));
   if(distinct.size>1)return {status:'conflict',values};
-  if(distinct.size===1)return {status:coverageComplete?'present':'partial',values};
-  return {status:coverageComplete?'absent':'unknown',values:[]};
+  const certain=coverageComplete&&proved;
+  if(distinct.size===1)return {status:certain?'present':'partial',values};
+  return {status:certain?'absent':'unknown',values:[]};
  };
  const predictions=[];
- for(const [id,{record,storageId}] of records){
-  if(!id.includes('|prediction|current|'))continue;
-  predictions.push({storageId,generatedAt:legacy.historyTime(record.generatedAt),contentSha256:legacy.historyValue(record,'contentSha256'),
+ for(const {record,storageId,position} of records.values()){
+  if(position!=='current')continue;
+  predictions.push({storageId,value:Object.fromEntries(PREDICTION_VALUE_FIELDS.map(name=>[name,legacy.historyValue(record,name)])),
+   provenance:{generatedAt:legacy.historyTime(record.generatedAt),contentSha256:legacy.historyValue(record,'contentSha256'),runId:legacy.historyValue(record,'runId'),
+    tasteProfileVersion:legacy.historyValue(record,'tasteProfileVersion'),tasteProfileHash:legacy.historyValue(record,'tasteProfileHash')},
    matchesCurrentProfile:profile&&record.tasteProfileVersion!=null?record.tasteProfileVersion===profile.version&&record.tasteProfileHash===profile.profileHash:null});
  }
  predictions.sort((a,b)=>a.storageId<b.storageId?-1:1);
- if(new Set(predictions.map(p=>p.generatedAt+'|'+p.contentSha256)).size>1)notes.add('prediction_current_in_several_storage_ids');
- const ratings=[...factsByKey.values()].filter(fact=>fact.record?.rating).map(fact=>({factKey:fact.factKey,storageIds:fact.aliases,value:legacy.historyValue(fact.record.rating,'value'),
-  observedAt:legacy.historyTime(fact.record.rating.observedAt),source:legacy.historyValue(fact.record.rating,'source'),observationId:legacy.historyValue(fact.record.rating,'observationId'),watchedAt:null}));
- return {events,notes:[...notes].sort(),records,current:{prediction:field(predictions,p=>p.generatedAt+'|'+p.contentSha256),rating:field(ratings,r=>r.value+'|'+r.observationId)}};
+ const ratings=factList.filter(fact=>isObject(fact.record?.rating)).map(fact=>({factKey:fact.factKey,storageIds:fact.aliases,value:legacy.historyValue(fact.record.rating,'value'),
+  provenance:{observedAt:legacy.historyTime(fact.record.rating.observedAt),source:legacy.historyValue(fact.record.rating,'source'),observationId:legacy.historyValue(fact.record.rating,'observationId')},watchedAt:null}));
+ const current={prediction:field(predictions,p=>p.value,proof.predictions),rating:field(ratings,r=>r.value,proof.ratings)};
+ if(current.prediction.status==='conflict')notes.add('prediction_current_in_several_storage_ids');
+ return {events,notes:[...notes].sort(),records,current};
 }
 
 // ---- the reader ----
-const SOURCE_STATUS=new Set(['recorded','missing','unreadable']);
-class SourceUnavailable extends Error{constructor(source,code){super(source+':'+code);this.source=source;this.code=code;}}
+class SourceFailure extends Error{constructor(reason,source){super(reason);this.code=reason;this.source=source;}}
 function reasonOf(error){
  const code=String(error?.code||'');
+ if(['budget_exceeded','history_too_large','history_source_over_cap'].includes(code))return code;
  if(code.startsWith('prediction_'))return 'prediction_unavailable';
  if(code.startsWith('ratings_'))return 'ratings_unavailable';
  return 'history_source_unavailable';
 }
-const normalized=(source,result)=>{
- if(!result||!SOURCE_STATUS.has(result.status)||(result.etag!=null&&typeof result.etag!=='string'))throw new SourceUnavailable(source,'malformed');
- return {status:result.status,etag:result.etag??null,value:result.status==='recorded'?result.value:null};
-};
 const unavailableHistory=(reason,extra={})=>({history:{status:'unavailable',reason,token:null,tokenStatus:'unavailable',...extra}});
+const nonNegative=value=>Number.isInteger(value)&&value>=0;
+const SHAPES={
+ predictions:value=>isObject(value)&&(value.history===undefined||Array.isArray(value.history)&&value.history.every(isObject))&&(value.current==null||isObject(value.current)),
+ legacyLog:value=>Array.isArray(value)&&value.every(isObject),
+ profile:isObject,
+ diaryHistory:value=>isObject(value)&&(value.entries===undefined||isObject(value.entries)),
+ diaryState:isObject,
+};
+const READERS={predictions:'predictionBundle',legacyLog:'legacyLog',profile:'profile',diaryHistory:'diaryHistory',diaryState:'diaryState'};
+// One source answer, checked against the contract. A broken contract (no usable token, no counts, counts over the limits, an unknown status) is a typed
+// failure of the whole history, never an empty source. A recorded value of the wrong shape is `invalid`.
+function accepted(source,result,limits){
+ if(!isObject(result))throw new SourceFailure('history_source_unavailable',source);
+ const {status,token,bytes,scanned}=result;
+ if(!['recorded','missing','unreadable','over_cap'].includes(status)||typeof token!=='string'||!token.length||!nonNegative(bytes)||!nonNegative(scanned))throw new SourceFailure('history_source_unavailable',source);
+ if(status==='over_cap'||bytes>limits.maxBytes||scanned>limits.maxScanned)throw new SourceFailure('history_source_over_cap',source);
+ if(status!=='recorded')return {status,token,value:null};
+ return !SHAPES[source](result.value)?{status:'invalid',token,value:null}:{status,token,value:result.value};
+}
 
-// `sources` is the set of injected readers (each returns {status:'recorded'|'missing'|'unreadable', etag, value}; a throw is `unavailable`):
-//   predictionBundle(storageId), factRecords(seeds) -> [{alias, factKey, status, etag, value}] (redirect/migration already followed, as the legacy route does),
-//   legacyLog(), profile(), diaryHistory(), diaryState(), predictionVersion(storageId, record) -> {status, r2Key, contentSha256} (page events only, optional),
-//   recheck(list) -> boolean, the E1 re-read of every source token after the reads (optional).
+// The sections reader. `sources`: predictionBundle({storageId}), legacyLog({storageIds}), profile({}), diaryHistory({lids}), diaryState({}),
+// predictionVersion({storageId, record}) (page events only, optional) and recheck(list) (required); see the source contract above.
 async function readHistorySection(env,resolution,budget,sources,page){
  const set=authorizedAliases(resolution);
  // A cursor of another canonical survivor never applies, whatever else this request can or cannot read; a Film without an authorized alias never issued one.
@@ -186,45 +257,59 @@ async function readHistorySection(env,resolution,budget,sources,page){
   if(page.cursor)return {history:{status:'changed',reason:'alias_set_changed'}};
   return {history:{status:'unknown',reason:'no_authorized_alias',token:null,tokenStatus:'unavailable'}};
  }
+ if(typeof sources?.recheck!=='function')return unavailableHistory('source_recheck_missing');
  const ratings=await readRatings(countedDatabase(database(env),budget),budget,resolution,set);
  if(ratings.state!=='open')return unavailableHistory(ratings.state==='budget'?'budget_exceeded':ratings.reason);
+ // The ratings fence reservation is consumed on every path: the E1 after-read below, or, when the history fails first, a best-effort read in `finally`.
+ let consumed=false;
+ const fence=async()=>{consumed=true;return ratings.after();};
+ try{
+  return await readOpenHistory(resolution,budget,sources,page,set,ratings,fence);
+ }catch(error){
+  return unavailableHistory(reasonOf(error),{source:error?.source??null});
+ }finally{
+  if(!consumed){try{await ratings.after();}catch{/* the reservation is spent; nothing more to do */}}
+ }
+}
+
+async function readOpenHistory(resolution,budget,sources,page,set,ratings,fence){
  const coverage=ratings.coverage,complete=coverage.status==='complete';
  const list=[];
- const take=async(source,key,run)=>{const result=normalized(source,await run());list.push({source,key,status:result.status,etag:result.etag});return result;};
- let bundles={},facts,legacyLog,profile,diaryHistory,diaryState;
- try{
-  for(const storageId of set.storageIds)bundles[storageId]=(await take('predictions',storageId,()=>sources.predictionBundle(storageId))).value;
-  const reached=await sources.factRecords(set.seeds);
-  if(!Array.isArray(reached))throw new SourceUnavailable('facts','malformed');
-  facts=reached.map(item=>({alias:item.alias,factKey:item.factKey,...normalized('facts',item)}));
-  for(const item of facts)list.push({source:'facts',key:item.factKey,status:item.status,etag:item.etag});
-  legacyLog=await take('legacyLog','rating-observations',()=>sources.legacyLog());
-  profile=await take('profile','profile',()=>sources.profile());
-  diaryHistory=await take('diaryHistory','history',()=>sources.diaryHistory());
-  diaryState=await take('diaryState','state',()=>sources.diaryState());
- }catch(error){
-  return unavailableHistory(error instanceof SourceUnavailable&&error.code==='malformed'?'history_source_unavailable':reasonOf(error),{source:error?.source??null});
+ const take=async(source,key,args)=>{
+  const limits=HISTORY_SOURCE_LIMITS[source];
+  const result=accepted(source,await sources[READERS[source]](args,{budget,limits}),limits);
+  list.push({source,key,status:result.status,token:result.token});
+  return result;
+ };
+ const bundles={};let predictionsProved=true;
+ for(const storageId of set.storageIds){
+  const result=await take('predictions',storageId,{storageId});
+  bundles[storageId]=result.status==='recorded'?result.value:null;
+  if(result.status==='unreadable'||result.status==='invalid')predictionsProved=false;
  }
- // E1: the coverage reads and every source token are re-read after the reads; a difference is `generation_moved`, never a mixed answer.
- let held=false;
- try{held=(await ratings.after())&&(typeof sources.recheck!=='function'||await sources.recheck(plain(list))===true);}catch{held=false;}
- if(!held)return unavailableHistory('generation_moved');
+ // The fact records are the shared G1 evidence, never a second read.
+ const reached=factsFromEvidence(set.seeds,ratings.evidence);
+ const legacyLog=await take('legacyLog','rating-observations',{storageIds:set.storageIds});
+ const profile=await take('profile','profile',{});
+ const diaryHistory=await take('diaryHistory','history',{lids:set.lids});
+ const diaryState=await take('diaryState','state',{});
 
- const factRecords=facts.filter(item=>item.status==='recorded'&&item.value&&typeof item.value==='object').map(item=>({factKey:item.factKey,aliases:[item.alias],record:item.value}));
- const candidateLids=factRecords.map(item=>item.record.links?.letterboxd).filter(lid=>typeof lid==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(lid));
- const built=buildAliasHistory({lids:set.lids,movies:set.movies,bundles,facts:factRecords,legacyLog:legacyLog.value,diary:{history:diaryHistory.value},profile:profile.value,coverageComplete:complete,candidateLids});
- if(built.events.length>HISTORY_MAX_EVENTS)return unavailableHistory('history_too_large');
+ const candidateLids=reached.facts.map(item=>item.record.links?.letterboxd).filter(lid=>typeof lid==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(lid));
+ const built=buildAliasHistory({lids:set.lids,movies:set.movies,bundles,facts:reached.facts,legacyLog:legacyLog.value,diary:{history:diaryHistory.value},profile:profile.value,coverageComplete:complete,candidateLids,
+  proof:{predictions:predictionsProved,ratings:reached.proven}});
  if(diaryHistory.status!=='recorded')built.notes.push('diary_history_'+diaryHistory.status);
- const state=diaryState.value,diaryComplete=state?.lastOutcome==='complete'&&state?.coverage?.reachedEnd===true&&!state?.resumePage;
- if(diaryHistory.status==='recorded'&&!diaryComplete)built.notes.push('diary_coverage_partial');
+ const state=diaryState.value,diaryComplete=diaryHistory.status==='recorded'&&diaryState.status==='recorded'&&state.lastOutcome==='complete'&&state.coverage?.reachedEnd===true&&!state.resumePage;
+ if(!diaryComplete)built.notes.push('diary_coverage_partial');
  built.notes.sort();
 
+ // The tokens. Fact records are bound through the coverage token (their etags are in it), so a changed record is `coverage_changed`; the sources digest
+ // holds the objects the caller read. Version evidence is page-local and is deliberately not part of the cursor binding (below).
  const tokens={
   survivor:digestOf(resolution.filmId),
   aliases:digestOf({lids:[...set.lids].sort(),movies:[...set.movies].sort()}),
   identity:resolution.fence.digest,
   coverage:digestOf({status:coverage.status,reason:coverage.reason??null,token:coverage.token}),
-  sources:digestOf(list.map(item=>[item.source,item.key,item.status,item.etag]).sort((a,b)=>JSON.stringify(a)<JSON.stringify(b)?-1:1)),
+  sources:digestOf(list.map(item=>[item.source,item.key,item.status,item.token]).sort((a,b)=>JSON.stringify(a)<JSON.stringify(b)?-1:1)),
  };
  if(page.cursor){
   const moved=historyCursorMismatch(page.cursor,tokens);
@@ -232,26 +317,43 @@ async function readHistorySection(env,resolution,budget,sources,page){
   if(page.offset>built.events.length)return {history:{status:'invalid_cursor'}};
  }
  const slice=built.events.slice(page.offset,page.offset+page.limit);
+ // Immutable-version verification of the events on this page, BEFORE the fences so a version reader that moves a source is caught. It is page-local:
+ // it proves that this page's pointers resolved to bodies of the recorded hash at this read, and is not a cursor-wide proof (the pointers themselves are
+ // part of the bundle token the cursor binds, the bodies are immutable by hash and are not read to paginate).
+ const checks=[];
  let versionProblem=false;
  for(const event of slice){
   if(event.type!=='prediction')continue;
   const held=built.records.get(event.identity),record=held?.record;
   if(!record?.r2Key&&!record?.contentSha256)continue;
-  const checked=typeof sources.predictionVersion==='function'?await sources.predictionVersion(held.storageId,record):null;
-  event.version=checked&&typeof checked.status==='string'?{status:checked.status,r2Key:checked.r2Key??null,contentSha256:checked.contentSha256??null}
+  let checked=null;
+  if(typeof sources.predictionVersion==='function'){
+   const limits=HISTORY_SOURCE_LIMITS.predictionVersion;
+   const result=await sources.predictionVersion({storageId:held.storageId,record},{budget,limits});
+   if(!isObject(result)||typeof result.status!=='string'||typeof result.token!=='string'||!result.token.length||!nonNegative(result.bytes)||!nonNegative(result.scanned)||result.bytes>limits.maxBytes||result.scanned>limits.maxScanned)
+    throw new SourceFailure('history_source_unavailable','predictionVersion');
+   checked=result;checks.push({source:'predictionVersion',key:record.r2Key??held.storageId,status:result.status,token:result.token});
+  }
+  event.version=checked?{status:checked.status,r2Key:checked.r2Key??null,contentSha256:checked.contentSha256??null}
    :{status:'unchecked',r2Key:legacy.historyValue(record,'r2Key'),contentSha256:legacy.historyValue(record,'contentSha256')};
   if(['missing','mismatch','invalid','unchecked'].includes(event.version.status))versionProblem=true;
  }
- const unreadable=[...list].some(item=>item.status==='unreadable');
+ // E1: the coverage reads (which fence the shared fact records) and EVERY source token, version evidence included, are re-read after ALL reads; a
+ // difference is `generation_moved`, never a mixed answer. A recheck that is absent was refused above; a recheck that does not say true is a move.
+ let held=false;
+ try{held=(await fence())&&(await sources.recheck(plain([...list,...checks])))===true;}catch{held=false;}
+ if(!held)return unavailableHistory('generation_moved');
+
+ const unreadable=list.some(item=>item.status==='unreadable'||item.status==='invalid');
  const next=page.offset+page.limit<built.events.length?encodeHistoryCursor(page.offset+page.limit,tokens):null;
- const status=complete&&!unreadable&&!versionProblem?'present':'partial';
- const reason=status==='present'?undefined:!complete?'coverage_incomplete':unreadable?'source_unreadable':'version_unverified';
+ const status=complete&&!unreadable&&diaryComplete&&reached.proven&&!versionProblem?'present':'partial';
+ const reason=status==='present'?undefined:!complete?'coverage_incomplete':unreadable?'source_unreadable':!reached.proven?'ratings_facts_unproven':!diaryComplete?'diary_coverage_partial':'version_unverified';
  return {history:{
   status,...(reason?{reason}:{}),
   aliases:{lids:[...set.lids].sort(),movies:[...set.movies].sort(),storageIds:set.storageIds},
   coverage:{status:coverage.status,...(coverage.reason?{reason:coverage.reason}:{}),token:tokens.coverage},
   tokens,
-  sources:Object.fromEntries(['predictions','facts','legacyLog','profile','diaryHistory','diaryState'].map(name=>[name,list.filter(item=>item.source===name).map(item=>item.status).sort()])),
+  sources:Object.fromEntries(['predictions','legacyLog','profile','diaryHistory','diaryState'].map(name=>[name,list.filter(item=>item.source===name).map(item=>item.status).sort()])),
   current:built.current,partial:status!=='present',notes:built.notes,events:slice,
   page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next},
  }};

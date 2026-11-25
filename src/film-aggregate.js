@@ -247,6 +247,8 @@ export async function readRatings(db,budget,resolution,set){
   const generation=Number(marker.generation);
   const view=list(head.view).map(viewRow).sort((a,b)=>a.aliasId<b.aliasId?-1:1);
   const reasons=new Set(),documents=new Map(),seedAbsent=[],notes=[];
+  // The bounded G1 evidence a history reader shares (AIR-650): each seed's fact key, the one-hop path walked from it and the records as read (etag and parsed value).
+  const evidence={seedRoots:{},paths:{},records:{}};
   let candidates=[],settlement=EMPTY_SETTLEMENT,proofPairs=[],proofMovies=[];
   const coverageToken=()=>({generation,links:documents.get(LINKS_KEY)??null,records:Object.fromEntries([...documents].filter(([key])=>key!==LINKS_KEY).sort()),seedAbsent:[...seedAbsent],candidates:digestOf({candidates,settlement})});
   // Authorized aliases beyond the per-scheme cap are never examined: they are unexamined candidates, so coverage cannot be complete.
@@ -272,6 +274,7 @@ export async function readRatings(db,budget,resolution,set){
        if(key===undefined){seedAbsent.push(seed);continue;}
        if(typeof key!=='string'||!FACT_KEY.test(key))throw sectionError('ratings_document_malformed');
        roots.add(key);
+       evidence.seedRoots[seed]=key;
       }
       if(seedAbsent.length)reasons.add('seed_absent_unproved');
       // 4. Each fact record reached is read once, in a bounded statement; every root is walked on its own: one redirect or migration hop is followed and both
@@ -284,7 +287,7 @@ export async function readRatings(db,budget,resolution,set){
         if(record.state==='over_cap'){reasons.add('discovery_cap');continue;}
         if(record.state!=='ok'){reasons.add('ratings_evidence_unavailable');continue;}
         documents.set(RECORD_PREFIX+key+'.json',record.etag);
-        out.set(key,{hop:recordEdge(record.value,key)});
+        out.set(key,{hop:recordEdge(record.value,key),etag:record.etag,value:record.value,kind:record.value.redirectTo!=null?'redirect':record.value.migrating!=null?'migrating':null});
        }
        return out;
       };
@@ -296,6 +299,7 @@ export async function readRatings(db,budget,resolution,set){
        if(rootKeys.length+targets.length>FACT_RECORDS_MAX)reasons.add('discovery_cap');
        else{
         const all=new Map([...first,...(targets.length?await readRecords(targets):new Map())]);
+        for(const [key,item] of all)evidence.records[key]={etag:item.etag,value:item.value,hop:item.hop,kind:item.kind};
         for(const root of rootKeys){
          const path=[root];
          for(let at=root,depth=0;;){
@@ -306,6 +310,7 @@ export async function readRatings(db,budget,resolution,set){
           path.push(record.hop);at=record.hop;
          }
          for(const key of path)reached.add(key);
+         evidence.paths[root]=[...path];
         }
        }
       }
@@ -351,7 +356,7 @@ export async function readRatings(db,budget,resolution,set){
    const now={marker:json(r.marker),etags:list(r.etags).map(e=>[String(e[0]),String(e[1])]).sort(),view:list(r.view).map(viewRow).sort((a,b)=>a.aliasId<b.aliasId?-1:1),settlement:settlementOf(r)};
    return digestOf(now)===digestOf(before);
   };
-  return {state:'open',generation,view,coverage,after};
+  return {state:'open',generation,view,coverage,after,evidence};
  }catch(error){
   fence.release();
   return overBudget(error)?{state:'budget'}:{state:'unavailable',reason:'ratings_unavailable'};
