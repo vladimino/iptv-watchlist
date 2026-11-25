@@ -337,6 +337,9 @@ export const FILES={
  "film-aggregate.mjs": {
   "suite": "core"
  },
+ "migration-0042-film-redirect-index.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },

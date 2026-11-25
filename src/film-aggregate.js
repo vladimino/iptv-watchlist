@@ -1,8 +1,8 @@
 // AIR-647 / ADR 0216 (Accepted), delivery graph step 3. FilmAggregateV1: the sections of the unified Film read contract, composed per request over the
 // typed resolver of AIR-646 (src/film-aggregate-resolver.js), with the mandatory candidate discovery and coverage of decision 6b (G1).
 // DORMANT: nothing in the Worker imports this module or the resolver (neither is bundled; build.mjs does not name them), so no route serves it and no
-// consumer is switched. Activation is AIR-648 (its own owner GO and its pre-activation readback of the retirement-ledger index: AIR-667 delivered migration 0040
-// offline only, its production apply is the AIR-603 M1 chain). The internal route handler below exists for the tests and for that card.
+// consumer is switched. Activation is AIR-648 (its own owner GO and its pre-activation readback of both indexes it needs, tmdb_retirement_decision_movie (0040,
+// AIR-667) and film_redirect_by_target (0042, this card): both migrations are delivered offline only and applied together by the AIR-603 M1 chain). The internal route handler below exists for the tests and for that card.
 // It only reads D1: every statement is a plain SELECT (a write is refused before it reaches the binding), no R2, no network, no repair, no promotion, no cache.
 //
 // Shape of one request (decision 7): the final identity fence is reserved first (resolver); then each section reserves its after-statement before it reads,
@@ -481,24 +481,32 @@ async function availabilitySection(db,fence,set){
 
 // ---- display (decision 5: film_metadata, localization sources, owner_review_entry; owner > reviewed > automatic) ----
 // ONE statement reads everything the section consumes, including every column the localization mapping reads, so the title is built from the rows the token
-// covers (localizationInputsFromRows is the loader's own mapping). The owner entries are those of the survivor and of the redirect chain the request passed
-// through (primary keys and owner_review_entry_identity). The entries of Films merged INTO the survivor are NOT read: finding them needs film_redirect by
-// to_film_id, which has no index, and decision 7 allows no scan on this route. So the title is never claimed complete (`partial`, `owner_ancestors_unproved`)
-// until an owner-approved index film_redirect(to_film_id) exists (a holdpoint of activation, see the API reference).
-const DISPLAY_SQL="SELECT (SELECT json_object('originalTitle',original_title,'canonicalIdentity',canonical_identity) FROM film WHERE id=?) AS film,"
+// covers (localizationInputsFromRows is the loader's own mapping).
+// Owner ancestry (ADR 0081: an owner_review_entry link is a snapshot a Film merge does not rewrite, so the owner values of a Film are those of every link in the redirect
+// TREE that ends at it): a recursive CTE walks `film_redirect` BACKWARDS from the survivor through `film_redirect_by_target` (migration 0042), whatever alias the request
+// used. It is bounded in depth and in breadth INSIDE the statement: it stops at OWNER_ANCESTOR_DEPTH + 1 levels and at OWNER_ANCESTORS_MAX + 2 rows (the survivor, its
+// ancestors, and one more row that proves an overflow); either overflow is typed (`owner_ancestry_bounded`) and never a partial answer. The edges (child, parent, depth)
+// are part of the section token and of its after-read, so a new or removed edge anywhere in the tree moves it; a leaf has no child row, so a child that appears under
+// it appears in the edges too. The owner entries are then found through owner_review_entry_identity, named in the statement (INDEXED BY) so the plan never falls back to the
+// primary-key range of every `film` entry; their order is the planner's, so the section sorts them before it digests or uses them.
+export const OWNER_ANCESTOR_DEPTH=8;
+export const OWNER_ANCESTORS_MAX=64;
+export const DISPLAY_SQL="WITH RECURSIVE anc(id,parent,depth) AS (SELECT ?,NULL,0 UNION ALL SELECT r.from_id,a.id,a.depth+1 FROM film_redirect r INNER JOIN anc a ON r.to_film_id=a.id WHERE a.depth<=? LIMIT ?) "
+ +"SELECT (SELECT json_object('originalTitle',original_title,'canonicalIdentity',canonical_identity) FROM film WHERE id=?) AS film,"
  +"(SELECT json_object('year',year,'runtime',runtime,'synopsis',synopsis,'poster',poster,'url',url,'genres',genres_json,'contentSha256',content_sha256,'updatedAt',updated_at) FROM film_metadata WHERE film_id=?) AS metadata,"
- +"(SELECT json_group_array(json_array(kind,source_key,identity_link,identity_state,localization,generation)) FROM (SELECT kind,source_key,identity_link,identity_state,CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.localization') END AS localization,generation FROM owner_review_entry WHERE kind='film' AND identity_state='verified' AND identity_link IN (SELECT value FROM json_each(?)) ORDER BY source_key LIMIT ?)) AS owner,"
+ +'(SELECT json_group_array(json_array(id,parent,depth)) FROM anc) AS ancestors,'
+ +"(SELECT json_group_array(json_array(kind,source_key,identity_link,identity_state,localization,generation)) FROM (SELECT kind,source_key,identity_link,identity_state,CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.localization') END AS localization,generation FROM owner_review_entry INDEXED BY owner_review_entry_identity WHERE kind='film' AND identity_state='verified' AND identity_link IN (SELECT id FROM anc) LIMIT ?)) AS owner,"
  +'(SELECT json_group_array(json_array(source,value,source_version,provenance_json,observed_at)) FROM (SELECT source,value,source_version,provenance_json,observed_at FROM film_localization_source WHERE film_id=? ORDER BY source LIMIT ?)) AS sources,'
  +"(SELECT json_group_array(json_array(status,source,source_version,provenance_json,value,authority,updated_at)) FROM film_dimension WHERE film_id=? AND dimension='localization') AS dimension,"
  +'(SELECT json_group_array(json_array(person_id,role,ordinal)) FROM (SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? ORDER BY role DESC,ordinal LIMIT ?)) AS credits';
 const METADATA_FIELDS=['year','runtime','synopsis','poster','url','genres'];
 async function displaySection(db,fence,resolution){
- const filmId=resolution.filmId,links=[filmId,...resolution.redirectedFrom];
- const params=[filmId,filmId,JSON.stringify(links),OWNER_ENTRIES_MAX+1,filmId,LOCALIZATION_SOURCES_MAX+1,filmId,filmId,CREDITS_MAX+1];
- const read=x=>({film:json(x.film),metadata:json(x.metadata),owner:list(x.owner),sources:list(x.sources),dimension:list(x.dimension),credits:list(x.credits)});
+ const filmId=resolution.filmId;
+ const params=[filmId,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,filmId,filmId,OWNER_ENTRIES_MAX+1,filmId,LOCALIZATION_SOURCES_MAX+1,filmId,filmId,CREDITS_MAX+1];
+ const read=x=>({film:json(x.film),metadata:json(x.metadata),ancestors:list(x.ancestors).map(a=>({id:String(a[0]),parent:a[1]==null?null:String(a[1]),depth:Number(a[2])})).sort((l,r)=>l.depth-r.depth||(l.id<r.id?-1:l.id>r.id?1:0)),owner:list(x.owner).sort((l,r)=>JSON.stringify(l)<JSON.stringify(r)?-1:JSON.stringify(l)>JSON.stringify(r)?1:0),sources:list(x.sources),dimension:list(x.dimension),credits:list(x.credits)});
  const s=read(await row(db,DISPLAY_SQL,params));
  const metadata=s.metadata;
- const token={metadata:metadata?.contentSha256??metadata?.updatedAt??null,ownerReview:digestOf(s.owner),localization:digestOf({sources:s.sources,dimension:s.dimension})};
+ const token={metadata:metadata?.contentSha256??metadata?.updatedAt??null,ancestry:digestOf(s.ancestors),ownerReview:digestOf(s.owner),localization:digestOf({sources:s.sources,dimension:s.dimension})};
  // Metadata fields: ADR 0214 per-field provenance is not delivered, so a missing or null value is `unknown`, never `absent` (no explicit-null provenance exists).
  const fields={};
  for(const name of METADATA_FIELDS){
@@ -507,13 +515,17 @@ async function displaySection(db,fence,resolution){
   fields[name]=value==null||value===''?{status:'unknown',provenance:'unknown'}:{status:'present',value,provenance:'unknown'};
  }
  fields.originalTitle=s.film?.originalTitle?{status:'present',value:s.film.originalTitle,provenance:'unknown'}:{status:'unknown',provenance:'unknown'};
- // The title: owner (owner_review_entry of the survivor and the redirect chain) > reviewed dictionary > automatic, over the rows captured above.
- if(s.owner.length>OWNER_ENTRIES_MAX)fields.title={status:'unknown',reason:'owner_entries_bounded'};
+ // The owner ancestry is complete only inside both bounds; an overflow of either is never read as "no more ancestors".
+ const bounded=s.ancestors.some(a=>a.depth>OWNER_ANCESTOR_DEPTH)||s.ancestors.length>1+OWNER_ANCESTORS_MAX;
+ const ancestry={status:bounded?'bounded':'complete',films:Math.max(0,s.ancestors.length-1),depth:s.ancestors.reduce((m,a)=>Math.max(m,a.depth),0)};
+ // The title: owner (owner_review_entry of the survivor and every Film of its redirect tree) > reviewed dictionary > automatic, over the rows captured above.
+ if(bounded)fields.title={status:'unknown',reason:'owner_ancestry_bounded'};
+ else if(s.owner.length>OWNER_ENTRIES_MAX)fields.title={status:'unknown',reason:'owner_entries_bounded'};
  else if(s.sources.length>LOCALIZATION_SOURCES_MAX)fields.title={status:'unknown',reason:'localization_sources_bounded'};
  else{
   const entries=s.owner.map(o=>({kind:o[0],source_key:o[1],identity_link:o[2],identity_state:o[3],payload_json:o[4]==null?'{}':'{"localization":'+o[4]+'}'}));
   const candidates=ownerCandidatesFromEntries(entries);
-  const owned=links.flatMap(link=>candidates.get(link)||[]);
+  const owned=s.ancestors.flatMap(a=>candidates.get(a.id)||[]);
   const distinct=[...new Set(owned.map(item=>item.value))];
   if(distinct.length>1)fields.title={status:'conflict',values:owned.map(item=>({value:item.value,sourceKey:item.sourceKey,link:item.link}))};
   else{
@@ -522,14 +534,14 @@ async function displaySection(db,fence,resolution){
    const input=localizationInputsFromRows([filmId],dimensions,sources).get(filmId);
    if(owned.length)input.owner={value:owned[0].value,at:owned.map(item=>item.at).filter(Boolean).sort().at(-1)??null};
    const resolved=resolveLocalization(input);
-   fields.title=resolved.value?{status:'partial',value:resolved.value,provenance:resolved.tier,source:resolved.source??null,reason:'owner_ancestors_unproved'}:{status:'unknown',reason:'owner_ancestors_unproved'};
+   fields.title=resolved.value?{status:'present',value:resolved.value,provenance:resolved.tier,source:resolved.source??null}:{status:'unknown'};
   }
  }
  const truncated=s.credits.length>CREDITS_MAX;
  const credits={status:truncated?'partial':s.credits.length?'present':'unknown',items:s.credits.slice(0,CREDITS_MAX).map(c=>({personId:String(c[0]),role:String(c[1]),ordinal:Number(c[2])}))};
  const statuses=[...Object.values(fields).map(f=>f.status),credits.status];
  const status=statuses.includes('conflict')?'conflict':statuses.every(x=>x==='present')?'present':'partial';
- const section={status,source:'d1:film_metadata',token,fields,credits,ownerAncestors:{status:'unproved',reason:'film_redirect_target_index_pending'}};
+ const section={status,source:'d1:film_metadata',token,fields,credits,ancestry};
  const after=async()=>{if(!fence.redeem())return false;return digestOf(read(await row(db,DISPLAY_SQL,params)))===digestOf(s);};
  return {section,after};
 }

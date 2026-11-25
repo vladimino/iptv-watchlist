@@ -10,8 +10,8 @@ import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {
- readFilmAggregate,readSections,handleFilmAggregateRequest,countedDatabase,FILM_AGGREGATE_ROUTE,
- LINK_DOCUMENT_MAX_PARTS,LINK_INDEX_MAX_ENTRIES,FACT_RECORDS_MAX,FACT_RECORD_MAX_PARTS,SETTLEMENT_ROWS_MAX,CANDIDATES_MAX,CURRENT_SHOWS_MAX,CREDITS_MAX,
+ readFilmAggregate,readSections,handleFilmAggregateRequest,countedDatabase,FILM_AGGREGATE_ROUTE,DISPLAY_SQL,
+ LINK_DOCUMENT_MAX_PARTS,LINK_INDEX_MAX_ENTRIES,FACT_RECORDS_MAX,FACT_RECORD_MAX_PARTS,SETTLEMENT_ROWS_MAX,CANDIDATES_MAX,CURRENT_SHOWS_MAX,CREDITS_MAX,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX,OWNER_ENTRIES_MAX,
 } from '../src/film-aggregate.js';
 import {createStatementBudget,REQUEST_STATEMENT_BUDGET,AUTHORIZED_ALIASES_PER_SCHEME} from '../src/film-aggregate-resolver.js';
 
@@ -251,26 +251,24 @@ function world({lids=['l5'],links=null,records=true}={}){
  metadata(file,'film:tmdb:5',{year:1999,genres:['Drama']});
  ownerTitle(file,'k1','film:tmdb:5','Owner Title');
  const out=await read(file,'tmdb_5');
- // The title is never claimed complete while the owner entries of Films merged into the survivor cannot be read without a film_redirect(to_film_id) index.
- assert.deepEqual([out.body.display.fields.title.status,out.body.display.fields.title.value,out.body.display.fields.title.provenance,out.body.display.fields.title.reason],['partial','Owner Title','owner','owner_ancestors_unproved']);
- assert.deepEqual(out.body.display.ownerAncestors,{status:'unproved',reason:'film_redirect_target_index_pending'});
- assert.deepEqual([out.body.display.fields.year.status,out.body.display.fields.year.value],['present',1999]);
- assert.deepEqual(out.body.display.fields.genres.value,['Drama']);
+ // The owner ancestry of the redirect tree is complete here (no Film was merged into this one): the title is proven.
+ assert.deepEqual([out.body.display.fields.title.status,out.body.display.fields.title.value,out.body.display.fields.title.provenance,out.body.display.fields.title.reason],['present','Owner Title','owner',undefined]);
+ assert.deepEqual(out.body.display.ancestry,{status:'complete',films:0,depth:0});
+ assert.ok(out.body.display.token.ancestry.startsWith('sha256:'));
  // Test 12: no per-field provenance is delivered (ADR 0214 PF): a missing or null field is unknown, never absent.
  for(const name of ['runtime','synopsis','poster','url'])assert.equal(out.body.display.fields[name].status,'unknown',name);
  assert.equal(out.body.display.status,'partial');
  assert.ok(out.body.display.token.ownerReview.startsWith('sha256:')&&out.body.display.token.metadata);
- // An owner entry of a Film merged into the survivor: read when the request passed through it (the redirect chain, indexed); NOT read otherwise, so the title
- // is never `present` (no scan of film_redirect on this route, ADR 0216 decision 7).
+ // The owner ancestry (a Film merged into the survivor) is read from the survivor through film_redirect_by_target, whatever alias the request used.
  const merged=world();film(merged,'film:old:5');sqlite(merged,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);
  ownerTitle(merged,'k2','film:old:5','Ancestor Owner');
- const viaSurvivor=(await read(merged,'tmdb_5')).body.display.fields.title;
- assert.notEqual(viaSurvivor.value,'Ancestor Owner','an ancestor the request did not pass through is not read');
- assert.notEqual(viaSurvivor.status,'present');
- const viaChain=(await read(merged,'film:old:5')).body.display.fields.title;
- assert.deepEqual([viaChain.status,viaChain.value,viaChain.provenance],['partial','Ancestor Owner','owner'],'the redirect chain of the request is read');
+ for(const alias of ['tmdb_5','l5','film:tmdb:5','film:old:5']){
+  const title=(await read(merged,alias)).body.display.fields.title;
+  assert.deepEqual([alias,title.status,title.value,title.provenance],[alias,'present','Ancestor Owner','owner']);
+ }
  ownerTitle(merged,'k3','film:tmdb:5','Other Owner');
  assert.equal((await read(merged,'film:old:5')).body.display.fields.title.status,'conflict','two owner values: no winner');
+ assert.equal((await read(merged,'tmdb_5')).body.display.fields.title.status,'conflict','also from the survivor alias');
  // Test 11.
  const e=env(file,{onQuery:text=>{if(text.includes('FROM ratings_document WHERE part=0'))ownerTitle(file,'k1','film:tmdb:5','Changed');}});
  const moved=await readFilmAggregate(e,'tmdb_5');
@@ -896,9 +894,155 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  assert.equal(coverageOf(await read(settled,'tmdb_5')).status,'complete');
 }
 
+// ---- Owner decision of 25 Nov 2026 (AIR-647): the owner ancestry is a bounded reverse traversal through film_redirect_by_target ----
+{
+ const redirectTo=(file,from,to)=>sqlite(file,`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES (${q(from)},${q(to)},${q(AT)})`);
+ const title=async(file,id='tmdb_5')=>(await read(file,id)).body.display;
+ // A multi-branch tree: S <- A, S <- B, A <- C, C <- D (depth 3), B <- E; owner entries sit on D and on nothing else. Independent of the request alias.
+ const tree=world();
+ for(const id of ['A','B','C','D','E'])film(tree,'film:anc:'+id);
+ for(const [from,to] of [['film:anc:A','film:tmdb:5'],['film:anc:B','film:tmdb:5'],['film:anc:C','film:anc:A'],['film:anc:D','film:anc:C'],['film:anc:E','film:anc:B']])redirectTo(tree,from,to);
+ ownerTitle(tree,'kD','film:anc:D','Deep Owner');
+ for(const alias of ['tmdb_5','l5','film:tmdb:5','film:anc:A','film:anc:D','film:anc:E','film:anc:C']){
+  const d=await title(tree,alias);
+  assert.deepEqual([alias,d.fields.title.status,d.fields.title.value,d.fields.title.provenance],[alias,'present','Deep Owner','owner']);
+  assert.deepEqual(d.ancestry,{status:'complete',films:5,depth:3},alias+': the whole tree, whatever alias was requested');
+ }
+ // Owner precedence over the tree: an owner value beats a reviewed dictionary and an automatic source; two owner values anywhere in the tree conflict, equal values do not.
+ const locSourceRow=(file,filmId,source,value)=>sqlite(file,`INSERT OR REPLACE INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES (${q(filmId)},${q(source)},${q(value)},'v1','{}','r-${source}','2026-11-20T10:00:00.000Z',${q(AT)})`);
+ locSourceRow(tree,'film:tmdb:5','tmdb','Automatic');
+ sqlite(tree,`INSERT OR REPLACE INTO film_dimension (film_id,dimension,status,source,authority,attempts,updated_at,value) VALUES ('film:tmdb:5','localization','reviewed','dictionary','dictionary',0,'${AT}','Reviewed')`);
+ assert.equal((await title(tree)).fields.title.value,'Deep Owner','owner (through an ancestor of depth 3) > reviewed > automatic');
+ ownerTitle(tree,'kD','film:anc:D','Deep Owner');ownerTitle(tree,'kE','film:anc:E','Deep Owner');
+ assert.deepEqual([(await title(tree)).fields.title.status,(await title(tree)).fields.title.value],['present','Deep Owner'],'equal owner values on two branches agree');
+ ownerTitle(tree,'kB','film:anc:B','Other Owner');
+ for(const alias of ['tmdb_5','film:anc:D','film:anc:B']){
+  const t=(await title(tree,alias)).fields.title;
+  assert.equal(t.status,'conflict',alias+': two owner values on different branches, no winner');
+  assert.deepEqual(t.values.map(v=>v.value).sort(),['Deep Owner','Deep Owner','Other Owner']);
+ }
+ sqlite(tree,"DELETE FROM owner_review_entry");
+ assert.deepEqual([(await title(tree)).fields.title.value,(await title(tree)).fields.title.provenance],['Reviewed','reviewed'],'without an owner value the reviewed dictionary wins, then automatic');
+ // An owner entry that is not verified, or of another kind, or linked to an unrelated Film, is not read.
+ film(tree,'film:other:9');
+ ownerTitle(tree,'kX','film:other:9','Stranger');
+ sqlite(tree,"INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','kH','{\"localization\":{\"status\":\"reviewed\",\"value\":\"Held\",\"provenance\":{\"authority\":\"owner\"}}}','film:anc:C','held',1)");
+ assert.equal((await title(tree)).fields.title.value,'Reviewed');
+
+ // Depth bound: a chain of exactly OWNER_ANCESTOR_DEPTH ancestors is read; one more is `bounded` (typed, never "no more ancestors").
+ const chain=(length)=>{
+  const f=world();film(f,'film:c:0');
+  for(let i=1;i<=length;i++){film(f,'film:c:'+i);}
+  sqlite(f,"DELETE FROM film_redirect");
+  redirectTo(f,'film:c:0','film:tmdb:5');
+  for(let i=1;i<=length-1;i++)redirectTo(f,'film:c:'+i,'film:c:'+(i-1));
+  ownerTitle(f,'kLeaf','film:c:'+(length-1),'Chain Owner');
+  return f;
+ };
+ const atDepth=await title(chain(OWNER_ANCESTOR_DEPTH));
+ assert.deepEqual([atDepth.fields.title.status,atDepth.fields.title.value,atDepth.ancestry],['present','Chain Owner',{status:'complete',films:OWNER_ANCESTOR_DEPTH,depth:OWNER_ANCESTOR_DEPTH}]);
+ const pastDepth=await title(chain(OWNER_ANCESTOR_DEPTH+1));
+ assert.deepEqual([pastDepth.fields.title.status,pastDepth.fields.title.reason,pastDepth.ancestry.status,pastDepth.status],['unknown','owner_ancestry_bounded','bounded','partial']);
+ // Breadth bound: exactly OWNER_ANCESTORS_MAX direct ancestors are read, one more is bounded; the owner entry of the LAST one is found at the boundary.
+ const wide=(count)=>{
+  const f=world();
+  const inserts=[];
+  for(let i=0;i<count;i++)inserts.push(`INSERT INTO film (id,contract_version,updated_at) VALUES ('film:w:${i}',1,'${AT}');INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:w:${i}',1,'${AT}');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:w:${i}','film:tmdb:5','${AT}');`);
+  sqlite(f,inserts.join(''));
+  ownerTitle(f,'kLast','film:w:'+(count-1),'Wide Owner');
+  return f;
+ };
+ const atWidth=await title(wide(OWNER_ANCESTORS_MAX));
+ assert.deepEqual([atWidth.fields.title.status,atWidth.fields.title.value,atWidth.ancestry],['present','Wide Owner',{status:'complete',films:OWNER_ANCESTORS_MAX,depth:1}]);
+ const pastWidth=await title(wide(OWNER_ANCESTORS_MAX+1));
+ assert.deepEqual([pastWidth.fields.title.status,pastWidth.fields.title.reason,pastWidth.ancestry.status],['unknown','owner_ancestry_bounded','bounded']);
+ // The work is bounded INSIDE the statement, not only in the answer: the recursive CTE materializes at most OWNER_ANCESTORS_MAX + 2 rows however large the tree is,
+ // and stops at depth OWNER_ANCESTOR_DEPTH + 1 however long the chain is.
+ {
+  const hugeWide=wide(OWNER_ANCESTORS_MAX*3);
+  const hugeChain=chain(OWNER_ANCESTOR_DEPTH*4);
+  const ancestryRows=(file)=>{
+   const params=['film:tmdb:5',OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,'film:tmdb:5','film:tmdb:5',OWNER_ENTRIES_MAX+1,'film:tmdb:5',11,'film:tmdb:5','film:tmdb:5',61];
+   let i=0;const text=DISPLAY_SQL.replace(/\?/g,()=>{const v=params[i++];return typeof v==='number'?String(v):q(v);});
+   return JSON.parse(JSON.parse(sqliteSync(['-json',file],{input:text+';',encoding:'utf8'}).stdout)[0].ancestors);
+  };
+  assert.equal(ancestryRows(hugeWide).length,OWNER_ANCESTORS_MAX+2,'breadth: the CTE stops at the row cap of a 192-wide tree');
+  const deep=ancestryRows(hugeChain);
+  assert.equal(Math.max(...deep.map(r=>r[2])),OWNER_ANCESTOR_DEPTH+1,'depth: the CTE stops one level past the bound of a 32-long chain');
+  assert.equal(deep.length,OWNER_ANCESTOR_DEPTH+2);
+ }
+ // The owner-entry cap is separate from the ancestry cap: more entries than OWNER_ENTRIES_MAX over a small tree is typed too.
+ const entries=world();
+ sqlite(entries,Array.from({length:OWNER_ENTRIES_MAX+1},(_,i)=>`INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','k${i}','{"localization":{"status":"reviewed","value":"V","provenance":{"authority":"owner"}}}','film:tmdb:5','verified',1);`).join(''));
+ const manyEntries=await title(entries);
+ assert.deepEqual([manyEntries.fields.title.status,manyEntries.fields.title.reason],['unknown','owner_entries_bounded']);
+ // A redirect cycle (data corruption) is bounded by the depth, never an endless walk.
+ const cyc=world();film(cyc,'film:x:1');redirectTo(cyc,'film:x:1','film:tmdb:5');sqlite(cyc,"PRAGMA foreign_keys=OFF;INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:5','film:x:1','"+AT+"')");
+ const cycle=await read(cyc,'film:x:1');
+ assert.equal(cycle.http,409,'the resolver refuses a cycle first: no section');
+
+ // Fence: an edge, an owner entry or an absence moves the section (`generation_moved`); an unrelated edge does not.
+ // The mutation runs just before the section's FIRST read and is undone before its after-read: A->B->A. The first read sees B; the after-read sees A: moved, never B.
+ const flip=(mutate,undo)=>async()=>{
+  const f=world();film(f,'film:anc:A');redirectTo(f,'film:anc:A','film:tmdb:5');ownerTitle(f,'kA','film:anc:A','Stable Owner');
+  let n=0;
+  const e=env(f,{onQuery:text=>{if(text.includes('WITH RECURSIVE anc')){n++;if(n===1)mutate(f);else if(n===2)undo(f);}}});
+  const out=await readFilmAggregate(e,'tmdb_5');
+  assert.equal(n,2,'the section reads twice');
+  return out.body.display;
+ };
+ for(const [name,mutate,undo] of [
+  ['a new child edge under a leaf',f=>{film(f,'film:anc:N');redirectTo(f,'film:anc:N','film:anc:A');},f=>sqlite(f,"DELETE FROM film_redirect WHERE from_id='film:anc:N'")],
+  ['a new direct edge',f=>{film(f,'film:anc:M');redirectTo(f,'film:anc:M','film:tmdb:5');},f=>sqlite(f,"DELETE FROM film_redirect WHERE from_id='film:anc:M'")],
+  ['a removed edge',f=>sqlite(f,"DELETE FROM film_redirect WHERE from_id='film:anc:A'"),f=>redirectTo(f,'film:anc:A','film:tmdb:5')],
+  ['a re-pointed edge',f=>{film(f,'film:anc:Q');sqlite(f,"UPDATE film_redirect SET to_film_id='film:anc:Q' WHERE from_id='film:anc:A'");},f=>sqlite(f,"UPDATE film_redirect SET to_film_id='film:tmdb:5' WHERE from_id='film:anc:A'")],
+  ['a new owner entry on the survivor (an absence predicate)',f=>ownerTitle(f,'kS','film:tmdb:5','Late Owner'),f=>sqlite(f,"DELETE FROM owner_review_entry WHERE source_key='kS'")],
+  ['an owner value changed on an ancestor',f=>ownerTitle(f,'kA','film:anc:A','Changed'),f=>ownerTitle(f,'kA','film:anc:A','Stable Owner')],
+ ]){
+  const d=await flip(mutate,undo)();
+  assert.deepEqual([name,d.status,d.reason],[name,'unavailable','generation_moved']);
+  assert.ok(!JSON.stringify(d).includes('Late Owner')&&!JSON.stringify(d).includes('Changed'),name+': the moved value is never returned');
+ }
+ // An edge under an UNRELATED Film changes nothing the section consumed: it is not moved.
+ const unrelated=await (async()=>{
+  const f=world();film(f,'film:anc:A');redirectTo(f,'film:anc:A','film:tmdb:5');ownerTitle(f,'kA','film:anc:A','Stable Owner');film(f,'film:stranger:1');film(f,'film:stranger:2');
+  let n=0;
+  const e=env(f,{onQuery:text=>{if(text.includes('WITH RECURSIVE anc')){n++;if(n===1)redirectTo(f,'film:stranger:2','film:stranger:1');}}});
+  return (await readFilmAggregate(e,'tmdb_5')).body.display;
+ })();
+ assert.deepEqual([unrelated.fields.title.status,unrelated.fields.title.value],['present','Stable Owner']);
+ // A change that stays inside the section (a new ancestor with an owner entry) BEFORE the first read is simply read.
+ const early=world();film(early,'film:anc:A');redirectTo(early,'film:anc:A','film:tmdb:5');
+ let first=true;
+ const lateAncestor=env(early,{onQuery:text=>{if(first&&text.includes('WITH RECURSIVE anc')){first=false;ownerTitle(early,'kA','film:anc:A','Read Now');}}});
+ assert.equal((await readFilmAggregate(lateAncestor,'tmdb_5')).body.display.fields.title.value,'Read Now');
+ // A identity-level move during the ancestry read is still 503 with no section (the identity fence is independent of the section fences).
+ const idMove=world();film(idMove,'film:anc:A');redirectTo(idMove,'film:anc:A','film:tmdb:5');
+ let moved=false;
+ const idEnv=env(idMove,{onQuery:text=>{if(!moved&&text.includes('WITH RECURSIVE anc')){moved=true;claim(idMove,'film:tmdb:5','letterboxd','late7');}}});
+ const idOut=await readFilmAggregate(idEnv,'tmdb_5');
+ assert.deepEqual([idOut.http,idOut.body.identity.reason,Object.keys(idOut.body).sort()],[503,'identity_moved',['contract','identity']]);
+ // The shared budget: the ancestry costs no statement of its own (one display statement and its after-read), a huge tree included.
+ const budgeted=wide(OWNER_ANCESTORS_MAX);
+ const counted=env(budgeted);
+ const done=await readFilmAggregate(counted,'tmdb_5');
+ assert.equal(done.http,200);
+ assert.ok(counted.calls.queries<=REQUEST_STATEMENT_BUDGET-10,'the ancestry adds no statements: '+counted.calls.queries);
+ for(let limit=4;limit<=REQUEST_STATEMENT_BUDGET;limit++){
+  const small=env(budgeted);
+  const o=await readFilmAggregate(small,'tmdb_5',{budgetLimit:limit});
+  assert.ok(small.calls.queries<=limit,limit+': '+small.calls.queries);
+  if(o.http===200&&o.body.display.status==='unavailable')assert.equal(o.body.display.reason,'budget_exceeded');
+ }
+ // A display failure (a malformed ancestry column) is typed and does not touch the other sections or the identity fence.
+ const broken=env(tree,{rewrite:sql=>sql.replace("(SELECT json_group_array(json_array(id,parent,depth)) FROM anc) AS ancestors","'{bad' AS ancestors")});
+ const b=await readFilmAggregate(broken,'tmdb_5');
+ assert.deepEqual([b.http,b.body.display.status,b.body.display.reason,b.body.personal.status,b.body.watchlist.status,b.body.availability.status],[200,'unavailable','display_unavailable','present','unknown','present']);
+}
+
 // EXPLAIN QUERY PLAN of every statement of the aggregate (ADR 0216 decision 7): each lookup is a primary-key or index SEARCH, no base table and no index is
 // scanned (the bound json_each key lists, a constant row, derived tables and the measuring CTE of the bounded document read are the only SCANs). A scan of
-// film_redirect, which has no index on to_film_id, is NOT allowed here and is not read by this route.
+// film_redirect is never scanned: its ancestry step is a SEARCH through film_redirect_by_target (migration 0042, part of the real chain this fixture is built from).
 {
  const file=world({links:{'tmdb:5':'tmdb-5','letterboxd:l5':'tmdb-5','letterboxd:own2':'tmdb-5','tmdb:66':'tmdb-5'}});
  film(file,'film:other:2',[['letterboxd','own2']]);film(file,'film:old:5');sqlite(file,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);
@@ -916,9 +1060,13 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   const out=sqliteSync([file],{input:'EXPLAIN QUERY PLAN '+text+';',encoding:'utf8'});
   assert.equal(out.status,0,out.stderr);
   const plan=out.stdout.split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
-  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN g$/.test(d));
+  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN (g|a|anc)$/.test(d));
   assert.deepEqual(scans,[],text.slice(0,160)+'\n'+plan.join('\n'));
   assert.ok(!plan.some(d=>/film_redirect/.test(d)&&/^SCAN /.test(d)),'film_redirect is never scanned');
+  if(text.startsWith('WITH RECURSIVE anc')){
+   assert.ok(plan.some(d=>/^SEARCH r USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),'the ancestry step is served by film_redirect_by_target (migration 0042)\n'+plan.join('\n'));
+   assert.ok(plan.some(d=>/^SEARCH owner_review_entry USING INDEX owner_review_entry_identity \(identity_link=\?\)/.test(d)),'the owner entries are found by identity_link, not by a range of every film entry\n'+plan.join('\n'));
+  }
   if(text.startsWith('WITH g AS'))assert.ok(plan.some(d=>/^SEARCH ratings_document USING INDEX sqlite_autoindex_ratings_document_1 \(key=\?\)/.test(d)),'the measure is a primary-key search\n'+plan.join('\n'));
  }
  assert.ok(seen.size>=9,'every statement shape was planned: '+seen.size);
