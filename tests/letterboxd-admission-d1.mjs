@@ -277,6 +277,14 @@ const revision=(file,id)=>Number(rows(file,"SELECT revision FROM canonical_revis
  const tail=sqliteSync(['-bail',file],{input:"UPDATE canonical_write_receipt SET state='applied',applied_revision=1 WHERE request_id='cut-A' AND state='pending';SELECT changes();",encoding:'utf8'});
  assert.equal(tail.stdout.trim(),'0');
  assert.equal(receipts(file).length,1,'and no new receipt was reserved');
+ // a settled attempt for the NEW movie cannot bypass the comparison with the durable intent: B is admitted for the code, the intent still says A, the check says B -> source_changed, not present
+ {
+  const h=fresh();
+  assert.equal((await admitVerifiedFilm(envOf(h),{...itemOf({lid:'Gh1',tmdb:'650'}),now:clock()})).outcome,'admitted');
+  const out=await admitVerifiedFilm(envOf(h),{...itemOf({lid:'Gh1',tmdb:'650'}),intent:{tmdb:'649'},now:clock(60000)});
+  assert.equal(out.outcome,'source_changed',JSON.stringify(out));
+  assert.equal(out.fromIntent,undefined);
+ }
  // the same movie as the durable record is not a change
  const same=await admitVerifiedFilm(envOf(file),{...itemOf({lid:'Ab1',tmdb:'603'}),intent:{tmdb:'603'},now:clock(60000)});
  assert.equal(same.outcome,'admitted');

@@ -53,7 +53,7 @@ const site=new Map(),movies=new Map(),calls=[];
 const fetchImpl=async url=>{
  url=String(url);calls.push(url);
  const boxd=/^https:\/\/boxd\.it\/([A-Za-z0-9]+)$/.exec(url);
- if(boxd){const item=site.get(boxd[1]);return item?http(301,'',{location:'https://letterboxd.com/film/'+item.slug+'/'}):http(404,'');}
+ if(boxd){const item=site.get(boxd[1]);if(item&&item.status)return http(item.status,'');return item?http(301,'',{location:'https://letterboxd.com/film/'+item.slug+'/'}):http(404,'');}
  const film=/^https:\/\/letterboxd\.com\/film\/([a-z0-9-]+)\/$/.exec(url);
  if(film){const item=[...site.values()].find(entry=>entry.slug===film[1]);return item?http(200,item.html):http(404,'');}
  const tm=/api\.themoviedb\.org\/3\/movie\/(\d+)/.exec(url);if(tm&&movies.has(tm[1]))return http(200,movies.get(tm[1]));
@@ -75,7 +75,7 @@ const world=file=>({DB:d1Standin(file),BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:
 const seed=(env,lid,rating=4)=>Facts.applyDiaryEvidence(env,[{lid,watchedDate:'2026-11-15',rating,ratingState:'rated',sourceRef:'diary:viewing:1'}]);
 const opts=extra=>({clock:()=>NOW,remaining:()=>120000,fetchImpl,...extra});
 const admissionRows=file=>rows(file,'SELECT film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,verified_at,request_id FROM film_rated_admission ORDER BY film_id');
-const receipts=file=>rows(file,"SELECT request_id,state,operation_key FROM canonical_write_receipt WHERE operation='film_admission' ORDER BY created_at,request_id");
+const receipts=(file,prefix=null)=>rows(file,prefix?"SELECT request_id,state,operation_key FROM canonical_write_receipt WHERE operation_key LIKE '"+prefix+"%' ORDER BY created_at,request_id":"SELECT request_id,state,operation_key FROM canonical_write_receipt WHERE operation='film_admission' ORDER BY created_at,request_id");
 const evidence=file=>rows(file,'SELECT subject_value,object_value,route,method,source_root,request_id,film_id FROM film_identity_evidence ORDER BY seq');
 const reset=()=>{r2.clear();etags.clear();site.clear();movies.clear();calls.length=0;puts.length=0;};
 
@@ -309,6 +309,119 @@ const file=fresh('d1'),env=world(file);
  const again=await Identity.resolve(env,[{lid:'chg2',slug:'fixture-zeta-2023'}],opts({route:'ratings_diary'}));
  assert.equal(again.outcomes.get('chg2').class,'settled',JSON.stringify([...again.outcomes]));
  assert.ok(admissionRows(file).some(item=>item.source_code==='chg2'&&item.tmdb==='900052'),'the same movie as the intent is admitted');
+}
+
+// ===== H. review of PR #1018: the durable intent, reconcile BEFORE the fetch, proven evidence and the history fence, through the real Diary and Watchlist caller =====
+{
+ const entryOf=(tmdb,extra={})=>({reason:'linking',class:'intent',slug:'fixture-h-'+tmdb,tmdb,attempts:0,streak:0,queuedAt:new Date(NOW-3600000).toISOString(),lastAttemptAt:new Date(NOW-3000000).toISOString(),nextAttemptAt:new Date(NOW-1000).toISOString(),route:'ratings_diary',...extra});
+ const putIntent=async(lid,tmdb,extra)=>Facts.updateDiaryIdentity(env,{set:{[lid]:entryOf(tmdb,extra)},expect:{[lid]:null}});
+ const pendingReceipt=(lid,id,future)=>sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('"+id+"','film_admission','rated_admission_retention','film','film:tmdb:900060','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(NOW+(future?3600000:-3600000)).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:"+lid+"')");
+ const entry=async lid=>(await Facts.readDiaryIdentity(env)).films[lid]||null;
+ const resolve1=(lid,slug,route='ratings_diary')=>Identity.resolve(env,[{lid,slug}],opts({route}));
+ const intentOf8=e=>e?(e.reason==='linking'?e.tmdb:e.intent?.tmdb):null;
+ const boxdCalls=()=>calls.filter(url=>url.includes('boxd.it')||url.includes('api.themoviedb.org')).length;
+
+ // (1) a LIVE attempt of A under the key, the page now names B: the id waits WITHOUT a fetch and the durable intent A survives
+ reset();
+ await seed(env,'hw1');await putIntent('hw1','900060');add('hw1','fixture-h-900060','900061','Fixture HB',2020);pendingReceipt('hw1','live-A',true);
+ const waited=await resolve1('hw1','fixture-h-900060');
+ assert.deepEqual([waited.outcomes.get('hw1').class,waited.outcomes.get('hw1').reason],['not_now','in_flight'],JSON.stringify([...waited.outcomes]));
+ assert.equal(boxdCalls(),0,'reconcile first: a live attempt means no fetch');
+ const kept=await entry('hw1');
+ assert.equal(kept.reason,'linking');assert.equal(kept.tmdb,'900060','the intended movie is untouched by the wait');
+
+ // (2) the attempt of A EXPIRED (a crash): it is abandoned first, then the real check names B: source_changed, never an admission of B
+ reset();
+ await seed(env,'hw2');await putIntent('hw2','900060');add('hw2','fixture-h-900060','900062','Fixture HC',2021);pendingReceipt('hw2','stale-A',false);
+ const changed=await resolve1('hw2','fixture-h-900060');
+ assert.deepEqual([changed.outcomes.get('hw2').class,changed.outcomes.get('hw2').reason],['definite','source_changed'],JSON.stringify([...changed.outcomes]));
+ assert.equal(rows(file,"SELECT state FROM canonical_write_receipt WHERE request_id='stale-A'")[0].state,'abandoned','the old attempt was settled before the check was believed');
+ assert.equal(admissionRows(file).some(item=>item.source_code==='hw2'),false,'B is never admitted over an intent for A');
+
+ // (3) an APPLIED attempt of A proves the work: the item finishes from the intent WITHOUT a fetch and without fresh evidence, even though the page now names B
+ reset();
+ await seed(env,'hw3');
+ const evBefore=evidence(file).length;
+ const admitted=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3',receipt:{tmdb:'900063',archiveSha256:'a'.repeat(64),title:'Fixture HD',year:2019},now:()=>new Date(NOW).toISOString()});
+ assert.equal(admitted.outcome,'admitted');
+ await putIntent('hw3','900063');add('hw3','fixture-h-900063','900064','Fixture HE',2018);
+ calls.length=0;
+ const settled=await resolve1('hw3','fixture-h-900063','watchlist_admission');
+ assert.deepEqual([settled.outcomes.get('hw3').class,settled.outcomes.get('hw3').reason],['settled','verified'],JSON.stringify([...settled.outcomes]));
+ assert.equal(boxdCalls(),0,'no fetch: the applied attempt proves the work');
+ assert.equal((await Facts.diaryLinks(env,['hw3'])).get('hw3').tmdb,'900063','linked to the INTENDED movie, not the one the page names now');
+ assert.equal(evidence(file).length,evBefore,'a recovery that made no check writes no evidence');
+
+ // (4) a genuine SECOND check of an admitted pair is recorded through the keyed evidence-only operation
+ reset();
+ await seed(env,'hw4');
+ const first=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw4',receipt:{tmdb:'900065',archiveSha256:'a'.repeat(64),title:'Fixture HF',year:2017},now:()=>new Date(NOW).toISOString()});
+ assert.equal(first.outcome,'admitted');
+ add('hw4','fixture-h-900065','900065','Fixture HF',2017);
+ const second=await resolve1('hw4','fixture-h-900065','watchlist_admission');
+ assert.equal(second.outcomes.get('hw4').class,'settled',JSON.stringify([...second.outcomes]));
+ const ev4=evidence(file).filter(item=>item.subject_value==='hw4');
+ assert.deepEqual(ev4.map(item=>item.route),['watchlist_admission'],'the genuine second check is one evidence row');
+ const keyed=receipts(file,'evidence:');
+ assert.ok(keyed.some(item=>item.state==='applied'&&item.operation_key==='evidence:'+rows(file,"SELECT evidence_key FROM film_identity_evidence WHERE subject_value='hw4'")[0].evidence_key),'under its own key evidence:<evidence_key>');
+
+ // (5) an evidence write that FAILS is never reported as success: the id is not linked, the intent keeps the evidence to record, and the next step records it WITHOUT a fetch and then links
+ reset();
+ await seed(env,'hw5');
+ const a5=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw5',receipt:{tmdb:'900066',archiveSha256:'a'.repeat(64),title:'Fixture HG',year:2016},now:()=>new Date(NOW).toISOString()});
+ assert.equal(a5.outcome,'admitted');
+ add('hw5','fixture-h-900066','900066','Fixture HG',2016);
+ const realDb=env.DB;let failing=true;
+ const lossy={...env,DB:{prepare:sql=>realDb.prepare(sql),batch:async statements=>{if(failing&&statements.some(item=>/INSERT INTO film_identity_evidence/.test(item.text||'')))throw new Error('D1_ERROR: evidence batch lost');return realDb.batch(statements);}}};
+ const failed=await Identity.resolve(lossy,[{lid:'hw5',slug:'fixture-h-900066'}],opts({route:'ratings_diary'}));
+ assert.deepEqual([failed.outcomes.get('hw5').class,failed.outcomes.get('hw5').reason],['not_now','evidence_unrecorded'],JSON.stringify([...failed.outcomes]));
+ assert.equal((await Facts.diaryLinks(env,['hw5'])).get('hw5').tmdb,null,'not linked: the check is not proven recorded');
+ const kept5=await entry('hw5');
+ assert.equal(kept5.reason,'linking');assert.ok(kept5.pendingEvidence&&kept5.pendingEvidence.route==='ratings_diary','the evidence is kept for a recoverable retry');
+ failing=false;calls.length=0;
+ const healed=await Identity.resolve(env,[{lid:'hw5',slug:'fixture-h-900066'}],opts({route:'ratings_diary'}));
+ assert.equal(healed.outcomes.get('hw5').class,'settled',JSON.stringify([...healed.outcomes]));
+ assert.equal(boxdCalls(),0,'recorded from the kept evidence, without a fetch');
+ assert.equal(evidence(file).filter(item=>item.subject_value==='hw5').length,1,'the evidence of the genuine check is no longer lost');
+ assert.equal((await Facts.diaryLinks(env,['hw5'])).get('hw5').tmdb,'900066');
+
+ // (6) a TERMINAL outcome is fenced by the operation history IN the same D1 batch that writes the entry: another attempt appears under the key meanwhile, the write is refused, the attempt replans
+ reset();
+ await seed(env,'hw6');await putIntent('hw6','900060');add('hw6','fixture-h-900060','900067','Fixture HH',2015);
+ let injected=0;
+ const racing={...env,DB:d1Standin(file,{onBatch:async statements=>{
+  if(!injected&&statements.some(item=>/letterboxd\/facts\/scans\/diary-identity\.json/.test(item.text||''))&&statements.some(item=>/operation_key/.test(item.text||'')&&/admission:lid:hw6/.test(item.text||''))){
+   injected++;pendingReceipt('hw6','late-A',false);
+  }
+ }})};
+ const fenced=await Identity.resolve(racing,[{lid:'hw6',slug:'fixture-h-900060'}],opts({route:'ratings_diary'}));
+ assert.equal(injected,1,'the history moved between the plan and the terminal write');
+ assert.deepEqual([fenced.outcomes.get('hw6').class,fenced.outcomes.get('hw6').reason],['definite','source_changed'],JSON.stringify([...fenced.outcomes]));
+ assert.equal(rows(file,"SELECT state FROM canonical_write_receipt WHERE request_id='late-A'")[0].state,'abandoned','the replan settled the newcomer before answering again');
+
+ // (7) a TRANSPORT stop (403) after the reconcile never discards the intent: the entry keeps `intent` A, and the next check that names B is still `source_changed`
+ reset();
+ await seed(env,'hw7');await putIntent('hw7','900060');add('hw7','fixture-h-900060','900068','Fixture HI',2014);site.get('hw7').status=403;
+ const stop7=await resolve1('hw7','fixture-h-900060');
+ assert.deepEqual([stop7.outcomes.get('hw7').class,stop7.outcomes.get('hw7').reason],['transport','forbidden'],JSON.stringify([...stop7.outcomes]));
+ const after7=await entry('hw7');
+ assert.equal(after7.intent?.tmdb,'900060','the transport stop kept the intended movie');
+ delete site.get('hw7').status;
+ await Facts.updateDiaryIdentity(env,{set:{hw7:{...after7,nextAttemptAt:new Date(NOW-1000).toISOString()}},expect:{hw7:JSON.stringify(after7)}});
+ const again7=await resolve1('hw7','fixture-h-900060');
+ assert.deepEqual([again7.outcomes.get('hw7').class,again7.outcomes.get('hw7').reason],['definite','source_changed'],JSON.stringify([...again7.outcomes]));
+
+ // (8) a crash right after the check, before anything settles: the entry still names A (the intent is never replaced by the movie of an unsettled check)
+ reset();
+ await seed(env,'hw8');await putIntent('hw8','900060');add('hw8','fixture-h-900060','900069','Fixture HJ',2013);
+ let thrown=0;
+ const crashing={...env,DB:d1Standin(file,{onBatch:async statements=>{
+  if(!thrown&&statements.some(item=>/letterboxd\/facts\/scans\/diary-identity\.json/.test(item.text||''))&&statements.some(item=>/operation_key/.test(item.text||'')&&/admission:lid:hw8/.test(item.text||''))){thrown++;throw new Error('D1_ERROR: process lost');}
+ }})};
+ await Identity.resolve(crashing,[{lid:'hw8',slug:'fixture-h-900060'}],opts({route:'ratings_diary'}));
+ assert.equal(thrown,1);
+ const after8=await entry('hw8');
+ assert.equal(intentOf8(after8),'900060','the durable intent is still A, never B');
 }
 
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

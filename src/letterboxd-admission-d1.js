@@ -21,12 +21,13 @@
 // A terminal outcome that RESERVES NOTHING (`other_code`, `conflict`) can be finalized atomically against the observed history: pass `finalize(outcome, guard)`; the caller's own writer-state batch carries `guard`
 // ({sql, params}) and answers `{refused:true}` when its batch was refused; the attempt then replans (ADR 0207 decision 3, step 5).
 import {database,failed,many,one} from './film-person-authority.js';
+import {fenced} from './canonical-mutations.js';
 import {RETRY_POLICY} from './canonical-receipts.js';
 import {runOperationKey} from './receipt-operation-key.js';
 import {admitRatedFilm,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN,admissionDigestD1} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,readAdmissionAuthority} from './letterboxd-admission-authority.js';
-import {planIdentityEvidence,recordIdentityEvidence} from './identity-evidence.js';
+import {planIdentityEvidence,recordIdentityEvidenceKeyed} from './identity-evidence.js';
 
 export const ADMISSION_KINDS=Object.freeze(['lid','inferred_import','short_code']);
 const LID=/^[A-Za-z0-9_-]{1,80}$/;
@@ -62,19 +63,27 @@ export async function planAdmissionD1(env,{tmdb,sourceCode}){
  return {outcome:'admit',id:target.id,revision:target.revision};
 }
 
-const NON_TERMINAL=Object.freeze({wait:true,held:true,redirect:true,failed:true,unknown:true,deferred:true});
+const NON_TERMINAL=Object.freeze({wait:true,held:true,redirect:true,failed:true,unknown:true,deferred:true,source_unavailable:true});
 const result=(outcome,extra={})=>({outcome,terminal:!NON_TERMINAL[outcome],...extra});
 
 // The coordinator. input:
 //   kind        'lid' (Diary, Watchlist), 'inferred_import' or 'short_code': what the digest names (the key itself comes from `admissionOperationKey`)
 //   lid         the Letterboxd id (the operation key). code: the short code the admission stores (`source_code`); defaults to `lid`.
-//   receipt     {tmdb, archiveSha256 (the archive digest, or the digest of the check's evidence), title, year, filmPath?}; `sourceCode` is `code`; `verifiedAt` is not an input (it is the time of the admitting batch)
-//   evidence    the input of `planIdentityEvidence` for the check that produced this item, or null for none (a check that did not run writes no evidence row)
-//   intent      optional `{tmdb}`: the movie the writer's OWN durable record (its `linking` intent, its `admitting` row) named for this item before this reacquisition (ADR 0207 decision 4, 4A). When the source
-//               now names ANOTHER movie, the outcome is `source_changed` (terminal, owner review): no admission, no link, and every earlier unresolved receipt of the key has been settled first (step 2), so the old
-//               attempt can never land and contradict it (the race of decision 4)
-//   finalize    optional `async (result, guard) => {refused?:true, ...}` for the terminal outcomes that reserve nothing
+//   receipt, evidence   the verified check: receipt {tmdb, archiveSha256 (the archive digest, or the digest of the check's evidence), title, year, filmPath?}; `sourceCode` is `code`; `verifiedAt` is not an input (it
+//               is the time of the admitting batch); evidence is the input of `planIdentityEvidence` for the check that produced this item, or null (a check that did not run writes no evidence row)
+//   reacquire   optional `async () => {ok:true, receipt, evidence} | {ok:false, reason, ...}`: the REAL bounded source check, run only after the key's history is reconciled and only when this call still needs one
+//               (ADR 0207 decision 4, 4A). With it `receipt` and `evidence` are not given. A failed check is `source_unavailable` (the caller applies its own transport / gone / definite rule to `reason`) and
+//               writes nothing; no evidence is ever synthesized for a recovery that made no check.
+//   intent      optional `{tmdb}`: the movie the writer's OWN durable record (its `linking` intent, its `admitting` row) named for this item before this call. An applied attempt of the key that matches it
+//               settles the item WITHOUT a fetch and without fresh evidence; when the source (acquired now, or given) names ANOTHER movie the outcome is `source_changed` (terminal, owner review): no
+//               admission, no link, and every earlier unresolved receipt of the key has been settled first (step 2), so the old attempt can never land and contradict it (the race of decision 4)
+//   pendingEvidence   optional evidence input an earlier call could not record (`evidence_unrecorded`); a retry that settles from the intent records it before reporting success
+//   finalize    `async (result, guard) => {refused?:true, ...}` for the terminal outcomes that reserve nothing (`other_code`, `conflict`, `source_changed`): the caller writes its OWN terminal state with `guard`
+//               (one SQL boolean over the operation history) in the same batch and answers `{refused:true}` when it was refused; the attempt then replans from step 2. Without it the outcome is returned
+//               unfenced and the caller owns that limit (a writer state that lives outside D1)
 //   now, policy as for receiptedWrite
+// A completion is only reported when it is PROVEN: `present` after a genuine check means the evidence row exists (written now, or already there); an evidence write that failed, is unavailable or is still
+// in flight is `deferred` with reason `evidence_unrecorded` and the evidence input to keep (`pendingEvidence`).
 export async function admitVerifiedFilm(env,input={}){
  const kind=input.kind||'lid';
  if(!ADMISSION_KINDS.includes(kind))throw failed('film_person_invalid');
@@ -83,56 +92,79 @@ export async function admitVerifiedFilm(env,input={}){
  const authority=await readAdmissionAuthority(env);
  if(admissionRoute(authority)!=='d1')throw admissionClosedError(authority.mode);
  const clock=clockOf(input.now);
+ const policy=input.policy||RETRY_POLICY;
  const operationKey=admissionOperationKey({lid,kind,code});
- const at=clock();
- const checked=verifiedAdmission('tmdb_'+String(input.receipt?.tmdb??''),{...input.receipt,sourceCode:code,verifiedAt:at});
- if(!checked.ok){const error=failed('admission_not_verified');error.reason=checked.reason;throw error;}
- const admission=checked.admission;
- const tmdb=admission.tmdb;
- const evidence=input.evidence?await planIdentityEvidence(input.evidence):null;
- const evidenceDigest=evidence?.evidenceKey??admission.archiveSha256;
  const db=database(env);
- const receipt={tmdb,sourceCode:code,archiveSha256:admission.archiveSha256,title:admission.title,year:admission.year,filmPath:input.receipt?.filmPath??null,verifiedAt:at};
+ const intentTmdb=input.intent&&input.intent.tmdb!==undefined&&input.intent.tmdb!==null?String(input.intent.tmdb):null;
+ // The source of this call: the check it was given, or the one `reacquire` makes (once, and only after the history is reconciled).
+ let src=null;
+ const acquire=async()=>{
+  if(src)return src;
+  let got;
+  if(typeof input.reacquire==='function'){
+   got=await input.reacquire();
+   if(!got||got.ok!==true){src={fail:got||{reason:'source_unavailable'}};return src;}
+  }else got={receipt:input.receipt,evidence:input.evidence};
+  const at=clock();
+  const checked=verifiedAdmission('tmdb_'+String(got.receipt?.tmdb??''),{...got.receipt,sourceCode:code,verifiedAt:at});
+  if(!checked.ok){const error=failed('admission_not_verified');error.reason=checked.reason;throw error;}
+  const admission=checked.admission;
+  const evidence=got.evidence?await planIdentityEvidence(got.evidence):null;
+  src={admission,tmdb:admission.tmdb,evidenceInput:got.evidence||null,evidence,evidenceDigest:evidence?.evidenceKey??admission.archiveSha256,
+   receipt:{tmdb:admission.tmdb,sourceCode:code,archiveSha256:admission.archiveSha256,title:admission.title,year:admission.year,filmPath:got.receipt?.filmPath??null,verifiedAt:at}};
+  return src;
+ };
+ // A call that is GIVEN its check validates it up front (an invalid item is refused before any read of a Film); a call that must reacquire does so only inside the protocol.
+ if(typeof input.reacquire!=='function')await acquire();
 
- // Step 3 of the protocol: an applied attempt is settled only when the CURRENT admission row of the code names this work's movie on the Film that holds it now.
+ // Step 3 of the protocol: an applied attempt is settled only when the CURRENT admission row of the code names the work's movie on the Film that holds it now. The work's movie is the writer's own durable
+ // intent when there is one and no check contradicts it (a settled attempt then needs no fetch), else the movie of the check itself.
  const validate=async(applied,{currentTarget})=>{
+  const checked=src&&!src.fail?src:null;
+  const want=checked?(intentTmdb!==null&&intentTmdb!==checked.tmdb?null:checked.tmdb):intentTmdb;
+  if(want===null)return 'historical';
   const row=await one(db,'SELECT film_id,tmdb FROM film_rated_admission WHERE source_code=?',[code]);
-  return row&&row.film_id===currentTarget.id&&row.tmdb===tmdb?'settled':'historical';
+  return row&&row.film_id===currentTarget.id&&row.tmdb===want?'settled':'historical';
  };
  let observed=null;
- const decide=async ctx=>{
+ // The guard a terminal writer carries: `{sql, params}` (one SQL boolean over the key's operation history, exactly the fingerprint this attempt observed), `statement` (the same condition as ONE assertion
+ // statement for a writer whose own batch is a D1 batch: a false condition fails the CHECK and rolls that batch back whole) and `holds()` (the condition evaluated NOW, for a writer whose state lives outside D1
+ // and cannot carry a statement: it re-checks immediately before its own write, and the window between that check and the write is that writer's documented limit).
+ const guardOf=guard=>({...guard,statement:[fenced.assertSql(guard.sql),guard.params],holds:async()=>{
+  const row=await one(db,'SELECT CASE WHEN ('+guard.sql+') THEN 1 ELSE 0 END AS ok',guard.params);
+  return Number(row?.ok)===1;
+ }});
+ const terminalOf=(terminal)=>{
+  if(typeof input.finalize!=='function')return {kind:'none',result:terminal};
+  return {kind:'finalize',write:async guard=>{const out=await input.finalize(terminal,guardOf(guard));return out?.refused===true?{refused:true}:{...terminal,finalized:out??null};}};
+ };
+ const decide=async()=>{
+  const a=await acquire();
+  // The source could not be reacquired now. History is clear (reconciled above), nothing is written; the caller classifies `reason` (transport keeps its place, a 404 costs one attempt).
+  if(a.fail)return {kind:'none',result:result('source_unavailable',{reason:a.fail.reason??'source_unavailable',detail:a.fail})};
   // The reacquired source against the writer's own durable record, BEFORE the pair is classified: the key's history is clear here (every earlier attempt settled or validated), so the answer is a function of
   // durable state and cannot depend on the timing of an attempt that was cut off.
-  if(input.intent&&input.intent.tmdb!==undefined&&input.intent.tmdb!==null&&String(input.intent.tmdb)!==tmdb){
-   const changed=result('source_changed',{reason:'source_changed',intended:String(input.intent.tmdb),found:tmdb});
-   if(typeof input.finalize!=='function')return {kind:'none',result:changed};
-   return {kind:'finalize',write:async guard=>{const out=await input.finalize(changed,guard);return out?.refused===true?{refused:true}:{...changed,finalized:out??null};}};
-  }
-  const plan=await planAdmissionD1(env,{tmdb,sourceCode:code});
+  if(intentTmdb!==null&&intentTmdb!==a.tmdb)return terminalOf(result('source_changed',{reason:'source_changed',intended:intentTmdb,found:a.tmdb}));
+  const plan=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});
   observed=plan;
   if(plan.outcome==='present')return {kind:'none',result:result('present',{id:plan.id})};
   if(plan.outcome==='held'||plan.outcome==='redirect')return {kind:'none',result:result(plan.outcome,{id:plan.id,reason:plan.reason??null})};
-  if(plan.outcome==='conflict'||plan.outcome==='other_code'){
-   const terminal=result(plan.outcome,{id:plan.id,reason:plan.reason});
-   if(typeof input.finalize!=='function')return {kind:'none',result:terminal};
-   return {kind:'finalize',write:async guard=>{const out=await input.finalize(terminal,guard);return out?.refused===true?{refused:true}:{...terminal,finalized:out??null};}};
-  }
-  const content={kind,tmdb,sourceCode:code,evidenceDigest,title:admission.title,year:admission.year};
-  const digest=await admissionDigestD1(content);
+  if(plan.outcome==='conflict'||plan.outcome==='other_code')return terminalOf(result(plan.outcome,{id:plan.id,reason:plan.reason}));
+  const digest=await admissionDigestD1({kind,tmdb:a.tmdb,sourceCode:code,evidenceDigest:a.evidenceDigest,title:a.admission.title,year:a.admission.year});
   const target={kind:'film',id:plan.id};
   return {kind:'reserve',
    request:{operation:FILM_ADMISSION_OPERATION,target,expectedRevision:plan.revision,digest,source:digest},
    write:{
     atomic:true,
-    run:ctx2=>admitRatedFilm(env,{receiptKey:'tmdb_'+tmdb,receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
-     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence}),
+    run:ctx2=>admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
+     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence:a.evidence}),
     // The receipt's own readback (a reconcile of an unresolved attempt): the pair is committed when the admission row exists for it.
-    readback:async()=>{const snap=await planAdmissionD1(env,{tmdb,sourceCode:code});return {digest:snap.outcome==='present'?digest:null,revision:snap.revision??await revisionOf(db,plan.id)};},
-    revalidate:async()=>{const snap=await planAdmissionD1(env,{tmdb,sourceCode:code});return snap.outcome==='admit'?'proceed':snap.outcome==='present'?'superseded':'stale';},
+    readback:async()=>{const snap=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});return {digest:snap.outcome==='present'?digest:null,revision:snap.revision??await revisionOf(db,plan.id)};},
+    revalidate:async()=>{const snap=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});return snap.outcome==='admit'?'proceed':snap.outcome==='present'?'superseded':'stale';},
    }};
  };
  let ran;
- try{ran=await runOperationKey(env,{origin:RATED_ADMISSION_ORIGIN,operationKey,now:clock,policy:input.policy||RETRY_POLICY},{validate,decide});}
+ try{ran=await runOperationKey(env,{origin:RATED_ADMISSION_ORIGIN,operationKey,now:clock,policy},{validate,decide});}
  catch(error){
   // A race inside the writer's batch: the typed refusals of the d1 writer are outcomes, not crashes. The attempt's receipt stays pending and is abandoned by the next attempt of the key.
   if(error?.code==='admission_conflict')return result(error.reason==='code_on_other_film'?'conflict':'other_code',{reason:error.reason??null,error:error.code});
@@ -144,7 +176,7 @@ export async function admitVerifiedFilm(env,input={}){
  let out;
  switch(ran.status){
   case 'wait':out=result('wait',{reason:ran.reason??'in_flight',dueAt:ran.dueAt??null});break;
-  case 'settled':out=result('present',{id:ran.currentTarget?.id??null,requestId:ran.receipt?.requestId??null});break;
+  case 'settled':out=result('present',{id:ran.currentTarget?.id??null,requestId:ran.receipt?.requestId??null,...(src&&!src.fail?{}:{fromIntent:true})});break;
   case 'none':out=ran.result;break;
   case 'finalized':out=ran.result;break;
   case 'refused':out=result('deferred',{reason:'finalize_refused'});break;
@@ -159,10 +191,17 @@ export async function admitVerifiedFilm(env,input={}){
   }
   default:out=result('deferred',{reason:'contended'});
  }
- // A pair that was admitted already (by this item's earlier attempt, by another route, before the key existed) writes nothing, but a genuinely NEW check of it is evidence (ADR 0213 decision 4).
- if(evidence&&out.outcome==='present'&&out.id){
-  try{out.evidence=await recordIdentityEvidence(env,{evidence:input.evidence,filmId:out.id,now:clock,policy:input.policy||RETRY_POLICY});}
-  catch(error){out.evidence={state:'failed',errorClass:error?.code||'unclassified'};}
+ // A pair that was admitted already (by this item's earlier attempt, by another route, before the key existed) writes nothing, but a genuinely NEW check of it is evidence (ADR 0213 decision 4). The evidence-only
+ // operation runs under its own key `evidence:<evidence_key>` and its completion is PROVEN before the item is reported complete. The evidence to record is the one of a check THIS call performed, or the one an
+ // earlier call kept (`pendingEvidence`); a recovery that made no check records none.
+ const performed=src&&!src.fail?src.evidenceInput:null;
+ const toRecord=out.outcome==='present'&&out.id?(performed||input.pendingEvidence||null):null;
+ if(toRecord){
+  let ev;
+  try{ev=await recordIdentityEvidenceKeyed(env,{evidence:toRecord,filmId:out.id,now:clock,policy},{run:runOperationKey});}
+  catch(error){ev={state:'failed',written:false,errorClass:error?.code||'unclassified'};}
+  out.evidence=ev;
+  if(ev.state!=='present'&&ev.state!=='written')out=result('deferred',{reason:'evidence_unrecorded',admitted:true,id:out.id,pendingEvidence:toRecord,evidence:ev});
  }
  return {...out,...base};
 }
