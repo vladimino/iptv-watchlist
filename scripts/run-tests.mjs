@@ -4,12 +4,14 @@ import {availableParallelism,tmpdir} from 'node:os';
 import path from 'node:path';
 import {selectSuite} from './test-classification.mjs';
 import {onPath,resolveSqliteCli} from './sqlite-cli.mjs';
+import {appendRecord,contentTree,recordPath} from './test-pass-record.mjs';
 
 // AIR-378. Runs every self-contained test file in its own Node process (process isolation is kept), a bounded number at a time.
 //
 //   npm test                          the core suite: min(6, ceil(1.5 x CPUs)) files at a time (AIR-408: the suite waits more than it computes)
 //   npm test -- --suite non-functional  mutant-kill checks and runner wall-clock checks (also TEST_SUITE); the nightly workflow runs this
-//   npm test -- --suite all           core, then the non-functional suite (split files run in both, with the matching callbacks)
+//   npm test -- --suite all           core, then the non-functional suite (split files run in both, with the matching callbacks); a full pass on an unchanged
+//                                     working tree is recorded for the pre-push hook (AIR-668, scripts/test-pass-record.mjs; IPTV_TEST_PASS_RECORD=0 skips it)
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
@@ -480,11 +482,22 @@ async function main(){
   };
   process.on('SIGINT',()=>forward('SIGINT'));
   process.on('SIGTERM',()=>forward('SIGTERM'));
+  // AIR-668: a full pass of the repository's own suite on an unchanged working tree is recorded (scripts/test-pass-record.mjs), so the pre-push hook can
+  // skip running the same suite again on the same content. A synthetic --dir run, or IPTV_TEST_PASS_RECORD=0, records nothing.
+  const recordable=process.env.IPTV_TEST_PASS_RECORD!=='0'&&path.resolve(directory)===path.resolve('tests');
+  const testedTree=recordable?contentTree():null;
   const first=await runStage('core');
   if(wrapperInterrupted){console.error(`Interrupted by ${wrapperInterrupted}.`);process.exitCode=exitFor(wrapperInterrupted);return;}
   if(first!==0){process.exitCode=first;return;}
   const second=await runStage('non-functional');
   process.exitCode=wrapperInterrupted?exitFor(wrapperInterrupted):second;
+  if(process.exitCode===0&&testedTree){
+   const endTree=contentTree();
+   if(endTree===testedTree){
+    try{if(appendRecord(recordPath(),{tree:testedTree}))console.log(`Recorded the pass of tree ${testedTree.slice(0,12)} for the pre-push hook.`);}
+    catch(error){console.error(`Could not record the pass for the pre-push hook: ${error.message}`);}
+   }else console.log('The working tree changed during the run; the pass is not recorded for the pre-push hook.');
+  }
   return;
  }
  let plan;

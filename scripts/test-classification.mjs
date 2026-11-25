@@ -1754,6 +1754,9 @@ export const FILES={
   "suite": "fixture",
   "note": "Historical integration fixture, intentionally absent from the public suite."
  },
+ "test-pass-record.mjs": {
+  "suite": "core"
+ },
  "test-classification.mjs": {
   "suite": "core"
  },
