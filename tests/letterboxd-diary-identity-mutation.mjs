@@ -51,7 +51,7 @@ const MUTANTS = [
   ['a refused reservation still checks the id', "if(taken==='ok')return true;", "if(taken==='ok'||taken==='refused')return true;"],
   ['the queue position is ignored', "x.first-y.first||(x.pos<y.pos?-1:x.pos>y.pos?1:0)||x.index-y.index", "x.first-y.first||x.index-y.index"],
   // Review of PR #1009: writes bound to the entry as read; the budget survives the backlog; the stored slug serves a caller without one.
-  ['the final write ignores a moved entry', "expect:expectOf([...Object.keys(set),...clearNow,...removeNow])", "expect:null"],
+  ['the final write ignores a moved entry', "expect:expectOf([...Object.keys(inSet),...inClear,...inRemove,...Object.keys(inAdd)]),", "expect:null,"],
   ['the link intent ignores a moved entry', "if(out?.refused?.includes(item.lid)||out?.conflicts?.includes(item.lid))return false;", "if(out?.refused?.includes(item.lid))return false;"],
   ['the claim write ignores a moved entry', "expect:Object.fromEntries([...Object.keys(claimSet),...claimClear].map(lid=>[lid,afterStep(lid)]))", "expect:null"],
   ['a lost race is charged as a check', "if(conflicted.includes(lid)){outcomes.set(lid,{checked:checked.has(lid),class:'not_now',reason:'entry_changed',retryAt:null,attempts:null,streak:null,terminal:false});continue;}", ""],
@@ -68,7 +68,11 @@ const MUTANTS = [
   ['the intake is not removed from the backlog by the reservation', "backlogRemove:fromBacklog?[lid]:[]", "backlogRemove:[]"],
   // Third review of PR #1009: the stale seed is guarded by the row token; every effect is under a reservation.
   ['the reservation drops the row-token guard', ",extra:item.guard?[item.guard]:[]});", ",extra:[]});"],
-  ['the final write drops the row-token guard', "extra:guardsOf([...Object.keys(set)]),", ""],
+  ['the final write drops the row-token guard', "extra:guardsOf(lids),", ""],
+  // Fourth review of PR #1009: the guard covers the backlog write too; one stale id never rolls back another; the reservation bounds every effect.
+  ['the final write guards only the entries, not the backlog write', "extra:guardsOf(lids),", "extra:guardsOf(Object.keys(inSet)),"],
+  ['a refused batch is not isolated per id', "if(error&&error.code==='write_contention'&&idsOf.length>1){", "if(false){"],
+  ['the reservation does not bound the effects', "const remaining=()=>Math.min(callerRemaining(),now+RESERVATION_MS-15000-clock());", "const remaining=callerRemaining;"],
   ['a trusted-bridge link is not reserved', "if(!(await take(item,stored.films[lid]||null)))continue;\n    if(!(await intend(item,bridge.tmdb)))", "if(!(await intend(item,bridge.tmdb)))"],
   ['a link repair is not reserved', "if(!(await take(item,prior)))continue;\n    try{", "try{"],
   ['the stored slug is not used', "if(!item.slug&&typeof prior?.slug==='string'&&SLUG.test(prior.slug))item.slug=prior.slug;", ""],

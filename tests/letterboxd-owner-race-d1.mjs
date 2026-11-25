@@ -48,10 +48,13 @@ async function ownerRequeue(env, lid) {
   const plan = await WatchlistD1.ownerAdmissionPlan(env, {action: 'requeue', lids: [lid], now: NOW}); assert.equal(plan.ok, true);
   const out = await Facts.ownerAction(env, {action: 'requeue', lids: [lid], expectedVersion: version, by: 'o', why: 'w', at: AT, extra: plan.statements}); assert.equal(out.state, 'applied', JSON.stringify(out)); return out;
 }
-async function scenario({withEntry, slugless = false}) {
+async function scenario({withEntry, slugless = false, fullCap = false}) {
   const db = open(), env = {DB: db}; currentDb = db; calls.length = 0;
-  const lid = slugless ? 'Sl1' : withEntry ? 'Wi1' : 'Wo1';
+  const lid = fullCap ? 'Fc1' : slugless ? 'Sl1' : withEntry ? 'Wi1' : 'Wo1';
   await Facts.applyDiaryEvidence(env, [{lid, watchedDate: '2026-11-17', rating: 3, ratingState: 'rated', sourceRef: 'diary:viewing:1'}]);
+  const fillers = Array.from({length: 200}, (_, i) => 'Fill' + i);
+  // a FULL document: 200 entries that may not be evicted, so the row-only id has no place and its seed would go to the backlog
+  if (fullCap) await Facts.updateDiaryIdentity(env, {set: Object.fromEntries(fillers.map(id => [id, {reason: 'not_found', class: 'gone', slug: 'f-' + id.toLowerCase(), attempts: 1, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2099-01-01T00:00:00.000Z'}]))});
   if (withEntry) await Facts.updateDiaryIdentity(env, {set: {[lid]: {reason: 'not_found', class: 'gone', slug: 'film-one', attempts: 5, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}}});
   db.sql(`INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('${lid}','none',1,'pending',5,NULL,'not_found',NULL,'2026-11-24T00:00:00.000Z')`);
   let fired = false;
@@ -66,6 +69,12 @@ async function scenario({withEntry, slugless = false}) {
   assert.equal(first.counts.entryChanged >= 1 || first.counts.rowChanged >= 1 || first.counts.notNow >= 1, true, JSON.stringify(first.counts));
   assert.deepEqual([ledger(db)[lid].state, ledger(db)[lid].attempts, ledger(db)[lid].last_reason], ['pending', 0, 'owner_requeued'], 'the row keeps the owner requeue');
   const entry = await entryOf(lid); assert.ok(!entry || entry.attempts === 0, 'no entry carries the stale budget: ' + JSON.stringify(entry));
+  if (fullCap) {
+    const backlog = (await Facts.readDiaryIdentity(env)).backlog || {};
+    assert.ok(!backlog[lid] || backlog[lid].attempts === 0, 'no backlog record carries the stale budget: ' + JSON.stringify(backlog[lid]));
+    // a place returns; the next ordinary check charges from ZERO (one 404 = 1, not 6)
+    await Facts.updateDiaryIdentity(env, {clear: ['Fill0']});
+  }
   // the next ordinary step starts from the NEW budget: one 404 is one attempt, not six
   const later = NOW + 60000;
   const second = await step(later);
@@ -77,4 +86,26 @@ await scenario({withEntry: true});
 await scenario({withEntry: false});
 // a non-source outcome (no slug anywhere) also applies the seed: its write carries the row-token guard too
 await scenario({withEntry: false, slugless: true});
+// a full document: the stale seed would be written to the BACKLOG (no entry slot); that write carries the row-token guard too
+await scenario({withEntry: false, fullCap: true});
+// Isolation: two due rows in ONE step; an owner requeue of the first lands during the snapshot read. The stale id is refused (`entry_changed`) but the OTHER id's answered check keeps its charge.
+async function pair() {
+  const db = open(), env = {DB: db}; currentDb = db; calls.length = 0;
+  const A = 'Pa1', B = 'Pb1';
+  await Facts.applyDiaryEvidence(env, [A, B].map((lid, i) => ({lid, watchedDate: '2026-11-17', rating: 3, ratingState: 'rated', sourceRef: 'diary:viewing:' + i})));
+  for (const lid of [A, B]) db.sql(`INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('${lid}','none',1,'pending',2,NULL,'not_found',NULL,'2026-11-24T00:00:00.000Z')`);
+  // A has no slug anywhere (a non-source outcome that applies A's seed in the FINAL write); B is checked at the source, and the owner requeue of A lands during B's request.
+  let fired = false; const base = ctx.fetch;
+  ctx.fetch = async (...args) => {if (!fired) {fired = true; await ownerRequeue(env, A);} return base(...args);};
+  const repository = {...WatchlistD1,
+    readSnapshot: async () => ({ok: false, reason: 'absent'}),
+    currentMemberUrls: async () => ({ok: true, urls: new Map([[B, 'https://letterboxd.com/film/film-b/']])})};
+  const identity = {MAX_ATTEMPTS: Identity.MAX_ATTEMPTS, resolve: (e, items, opts) => Identity.resolve(e, items, opts), diaryLinks: (e, lids) => Facts.diaryLinks(e, lids)};
+  await admissionStep({repository, identity, epochGuard: () => GUARD})({env, epoch: 1, now: () => NOW, deadline: NOW + 600000}, {limit: 3, now: NOW});
+  assert.equal((await entryOf(B))?.attempts, 3, 'the other id keeps its answered check (2 + 1)');
+  assert.equal(ledger(db)[B].attempts, 3, 'and its ledger row');
+  assert.deepEqual([ledger(db)[A].attempts, ledger(db)[A].last_reason], [0, 'owner_requeued'], 'the stale id keeps the owner requeue');
+  const ea = await entryOf(A); assert.ok(!ea || ea.attempts === 0, 'no stale budget on the stale id: ' + JSON.stringify(ea));
+}
+await pair(); ctx.fetch = fetchMock;
 console.log('letterboxd-owner-race-d1: ok');

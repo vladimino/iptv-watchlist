@@ -136,9 +136,13 @@ const LetterboxdDiaryIdentity=(()=>{
  //  - due ids run in one stable order: link repairs and pending claims first, then by queue position (`queuedAt`, oldest first);
  //  - an id without an entry is not checked while the document is full of entries it may not evict: it goes to the bounded backlog (`cap_refused`).
  // route: 'ratings_diary' | 'watchlist_admission' (the caller whose step performs the check). Returns {labels,counts,outcomes}.
- async function resolve(env,items,{clock=()=>Date.now(),remaining=()=>Infinity,fetchImpl=fetch,route='ratings_diary'}={}){
+ async function resolve(env,items,{clock=()=>Date.now(),remaining:callerRemaining=()=>Infinity,fetchImpl=fetch,route='ratings_diary'}={}){
   const counts={considered:0,bridged:0,verified:0,repaired:0,pending:0,deferred:0,skipped:0,checked:0,transport:0,notNow:0,gone:0,definite:0,atCap:0,capRefused:0,backlogFull:0},labels=new Map(),outcomes=new Map();
-  const now=clock(),ISO_TIME=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+  const now=clock();
+  // AIR-599 (fourth review of PR #1009): the reservation expires at now+RESERVATION_MS. No effect of this step may begin or run on after that: the time left is also bounded by the reservation (less the write reserve and a
+  // 15 s margin), whatever deadline the caller passed (`Infinity` by default), so an expired holder has already stopped when another caller can take the id over. At commit the holder's writes are bound to its reservation anyway.
+  const remaining=()=>Math.min(callerRemaining(),now+RESERVATION_MS-15000-clock());
+  const ISO_TIME=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
   const page=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,{lid:item.lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:true,queuedAt:ISO_TIME.test(String(item.queuedAt||''))?item.queuedAt:iso(now),seed:Number.isInteger(item.attempts)&&item.attempts>0?Math.min(item.attempts,MAX_ATTEMPTS):0,reason:typeof item.reason==='string'&&item.reason?item.reason.slice(0,60):null,guard:Array.isArray(item.guard)&&typeof item.guard[0]==='string'&&Array.isArray(item.guard[1])?item.guard:null}])).values()];
   const notNowAll=reason=>{for(const item of page)outcomes.set(item.lid,{checked:false,class:'not_now',reason,retryAt:null,attempts:null,streak:null,terminal:false});};
   let stored;
@@ -365,15 +369,37 @@ const LetterboxdDiaryIdentity=(()=>{
   {
    const removeNow=[...new Set(backlogRemove)].filter(lid=>Object.hasOwn(baseB,lid));
    const hints=Object.fromEntries(wanted.map(item=>[item.lid,{slug:item.slug||null,queuedAt:item.queuedAt||iso(now),attempts:item.seed||0}]));
+   const clearNow=clear.filter(lid=>stored.films[lid]);
+   // AIR-599 (fourth review of PR #1009): EVERY materialization of a ledger row's seed carries that row's token guard in its batch: the entry (`set`), the backlog record of a refused id (`backlogAdd`, `hints`), and the
+   // expected absence of an entry for an id that only the backlog receives. One batch for all ids; if it is refused (a moved document or a moved token), each id is written alone with its own guard, so one stale id never
+   // rolls back another id's answered check (its charge) and only the stale id is `entry_changed`.
+   const idsOf=[...new Set([...Object.keys(set),...clearNow,...removeNow,...Object.keys(backlogAdd)])];
+   const pick=(map,lids)=>Object.fromEntries(lids.filter(lid=>Object.hasOwn(map,lid)).map(lid=>[lid,map[lid]]));
+   const writeFor=lids=>{
+    const inSet=pick(set,lids),inAdd=pick(backlogAdd,lids),inRemove=removeNow.filter(lid=>lids.includes(lid)),inClear=clearNow.filter(lid=>lids.includes(lid));
+    return LetterboxdFacts.updateDiaryIdentity(env,{set:inSet,clear:inClear,backlogAdd:inAdd,backlogRemove:inRemove,backlogOnRefuse:pick(hints,lids),expect:expectOf([...Object.keys(inSet),...inClear,...inRemove,...Object.keys(inAdd)]),expectBacklog:Object.fromEntries([...Object.keys(inAdd),...inRemove].map(lid=>[lid,baseB[lid]??null])),extra:guardsOf(lids),...(answered?{checkedAt:iso(now)}:{})});
+   };
+   const absorb=out=>{
+    for(const lid of Array.isArray(out?.refused)?out.refused:[])refused.push(lid);
+    for(const lid of Array.isArray(out?.conflicts)?out.conflicts:[])conflicted.push(lid);
+    counts.backlogFull+=Array.isArray(out?.full)?out.full.length:0;
+   };
    try{
-    const clearNow=clear.filter(lid=>stored.films[lid]);
-    const out=await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clearNow,backlogAdd,backlogRemove:removeNow,backlogOnRefuse:hints,expect:expectOf([...Object.keys(set),...clearNow,...removeNow]),expectBacklog:Object.fromEntries([...Object.keys(backlogAdd),...removeNow].map(lid=>[lid,baseB[lid]??null])),extra:guardsOf([...Object.keys(set)]),...(answered?{checkedAt:iso(now)}:{})});
-    refused=Array.isArray(out?.refused)?out.refused:[];conflicted=Array.isArray(out?.conflicts)?out.conflicts:[];counts.entryChanged=(counts.entryChanged||0)+conflicted.length||undefined;counts.backlogFull+=Array.isArray(out?.full)?out.full.length:0;
+    absorb(await writeFor(idsOf));
    }catch(error){
-    // Contention: a moved document or a moved ledger row token. Nothing was written; the ids stay as they were (not now, no attempt).
-    persisted=false;
-    if(error&&error.code==='write_contention')counts.entryChanged=(counts.entryChanged||0)+Object.keys(set).length;else counts.persistFailed=1;
+    if(error&&error.code==='write_contention'&&idsOf.length>1){
+     // Isolate: each id on its own (the first batch wrote nothing).
+     for(const lid of idsOf){
+      try{absorb(await writeFor([lid]));}
+      catch(inner){if(inner&&inner.code==='write_contention')conflicted.push(lid);else{persisted=false;counts.persistFailed=1;break;}}
+     }
+    }else{
+     // Contention: a moved document or a moved ledger row token. Nothing was written; the ids stay as they were (not now, no attempt).
+     persisted=false;
+     if(error&&error.code==='write_contention'){counts.entryChanged=(counts.entryChanged||0)+Math.max(1,Object.keys(set).length);}else counts.persistFailed=1;
+    }
    }
+   if(conflicted.length)counts.entryChanged=(counts.entryChanged||0)+conflicted.length;
   }
   for(const lid of refused)counts.capRefused++;
   // The explicit outcome of every id this step was asked about (and of the ids it serviced on its own).

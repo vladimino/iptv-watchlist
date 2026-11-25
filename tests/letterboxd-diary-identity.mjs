@@ -617,4 +617,14 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
  assert.deepEqual([both.entries.Both9.attempts, both.backlog.Both9.attempts], [0, 0], 'a requeue resets every place that holds the id');
 }
 
+// AIR-599 (fourth review of PR #1009): no effect starts so late that the reservation could expire under it. With no caller deadline (Infinity) a step whose clock has run to the end of the reservation (less the margin)
+// makes no source request: the id is deferred, nothing is charged.
+{
+  reset(); await seed('Late1', 3); add('Late1', 'fixture-late-2001', '900777', 'Fixture Late', 2001);
+  let ticks = 0;
+  const out = await Identity.resolve(env, items(['Late1', 'fixture-late-2001']), {clock: () => (ticks++ === 0 ? NOW : NOW + 4.9 * 60000), remaining: () => Infinity, fetchImpl: ctx.fetch});
+  assert.equal(net.calls.length, 0, 'no request after the reservation window is spent');
+  assert.equal(out.counts.checked, 0);
+}
+
 console.log('letterboxd-diary-identity: ok');
