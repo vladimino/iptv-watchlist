@@ -30,7 +30,8 @@ const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA fore
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const tryWrite=(file,text)=>sqliteSync(['-bail',file],{input:text,encoding:'utf8'});
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
-assert.equal(files[files.length-1],'0038_canonical_producer_outcome.sql','0038 is the last migration of the chain');
+// The templates below stop at 38 and 37 by number, so a later migration (0039 and on, AIR-600) never changes what this file tests.
+assert.ok(files.includes('0038_canonical_producer_outcome.sql'),'0038 is in the chain');
 function template(upTo){
  const file=path.join(root,'t-'+upTo+'.sqlite');
  sqlite(file,files.filter(name=>Number(name.slice(0,4))<=upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
