@@ -4,6 +4,7 @@ cd "$(git rev-parse --show-toplevel)"
 # Git passes local/ref and remote/ref pairs. Compare pushed code, not the entire working tree.
 requires_tests=0
 saw_ref=0
+tested_commits=()
 zero=0000000000000000000000000000000000000000
 while read -r local_ref local_sha remote_ref remote_sha; do
   saw_ref=1
@@ -14,12 +15,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     base="$(git merge-base "$local_sha" refs/remotes/origin/main)"
   else
     requires_tests=1
-    break
+    tested_commits+=("$local_sha")
+    continue
   fi
   if git diff --name-only "$base" "$local_sha" |
     grep -Eq '^(src/|scripts/|tests/|migrations/|public/|data/|build\.mjs$|package(-lock)?\.json$|wrangler\.jsonc$|\.github/workflows/|\.githooks/)'; then
     requires_tests=1
-    break
+    tested_commits+=("$local_sha")
   fi
 done
 if [[ "$saw_ref" == 0 ]]; then
@@ -28,6 +30,16 @@ if [[ "$saw_ref" == 0 ]]; then
 fi
 if [[ "$requires_tests" == 0 ]]; then
   echo '[AIR-514] pre-push: documentation-only change, full suite not needed'
+  exit 0
+fi
+# AIR-668: the pre-PR rule already runs `npm run test:all`, and running it again here doubled the time to push. When a full pass was recorded for the
+# exact content of every pushed commit (or for content that differs only in files that do not need the suite), the hook says so and does not repeat it.
+# The record is written only by a `--suite all` run that passed in full on an unchanged working tree (scripts/test-pass-record.mjs).
+# IPTV_PREPUSH_RERUN=1 always runs the suite.
+if [[ "$saw_ref" == 1 && "${IPTV_PREPUSH_RERUN:-0}" != 1 && ${#tested_commits[@]} -gt 0 ]] &&
+  covered="$(node scripts/test-pass-record.mjs check "${tested_commits[@]}")"; then
+  echo '[AIR-668] pre-push: core and non-functional suites already passed on this content, not running them again:'
+  echo "$covered"
   exit 0
 fi
 echo '[AIR-514] pre-push: running core and non-functional suites'

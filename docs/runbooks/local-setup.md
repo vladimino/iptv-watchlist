@@ -110,7 +110,15 @@ The hook also passes `--isolate-measurements`: every non-functional file that is
 
 `npm test`, `npm run test:all` run by hand, and CI keep the 300 s default.
 
-Git opens the SSH connection to GitHub before it runs the hook, and the full suite takes about ten minutes, so an idle connection can be closed under it: the hook passes and the push then dies with exit 141 (SIGPIPE) without updating the remote. Keep the connection alive for a push that runs the suite:
+The hook does not run the suite again on content that already passed it (AIR-668). A `npm run test:all` that passes in full records the Git tree of the working tree it tested (tracked and untracked files that are not ignored) in `.git/iptv-test-all-passed`, with the Node version, but only when the working tree was the same at the end of the run as at the start; the hook's own run records the same way. The hook then skips the suite when every pushed commit has a recorded tree on the current Node version, or differs from one only in files that need no suite under the documentation-only rule above, and prints which run covers each commit. Any other push runs the suite as before. So the usual order, `npm run test:all`, then `git commit`, then `git push`, runs the suite once; a retried push of the same commits does not run it again. To force a run:
+
+```bash
+IPTV_PREPUSH_RERUN=1 git push
+```
+
+`IPTV_TEST_PASS_RECORD=0` stops a `test:all` run from recording. The record lives only in the local Git directory; it is a convenience like the hook itself, not evidence for a reviewer, and the PR still reports the commands and results that were run.
+
+Git opens the SSH connection to GitHub before it runs the hook, and the full suite takes about ten minutes when it does run, so an idle connection can be closed under it: the hook passes and the push then dies with exit 141 (SIGPIPE) without updating the remote. Keep the connection alive for a push that runs the suite:
 
 ```bash
 GIT_SSH_COMMAND="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=40" git push
@@ -120,6 +128,7 @@ The tests of this tooling:
 
 | Test | What it proves |
 | --- | --- |
+| `tests/test-pass-record.mjs` | A passing `test:all` on an unchanged working tree records the tested tree, and nothing is recorded for a failure, a changed tree, a `--dir` run or `IPTV_TEST_PASS_RECORD=0`; the pre-push hook skips the suite only when every pushed commit has a recorded tree (or differs from one only in documentation-only paths) on the same Node version, and `IPTV_PREPUSH_RERUN=1` always runs it |
 | `tests/local-d1.mjs` | The migration splitter reads every migration like sqlite3 does; the guarded marker activation; synthetic rows whose R2 bodies match their SHA-256; readiness refusals; the snapshot `d1Sql` input rules |
 | `tests/local-store.mjs` | Fixture and snapshot stores are isolated (R2 and D1), `--refresh` replaces only the selected store, a changed migration chain, a deleted directory, an incomplete D1 or a failed import imports again |
 | `tests/local-api.mjs` | The built Worker answers the programme, started, view, Finds, footer and admin reads from the installed D1 with the fixture data, and refuses an absent, old, not-authoritative or body-mismatched D1 |
