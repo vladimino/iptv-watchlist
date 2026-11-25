@@ -483,6 +483,18 @@ const setWriter=async(env,writer,target)=>{
   assert.equal(ledgerRows(file)[0].request_id,'req-1','the first writer of the key keeps it');
   assert.deepEqual(probe(file),['m','again'],state+': the duplicate batch still commits its domain write');
  }
+// A reconstructed row with a KNOWN root is the same identity as a live check of that key: reconstruction provenance is not identity (ADR 0215 decisions 1 and 7), for both writers.
+ for(const [writer,input,order] of [['discovery_decision',decision(),null],['discovery_owner',owner({sourceOrder:4}),4]]){
+  const file=withProbe(copy(template));const env=envOf(file);
+  await setWriter(env,writer,'on');
+  const rooted=await planDomainEvidence(writer,input);
+  const r=rooted.row;
+  ok(file,"INSERT INTO film_identity_evidence (evidence_key,film_id,subject_kind,subject_value,relation,object_kind,object_value,polarity,route,method,source_root,source_ref,source_scope,scope_evidence_key,supersedes_key,observed_at,origin,reconstruction_run,reconstructed_from,request_id,recorded_at,source_order) VALUES ('"+rooted.evidenceKey+"',NULL,'"+r.subjectKind+"','"+r.subjectValue+"','"+r.relation+"','"+r.objectKind+"','"+r.objectValue+"','"+r.polarity+"','"+r.route+"','"+r.method+"','"+r.sourceRoot+"',NULL,"+(r.sourceScope?"'"+r.sourceScope+"'":'NULL')+",NULL,NULL,'"+AT+"','reconstruction','run-1','record-1','imp-1','"+AT+"',"+(order===null?'NULL':order)+")");
+  await domainBatch(env,file,rooted,{requestId:'live-1',mark:'live'});
+  assert.deepEqual(probe(file),['live'],writer+': the live batch commits beside a reconstructed row of the same rooted key');
+  assert.equal(ledgerRows(file).length,1);
+  assert.equal(one(file,'SELECT origin FROM film_identity_evidence'),'reconstruction','the existing row is not changed');
+ }
  // A mismatching row under the same key rolls the whole batch back: another method, scope, source order or root.
  {
   const file=withProbe(copy(template));const env=envOf(file);
@@ -564,14 +576,16 @@ const setWriter=async(env,writer,target)=>{
  }
 }
 
-// ===== 7. dormant: nothing in the Worker imports the writer control, nothing reads the ledger or the control =====
+// ===== 7. dormant: only the Discovery decision writer (E2a, AIR-617) imports the helper, nothing calls the operator, nothing reads the ledger or the control =====
 {
  const sources=fs.readdirSync('src',{recursive:true}).filter(name=>String(name).endsWith('.js')).map(name=>path.join('src',String(name)));
  const mentions=sources.filter(name=>/identity_evidence_writer/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(mentions,['src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,[],'nothing imports the writer control: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ assert.deepEqual(importers,['src/discovery-authority.js'],'only the Discovery decision write imports the helper (E2a); no route, Workflow, cron or producer imports the writer control');
+ const operator=sources.filter(name=>name!=='src/identity-evidence-writer.js'&&/\bchangeWriter\b/.test(fs.readFileSync(name,'utf8')));
+ assert.deepEqual(operator,[],'nothing in the Worker calls the activation/break operator: no row of any writer is ever flipped by code');
+ assert.ok(!/changeWriter/.test(fs.readFileSync('build.mjs','utf8')+fs.readFileSync('scripts/bundle-scope.mjs','utf8').replace(/\/\/.*$/gm,'')),'the bundle hands the operator to nothing');
  // The migration is a file only: no code applies it, and the deploy workflow never applies a migration.
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0042_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0042');

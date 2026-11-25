@@ -11,7 +11,7 @@ import vm from 'node:vm';
 import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
-import {scoped,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedEpgPriority,scopedDiscoveryAuthority,loadDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {standins, strict} from './local-standins.mjs';
 
@@ -40,7 +40,7 @@ const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abort
  fetch:async()=>{throw new Error('unexpected outbound request');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);
 vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),world);
-vm.runInContext(scopedEpgPriority(),world);vm.runInContext(scopedDiscoveryAuthority(),world);
+vm.runInContext(scopedEpgPriority(),world);loadDiscoveryAuthority(script=>vm.runInContext(script,world));
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
 installViewIndexFixture(world);
