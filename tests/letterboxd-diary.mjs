@@ -284,10 +284,12 @@ assert.equal(records.get('sync.json').ratingAttempt,undefined);
  // P1-2 of the review of PR #1021: a challenge page behind a 200 with no header, a challenge body behind another status, a header challenge: each writes the cooldown (the Diary also reports its
  // existing `blocked` outcome for the page); an ordinary 404 or 5xx writes nothing
  const challengePage='<html><head><title>Just a moment...</title></head><body>cf-chl-opt</body></html>';
- for(const [label,reply,expected] of [['200 body challenge',()=>respond(200,challengePage),'challenge'],['503 body challenge',()=>respond(503,challengePage),'challenge'],['200 header challenge',()=>respond(200,'<html></html>',{'cf-mitigated':'challenge'}),'challenge'],['403',()=>respond(403,''),'forbidden'],['404',()=>respond(404,''),null],['500',()=>respond(500,''),null]]){
+ for(const [label,reply,expected] of [['200 body challenge',()=>respond(200,challengePage),'challenge'],['503 body challenge',()=>respond(503,challengePage),'challenge'],['200 header challenge',()=>respond(200,'<html></html>',{'cf-mitigated':'challenge'}),'challenge'],['200 header challenge, body unreadable',()=>({ok:true,status:200,headers:new Headers({'cf-mitigated':'challenge'}),text:async()=>{throw new Error('read failed');}}),'challenge'],['200 platform-script challenge outside the parser marker',()=>respond(200,'<html><body><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></body></html>'),'challenge'],['403',()=>respond(403,''),'forbidden'],['404',()=>respond(404,''),null],['500',()=>respond(500,''),null]]){
   w=world('enforce');records.clear();etags.clear();requests.length=0;site.set(url(1),reply);
   out=await D.syncHistory(w.env);
   assert.equal(plain(cool(w.file)).length,expected?1:0,label);
+  if(expected&&label.startsWith('200'))assert.equal(out.lastOutcome,'blocked',label+': a challenge behind a 200 is a blocked answer, never a Diary page');
+  if(expected&&label.startsWith('200'))assert.equal(out.counts.pages,0,label+': no page was counted');
   if(expected)assert.equal(plain(cool(w.file))[0].reason,expected,label);
  }
  site.set(url(1),()=>respond(200,'<html></html>'));

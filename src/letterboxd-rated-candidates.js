@@ -183,10 +183,21 @@ const LetterboxdRatedCandidates = (() => {
   async function boundedFetch(fetchImpl, url, init, timeout, limit) {
     let response;
     try {response = await fetchImpl(url, {...init, signal: AbortSignal.timeout(timeout)});} catch (error) {return stopFrom(error);}
+    // AIR-604 (ADR 0211 decision 5). A known 429, 403 or challenge is recorded and is a TRANSPORT stop, the existing classifier's own word for it. It takes precedence over a body that is oversized or
+    // unreadable, which would otherwise be a definite answer that charges an attempt. The status and the headers are checked FIRST, before the body is read (no body is read for a known signal);
+    // a challenge page behind a 200 is found in the one bounded read below. Without a coordinator, and with `off`, nothing changes: `after` records nothing and returns null.
+    const scope = fetchImpl.coordinator ? UpstreamCooldown.scopeOfUrl(url) : null;
+    const record = async html => {
+      if (!scope) return null;
+      let signal = null;
+      try {signal = await fetchImpl.coordinator.after(scope, {status: response.status, headers: response.headers, html});} catch { /* coordination never fails a check */ }
+      return signal ? (LetterboxdIdentity.transportStop(response.status, response.headers, html) || null) : null;
+    };
+    const early = await record('');
+    if (early) return {stop: early};
     const read = await readBounded(response, limit);
-    // AIR-604: record a 429, a challenge or a 403 of a request that WAS sent (observe and enforce); a no-op for `off`, and when no coordinator is attached.
-    // A known 429, 403 or header challenge is recorded whatever happened to the body (a failed or oversized read has no text, and status and headers still classify).
-    if (fetchImpl.coordinator) {try {await fetchImpl.coordinator.after(UpstreamCooldown.scopeOfUrl(url), {status: response.status, headers: response.headers, html: read.text || ''});} catch { /* coordination never fails a check */ }}
+    const late = await record(read.text || '');
+    if (late) return {stop: late};
     if (read.oversize) return {stop: 'oversized'};
     if (read.error) return stopFrom(read.error);
     return {response, text: read.text || ''};
@@ -571,7 +582,7 @@ const LetterboxdRatedCandidates = (() => {
   // One pending code, or one enrichment continuation. A stop is stored and the next code is not fetched.
   // `code` selects that one pending or admitting row and does not walk the rest of the queue.
   async function identityStep(env, {sha, resume = false, code: requested = null, fetchImpl: baseFetch = fetch} = {}) {
-    const fetchImpl = typeof UpstreamCooldown === 'undefined' ? baseFetch : UpstreamCooldown.createCoordinator(env, {caller: 'letterboxd-archive-step'}).guard(baseFetch);
+    const fetchImpl = typeof UpstreamCooldown === 'undefined' || baseFetch.coordinator ? baseFetch : UpstreamCooldown.createCoordinator(env, {caller: 'letterboxd-archive-step'}).guard(baseFetch);
     if (!HEX64.test(String(sha || ''))) return {error: 'invalid_request'};
     const key = CANDIDATES(sha);
     const opened = await readDoc(env, key);

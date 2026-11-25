@@ -236,9 +236,10 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   for (const [label, make, expected] of cases.filter(([, , reason]) => reason)) {
     const file = dbWith('enforce'); reset(); answer = make; bytesRead = 0; context.env = {DB: d1Standin(file)};
     context.net = run("upstreamCoordinator(env,'letterboxd-identity:ratings_diary').guard(fetch)");
-    await run("LetterboxdRatedCandidates.follow(net,'abc')");
+    const result = plain(await run("LetterboxdRatedCandidates.follow(net,'abc')"));
     assert.equal(rows(file).length, 1, 'follow ' + label + ': ' + JSON.stringify(rows(file)));
     assert.equal(rows(file)[0].reason, expected, 'follow ' + label);
+    assert.ok(['rate_limited', 'forbidden', 'challenge'].includes(result.stop), 'follow ' + label + ': a known block stays a transport stop, whatever happened to the body (got ' + JSON.stringify(result) + ')');
   }
   // the removal rating refresh (refreshPersonalRating): the real function, one body read
   for (const f of ['src/domain/prediction-confidence.js', 'src/enrichment.js']) {try {load(fs.readFileSync(f, 'utf8').replace('export default', 'globalThis.worker='), f);} catch { /* already loaded by section 2 */ }}
@@ -285,6 +286,40 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   run('recordUpstreamEvidence(runRecord,c1,c2,null)');
   assert.deepEqual(plain(context.runRecord.upstreamCooldown), {skipped: 3, wouldSkip: 4, written: 1, writeFailed: 4});
   context.empty = {}; run('recordUpstreamEvidence(empty,null)'); assert.equal(context.empty.upstreamCooldown, undefined, 'nothing to record, nothing recorded');
+}
+
+// ---- 9. second review round: signals before bodies, no hanging on a non-ok native body, JSON challenge pages, ordinary answers intact ---------------------------------------------------------
+{
+  const native = (status, size = 65536) => {let sent = 0; return new Response(new ReadableStream({pull(controller) {if (sent >= size) {controller.close(); return;} sent += 16384; controller.enqueue(new Uint8Array(16384));}}), {status});};
+  const within = async (promise, label) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(label + ': hung (a pending body cancellation held the caller)')), 3000))]);
+  const env0 = () => {const f = dbWith('enforce'); context.env = {DB: d1Standin(f), TMDB_API_READ_ACCESS_TOKEN: 't', TMDB_REQUEST_INTERVAL_MS: 0, LETTERBOXD_USERNAME: 'demo', EPG_XML_URL: 'https://epg.test/guide.xml'}; reset(); return f;};
+  // Discovery: a large non-ok native Response completes and records the signal; the caller's own error is unchanged
+  for (const [status, reason] of [[403, 'forbidden'], [429, 'rate_limited']]) {
+    const f = env0(); answer = () => native(status);
+    const out = await within(run("tmdbRequest(env,'movie/1').then(()=>'ok',e=>e.message)"), 'Discovery ' + status);
+    assert.equal(out, 'TMDB HTTP ' + status); assert.equal(rows(f)[0]?.reason, reason, 'Discovery ' + status);
+  }
+  for (const status of [404, 500]) {const f = env0(); answer = () => native(status); const out = await within(run("tmdbRequest(env,'movie/1').then(()=>'ok',e=>e.message)"), 'Discovery ' + status); assert.equal(out, 'TMDB HTTP ' + status); assert.deepEqual(rows(f), [], status + ' sets no cooldown');}
+  // ordinary JSON stays correct; a challenge page behind a 200 (body only, or by header) is a recorded block, never data
+  {const f = env0(); answer = () => new Response('{"id":603}', {status: 200}); assert.deepEqual(plain(await within(run("tmdbRequest(env,'movie/603')"), 'json')), {id: 603}); assert.deepEqual(rows(f), []);}
+  {const f = env0(); answer = () => new Response('<html><title>Just a moment...</title>cf-chl-opt</html>', {status: 200}); const out = await run("tmdbRequest(env,'movie/603').then(()=>'data',e=>e.message)"); assert.match(out, /blocked|403/); assert.equal(rows(f)[0]?.reason, 'challenge', 'a body-only challenge in a JSON path is a signal');}
+  {const f = env0(); answer = () => new Response('{"id":1}', {status: 200, headers: {'cf-mitigated': 'challenge'}}); const out = await run("tmdbRequest(env,'movie/603').then(()=>'data',e=>e.message)"); assert.notEqual(out, 'data', 'a header challenge is never data'); assert.equal(rows(f).length, 1); assert.equal(rows(f)[0].reason, 'challenge');}
+  // Wikidata: the same, through localizeByLetterboxd
+  const people = "films=[{id:'a',directors:[{id:'p/jane-doe',name:'Jane Doe',original:'Jane Doe'}],actors:[]}];people={};coordination=upstreamCoordinator(env,'epg-localization');localizeByLetterboxd(films,people,coordination).then(()=>'done',e=>e.message)";
+  for (const [status, reason] of [[403, 'forbidden'], [429, 'rate_limited']]) {const f = env0(); answer = () => native(status); const out = await within(run(people), 'Wikidata ' + status); assert.equal(out, 'done', 'a non-ok answer is skipped as today'); assert.equal(rows(f)[0]?.reason, reason, 'Wikidata ' + status);}
+  {const f = env0(); answer = () => new Response('<html>cf-chl-opt Just a moment...</html>', {status: 200}); const out = await run(people); assert.notEqual(out, 'done', 'a challenge page is never data'); assert.equal(rows(f)[0]?.reason, 'challenge');}
+  {const f = env0(); answer = () => Response.json({results: {bindings: []}}); assert.equal(await run(people), 'done'); assert.deepEqual(rows(f), []);}
+  // getHTML: a known header challenge is blocked and the body is not read; an unreadable 200 body cannot hide it
+  {const f = env0(); let bodyReads = 0; answer = () => ({ok: true, status: 200, headers: new Headers({'cf-mitigated': 'challenge'}), body: null, async text() {bodyReads++; throw new Error('read failed');}});
+   context.coordination = run("upstreamCoordinator(env,'letterboxd-watchlist-scan')");
+   const out = await run("getHTML('https://letterboxd.com/demo/watchlist/',coordination).then(()=>'page',e=>e.message)"); assert.match(out, /^Source HTTP 403/); assert.equal(rows(f)[0]?.reason, 'challenge'); assert.equal(bodyReads, 0, 'no body is read for a known header signal');}
+  // the removal refresh: a challenge header on a 404 or on a 200 (readable or not) is never `not_found` or `not_rated`
+  for (const [label, make] of [['404 with a challenge header', () => new Response('', {status: 404, headers: {'cf-mitigated': 'challenge'}})], ['200 with a challenge header, unreadable body', () => ({ok: true, status: 200, headers: new Headers({'cf-mitigated': 'challenge'}), body: null, async text() {throw new Error('read failed');}})], ['200 with a challenge header, readable body', () => new Response('<html></html>', {status: 200, headers: {'cf-mitigated': 'challenge'}})]]) {
+    const f = env0(); answer = make;
+    const out = await run("refreshPersonalRating(env,{id:'film1',url:'https://letterboxd.com/film/heat-1995/'}).then(v=>({value:v&&v.status}),e=>({error:e.message}))");
+    assert.match(String(out.error), /Rating source HTTP 403/, label + ': a blocked answer, not an entity verdict (' + JSON.stringify(out) + ')'); assert.equal(rows(f)[0]?.reason, 'challenge', label);
+  }
+  {const f = env0(); answer = () => new Response('', {status: 404}); const out = await run("refreshPersonalRating(env,{id:'film1',url:'https://letterboxd.com/film/heat-1995/'}).then(v=>v.status)"); assert.equal(out, 'not_found', 'an ordinary 404 is still not_found'); assert.deepEqual(rows(f), []);}
 }
 
 console.log('upstream-cooldown-callers: ok');

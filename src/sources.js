@@ -332,12 +332,15 @@ async function getHTML(url,coordination=null){
  let r;
  try{r=await(coordination?coordination.guard(fetch):fetch)(url,{signal:AbortSignal.timeout(25000)});}
  catch(error){if(error?.code==='upstream_cooldown')throw Object.assign(new Error(`Upstream cooldown: ${new URL(url).pathname}`),{code:'upstream_cooldown',until:error.until});throw error;}
- let h=null,html='';
- if(r.ok){h=await r.text();html=h;}else if(coordination&&await coordination.active())html=await UpstreamCooldown.readBodyBounded(r,32768);
- const scope=coordination?UpstreamCooldown.scopeOfUrl(url):null;
- const signal=scope?await coordination.after(scope,{status:r.status,headers:r.headers,html}):null;
- if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);
- if(signal&&signal.reason==='challenge')throw new Error(`Source HTTP 403: ${new URL(url).pathname}`);
+ const scope=coordination?UpstreamCooldown.scopeOfUrl(url):null,path=new URL(url).pathname;
+ // The status and the headers are recorded FIRST and on their own: a known signal never waits for the body, and a failed body read cannot hide it. A header or status signal is a blocked answer and
+ // the body is not read at all.
+ let signal=scope?await coordination.after(scope,{status:r.status,headers:r.headers,html:''}):null;
+ if(signal&&signal.reason==='challenge'&&r.ok)throw new Error(`Source HTTP 403: ${path}`);
+ let h=null;
+ if(r.ok){h=await r.text();if(scope&&!signal){signal=await coordination.after(scope,{status:r.status,headers:r.headers,html:h});if(signal)throw new Error(`Source HTTP 403: ${path}`);}}
+ else if(scope&&!signal&&await coordination.active())await coordination.after(scope,{status:r.status,headers:r.headers,html:await UpstreamCooldown.readBodyBounded(r,32768)});
+ if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${path}`);
  if(h.length>3000000)throw new Error('Unexpected page size');return h;
 }
 function parseWatchlist(html){
@@ -503,6 +506,14 @@ function recordUpstreamEvidence(run,...coordinators){
  const old=run.upstreamCooldown||{};for(const k of Object.keys(total))total[k]+=Number.isInteger(old[k])?old[k]:0;
  run.upstreamCooldown=total;
 }
+// The JSON body of an OK answer, read once. With coordination on, the text goes through the shared classifier first: a challenge page behind a 200 is a recorded signal and an error, never data.
+async function coordinatedJson(coordination,scope,response){
+ if(!coordination||!await coordination.active())return response.json();
+ const text=await response.text();
+ const signal=await coordination.after(scope,{status:response.status,headers:response.headers,html:text});
+ if(signal)throw new Error('Upstream blocked: '+signal.reason);
+ return JSON.parse(text);
+}
 async function wikidataRequest(coordination,url,init){
  if(!coordination)return fetch(url,init);
  try{return await coordination.fetch(fetch,url,init,{scope:'wikidata'});}catch(error){if(error?.code==='upstream_cooldown')return null;throw error;}
@@ -514,7 +525,7 @@ async function loadPeopleNameIndex(films,coordination=null){
  const response=await wikidataRequest(coordination,'https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(45000)});
  if(!response)return null;
  if(!response.ok)throw new Error('Russian names HTTP '+response.status);
- const data=await response.json();const index=new Map();
+ const data=await coordinatedJson(coordination,'wikidata',response);const index=new Map();
  for(const row of data.results.bindings){const key=row.tmdb.value+':'+norm(row.en.value);const names=index.get(key)||new Set();names.add(row.ru.value);index.set(key,names);}
  return index;
 }
@@ -535,7 +546,7 @@ async function localizeByLetterboxd(films,cache,coordination=null){
   const query=`SELECT ?slug ?ru WHERE { VALUES ?slug { ${slugs.map(s=>JSON.stringify(s)).join(' ')} } ?person (wdt:P6119|wdt:P12383) ?slug; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
   const response=await wikidataRequest(coordination,'https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0'},signal:AbortSignal.timeout(15000)});
   if(!response)break;
-  if(!response.ok)continue;const data=await response.json();const labels=new Map();for(const r of data.results.bindings){const names=labels.get(r.slug.value)||new Set();names.add(r.ru.value);labels.set(r.slug.value,names);}
+  if(!response.ok)continue;const data=await coordinatedJson(coordination,'wikidata',response);const labels=new Map();for(const r of data.results.bindings){const names=labels.get(r.slug.value)||new Set();names.add(r.ru.value);labels.set(r.slug.value,names);}
   for(const p of batch){const names=labels.get(p.id.split('/')[1]);if(names?.size===1){const raw=[...names][0];cache[p.id]={name:raw.includes(', ')?raw.split(', ').reverse().join(' '):raw,original:p.original};}}
  }
 }
@@ -650,7 +661,7 @@ async function localizeFilmTitles(films,cache,mode,coordination=null){
   const query=`SELECT ?tmdb ?film ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
   const response=await wikidataRequest(coordination,'https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(30000)});
   if(response&&!response.ok)throw new Error('Russian film titles HTTP '+response.status);
-  const data=response?await response.json():null,byId=new Map();
+  const data=response?await coordinatedJson(coordination,'wikidata',response):null,byId=new Map();
   for(const row of data?.results.bindings||[]){const id=row.tmdb.value,ru=row.ru.value,source=row.film.value;if(!/[а-яё]/i.test(ru))continue;const labels=byId.get(id)||new Map();labels.set(ru,source);byId.set(id,labels);}
   for(const f of pending){const labels=byId.get(f.tmdbId);if(labels?.size===1){const [title,source]=[...labels][0];cache[f.id]={tmdbId:f.tmdbId,title,status:'provisional',sources:[source.replace('http:','https:').replace('/entity/','/wiki/')]};}}
  }

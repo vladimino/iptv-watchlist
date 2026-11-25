@@ -70,7 +70,8 @@ export async function readBodyBounded(response, limit = 32768) {
         chunks.push(value.byteLength > limit - total ? value.subarray(0, limit - total) : value);
         total += Math.min(value.byteLength, limit - total);
       }
-      try {await reader.cancel();} catch { /* the rest of the body is discarded */ }
+      // Disposed of, not awaited: a cancellation can depend on another reader of the same stream (a tee) and must never hold the caller.
+      try {const cancelled = reader.cancel(); if (cancelled && typeof cancelled.catch === 'function') cancelled.catch(() => {});} catch { /* the rest of the body is discarded */ }
       const bytes = new Uint8Array(total);
       let offset = 0;
       for (const chunk of chunks) {bytes.set(chunk, offset); offset += chunk.byteLength;}
@@ -162,6 +163,7 @@ export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
   const mode = () => (modePromise ||= readMode(env));
   const stats = {skipped: 0, wouldSkip: 0, written: 0, writeFailed: 0};
   const counts = new Map();
+  const recorded = new WeakMap(); // response headers object -> the signal already recorded for that response: a response is recorded once
   const record = (decision, scope, extra = {}) => {
     const key = decision + ':' + scope;
     const n = (counts.get(key) || 0) + 1;
@@ -190,8 +192,12 @@ export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
     async after(scope, response) {
       const m = await mode();
       if (m === 'off' || !response) return null;
+      const key = response.headers && typeof response.headers === 'object' ? response.headers : null;
+      const prior = key ? recorded.get(key) : undefined;
+      if (prior) return prior; // already recorded for this response (the header or status signal of an earlier call); never a second write or count
       const signal = classifySignal({status: response.status, headers: response.headers, html: response.html || ''}, now());
       if (!signal) return null;
+      if (key) recorded.set(key, signal);
       const ok = await writeCooldown(env, scope, signal, caller, now());
       if (ok) {stats.written++; record('written', scope, {reason: signal.reason, seconds: signal.seconds});} else {stats.writeFailed++; record('write_failed', scope, {reason: signal.reason});}
       return signal;
@@ -217,11 +223,11 @@ export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
       const gate = await this.peek(scope);
       if (gate.skip) throw new UpstreamCooldownSkip(scope, gate.until, gate.reason);
       const response = await fetchImpl(url, init);
-      // A non-ok answer that the caller will not read as a body is classified by status, headers and a bounded body prefix (a challenge page behind any status). An ok answer is the
-      // caller's: it reads the body itself and calls `after` with it where a challenge page can hide behind a 200 (HTML pages); JSON APIs fail their own parse there.
-      let html = '';
-      if (response && response.ok === false && response.status !== 404 && await this.active() && typeof response.clone === 'function') html = await readBodyBounded(response.clone(), 32768);
-      await this.after(scope, {status: response.status, headers: response.headers, html});
+      // The status and the headers are recorded first and on their own (a known signal never waits for a body). A non-ok answer is then read as a bounded prefix of the ORIGINAL response
+      // (no clone: a tee's cancellation can depend on the other, unread branch): the callers of `fetch` do not use a non-ok body, so consuming it costs them nothing. An ok answer is the
+      // caller's: it reads the body once and calls `after` with it (a second call for the same response never writes twice).
+      let signal = await this.after(scope, {status: response.status, headers: response.headers, html: ''});
+      if (!signal && response && response.ok === false && response.status !== 404 && await this.active()) signal = await this.after(scope, {status: response.status, headers: response.headers, html: await readBodyBounded(response, 32768)});
       return response;
     }
   };

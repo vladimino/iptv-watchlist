@@ -343,7 +343,7 @@ async function tmdbRequest(env,path,options={}){
  const coordination=upstreamCoordinator(env,'discovery'),request=['https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)}];
  try{response=coordination?await coordination.fetch(fetch,...request,{scope:'tmdb'}):await fetch(...request);}
  catch(error){if(error?.code==='upstream_cooldown'){const skipped=new Error('TMDB upstream cooldown');skipped.retryAt=new Date(error.until).toISOString();skipped.upstreamCooldown=true;throw skipped;}throw error;}
- if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
+ if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return coordinatedJson(coordination,'tmdb',response);
 }
 // AIR-503 / ADR 0158: the titles the movie authority itself gives one TMDB movie. This is movie provenance; an EPG title is never part of it.
 function movieAuthorityTitles(movie){

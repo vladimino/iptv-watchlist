@@ -140,7 +140,7 @@ const LetterboxdDiaryIdentity=(()=>{
  // route: 'ratings_diary' | 'watchlist_admission' (the caller whose step performs the check). Returns {labels,counts,outcomes}.
  async function resolve(env,items,{clock=()=>Date.now(),remaining:callerRemaining=()=>Infinity,fetchImpl:baseFetch=fetch,route='ratings_diary'}={}){
   // AIR-604 (ADR 0211 decision 5): the shared Letterboxd and TMDB cooldown. `off` and an unavailable state change nothing; an enforced cooldown stops the check as a transport stop `upstream_cooldown`, which costs no attempt.
-  const fetchImpl=typeof UpstreamCooldown==='undefined'?baseFetch:UpstreamCooldown.createCoordinator(env,{caller:'letterboxd-identity:'+route}).guard(baseFetch);
+  const fetchImpl=typeof UpstreamCooldown==='undefined'||baseFetch.coordinator?baseFetch:UpstreamCooldown.createCoordinator(env,{caller:'letterboxd-identity:'+route}).guard(baseFetch);
   const counts={considered:0,bridged:0,verified:0,repaired:0,pending:0,deferred:0,skipped:0,checked:0,transport:0,notNow:0,gone:0,definite:0,atCap:0,capRefused:0,backlogFull:0},labels=new Map(),outcomes=new Map();
   const now=clock();
   // AIR-599 (fourth review of PR #1009): the reservation expires at now+RESERVATION_MS. No effect of this step may begin or run on after that: the time left is also bounded by the reservation (less the write reserve and a
