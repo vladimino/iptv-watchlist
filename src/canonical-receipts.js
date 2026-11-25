@@ -329,7 +329,7 @@ export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit
  if(!list.length)return [];
  // AIR-600 (PR #995 review): a receipt with an operation key belongs to the keyed protocol (src/receipt-operation-key.js), which abandons and reserves anew; the legacy reconciler never selects,
  // replays, settles or abandons one, and keyed rows never use up its bounded window. Below schema 39 there is no such column and the list is exactly what it was.
- const where='state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'')+(origin!==null?' AND origin=?':'')+(await keyedColumn(db)?' AND operation_key IS NULL':'');
+ const where=(await keyedColumn(db)?'operation_key IS NULL AND ':'')+'state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'')+(origin!==null?' AND origin=?':'');
  return (await many(db,'SELECT '+COLUMNS+' FROM canonical_write_receipt WHERE '+where+' ORDER BY next_attempt_at,request_id LIMIT ?',[...list,...(dueBefore?[dueBefore]:[]),...(origin!==null?[origin]:[]),cap])).map(view);
 }
 
