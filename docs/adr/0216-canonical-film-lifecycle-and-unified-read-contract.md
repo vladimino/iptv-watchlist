@@ -188,7 +188,7 @@ Every section that reads storage keys distinguishes two sets:
 2. The link index is the D1-owned ratings document `letterboxd/facts/links.json`, read once per request through the existing owned reader, only at ratings `d1`/`open`. Its `etag` and the ratings generation are recorded.
 3. For each seed, the `factKey` it maps to is taken. A seed absent from the index is recorded as an **absence predicate** (`seed_absent`), not as proof that no candidate exists.
 4. **Reverse traversal:** the in-memory index is walked once to collect every other alias that maps to one of those fact keys. Each fact record reached is read once, and a fact-record redirect is followed once; a mid-migration record counts both sides.
-5. Every collected alias that is not an authorized alias is a candidate. A candidate key that names another Film's trusted claim is settled as belonging elsewhere; otherwise it stays unresolved.
+5. Every collected alias that is not an authorized alias is a candidate. A candidate is settled as belonging elsewhere only by another Film's trusted, non-conflicting claim, read with its competing and absence predicates and revalidated after the section's reads; otherwise it stays unresolved.
 
 **Work bounds.** The traversal is bounded by what it reads, not only by what it returns:
 
@@ -201,7 +201,7 @@ Every section that reads storage keys distinguishes two sets:
 
 A separately delivered indexed reverse lookup may replace the walk only with proved parity against it; until then the walk is the only discovery.
 
-**Coverage verdict.** `coverage.status` is `complete` only when: the ratings domain is `d1`/`open`; the link document was read within its bounds; every seed was present in the index or the survivor has no ratings link at all **and** this absence is recorded; the traversal finished; and every candidate is settled as belonging elsewhere. Otherwise it is `incomplete` with a reason: `ratings_evidence_unavailable` (held, unreadable or missing document), `seed_absent_unproved`, `discovery_cap` or `unresolved_candidate`.
+**Coverage verdict.** `coverage.status` is `complete` only when: the ratings domain is `d1`/`open`; the link document was read within its bounds; the seed set is not empty and **every** seed was present in the index (a missing seed or an empty seed set is never proof of coverage); the document limits were checked **before** the index was materialized; the traversal finished; and every candidate is settled as belonging elsewhere by a canonical ownership proof (another Film's trusted, non-conflicting claim, with its competing and absence predicates) that is revalidated with the section's after-tokens. Otherwise it is `incomplete` with a reason: `ratings_evidence_unavailable` (held, unreadable or missing document), `seed_absent_unproved`, `discovery_cap` or `unresolved_candidate`.
 
 **Effect on sections.** For `predictions` and `personal`:
 
@@ -369,7 +369,7 @@ Every case asserts no false `404`, no false rating and no false prediction. Synt
 19. Bridge-only pointer with no authorized key: `predictions` `partial`, `unresolved_candidate`, never `none`; the candidate's value is not returned.
 20. Authorized pointer plus an unresolved candidate with an **equal** current value: `partial`; with a **different** value: `partial`, never a silent single value.
 21. After a fully proved ADR 0184 promotion in the fixture: the key is authorized; different current values give `conflict`, equal values follow C2. A fixture whose ADR 0184 proof fails (missing fact record, a third alias on the fact key, a fact redirect or migration, a `ratings_view` row carrying another key, a conflicting, untrusted, revoked or retired claim, a second lid, a redirect source) is never promoted and coverage stays `incomplete`.
-22. Missing link document, held or unreadable ratings domain, a seed absent from the index without a recorded absence, link document over 40 parts, more than 50 000 entries walked, more than 4 fact records or more than 8 candidates: coverage `incomplete` with the matching reason, never `none`.
+22. Empty seed set, a seed missing from the index, missing link document, held or unreadable ratings domain, a seed absent from the index without a recorded absence, link document over 40 parts, more than 50 000 entries walked, more than 4 fact records or more than 8 candidates: coverage `incomplete` with the matching reason, never `none`.
 23. A known conflict between two authorized pointers while coverage is incomplete: `conflict`, not `partial`.
 24. One fact reachable through two aliases, and a fact redirect reached from two seeds: counted once.
 25. A link entry or fact record changes during the read: the dependent sections are `unavailable` `generation_moved`, other sections stay. A canonical claim changes during the read: `503 identity_moved` with no section, also under G1.
