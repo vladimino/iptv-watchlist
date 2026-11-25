@@ -1,7 +1,8 @@
 // AIR-647 / ADR 0216 (Accepted), delivery graph step 3. FilmAggregateV1: the sections of the unified Film read contract, composed per request over the
 // typed resolver of AIR-646 (src/film-aggregate-resolver.js), with the mandatory candidate discovery and coverage of decision 6b (G1).
 // DORMANT: nothing in the Worker imports this module or the resolver (neither is bundled; build.mjs does not name them), so no route serves it and no
-// consumer is switched. Activation is AIR-648 (its own owner GO, after AIR-667). The internal route handler below exists for the tests and for that card.
+// consumer is switched. Activation is AIR-648 (its own owner GO and its pre-activation readback of the retirement-ledger index: AIR-667 delivered migration 0040
+// offline only, its production apply is the AIR-603 M1 chain). The internal route handler below exists for the tests and for that card.
 // It only reads D1: every statement is a plain SELECT (a write is refused before it reaches the binding), no R2, no network, no repair, no promotion, no cache.
 //
 // Shape of one request (decision 7): the final identity fence is reserved first (resolver); then each section reserves its after-statement before it reads,
@@ -177,19 +178,24 @@ async function readBoundedDocuments(db,keys,maxParts,maxBytes){
  return out;
 }
 // A fact record must carry the minimum recognized envelope, and then holds at most one outgoing edge (redirectTo or migrating.to), a valid key. -> the edge key or null.
-// Envelope (what every record written by src/letterboxd-facts.js carries): a plain object; `schemaVersion` 1 when present (the only version there is; an absent
-// one is a legacy record); `factKey`, when present, is its own key (an absent one is tolerated exactly as the ADR 0184 planner tolerates it); a `links` object is
-// REQUIRED, with a Letterboxd id (a record is only ever created for one) and a movie id that is null or a valid TMDB id. An arbitrary JSON object, `{}` included, is
-// not a fact record and never certifies a traversal. This is the shape check G1 needs, not the promotion-grade link proof of ADR 0184.
-// A malformed record is never read as "no edge".
+// Envelope (what the records of src/letterboxd-facts.js carry): a plain object; `schemaVersion` 1 when present (the only version there is; an absent one is a legacy
+// record); `factKey`, when present, is its own key (an absent one is tolerated exactly as the ADR 0184 planner tolerates it); a `links` object is REQUIRED and names at
+// least one valid identity: a Letterboxd id (LID-only), a TMDB movie id (TMDB-only: the owner's watched mark, ADR 0032, writes `letterboxd: null`) or both. Every
+// non-null member is validated by its own type (a lid string that is not spelled `tmdb_<n>`; a TMDB id as a positive-integer string or number, never an array or an
+// object coerced to a string); both null or absent is no identity. An arbitrary JSON object, `{}` included, is not a fact record and never certifies a traversal.
+// This is the shape check G1 needs, not the promotion-grade link proof of ADR 0184. A malformed record is never read as "no edge".
+const validLid=value=>typeof value==='string'&&LID.test(value)&&!value.startsWith('tmdb_');
+const validMovie=value=>typeof value==='string'?TMDB.test(value):Number.isSafeInteger(value)&&value>0&&TMDB.test(String(value));
 function recordEdge(record,key){
  if(!record||typeof record!=='object'||Array.isArray(record))throw sectionError('ratings_document_malformed');
  if(record.schemaVersion!==undefined&&record.schemaVersion!==1)throw sectionError('ratings_document_malformed');
  if(record.factKey!==undefined&&record.factKey!==key)throw sectionError('ratings_document_malformed');
  const links=record.links;
  if(!links||typeof links!=='object'||Array.isArray(links))throw sectionError('ratings_document_malformed');
- if(typeof links.letterboxd!=='string'||!LID.test(links.letterboxd))throw sectionError('ratings_document_malformed');
- if(links.tmdb!=null&&!TMDB.test(String(links.tmdb)))throw sectionError('ratings_document_malformed');
+ const hasLid=links.letterboxd!=null,hasMovie=links.tmdb!=null;
+ if(!hasLid&&!hasMovie)throw sectionError('ratings_document_malformed');
+ if(hasLid&&!validLid(links.letterboxd))throw sectionError('ratings_document_malformed');
+ if(hasMovie&&!validMovie(links.tmdb))throw sectionError('ratings_document_malformed');
  const redirect=record.redirectTo!=null,migrating=record.migrating!=null;
  if(redirect&&migrating)throw sectionError('ratings_document_malformed');
  if(!redirect&&!migrating)return null;

@@ -641,8 +641,19 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   ['unrelated object','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{foo:'bar',n:1}})],
   ['unrelated object with an edge-like field','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{redirectTo:null,migrating:null}})],
   ['links empty','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{}}})],
-  ['links without a Letterboxd id','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:'5'}}})],
+  // Review 3: a record must name at least one valid identity, and every non-null member is validated by its own type.
+  ['links with no identity (both null)','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:null}}})],
+  ['links with no identity (members absent)','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{foo:'l5'}}})],
   ['links with a bad movie id','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:'l5',tmdb:'x5'}}})],
+  ['TMDB-only links with a bad movie id','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:'05'}}})],
+  ['movie id as an array coerced to a string','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:'l5',tmdb:['5']}}})],
+  ['movie id as an object','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:{n:5}}}})],
+  ['movie id zero','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:0}}})],
+  ['movie id fractional','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:null,tmdb:5.5}}})],
+  ['lid as a number','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:5,tmdb:'5'}}})],
+  ['lid as an array','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:['l5'],tmdb:'5'}}})],
+  ['lid spelled tmdb_<n>','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:'tmdb_5',tmdb:'5'}}})],
+  ['lid with a space','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,links:{letterboxd:'a b',tmdb:'5'}}})],
   ['unknown schemaVersion','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,schemaVersion:2}})],
   ['no links but a factKey','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{factKey:'tmdb-5'}})],
   ['self redirect A->A','incomplete','ratings_evidence_unavailable',record(BASE_INDEX,{'tmdb-5':{...good,redirectTo:'tmdb-5'}})],
@@ -662,6 +673,24 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   assert.notEqual(out.body.personal.status,'present',name);
   assert.equal(out.body.predictions.current?.length??0,0,name);
   assert.deepEqual([out.body.history.status,out.body.history.href],['unavailable',undefined],name+': no history href from uncertified evidence');
+ }
+ // Review 3: the TMDB-only record the owner's watched mark writes (ADR 0032, `letterboxd: null`) is a legitimate record. A movie-only Film (its one authorized
+ // alias is the movie claim) with a complete link index and that record has complete coverage and shows the owner's known watched state. LID-only and both
+ // identities stay valid.
+ const movieOnly=blank();
+ film(movieOnly,'film:tmdb:7',[['tmdb','7']]);
+ putLinks(movieOnly,{'tmdb:7':'tmdb-7'});
+ putRaw(movieOnly,'letterboxd/facts/films/tmdb-7.json',JSON.stringify({schemaVersion:1,factKey:'tmdb-7',links:{letterboxd:null,tmdb:'7'},redirectTo:null,migrating:null,watched:{value:true,effectiveOn:null,observedAt:AT,source:'owner',sourceRef:null,observationId:'o1',replaced:null}}));
+ view(movieOnly,'tmdb_7','tmdb-7',{watched:1,known:0});
+ const movie=await read(movieOnly,'tmdb_7');
+ assert.equal(movie.body.identity.verdict,'found');
+ assert.deepEqual([coverageOf(movie).status,coverageOf(movie).reason],['complete',undefined],'a TMDB-only record does not degrade coverage');
+ assert.deepEqual([movie.body.personal.fields.watched.status,movie.body.personal.fields.watched.value,movie.body.personal.fields.watched.storageIds],['present',true,['tmdb_7']],'the known owner watched state is not hidden behind partial');
+ assert.equal(movie.body.personal.fields.rating.status,'unknown','no rating fact is observed: unknown, never absent');
+ assert.deepEqual([movie.body.predictions.status,movie.body.predictions.reason],['absent','none']);
+ for(const links of [{letterboxd:'l5',tmdb:null},{letterboxd:'l5'},{letterboxd:'l5',tmdb:5},{letterboxd:'l5',tmdb:'5'}]){
+  const f=record(BASE_INDEX,{'tmdb-5':{...good,links}});
+  assert.equal(coverageOf(await read(f,'tmdb_5')).status,'complete',JSON.stringify(links));
  }
  // The documented legacy tolerances: a record with no factKey and no schemaVersion but a links object is a record (as the ADR 0184 planner reads it).
  const legacy=record(BASE_INDEX,{'tmdb-5':{links:{letterboxd:'l5',tmdb:5}}});
