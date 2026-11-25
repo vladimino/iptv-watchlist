@@ -8,6 +8,21 @@ import path from 'node:path';
 import {approvedMigrationChain,needsOneShot,quoteToJson,sqliteSync} from './sqlite-session.mjs';
 import {onPath} from '../scripts/sqlite-cli.mjs';
 
+// JSON text with the values of the named REAL fields (outside strings) at 15 significant digits; every other token, integers included, and every string untouched.
+// Used only where the shell's JSON writer itself rounds reals to 15 digits and drops `.0` (sqlite3 3.54).
+function at15(text,rounds,reals=new Set(['r','big','f','one','inf','ninf'])){
+ if(!rounds)return text;
+ let out='',at=0,key=null,afterKey=false;
+ while(at<text.length){
+  const c=text[at];
+  if(c==='"'){let end=at+1;while(text[end]!=='"'){if(text[end]==='\\')end++;end++;}const literal=text.slice(at,end+1);out+=literal;at=end+1;
+   if(text[at]===':'){key=JSON.parse(literal);afterKey=true;out+=':';at++;}else afterKey=false;continue;}
+  const number=afterKey?/^-?\d+(\.\d+)?([eE][+-]?\d+)?/.exec(text.slice(at,at+40)):null;
+  if(number){out+=reals.has(key)?Number(number[0]).toPrecision(15):number[0];at+=number[0].length;afterKey=false;continue;}
+  afterKey=false;out+=c;at++;
+ }
+ return out;
+}
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-sqlite-session-'));
 const db=name=>path.join(root,name+'.sqlite');
 const once=(file,input,json=false)=>spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});
@@ -151,10 +166,16 @@ const same=(file,input,json=false)=>{
  // and with 17 in quote mode; older shells print 17 in both. Where the shell's two writers agree the texts are equal byte for byte; where they differ, every real of the
  // conversion must round to what the JSON writer printed and all else stays byte for byte, so the conversion is never less exact than the CLI.
  const converted=quoteToJson(viaQuote.stdout);
- assert.ok(converted.includes('"f":0.30000000000000004,'),'the real is kept exactly: '+converted.slice(0,80));
- const jsonRounds=spawnSync('sqlite3',['-json',':memory:'],{input:'SELECT 0.1+0.2 AS f, 1.0 AS one;',encoding:'utf8'}).stdout.trim()!=='[{"f":0.30000000000000004,"one":1.0}]';
- const at15=text=>jsonRounds?text.replace(/(?<=[:,[])(-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(?=[,}\]])/g,token=>Number(token).toPrecision(15)):text;
- assert.equal(at15(converted),at15(viaJson.stdout),'the converted quote output is the JSON text of the CLI, byte for byte'+(jsonRounds?' (reals at the 15 digits this JSON writer prints)':''));
+ // Exactness is asserted on the value, not on one spelling: Ubuntu's shell prints 0.300000000000000044, sqlite3 3.54's quote mode 0.30000000000000004 (the same binary64).
+ assert.equal(JSON.parse(converted)[0].f,0.1+0.2,'the real is kept exactly: '+converted.slice(0,80));
+ assert.equal(JSON.parse(converted)[0].huge,9007199254740993,'an integer token is copied, not rounded');
+ const jsonRounds=JSON.parse(spawnSync('sqlite3',['-json',':memory:'],{input:'SELECT 0.1+0.2 AS f;',encoding:'utf8'}).stdout)[0].f!==0.1+0.2;
+ assert.equal(at15(converted,jsonRounds),at15(viaJson.stdout,jsonRounds),'the converted quote output is the JSON text of the CLI, byte for byte'+(jsonRounds?' (REAL tokens at the 15 digits this JSON writer prints)':''));
+ // The normalisation touches REAL tokens outside strings only: integers (unsafe ones too) and string contents stay byte for byte, and an equal real in another spelling still compares equal.
+ const sample='[{"i":9007199254740993,"n":-12,"s":"\\"f\\":0.30000000000000004, 1.0e+300","r":0.300000000000000044,"big":1.0e+300,"one":1}]';
+ assert.equal(at15(sample,true),'[{"i":9007199254740993,"n":-12,"s":"\\"f\\":0.30000000000000004, 1.0e+300","r":0.300000000000000,"big":1.00000000000000e+300,"one":1.00000000000000}]');
+ assert.equal(at15('[{"r":0.30000000000000004}]',true),at15('[{"r":0.300000000000000044}]',true));
+ assert.equal(at15(sample,false),sample,'no normalisation where the writers agree');
  assert.equal(quoteToJson(spawnSync('sqlite3',['-quote','-header',':memory:'],{input:'SELECT 1 AS a WHERE 0;',encoding:'utf8'}).stdout),'','no row is no output, as in JSON mode');
  assert.equal(quoteToJson(''),'');
  assert.throws(()=>quoteToJson("'a'\n'unterminated"),/unterminated/);

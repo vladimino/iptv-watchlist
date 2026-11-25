@@ -31,6 +31,8 @@ Date: 2026-11-24 (UTC). Machine: the owner's Mac (Apple Silicon, macOS Darwin 27
 | `tests/epg-r2-known-length.mjs`, `tests/epg-path-a-feasibility.mjs` alone | pass (`workerd: null`, `workerdSkipped: "no /proc on darwin"`). |
 | `tests/footer-memory.mjs`, `tests/user-read-memory.mjs` under `IPTV_TEST_SUITE=non-functional`, Node 20.20.2 | pass in 7 s and 1 s; the production-size scenarios print `skipped, node:sqlite needs Node 22.5 or later`. |
 | Core suite, all 538 files, 6 at a time, Homebrew shell (ad-hoc runner without fail-fast, before the last fixes) | 378 s wall; the only failures were the three files fixed afterwards (`epg-r2-known-length`, the semantics file, and `epg-path-a-feasibility` on a non-realpath `TMPDIR` the ad-hoc runner set, which the real runner does not). |
-| `git push` with the pre-push hook (`npm run test:all`) | see the pull request of AIR-629 for the hook's output on the pushed commit. |
+| First pushes, hook defaults (6 jobs, 300 s per file) | core passed 538 files; non-functional: `canonical-producer-driver-mutation.mjs` and `-b.mjs` timed out at 300 s (280 s in the run before). |
+| Review fix (25 Nov): CI shard 2 on Ubuntu | the quote-to-JSON check had required the spelling `0.30000000000000004`; Ubuntu prints `0.300000000000000044` (same binary64). Now asserted by value, the 15-digit comparison limited to the known REAL fields and only where the shell's JSON writer rounds. |
+| `TEST_JOBS=2 TEST_TIMEOUT_MS=900000 git push`, hook enabled, final revision | see the AIR-629 pull request. |
 
 Not measured: a Linux machine with sqlite3 3.54 (the probe would refuse or accept it the same way); Windows (the harness never supported it).

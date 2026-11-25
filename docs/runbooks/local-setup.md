@@ -98,6 +98,16 @@ On macOS the shell Apple ships does not qualify (24 Nov 2026: `/usr/bin/sqlite3`
 
 `npm run test:nonfunctional` (and the pre-push hook, which runs `npm run test:all`) needs Node 22.5 or later for the production-size memory scenarios, which run the built Worker over `node:sqlite`; the nightly workflow pins Node 22. On an older local Node those scenarios print that they were skipped; the rest of both files still runs. On CI an older Node fails them as before.
 
+The three scenarios skipped that way are `footer-memory-production-size` and `owner-limbo-memory-production-size` (`tests/footer-memory.mjs`) and `user-reads-memory-production-size` (`tests/user-read-memory.mjs`); the nightly `Non-functional tests` workflow still runs all three on Node 22.
+
+On a laptop the heaviest mutation files of the non-functional suite (`canonical-producer-driver-mutation*.mjs`, about 280 s each six at a time on the owner's Mac) can pass the runner's default 300 s per-file limit. The runner reads `TEST_JOBS` and `TEST_TIMEOUT_MS` from the environment and the pre-push hook inherits them, so a local push uses:
+
+```bash
+TEST_JOBS=2 TEST_TIMEOUT_MS=900000 git push
+```
+
+CI keeps its defaults.
+
 The tests of this tooling:
 
 | Test | What it proves |
