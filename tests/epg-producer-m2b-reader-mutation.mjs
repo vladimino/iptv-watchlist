@@ -101,7 +101,7 @@ try{
  // ONE tree with its own src/, scripts/ and tests/ helpers, so the relative imports of a mutant resolve and the module graph is loaded once; every mutant is a sibling file of scripts/. The test body runs in THIS process for each mutant, one after the other.
  fs.mkdirSync(path.join(dir,'scripts'),{recursive:true});fs.mkdirSync(path.join(dir,'tests'),{recursive:true});
  fs.cpSync('src',path.join(dir,'src'),{recursive:true});
- for(const file of ['scripts/schema-preflight.mjs','scripts/epg-producer-dry-run.mjs','scripts/epg-producer-m2b.mjs','tests/d1-standin.mjs','tests/sqlite-session.mjs'])fs.copyFileSync(file,path.join(dir,file));
+ for(const file of ['scripts/schema-preflight.mjs','scripts/epg-producer-dry-run.mjs','scripts/epg-producer-m2b.mjs','tests/d1-standin.mjs','tests/sqlite-session.mjs','scripts/sqlite-cli.mjs'])fs.copyFileSync(file,path.join(dir,file));
  const place=(name,text)=>{const file=path.join(dir,'scripts','epg-producer-m2b-reader.'+name+'.mjs');fs.writeFileSync(file,text);return file;};
  // A kill counts only when the TEST ASSERTION about the altered rule failed. A setup failure or any other error is not a kill: it would mean the mutants die before the altered rule is tested.
  const SETUP=/EEXIST|ENOENT|no such file or directory|CANTOPEN|database is locked|EBUSY/i;

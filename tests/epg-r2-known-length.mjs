@@ -124,8 +124,10 @@ export default {async fetch(request,env){
  return source;
 }
 
+// workerd's resident memory is read from /proc, which only Linux has (CI runs Ubuntu). Elsewhere the sample says it was skipped; it is logged, never asserted.
 function sampleHost(){
  const mem=process.memoryUsage();
+ if(process.platform!=='linux')return {heapUsed:mem.heapUsed,external:mem.external,arrayBuffers:mem.arrayBuffers,rss:mem.rss,workerd:null,workerdSkipped:'no /proc on '+process.platform};
  let workerd=null;
  for(const name of fs.readdirSync('/proc')){
   if(!/^\d+$/.test(name))continue;

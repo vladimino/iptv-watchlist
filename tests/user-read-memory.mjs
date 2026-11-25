@@ -17,7 +17,7 @@ import * as Authority from '../src/discovery-authority.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-import {nonFunctional} from './suite-gate.mjs';
+import {nodeSqliteOrSkip,nonFunctional} from './suite-gate.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-user-read-memory-'));
 const plain=value=>JSON.parse(JSON.stringify(value));
@@ -164,6 +164,7 @@ for(const completedOnly of [true,false])for(const exclusion of [{state:'unavaila
 // production, where the isolate limit of 128 MB also counts what is not old space); two rounds one after the other needed 96 MB. After AIR-586 they need 113 MB
 // at once and 85 MB one after the other, as the page now asks them. 92 MB fails the old reads in either order and leaves the new ones about 7 MB of room.
 nonFunctional('user-reads-memory-production-size',()=>{
+ if(!nodeSqliteOrSkip('user-reads-memory-production-size'))return;
  const script=path.resolve('scripts/footer-memory-profile.mjs'),fixtures=path.join(root,'fixtures');
  const build=spawnSync(process.execPath,['--no-warnings',script,'--build','--fixtures',fixtures],{encoding:'utf8',maxBuffer:1<<24,env:{...process.env,CATALOG:'12255'}});
  assert.equal(build.status,0,build.stderr);
