@@ -1,9 +1,9 @@
 # ADR 0216: Canonical Film lifecycle and the unified Film read contract
 
-**Status:** Proposed (owner selections A2, B3, C2, D2, E1, F1, G1 recorded; final disposition pending)  
-**Original decision date:** pending Product Owner disposition  
+**Status:** Accepted  
+**Original decision date:** 2026-11-25 ([owner disposition](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161412265))  
 **Recorded at:** 2026-11-25, from `main` `a537c9c7`. Revised the same day after the [independent technical review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156435200) of `bb1605aa` the [second review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156853568) of `cfc48c6d`, the [third review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7156969487) of `c08984ee`, the [owner's instruction adding choice G](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7157683873) from the AIR-627 audit, the [fourth review](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7159940391) of `d7ec6d22`, and the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943).  
-**Approval source:** none yet. This record must not merge while it is `Proposed` ([ADR merge gate](../process/agent-workflow.md#adr-merge-gate)).  
+**Approval source:** [Product Owner disposition of 25 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161412265), recorded verbatim by the Coordinator from the owner's conversation: «Давай принимать уже», accepting the design with the selections A2, B3, C2, D2, E1, F1, G1 ([exact choices](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943)) as reviewed at `8d0715af` in the [final technical review](https://github.com/vladimino/iptv-watchlist/pull/991#pullrequestreview-6056975282). The later wording change `f9dc217e` only states that review's fail-closed coverage obligations in the contract. This is an architecture acceptance only, with no implementation, migration, promotion or production GO.  
 **Related work:** [AIR-628](https://trello.com/c/zwJum962), companion audit [AIR-627](https://trello.com/c/IOERZ9GI). Coordinated with, and not extending, Accepted [ADR 0214](0214-film-metadata-per-field-provenance.md) (per-field metadata provenance, AIR-613) and Accepted [ADR 0215](0215-identity-evidence-full-model.md) (full identity evidence model, AIR-616).  
 **Supersedes:** None. It amends no accepted decision.  
 **Superseded by:** None
@@ -41,7 +41,7 @@ Each domain has a safe reader of its own facts. No contract says how those facts
 
 There is also **no admission policy** for a verified Letterboxd film with no TMDB movie. The AIR-627 first census found no pure lid-only Film among the lid-owned Films: 402 carry a trusted TMDB movie id and 4 a TMDB TV identity. This is a future capability, not a live defect.
 
-## Decision (proposed, with the selected options)
+## Decision
 
 ### 1. Lifecycle: existence is separate from facts
 
@@ -308,7 +308,7 @@ The route is a pure GET under [ADR 0107](0107-get-head-read-side-effect-boundary
 
 ## Selected options and alternatives
 
-The Product Owner's selections, transcribed by the Coordinator in the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943) against `d7ec6d22`: **A2, B3, C2, D2, E1, F1, G1**, with no qualifications. This is not yet the final ADR disposition.
+The Product Owner's selections, transcribed by the Coordinator in the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943): **A2, B3, C2, D2, E1, F1, G1**, with no qualifications, accepted in the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161412265).
 
 | Choice | Selected | Meaning | Alternatives not selected |
 | --- | --- | --- | --- |
