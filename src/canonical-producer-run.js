@@ -49,12 +49,16 @@ export const ERROR_CLASSES=Object.freeze(Object.fromEntries([
   // AIR-600 (ADR 0207 decision 3): the receipt operation key. An absent or partial schema, and a reservation that lost its race under a key (the keyed protocol replans it), are the receipt layer's.
   'receipt_operation_key_missing','receipt_operation_key_invalid','operation_key_moved','operation_key_in_flight','operation_key_history_oversized','operation_key_history_exhausted','operation_key_validation_required',
   // The owner-review check itself cannot be performed (decision 12 b).
+  // ADR 0218 D1 (AIR-662): the projection writer's owner-review domain is not D1-authoritative / unreadable, and the source rows cannot be read: the same kind of check failure.
+  'localization_owner_unavailable','localization_source_unavailable',
   'owner_review_check_failed',
  ]),
  // UNIT-SPECIFIC execution failures, strike-eligible. The first two are re-planned once, immediately, because the other writer may have moved.
- ...rows(CLASS.UNIT,['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history','film_person_metadata_locked']),
+ ...rows(CLASS.UNIT,['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history','film_person_metadata_locked','localization_owner_moved','localization_inputs_moved']),
  // PERMANENT input refusals: a pure function of the unit's own input, cleared only by a changed unit digest.
  ...rows(CLASS.PERMANENT,['film_person_invalid','film_person_bounded','dictionary_source_ambiguous']),
+ // ADR 0218 D1 (AIR-662): a replayed request id with other content, and an invalid projection input, are the unit's own permanent refusals.
+ ...rows(CLASS.PERMANENT,['localization_replay_mismatch','localization_invalid']),
  // RECOVERABLE prerequisite refusals: they depend on canonical state another writer may legitimately change without the source digest changing.
  ...rows(CLASS.RECOVERABLE,['no_identity_row','needs_trusted_tmdb_id','film_person_reference','film_person_redirect','dictionary_identity_ambiguous','owner_review_inconsistent']),
  // NAMED KEPT OUTCOMES of the dictionary and credit layers: counted by reason, no result row, no retry (a retry cannot change them).

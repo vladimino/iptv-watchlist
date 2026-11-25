@@ -62,7 +62,7 @@ const DIGEST=/^[0-9a-f]{64}$/;
 // Definite refusals that retrying the same content cannot fix: the receipt is abandoned at once (it needs a person or a repair, and says so).
 const PERMANENT=new Set(['film_person_invalid','film_person_redirect','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_reference','film_person_bounded']);
 // Definite not-applied refusals that a re-read and a replay can fix (the batch rolled back whole).
-const RETRYABLE=new Set(['film_person_fence','film_person_revision_conflict','film_person_precondition','film_person_held','film_person_not_open','localization_owner_moved','localization_owner_unavailable']);
+const RETRYABLE=new Set(['film_person_fence','film_person_revision_conflict','film_person_precondition','film_person_held','film_person_not_open','localization_owner_moved','localization_owner_unavailable','localization_inputs_moved']);
 
 // ---- pure helpers ----
 
