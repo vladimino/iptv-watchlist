@@ -4,7 +4,8 @@
 // Nothing here retries, resets, merges or writes; `disposition` is a read-side label, not an action.
 
 export const IDENTITY_WORK_VERSION = 1;
-export const IDENTITY_LANES = ['film', 'epg_observation', 'watchlist_admission', 'letterboxd_rated_candidate'];
+// AIR-599 / ADR 0207 decision 4b: `diary_identity` lists the shared Diary check entries and the backlog (an in-memory lane, paged by index like `film`).
+export const IDENTITY_LANES = ['film', 'epg_observation', 'watchlist_admission', 'diary_identity', 'letterboxd_rated_candidate'];
 export const IDENTITY_DISPOSITIONS = ['retryable', 'blocked', 'needs_owner_review', 'waiting', 'resolved'];
 export const IDENTITY_LIMIT_MAX = 25;
 export const IDENTITY_LIMIT_DEFAULT = 25;
@@ -143,7 +144,8 @@ export function admissionDisposition(row, nowMs) {
   const due = row?.nextRetryAt == null || (Number.isFinite(Date.parse(row.nextRetryAt)) && Date.parse(row.nextRetryAt) <= nowMs);
   return {disposition: due ? 'retryable' : 'waiting', reason: row?.lastReason ?? null};
 }
-export function admissionRows(items, {nowMs}) {
+// AIR-599: `classify` (the one classifier of the check) and `diary` (the shared Diary document, when read) add each row's class, transport streak and next retry; both are optional.
+export function admissionRows(items, {nowMs, classify = null, diary = null}) {
   const rows = [];
   for (const item of Array.isArray(items) ? items : []) {
     if (!item || typeof item.lid !== 'string' || !item.lid) continue;
@@ -153,10 +155,46 @@ export function admissionRows(items, {nowMs}) {
       title: typeof item.title === 'string' && item.title ? item.title : null, year: Number.isInteger(item.year) ? item.year : null, shortCode: item.lid, archiveSha256: null,
       provenance: [{source: 'watchlist_snapshot', ref: String(item.firstSeenSnapshotId ?? '')}],
       observedAt: item.firstSeenAt ?? null, lastProgressAt: typeof item.updatedAt === 'string' ? item.updatedAt : null, ageMs: ageOf(nowMs, item.firstSeenAt),
-      film: null, observedHints: [], source: {attempts: Number.isInteger(item.attempts) ? item.attempts : null, nextRetryAt: item.nextRetryAt ?? null, firstSeenVersion: item.firstSeenVersion ?? null, resolvedBy: item.resolvedBy ?? null},
+      film: null, observedHints: [], source: {attempts: Number.isInteger(item.attempts) ? item.attempts : null, nextRetryAt: item.nextRetryAt ?? null, firstSeenVersion: item.firstSeenVersion ?? null, resolvedBy: item.resolvedBy ?? null,
+        class: item.state === 'terminal' ? 'needs_owner_review' : item.state === 'pending' && typeof classify === 'function' && item.lastReason ? classify(item.lastReason) : null,
+        streak: object(diary?.films?.[item.lid]) && Number.isInteger(diary.films[item.lid].streak) ? diary.films[item.lid].streak : null,
+        revision: {state: item.state ?? null, attempts: Number.isInteger(item.attempts) ? item.attempts : null, updatedAt: item.updatedAt ?? null}},
     });
   }
   return rows;
+}
+
+// AIR-599 / ADR 0207 decision 4b: the shared Diary check document (`diary-identity.json`) and its bounded backlog, as the `diary_identity` lane. An entry at the attempt cap needs the owner; an owner-dismissed
+// entry is resolved; a due entry is retryable, a backed-off one waiting; a backlog id waits for capacity. `version` / `backlogVersion` are the compare-and-swap tokens of the owner actions.
+export function diaryDisposition(entry, nowMs, maxAttempts) {
+  if (entry?.reason === 'owner_dismissed') return 'resolved';
+  if ((Number(entry?.attempts) || 0) >= maxAttempts) return 'needs_owner_review';
+  const due = entry?.nextAttemptAt == null || (Number.isFinite(Date.parse(entry.nextAttemptAt)) && Date.parse(entry.nextAttemptAt) <= nowMs);
+  return due ? 'retryable' : 'waiting';
+}
+export function diaryRows(doc, backlog, {nowMs, maxAttempts = 6, classify = null}) {
+  const rows = [];
+  for (const [lid, entry] of Object.entries(object(doc?.films) ? doc.films : {})) {
+    if (!object(entry)) continue;
+    const disposition = diaryDisposition(entry, nowMs, maxAttempts);
+    const queuedAt = entry.queuedAt || entry.lastAttemptAt || null;
+    rows.push({
+      key: 'did:' + lid, type: 'diary_identity', status: 'entry', reason: entry.reason ?? null, disposition, title: null, year: null, shortCode: lid, archiveSha256: null,
+      provenance: [{source: 'diary_identity', ref: lid}], observedAt: queuedAt, lastProgressAt: entry.lastAttemptAt ?? null, ageMs: ageOf(nowMs, queuedAt), film: null, observedHints: [],
+      source: {attempts: Number(entry.attempts) || 0, streak: Number(entry.streak) || 0, nextRetryAt: entry.nextAttemptAt ?? null, class: disposition === 'needs_owner_review' ? 'needs_owner_review' : entry.class || (typeof classify === 'function' ? classify(entry.reason) : null),
+        slug: entry.slug ?? null, route: entry.route ?? null, checkId: entry.checkId ?? null, requeued: object(entry.requeued) ? entry.requeued : null, queuedAt},
+    });
+  }
+  for (const [lid, item] of Object.entries(object(backlog?.ids) ? backlog.ids : {})) {
+    if (!object(item) || (object(doc?.films) && doc.films[lid])) continue;
+    rows.push({
+      key: 'dbl:' + lid, type: 'diary_identity', status: 'backlog', reason: 'diary_cap', disposition: 'waiting', title: null, year: null, shortCode: lid, archiveSha256: null,
+      provenance: [{source: 'diary_identity_backlog', ref: lid}], observedAt: item.queuedAt ?? null, lastProgressAt: null, ageMs: ageOf(nowMs, item.queuedAt), film: null, observedHints: [],
+      source: {attempts: 0, streak: 0, nextRetryAt: null, class: 'not_now', slug: item.slug ?? null, route: null, checkId: null, requeued: object(item.requeued) ? item.requeued : null, queuedAt: item.queuedAt ?? null},
+    });
+  }
+  // Queue order: oldest queue position first (the order the checks serve), then key.
+  return rows.sort((left, right) => text(left.source.queuedAt, right.source.queuedAt) || text(left.key, right.key));
 }
 
 export function observationRows(items) {
