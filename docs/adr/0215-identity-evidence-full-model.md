@@ -1,7 +1,7 @@
 # ADR 0215: The full identity evidence model: each domain step writes its own evidence under its own fence, bare sightings stay in their domains, and history is mapped record by record
 
 **Status:** Proposed  
-**Original decision date:** not decided. The owner selected all nine choices on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622); exact wording on [AIR-616](https://trello.com/c/DZNk9uMJ#comment-6b067f103671a1cae1b82f63)). That is a direction, not the final disposition of this record.  
+**Original decision date:** not decided. The owner selected all nine choices on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622); exact wording on [AIR-616](https://trello.com/c/DZNk9uMJ#comment-6b067f103671a1cae1b82f63)). Q1 = Q1-a followed the same day ([owner choice](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7155532290)). These are directions, not the final disposition of this record.  
 **Recorded at:** 2026-11-24. Renumbered from 0214 the same day, because [PR #988](https://github.com/vladimino/iptv-watchlist/pull/988) took that number first.  
 **Approval source:** not yet decided. The owner approved the roadmap card on 24 Nov 2026 ([AIR-616](https://trello.com/c/DZNk9uMJ)); that is not an architecture decision.  
 **Related work:**
