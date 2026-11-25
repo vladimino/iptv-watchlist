@@ -7,16 +7,23 @@
 // - Same two fences: the Film revision CAS and the owner-review token (marker generation, every consumed owner row, the redirect closure), re-proved INSIDE the batch.
 // - Its own receipts: kind `film_localization_reconcile`, origin `localization_reconciler`, a FRESH request id per run and Film. It never replays, settles or reuses a historical
 //   `localization_source` or `film_localization_projection` receipt (those stay terminal / settle under their own rules; equal content proves no causality).
-// - Bounded: a per-run Films-examined limit and a per-run write cap, one fenced batch per Film. A dry run is read only: no receipt, no statement, no write.
-// - Pre-image: an apply returns, per written Film, a restore token {preImage, postImage, postRevision}. The token is the ONLY pre-image: a receipt stores no payload and a dry-run report is not
-//   one. The caller (the AIR-664 operation) persists it in its sanitized evidence BEFORE it treats the run as done. Restore applies only while the Film is still at exactly postRevision and the
-//   stored row still equals postImage; otherwise it refuses (`localization_restore_moved`) and the alternative is a forward correction through this same reconciler.
+// - Bounded: a per-run Films-examined limit (a keyset page of RAW Film ids, so the scan is bounded by the limit whatever the candidates) and a per-run write cap, one fenced batch per Film.
+//   A dry run is read only: no receipt, no statement, no write.
+// - INTENT (the pre-image contract). A receipt stores no payload, so the exact immutable per-Film intent is the pre-image: {id, runId, requestId, digest, at, plannedRevision, postRevision,
+//   inputs, preImage, postImage}. An apply REQUIRES a durable `checkpoint` port from its caller and fails closed: `checkpoint.record(intent)` must resolve BEFORE the write is permitted (a throw
+//   writes nothing), and `checkpoint.settle(intent, result)` is called after the write with the outcome (`applied`, `not_applied` or `unknown`). Every exit of a pass returns what it did
+//   (written intents, uncertain intents, the failed Film, the resume cursor); nothing is lost to a later failure. The caller (AIR-664) chooses the storage; this module owns the contract.
+//   An intent is immutable: the digest binds the full pre-image and post-image, the resolver inputs, the stable write time `at` and the planned revision, and the writer re-checks all of
+//   them inside the batch. A reply lost after the commit is recovered from the recorded intent against the applied receipt and the revision (recoverLocalizationReconcile), never from a replan.
+// - Restore applies an intent only after it is bound to its own applied receipt (same request id, digest, target and applied revision), the marker is open and the owner-review domain is
+//   D1-authoritative, and only while the Film is at exactly postRevision with the row still equal to postImage; otherwise it refuses and writes nothing (`localization_restore_moved`).
+//   It is not a general mutation API: a fabricated or incomplete token is refused before any receipt is reserved. The alternative is a forward correction through this same reconciler.
 // Person localization is out of scope (unchanged). No table, index or column changes.
-import {assertWritable,database,failed,many,readAuthority} from './film-person-authority.js';
-import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
-import {canonicalJson,defineOperation,digestOf,receiptedWrite,requestIdOf} from './canonical-receipts.js';
-import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken} from './film-localization-projection.js';
-import {LOCALIZATION_ROW,readFilmSnapshot} from './canonical-film-writers.js';
+import {assertWritable,database,failed,many,readAuthority}from './film-person-authority.js';
+import {fenced,MUTATION_STATEMENT_CAP}from './canonical-mutations.js';
+import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf}from './canonical-receipts.js';
+import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken}from './film-localization-projection.js';
+import {LOCALIZATION_ROW,readFilmSnapshot}from './canonical-film-writers.js';
 
 export const RECONCILE_OPERATION='film_localization_reconcile';
 export const RECONCILE_ORIGIN='localization_reconciler';
@@ -27,15 +34,31 @@ export const RECONCILE_WRITE_DEFAULT=10;
 export const RECONCILE_WRITE_MAX=25;
 export const RECONCILE_SOURCE_CHANGED='producer_source_changed';
 export const RECONCILE_HELD='localization_reconcile_held';
+export const RECONCILE_INTENT_REQUIRED='reconcile_intent_required';
 export const RESTORE_MOVED='localization_restore_moved';
+export const RESTORE_UNBOUND='localization_restore_unbound';
+export const CHECKPOINT_FAILED='localization_checkpoint_failed';
 const COLUMNS=['status','source','source_version','provenance_json','value','authority','last_error','failure_reason','retry_at','attempts','next_action','updated_at'];
 const DIM_PARAMS=['dimension',...COLUMNS];
 const ROW=LOCALIZATION_ROW;
+const DIGEST=/^[0-9a-f]{64}$/;
+const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+const own=(value,key)=>Object.prototype.hasOwnProperty.call(value,key);
 const clockOf=now=>typeof now==='function'?now:()=>now||new Date().toISOString();
 const mark=(ctx,clock)=>({requestId:ctx.requestId,attempt:ctx.attempt,now:clock(),target:ctx.target});
 const imageOf=row=>row?Object.fromEntries(COLUMNS.map(name=>[name,row[name]??null])):null;
 const imageOfParams=params=>Object.fromEntries(COLUMNS.map(name=>[name,params[DIM_PARAMS.indexOf(name)+1]??null]));
+const sameImage=(a,b)=>canonicalJson(a??null)===canonicalJson(b??null);
+// A complete, strictly shaped row image: every column present (null allowed), no other key. `null` itself is NOT an image here: callers say explicitly when an absent row is meant.
+function completeImage(value){
+ if(!plain(value))throw failed('film_person_invalid');
+ const keys=Object.keys(value);
+ if(keys.length!==COLUMNS.length||!COLUMNS.every(name=>own(value,name)))throw failed('film_person_invalid');
+ for(const name of COLUMNS){const item=value[name];if(item!==null&&typeof item!=='string'&&!(typeof item==='number'&&Number.isFinite(item)))throw failed('film_person_invalid');}
+ if(typeof value.status!=='string'||!value.status||typeof value.updated_at!=='string'||!value.updated_at)throw failed('film_person_invalid');
+ return imageOf(value);
+}
 // A SQL boolean over film_dimension of ONE Film's localization row equal, column for column, to `image` (null-safe). `image === null` means the row is absent.
 function imageCondition(image){
  if(image===null)return {sql:"NOT EXISTS (SELECT 1 FROM film_dimension WHERE film_id=? AND dimension='localization')",params:id=>[id]};
@@ -43,7 +66,8 @@ function imageCondition(image){
 }
 const assertImage=(image,id)=>{const condition=imageCondition(image);return [fenced.assertSql(condition.sql),condition.params(id)];};
 
-// PURE. The reconciliation decision for ONE Film from its stored rows and the owner-review token (no incoming source):
+// PURE. The reconciliation decision for ONE Film from its stored rows and the owner-review token (no incoming source). `input.at` is the STABLE write time of the intent: it is the only
+// clock the plan reads (the owner-projection fallback, the legacy source row), so the same inputs and `at` always give the same post-write row.
 //   absent     no Film row, or a redirect: nothing to reconcile (never created, never repaired through a redirect);
 //   noop       the stored row already is the resolver output (or there is nothing to project): no statement, no receipt;
 //   held       the output cannot be produced under the strong() guard (conflicting owner values, a protected row of another value, an owner projection whose decision is gone and that has
@@ -68,22 +92,41 @@ export function planLocalizationReconcile(snapshot,token,input){
  return {...base,state:'write',statements,changes,postImage,params:projection.params};
 }
 
-// The content a reconcile receipt binds: the Film, the resolver identity, the normalized resolver inputs (no incoming source), the pre-image and the intended post-write row. Another
-// input, pre-image or output is another digest and request identity: a moved input is replanned, never replayed under the old identity.
-export function reconcileContent({id,inputs,preImage,postImage}){
- if(typeof id!=='string'||!id.startsWith('film:')||!plain(inputs))throw failed('film_person_invalid');
- return {kind:'film',action:'reconcile',resolver:PROJECTION_RESOLVER,inputs,preImage:preImage??null,postImage:postImage??null};
+// The content a reconcile receipt binds: the Film, the resolver identity, the normalized resolver inputs (no incoming source), the FULL pre-image and post-write image, the stable write time
+// and the planned revision. Any other input, image, time or revision is another digest and request identity: a moved state is replanned as a NEW intent, never replayed under the old one.
+export function reconcileContent({id,inputs,preImage,postImage,at,plannedRevision}){
+ if(typeof id!=='string'||!id.startsWith('film:')||!plain(inputs)||typeof at!=='string'||!Number.isInteger(plannedRevision))throw failed('film_person_invalid');
+ return {kind:'film',action:'reconcile',resolver:PROJECTION_RESOLVER,inputs,preImage:preImage??null,postImage:postImage??null,at,plannedRevision};
 }
 export const reconcileDigest=input=>digestOf({operation:RECONCILE_OPERATION,id:input?.id,content:reconcileContent(input)});
-// The content of a restore receipt: the Film, the recorded pre-image, the post-write image and the exact post-write revision it is bound to.
-export const restoreDigest=input=>digestOf({operation:RECONCILE_OPERATION,id:input?.id,content:{kind:'film',action:'restore',preImage:input?.preImage??null,postImage:input?.postImage??null,postRevision:input?.postRevision}});
-// A fresh request id per run and Film: the run id is the source event. It never equals a historical receipt's id, so a historical receipt is never replayed through this kind.
+// A fresh request id per run, Film, action and digest: the run id is the source event. It never equals a historical receipt's id, so a historical receipt is never replayed through this kind.
 export async function reconcileRequestId({runId,action='reconcile',id,digest}){
- if(typeof runId!=='string'||!runId.trim()||runId.length>200||typeof id!=='string'||!/^[0-9a-f]{64}$/.test(digest||''))throw failed('film_person_invalid');
+ if(typeof runId!=='string'||!runId.trim()||runId.length>200||typeof id!=='string'||!DIGEST.test(digest||''))throw failed('film_person_invalid');
  return requestIdOf({origin:RECONCILE_ORIGIN,operation:RECONCILE_OPERATION,source:{runId,action,id,digest}});
 }
+// The restore receipt digest: the apply intent it undoes (by digest), the pre-image to put back, the image it removes and the exact revision it is bound to.
+const restoreDigest=intent=>digestOf({operation:RECONCILE_OPERATION,id:intent.id,content:{kind:'film',action:'restore',applyRequestId:intent.requestId,applyDigest:intent.digest,preImage:intent.preImage,postImage:intent.postImage,postRevision:intent.postRevision}});
 
-// Read only. The plan of ONE Film against D1 NOW: {plan, inputs, token, revision}.
+// Builds the immutable intent of ONE Film from a plan read at `at`. PURE over its arguments.
+async function intentOf({runId,at,revision,inputs,plan}){
+ const base={id:plan.id,inputs,preImage:plan.preImage,postImage:plan.postImage,at,plannedRevision:revision};
+ const digest=await reconcileDigest(base);
+ const requestId=await reconcileRequestId({runId,id:plan.id,digest});
+ return {version:1,id:plan.id,runId,requestId,digest,at,plannedRevision:revision,postRevision:revision+1,inputs,preImage:plan.preImage,postImage:plan.postImage};
+}
+// Validates an intent supplied by a caller (a checkpoint read back, a restore token): strict shape, an EXPLICIT preImage (null or a complete image), a complete postImage, and a digest and
+// request id that recompute from the content. A missing field is never read as null; nothing here reads the database.
+export async function checkIntent(value){
+ if(!plain(value)||value.version!==1||typeof value.id!=='string'||!/^film:.+/.test(value.id)||typeof value.runId!=='string'||!value.runId.trim()||typeof value.requestId!=='string'||!DIGEST.test(value.digest||''))throw failed('film_person_invalid');
+ if(typeof value.at!=='string'||!ISO.test(value.at)||!Number.isInteger(value.plannedRevision)||value.plannedRevision<0||value.postRevision!==value.plannedRevision+1||!plain(value.inputs)||!own(value,'preImage'))throw failed('film_person_invalid');
+ const preImage=value.preImage===null?null:completeImage(value.preImage),postImage=completeImage(value.postImage);
+ const intent={version:1,id:value.id,runId:value.runId,requestId:value.requestId,digest:value.digest,at:value.at,plannedRevision:value.plannedRevision,postRevision:value.postRevision,inputs:value.inputs,preImage,postImage};
+ const digest=await reconcileDigest(intent);
+ if(digest!==intent.digest||await reconcileRequestId({runId:intent.runId,id:intent.id,digest})!==intent.requestId)throw failed('film_person_invalid');
+ return intent;
+}
+
+// Read only. The plan of ONE Film against D1 NOW: {plan, inputs, token, revision}. `at` is the stable time the plan (and a resulting intent) will carry.
 export async function readReconcilePlan(env,id,{at=new Date().toISOString(),requestId}={}){
  const snapshot=await readFilmSnapshot(env,id);
  if(snapshot.redirect||!snapshot.film)return {plan:{state:'absent',id,statements:[],changes:[]},inputs:null,revision:snapshot.revision};
@@ -92,30 +135,40 @@ export async function readReconcilePlan(env,id,{at=new Date().toISOString(),requ
  return {plan,inputs:projectionInputs(snapshot,token,[]),token,snapshot,revision:snapshot.revision};
 }
 
-// The fenced reconcile write of ONE Film. input: {id, expectedRevision, at, requestId, inputs, receiptMark?}. Refuses before the database unless the Film/Person marker is open and the
-// owner-review domain is D1-authoritative; a moved resolver input is `localization_inputs_moved` (replan), a lost owner token `localization_owner_moved`, a lost revision
-// `film_person_revision_conflict`. `noop` and `held` write nothing and open no batch. Returns {written, revision, preImage, postImage, postRevision}.
-export async function writeFilmLocalizationReconcile(env,input){
- const id=fenced.filmId(input?.id),expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at);
- fenced.text(input.requestId);
- const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
+// Read only. The immutable intent of ONE Film against D1 NOW, or null when nothing is to be written ({plan} says why). The apply builds its intents this way.
+export async function readReconcileIntent(env,id,{runId,at=new Date().toISOString()}={}){
+ const {plan,inputs,revision}=await readReconcilePlan(env,id,{at});
+ if(plan.state!=='write')return {intent:null,plan};
+ return {intent:await intentOf({runId,at,revision,inputs,plan}),plan};
+}
+
+// The fenced reconcile write of ONE Film FROM ITS INTENT. input: {intent, receiptMark?}. It never trusts a fresh plan over the intent: the stored Film must still be at the intent's planned
+// revision, its stored resolver inputs and full pre-image row must equal the intent's, and a plan at the intent's `at` must reproduce the intent's post-write row exactly, otherwise nothing is
+// written (`localization_inputs_moved`, `film_person_revision_conflict`). The batch re-asserts the intent's own pre-image, the owner-review token and the revision CAS. A named refusal
+// `localization_owner_moved` (the owner token was lost between plan and commit) is retryable by a NEW intent. `held` writes nothing and opens no batch.
+// Returns {written, revision, postRevision, preImage, postImage}: the images of the INTENT, which the batch has just proved are the stored ones.
+export async function writeFilmLocalizationReconcile(env,{intent: given,receiptMark}={}){
+ const intent=await checkIntent(given);
+ const id=intent.id,expected=intent.plannedRevision;
+ const tail=fenced.receiptTail(receiptMark,{kind:'film',id});
  const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
  const snapshot=await readFilmSnapshot(env,id);
  if(snapshot.redirect)throw failed('film_person_redirect');
  if(!snapshot.film)throw failed('film_person_precondition');
+ if(snapshot.revision!==expected)throw failed('film_person_revision_conflict');
  const token=await readOwnerReviewToken(env,id);
- if(!plain(input.inputs)||canonicalJson(projectionInputs(snapshot,token,[]))!==canonicalJson(input.inputs))throw failed('localization_inputs_moved');
- const plan=planLocalizationReconcile(snapshot,token,input);
+ if(canonicalJson(projectionInputs(snapshot,token,[]))!==canonicalJson(intent.inputs)||!sameImage(imageOf(snapshot.dimensions.localization),intent.preImage))throw failed('localization_inputs_moved');
+ const plan=planLocalizationReconcile(snapshot,token,{id,at:intent.at,requestId:intent.requestId});
  if(plan.state==='held')return {id,revision:snapshot.revision,written:false,held:true,reason:plan.reason,effective:plan.effective};
- if(plan.state!=='write')return {id,revision:snapshot.revision,written:false,reason:'unchanged',effective:plan.effective};
+ if(plan.state!=='write'||!sameImage(plan.postImage,intent.postImage))throw failed('localization_inputs_moved');
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push(...ownerTokenStatements(token));
- // The pre-image is asserted INSIDE the batch: the row the plan read is the row the write replaces.
- statements.push(assertImage(plan.preImage,id));
+ // The pre-image of the INTENT is asserted INSIDE the batch: the row the intent recorded is the row the write replaces.
+ statements.push(assertImage(intent.preImage,id));
  statements.push(...plan.statements);
- statements.push([fenced.BUMP,['film',id,at]]);
+ statements.push([fenced.BUMP,['film',id,intent.at]]);
  if(statements.length>MUTATION_STATEMENT_CAP)throw failed('film_person_bounded');
  try{await fenced.commit(env,gate,statements,entities,tail);}
  catch(error){
@@ -126,22 +179,199 @@ export async function writeFilmLocalizationReconcile(env,input){
   }
   throw error;
  }
- return {id,revision:expected+1,written:true,changes:plan.changes,effective:plan.effective,preImage:plan.preImage,postImage:plan.postImage,postRevision:expected+1};
+ return {id,revision:intent.postRevision,written:true,changes:plan.changes,effective:plan.effective,preImage:intent.preImage,postImage:intent.postImage,postRevision:intent.postRevision};
 }
 
-// The fenced restore of ONE written Film to its recorded pre-image. input: {id, preImage, postImage, postRevision, at, requestId, receiptMark?}. It applies ONLY while the Film is at exactly
-// postRevision (the revision this reconciler's own write produced) AND the stored row still equals postImage: any other writer since then moved the revision, so a restore would erase
-// its work and is refused (`localization_restore_moved`, nothing written). A pre-image of null deletes the row the reconciler created. It bumps the revision, so a second restore of the same
-// token is refused. The legacy source row the reconciler preserved is NOT removed (a source row is a durable resolver input, never destroyed by a restore).
-export async function restoreFilmLocalization(env,input){
- const id=fenced.filmId(input?.id),at=fenced.text(input.at);
- fenced.text(input.requestId);
- const postRevision=fenced.revisionOf(input.postRevision);
- const pre=input.preImage===null?null:imageOf(input.preImage),post=imageOf(input.postImage);
- if(!post||(pre!==null&&!COLUMNS.every(name=>name in input.preImage)))throw failed('film_person_invalid');
- const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
+// The receipt hooks bound to ONE intent (never to a replan): the readback proves nothing from content alone, the revalidation proceeds only while the Film is still exactly where the intent
+// planned it (planned revision and pre-image row), and the run is the intent's own fenced write.
+function intentHooks(env,intent,clock){
+ const state=async()=>{const snapshot=await readFilmSnapshot(env,intent.id);return {revision:snapshot.revision,image:imageOf(snapshot.dimensions.localization)};};
+ return {
+  atomic:true,
+  readback:async()=>{
+   const now=await state();
+   // The post-write state without an applied receipt of this request: equal content proves no causality (another writer may have reached it): `needs_review`, never applied.
+   if(now.revision===intent.postRevision&&sameImage(now.image,intent.postImage))return {digest:intent.digest};
+   if(now.revision===intent.plannedRevision&&sameImage(now.image,intent.preImage))return {digest:null,revision:now.revision};
+   return {disposition:'abandon',errorClass:RECONCILE_SOURCE_CHANGED};
+  },
+  revalidate:async()=>{const now=await state();return now.revision===intent.plannedRevision&&sameImage(now.image,intent.preImage)?'proceed':'stale';},
+  run:ctx=>writeFilmLocalizationReconcile(env,{intent,receiptMark:mark(ctx,clock)}),
+ };
+}
+// ONE receipted, atomic, fenced write of an intent (a fresh apply or a resume of a recorded one: the same request id never double-writes, an applied receipt returns as applied).
+async function writeIntent(env,intent,{clock,policy}){
+ return receiptedWrite(env,{requestId:intent.requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:intent.id},expectedRevision:intent.plannedRevision,digest:intent.digest,now:clock,policy},intentHooks(env,intent,clock));
+}
+const appliedOf=(outcome,intent)=>outcome?.state==='applied'&&outcome.receipt?.appliedRevision===intent.postRevision&&outcome.receipt?.contentDigest===intent.digest;
+
+// The registry spec of the kind, for reconcileReceipts. A receipt stores no payload and the pre-image lives only in the intent, so the registry can neither re-plan nor replay: an unsettled
+// receipt is abandoned (`reconcile_intent_required`; with the atomic tail a non-applied receipt has no committed effect) and the operation settles its intent through
+// recoverLocalizationReconcile / resumeLocalizationReconcile.
+export function filmLocalizationReconcileOperation(){
+ return defineOperation({
+  operation:RECONCILE_OPERATION,atomic:true,
+  readback:async()=>({disposition:'abandon',errorClass:RECONCILE_INTENT_REQUIRED}),
+  replay:async()=>{throw failed('producer_replan_unavailable');},
+  revalidate:async()=>'stale',
+ });
+}
+
+// RECOVERY: settles a recorded intent against the actual applied receipt and the revision, including an unknown outcome (a lost reply). Read only. States:
+//   applied      the receipt of this request id is applied at exactly postRevision with the intent's digest: the intent is the pre-image token of an effect that exists;
+//   not_applied  no applied receipt and the Film is still at the planned revision with the intent's pre-image row: safe to resume the same intent;
+//   unknown      anything else (a post-write row without an applied receipt, a moved Film): never guessed, never written, for review.
+export async function recoverLocalizationReconcile(env,{intent: given}={}){
+ const intent=await checkIntent(given);
+ const receipt=await readReceipt(env,intent.requestId);
+ const snapshot=await readFilmSnapshot(env,intent.id);
+ const image=imageOf(snapshot.dimensions.localization);
+ if(receipt&&(receipt.operation!==RECONCILE_OPERATION||receipt.origin!==RECONCILE_ORIGIN||receipt.target.kind!=='film'||receipt.target.id!==intent.id||receipt.contentDigest!==intent.digest))return {state:'unknown',reason:'receipt_mismatch',revision:snapshot.revision};
+ if(receipt?.state==='applied'&&receipt.appliedRevision===intent.postRevision)return {state:'applied',revision:snapshot.revision,rowIsPostImage:snapshot.revision===intent.postRevision&&sameImage(image,intent.postImage),intent};
+ if(receipt?.state!=='applied'&&snapshot.revision===intent.plannedRevision&&sameImage(image,intent.preImage))return {state:'not_applied',revision:snapshot.revision,receiptState:receipt?.state??null};
+ return {state:'unknown',reason:receipt?.state==='applied'?'applied_revision_mismatch':'moved',revision:snapshot.revision};
+}
+// Resumes a recorded intent that recovery found `not_applied`: the same request id and digest, so a committed effect is never written twice. Returns {state, ...} like the apply of one Film.
+export async function resumeLocalizationReconcile(env,{intent: given,now,policy}={}){
+ const intent=await checkIntent(given),clock=clockOf(now);
+ const outcome=await writeIntent(env,intent,{clock,policy});
+ return {state:appliedOf(outcome,intent)?'applied':outcome.state,outcome,intent};
+}
+
+const clampCap=(value,fallback,max)=>{
+ if(value===undefined||value===null)return fallback;
+ if(!Number.isInteger(value)||value<1||value>max)throw failed('film_person_invalid');
+ return value;
+};
+const cursorOf=value=>{if(value===undefined||value===null||value==='')return '';if(typeof value!=='string'||!value.startsWith('film:'))throw failed('film_person_invalid');return value;};
+// One keyset page of RAW Film ids in id order (limit + 1 to learn whether more follow). The scan is bounded by `limit` whatever the candidates are; classification (candidate or not, redirect,
+// owner entries linked to a merged ancestor) is the ancestry-aware reader's job per Film, never an SQL guess here. No new index is needed (the primary key of film).
+async function filmPage(env,{after,limit}){
+ try{return (await many(database(env),'SELECT id FROM film WHERE id>? ORDER BY id LIMIT ?',[after,limit+1])).map(row=>row.id);}
+ catch(error){throw failed('film_person_unavailable',error);}
+}
+
+// DRY RUN: read only. No receipt, no statement, no write; it never reads a state it cannot prove (a Film whose owner evidence is unavailable is `unavailable` with the code). Returns
+// {examined, cursor, hasMore, stale:[{id,revision,effective,preImage,postImage,changes}], held:[{id,reason}], noop, absent, unavailable:[{id,code}], wouldWrite}. `cursor` is the last examined id: pass it as
+// `after` for the next page. `wouldWrite` is capped by `writeCap`. A dry-run entry is a report, NOT a pre-image: only an apply intent is.
+export async function dryRunLocalizationReconcile(env,{after,limit,writeCap,now}={}){
+ const examineCap=clampCap(limit,RECONCILE_EXAMINE_DEFAULT,RECONCILE_EXAMINE_MAX),writes=clampCap(writeCap,RECONCILE_WRITE_DEFAULT,RECONCILE_WRITE_MAX);
+ const clock=clockOf(now),start=cursorOf(after);
+ await readAuthority(env);
+ const page=await filmPage(env,{after:start,limit:examineCap});
+ const ids=page.slice(0,examineCap),out={examined:0,cursor:ids.length?ids.at(-1):start,hasMore:page.length>examineCap,stale:[],held:[],noop:0,absent:0,unavailable:[],wouldWrite:0};
+ for(const id of ids){
+  out.examined++;
+  try{
+   const {plan,revision}=await readReconcilePlan(env,id,{at:clock()});
+   if(plan.state==='write'){out.stale.push({id,revision,effective:plan.effective,preImage:plan.preImage,postImage:plan.postImage,changes:plan.changes});if(out.wouldWrite<writes)out.wouldWrite++;}
+   else if(plan.state==='held')out.held.push({id,reason:plan.reason});
+   else if(plan.state==='absent')out.absent++;
+   else out.noop++;
+  }catch(error){
+   if(!error?.code||error.code==='film_person_unavailable'&&!error.cause)throw error;
+   out.unavailable.push({id,code:error.code});
+  }
+ }
+ return out;
+}
+
+const REPLAN=new Set(['localization_inputs_moved','localization_owner_moved','film_person_revision_conflict']);
+const portOf=checkpoint=>{
+ if(!plain(checkpoint)||typeof checkpoint.record!=='function'||typeof checkpoint.settle!=='function')throw failed('film_person_invalid');
+ return checkpoint;
+};
+
+// APPLY: one bounded pass. input: {runId, checkpoint:{record(intent), settle(intent,result)}, after?, limit?, writeCap?, now?, policy?}. The checkpoint is REQUIRED (fail closed before anything is read
+// for writing). For each examined Film: a noop, held or absent Film opens no receipt; a stale one becomes an immutable intent (the plan read once, at ONE stable `at`), `checkpoint.record(intent)`
+// must resolve before the write is permitted (a throw stops the pass with nothing written for that Film), the write is ONE receipted, atomic, fenced batch under the intent's request id, and
+// `checkpoint.settle(intent, {state:'applied'|'not_applied'|'unknown', ...})` records the outcome. The pass stops writing at `writeCap`; a replan refusal (`localization_inputs_moved`,
+// `localization_owner_moved`, `film_person_revision_conflict`: definite not-applied) leaves the Film `moved` for the next run; any other error stops the pass.
+// EVERY exit returns what it did and never throws after the first Film is touched: {examined, cursor (the last Film FULLY settled, the resume point), written:[intent], uncertain:[intent], moved, held,
+// noop, absent, stopped, error?:{id,code}, failedId?}. A Film whose write may have committed is in `uncertain` with its intent (recover it with recoverLocalizationReconcile).
+export async function applyLocalizationReconcile(env,{runId,checkpoint,after,limit,writeCap,now,policy}={}){
+ if(typeof runId!=='string'||!runId.trim()||runId.length>200)throw failed('film_person_invalid');
+ const port=portOf(checkpoint);
+ const examineCap=clampCap(limit,RECONCILE_EXAMINE_DEFAULT,RECONCILE_EXAMINE_MAX),writes=clampCap(writeCap,RECONCILE_WRITE_DEFAULT,RECONCILE_WRITE_MAX);
+ const clock=clockOf(now),start=cursorOf(after);
+ assertWritable(await readAuthority(env));
+ const page=await filmPage(env,{after:start,limit:examineCap});
+ const ids=page.slice(0,examineCap);
+ const out={examined:0,cursor:start,hasMore:page.length>examineCap,written:[],uncertain:[],moved:[],held:[],noop:0,absent:0,stopped:null};
+ const stop=(id,code,extra={})=>{out.stopped=code;out.failedId=id;out.error={id,code,...extra};};
+ for(const id of ids){
+  if(out.written.length>=writes){out.stopped='write_cap';out.hasMore=true;break;}
+  out.examined++;
+  let intent=null,recorded=false;
+  try{
+   const at=clock();
+   const {plan,inputs,revision}=await readReconcilePlan(env,id,{at});
+   if(plan.state==='held'){out.held.push({id,reason:plan.reason});out.cursor=id;continue;}
+   if(plan.state==='absent'){out.absent++;out.cursor=id;continue;}
+   if(plan.state!=='write'){out.noop++;out.cursor=id;continue;}
+   intent=await intentOf({runId,at,revision,inputs,plan});
+   // Fail closed: nothing is written for this Film unless its intent is durably recorded.
+   try{await port.record(intent);}catch(error){stop(id,CHECKPOINT_FAILED,{cause:error?.code||null});out.examined--;break;}
+   recorded=true;
+   const outcome=await writeIntent(env,intent,{clock,policy});
+   if(appliedOf(outcome,intent)){
+    out.written.push(intent);out.cursor=id;
+    try{await port.settle(intent,{state:'applied',revision:intent.postRevision});}catch(error){stop(id,'localization_checkpoint_settle_failed',{cause:error?.code||null});break;}
+    continue;
+   }
+   // Not an applied receipt: the outcome is not proven either way. Never guessed.
+   out.uncertain.push(intent);
+   try{await port.settle(intent,{state:'unknown',receiptState:outcome?.state??null,errorClass:outcome?.errorClass??null});}catch{/* the intent is already recorded and listed as uncertain */}
+   stop(id,outcome?.errorClass||outcome?.reason||outcome?.state||'unclassified');break;
+  }catch(error){
+   const code=error?.code||'unclassified';
+   if(intent&&recorded&&REPLAN.has(code)){
+    out.moved.push({id,code});out.cursor=id;
+    try{await port.settle(intent,{state:'not_applied',errorClass:code});}catch{/* the next run replans under a new intent; the recorded one stays as not_applied-by-code */}
+    continue;
+   }
+   if(intent&&recorded)out.uncertain.push(intent);
+   if(intent&&recorded){try{await port.settle(intent,{state:'unknown',errorClass:code});}catch{/* listed as uncertain */}}
+   else if(REPLAN.has(code)){out.moved.push({id,code});out.cursor=id;continue;}
+   stop(id,code);break;
+  }
+ }
+ return out;
+}
+
+// RESTORE: one receipted, atomic, fenced restore of ONE Film from its apply intent (the restore token). The token is validated and bound BEFORE any receipt is reserved: it must be a complete,
+// self-consistent intent (explicit pre-image, complete post-image, digest and request id that recompute), its own apply receipt must exist and be `applied` with the same request id, digest,
+// target and applied revision, the marker must be open and the owner-review domain D1-authoritative. A refusal writes nothing and reserves nothing.
+export async function restoreLocalizationReconcile(env,{runId,token,now,policy}={}){
+ const clock=clockOf(now);
+ if(typeof runId!=='string'||!runId.trim()||runId.length>200)throw failed('film_person_invalid');
+ const intent=await checkIntent(token);
+ assertWritable(await readAuthority(env));
+ await readOwnerReviewToken(env,intent.id);
+ const original=await readReceipt(env,intent.requestId);
+ if(!original||original.operation!==RECONCILE_OPERATION||original.origin!==RECONCILE_ORIGIN||original.target.kind!=='film'||original.target.id!==intent.id||original.state!=='applied'||original.appliedRevision!==intent.postRevision||original.contentDigest!==intent.digest)throw failed(RESTORE_UNBOUND);
+ const digest=await restoreDigest(intent);
+ const requestId=await reconcileRequestId({runId,action:'restore',id:intent.id,digest});
+ const outcome=await receiptedWrite(env,{requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:intent.id},expectedRevision:intent.postRevision,digest,now:clock,policy},{
+  atomic:true,
+  // A restore is fenced on the recorded revision and row, so a replay can never overwrite another writer: the readback proves nothing and the replay is the fenced write itself.
+  readback:async()=>({digest:null}),
+  revalidate:async()=>'proceed',
+  run:ctx=>restoreFilmLocalization(env,{intent,at:clock(),receiptMark:mark(ctx,clock)}),
+ });
+ return {...outcome,requestId};
+}
+
+// The fenced restore write. It applies ONLY while the Film is at exactly postRevision AND the stored row still equals postImage: any other writer since then moved the revision, so a restore
+// would erase its work and is refused (`localization_restore_moved`, nothing written). A pre-image of null deletes the row the reconciler created. It bumps the revision, so a second restore of
+// the same token is refused. The legacy source row the reconciler preserved is NOT removed (a source row is a durable resolver input, never destroyed by a restore).
+export async function restoreFilmLocalization(env,{intent: given,at,receiptMark}={}){
+ const intent=await checkIntent(given);
+ const id=intent.id,pre=intent.preImage,post=intent.postImage;
+ fenced.text(at);
+ const tail=fenced.receiptTail(receiptMark,{kind:'film',id});
  const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
- const entities=[{kind:'film',id,expected:postRevision}];
+ const entities=[{kind:'film',id,expected:intent.postRevision}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push(assertImage(post,id));
@@ -154,134 +384,5 @@ export async function restoreFilmLocalization(env,input){
   if(error?.code==='film_person_revision_conflict'||error?.code==='film_person_precondition')throw failed(RESTORE_MOVED,error);
   throw error;
  }
- return {id,revision:postRevision+1,restored:true,preImage:pre};
-}
-
-// The registry spec of the kind, for reconcileReceipts. A receipt stores no payload: a replay re-plans from D1 and only an input whose digest is the receipt's is ever replayed; a moved
-// input abandons the receipt (the next run plans afresh). A restore receipt cannot be re-planned from D1 (its pre-image lives only in the token): it is never replayed by the registry,
-// and the operator re-issues the restore from the token.
-export function filmLocalizationReconcileOperation({now=()=>new Date().toISOString()}={}){
- const planned=async(env,receipt)=>{
-  const {plan,inputs,revision}=await readReconcilePlan(env,receipt.target.id,{at:now(),requestId:receipt.requestId});
-  if(plan.state==='absent')return null;
-  const digest=await reconcileDigest({id:receipt.target.id,inputs,preImage:plan.preImage,postImage:plan.postImage??plan.preImage});
-  return {plan,inputs,revision,ok:digest===receipt.contentDigest};
- };
- return defineOperation({
-  operation:RECONCILE_OPERATION,atomic:true,
-  readback:async(env,target,receipt)=>{
-   const found=await planned(env,receipt);
-   if(!found)return {digest:null};
-   if(found.plan.state==='write'){if(!found.ok)return {disposition:'abandon',errorClass:RECONCILE_SOURCE_CHANGED};return {digest:null,revision:found.revision};}
-   if(found.plan.state==='held')return {disposition:'abandon',errorClass:RECONCILE_HELD};
-   // noop: the row already is the output. Equal content proves no causality (another writer may have reached it): never applied from content, the evidence-less digest is `needs_review`.
-   return {digest:receipt.contentDigest};
-  },
-  replay:async(env,receipt,ctx)=>{
-   const found=await planned(env,receipt);
-   if(!found)throw failed('producer_replan_unavailable');
-   if(!found.ok)throw failed('film_person_invalid');
-   return writeFilmLocalizationReconcile(env,{id:receipt.target.id,inputs:found.inputs,at:now(),requestId:receipt.requestId,expectedRevision:ctx.currentRevision,receiptMark:mark(ctx,now)});
-  },
-  revalidate:async(env,receipt)=>{
-   const found=await planned(env,receipt);
-   return found&&found.ok&&found.plan.state==='write'?'proceed':'stale';
-  },
- });
-}
-
-const clampCap=(value,fallback,max)=>{
- if(value===undefined||value===null)return fallback;
- if(!Number.isInteger(value)||value<1||value>max)throw failed('film_person_invalid');
- return value;
-};
-const cursorOf=value=>{if(value===undefined||value===null||value==='')return '';if(typeof value!=='string'||!value.startsWith('film:'))throw failed('film_person_invalid');return value;};
-// One page of Film ids in id order: the Films that could carry a localization projection (a localization row, a source row, or a verified owner row linked to the Film). Redirected Films
-// are excluded. Read only, bounded by `limit`.
-async function candidatePage(env,{after,limit}){
- const db=database(env);
- try{
-  return (await many(db,`SELECT f.id AS id FROM film f WHERE f.id>? AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=f.id) AND (EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization') OR EXISTS (SELECT 1 FROM film_localization_source s WHERE s.film_id=f.id) OR EXISTS (SELECT 1 FROM owner_review_entry o WHERE o.kind='film' AND o.identity_state='verified' AND o.identity_link=f.id)) ORDER BY f.id LIMIT ?`,[after,limit+1])).map(row=>row.id);
- }catch(error){throw failed('film_person_unavailable',error);}
-}
-
-// DRY RUN: read only. No receipt, no statement, no write; it never reads a state it cannot prove (a Film whose owner evidence is unavailable is `unavailable` with the code). Returns
-// {examined, cursor, hasMore, stale:[{id,revision,effective,preImage,postImage,changes}], held:[{id,reason}], noop, unavailable:[{id,code}], wouldWrite}. `cursor` is the last examined id: pass it as
-// `after` for the next page. `wouldWrite` is capped by `writeCap` (the stale list beyond it is reported but a run would not write it).
-export async function dryRunLocalizationReconcile(env,{after,limit,writeCap,now}={}){
- const examineCap=clampCap(limit,RECONCILE_EXAMINE_DEFAULT,RECONCILE_EXAMINE_MAX),writes=clampCap(writeCap,RECONCILE_WRITE_DEFAULT,RECONCILE_WRITE_MAX);
- const clock=clockOf(now),start=cursorOf(after);
- await readAuthority(env);
- const page=await candidatePage(env,{after:start,limit:examineCap});
- const ids=page.slice(0,examineCap),out={examined:0,cursor:ids.length?ids.at(-1):start,hasMore:page.length>examineCap,stale:[],held:[],noop:0,unavailable:[],wouldWrite:0};
- for(const id of ids){
-  out.examined++;
-  try{
-   const {plan,revision}=await readReconcilePlan(env,id,{at:clock()});
-   if(plan.state==='write'){out.stale.push({id,revision,effective:plan.effective,preImage:plan.preImage,postImage:plan.postImage,changes:plan.changes});if(out.wouldWrite<writes)out.wouldWrite++;}
-   else if(plan.state==='held')out.held.push({id,reason:plan.reason});
-   else out.noop++;
-  }catch(error){
-   if(!error?.code||error.code==='film_person_unavailable'&&!error.cause)throw error;
-   out.unavailable.push({id,code:error.code});
-  }
- }
- return out;
-}
-
-// APPLY: one bounded pass. input: {runId, after?, limit?, writeCap?, now?, dryRun?:{...}} (a `runId` is the fresh source event of every request id of the run). For each examined Film: a noop or held
-// Film opens no receipt; a stale one is written by ONE receipted, atomic, fenced batch under a fresh request id. The pass stops writing at `writeCap` and stops at the first error that is not a
-// replan (`localization_inputs_moved`, `localization_owner_moved`, `film_person_revision_conflict`: the Film is reported `moved` and left for the next run), so an unknown outcome or a
-// closed marker never silently continues. Returns the restore tokens: {written:[{id,requestId,preImage,postImage,postRevision}], moved, held, noop, stopped}.
-export async function applyLocalizationReconcile(env,{runId,after,limit,writeCap,now,policy}={}){
- if(typeof runId!=='string'||!runId.trim()||runId.length>200)throw failed('film_person_invalid');
- const examineCap=clampCap(limit,RECONCILE_EXAMINE_DEFAULT,RECONCILE_EXAMINE_MAX),writes=clampCap(writeCap,RECONCILE_WRITE_DEFAULT,RECONCILE_WRITE_MAX);
- const clock=clockOf(now),start=cursorOf(after);
- assertWritable(await readAuthority(env));
- const page=await candidatePage(env,{after:start,limit:examineCap});
- const ids=page.slice(0,examineCap);
- const out={examined:0,cursor:start,hasMore:page.length>examineCap,written:[],moved:[],held:[],noop:0,stopped:null};
- const retry=new Set(['localization_inputs_moved','localization_owner_moved','film_person_revision_conflict']);
- for(const id of ids){
-  if(out.written.length>=writes){out.stopped='write_cap';out.hasMore=true;break;}
-  out.examined++;out.cursor=id;
-  const at=clock();
-  const {plan,inputs,revision}=await readReconcilePlan(env,id,{at});
-  if(plan.state==='held'){out.held.push({id,reason:plan.reason});continue;}
-  if(plan.state!=='write'){out.noop++;continue;}
-  const digest=await reconcileDigest({id,inputs,preImage:plan.preImage,postImage:plan.postImage});
-  const requestId=await reconcileRequestId({runId,id,digest});
-  let outcome;
-  try{
-   outcome=await receiptedWrite(env,{requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id},expectedRevision:revision,digest,now:clock,policy},{
-    atomic:true,
-    readback:filmLocalizationReconcileOperation({now:clock}).readback,
-    revalidate:filmLocalizationReconcileOperation({now:clock}).revalidate,
-    run:ctx=>writeFilmLocalizationReconcile(env,{id,inputs,at:clock(),requestId,expectedRevision:ctx.currentRevision,receiptMark:mark(ctx,clock)}),
-   });
-  }catch(error){
-   if(retry.has(error?.code)){out.moved.push({id,code:error.code});continue;}
-   out.stopped=error?.code||'unclassified';out.error={id,code:out.stopped};break;
-  }
-  if(outcome.state==='applied'&&outcome.result?.written)out.written.push({id,requestId,preImage:plan.preImage,postImage:plan.postImage,postRevision:outcome.result.postRevision});
-  else if(outcome.state==='applied')out.noop++;
-  else{out.stopped=outcome.errorClass||outcome.reason||outcome.state;out.error={id,state:outcome.state};break;}
- }
- return out;
-}
-
-// RESTORE: one receipted, atomic, fenced restore of ONE Film from its restore token {id, preImage, postImage, postRevision} (see the file header). `runId` makes the request id fresh.
-export async function restoreLocalizationReconcile(env,{runId,token,now,policy}={}){
- const clock=clockOf(now);
- if(!plain(token)||typeof runId!=='string'||!runId.trim())throw failed('film_person_invalid');
- const digest=await restoreDigest(token);
- const requestId=await reconcileRequestId({runId,action:'restore',id:token.id,digest});
- const outcome=await receiptedWrite(env,{requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:token.id},expectedRevision:fenced.revisionOf(token.postRevision),digest,now:clock,policy},{
-  atomic:true,
-  // A restore is fenced on the recorded revision, so a replay can never overwrite another writer: the readback proves nothing and the replay is the fenced write itself.
-  readback:async()=>({digest:null}),
-  revalidate:async()=>'proceed',
-  run:ctx=>restoreFilmLocalization(env,{...token,at:clock(),requestId,receiptMark:mark(ctx,clock)}),
- });
- return {...outcome,requestId};
+ return {id,revision:intent.postRevision+1,restored:true,preImage:pre};
 }
