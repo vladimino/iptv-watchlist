@@ -125,6 +125,10 @@ flowchart TB
     fence -->|unchanged| agg
 ```
 
+### Multi-alias history reader (AIR-650, offline, not live)
+
+The diagram above shows `history` as limited until its migration, and that is still the whole live behavior. The migration's reader is delivered offline and dormant ([film history](../reference/api/film-history.md#multi-alias-history-air-650-offline-not-live), ADR 0216 decision 6a): it reads every authorized alias of the survivor, takes the ratings facts from the same bounded G1 evidence the candidate coverage proved (never a second read), deduplicates one fact reached through several aliases, compares current values by value, and binds its cursor to the canonical survivor, the alias set, the identity read-set digest, the candidate-coverage token and the source tokens. A moved binding is `409 history_changed` with `identity_moved`, `alias_set_changed`, `coverage_changed` or `source_changed`, and incomplete coverage, an unreadable or invalid source or an incomplete Diary read is `partial`, never `present`; every source needs a token and a real recheck, with work bounds enforced at the source. It has no route and no consumer; the legacy history route, the aggregate's `history` section and the strict single-lid bridge of `POST /api/started` and prediction recovery are unchanged until a separately accepted consumer migration ([AIR-651](https://trello.com/c/qOmC8529)). No diagram changes.
+
 ### Identity consumer: prediction recovery intent
 
 The owner-only prediction recovery preview and confirm ([ADR 0165](../adr/0165-scoped-prediction-recovery-intent.md), Accepted) read a film's canonical identity only through `catalogFilmIdentityBridge` at `open`: the one trusted, non-conflicting typed claim of a Film without a redirect. A stored id that is not that claim, an absent, retired or conflicting identity, or any marker state other than `open` refuses the film. A retained Film outside the queue's admission is refused in v1; it is never admitted as a side effect of a recovery read or confirm.
