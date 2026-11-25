@@ -224,6 +224,12 @@ export const FILES={
  "letterboxd-owner-action-atomic.mjs": {
   "suite": "core"
  },
+ "import-fence-helper.mjs": {
+  "suite": "core"
+ },
+ "film-dimension-import-fence.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-activation-rehearsal.mjs": {
   "suite": "core"
  },
