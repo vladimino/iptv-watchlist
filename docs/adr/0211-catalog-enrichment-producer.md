@@ -10,7 +10,7 @@
 - [ADR 0213](0213-film-identity-evidence-ledger.md), a sibling record.
 
 **Supersedes:** In part [ADR 0087](0087-rated-archive-film-admission.md) decision 4: metadata written onto the R2 admission entry.  
-**Superseded by:** None
+**Superseded by:** In part by [ADR 0214](0214-film-metadata-per-field-provenance.md) (Accepted 2026-11-25), only while its provenance mode is `enforce`: decision 1 (fill-only), the decision 2 rule that a later answer of an earlier source never overwrites, and the decision 3b rule that values under a superseded anchor are never overwritten.
 
 ## Context
 
