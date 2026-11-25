@@ -422,7 +422,8 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
 {
  // Version evidence is inside the fence: a version reader that moves a source (or a ratings document) is caught; the version tokens are rechecked too.
  const {file,s}=fixture();
- s.bundles.a1={current:{...prediction(20,4),r2Key:'enrichment/films/a1/versions/v.json',contentSha256:'c'.repeat(64)},history:[]};
+ const SHA='c'.repeat(64),KEY='enrichment/films/a1/predictions/versions/'+SHA+'.json';
+ s.bundles.a1={current:{...prediction(20,4),r2Key:KEY,contentSha256:SHA},history:[]};
  const verify=async({record})=>({status:'linked',r2Key:record.r2Key,contentSha256:record.contentSha256,token:'obj-etag-1',bytes:100,scanned:1});
  const ok=await history(file,'tmdb_5',s,{limit:100,source:{versions:verify}});
  assert.deepEqual([ok.body.history.status,ok.body.history.events.find(e=>e.identity==='a1|prediction|current|0').version.status],['present','linked']);
@@ -432,7 +433,7 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  const movesRatings=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>{putLinks(file,{...s.links,'letterboxd:late':'other'});return verify(arg);}}});
  assert.deepEqual([movesRatings.body.history.status,movesRatings.body.history.reason],['unavailable','generation_moved'],'a ratings document moved by the version read');
  putLinks(file,s.links);
- const movesVersion=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>{s.versionTokens['enrichment/films/a1/versions/v.json']='obj-etag-2';return verify(arg);}}});
+ const movesVersion=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>{s.versionTokens[KEY]='obj-etag-2';return verify(arg);}}});
  assert.deepEqual([movesVersion.body.history.status,movesVersion.body.history.reason],['unavailable','generation_moved'],'the version object itself moved');
  s.versionTokens={};
  // A version result without a token or over its limit is a broken contract; a mismatch is page-local `partial`.
@@ -450,10 +451,30 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  }
  assert.equal((await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),status:'over_cap'})}})).body.history.reason,'history_source_over_cap');
  for(const status of ['weird','LINKED','',42,null])assert.equal((await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),status})}})).body.history.reason,'history_source_unavailable',String(status));
- for(const wrong of [{r2Key:'enrichment/films/other/versions/x.json'},{contentSha256:'d'.repeat(64)},{r2Key:undefined},{contentSha256:undefined}]){
+ for(const wrong of [{r2Key:'enrichment/films/other/predictions/versions/'+SHA+'.json'},{contentSha256:'d'.repeat(64)},{r2Key:undefined},{contentSha256:undefined}]){
   const out=await history(file,'tmdb_5',s,{limit:100,source:{versions:async arg=>({...await verify(arg),...wrong})}});
   assert.deepEqual([out.body.history.status,out.body.history.reason,out.body.history.events.find(e=>e.identity==='a1|prediction|current|0').version.status],['partial','version_unverified','invalid'],JSON.stringify(wrong));
  }
+ // The maintained pointer rule (predictionVersionLinked) is applied BEFORE any body is requested: a key naming another film, a hash that differs from the one in
+ // the key, a placeholder key, a key without a hash and a hash without a key are `invalid`, and the version reader is never called for them. `none` is only a
+ // record with both pointer fields absent (nothing to verify).
+ const other='enrichment/films/other/predictions/versions/'+SHA+'.json';
+ for(const pointer of [{r2Key:other,contentSha256:SHA},{r2Key:KEY,contentSha256:'d'.repeat(64)},{r2Key:'enrichment/films/a1/versions/v.json',contentSha256:SHA},{r2Key:KEY},{contentSha256:SHA},{r2Key:KEY,contentSha256:null},{r2Key:'x',contentSha256:'y'},{r2Key:'enrichment/films/a1/predictions/versions/'+'C'.repeat(64)+'.json',contentSha256:'C'.repeat(64)}]){
+  let called=0;
+  const bad={...s,bundles:{...s.bundles,a1:{current:{...prediction(20,4),...pointer},history:[]}}};
+  const out=await history(file,'tmdb_5',bad,{limit:100,source:{versions:async arg=>{called++;return verify(arg);}}});
+  assert.equal(called,0,'no body is requested for '+JSON.stringify(pointer));
+  const event=out.body.history.events.find(e=>e.identity==='a1|prediction|current|0');
+  assert.deepEqual([out.body.history.status,out.body.history.reason,event.version.status],['partial','version_unverified','invalid'],JSON.stringify(pointer));
+ }
+ // A pointer to the holder's own version object is accepted for a tmdb_<n> holder too, and a record with no pointer at all is not checked.
+ const KEY5='enrichment/films/tmdb_5/predictions/versions/'+SHA+'.json';
+ const own5={...s,bundles:{...s.bundles,tmdb_5:{current:{...prediction(22,3),r2Key:KEY5,contentSha256:SHA},history:[]}}};
+ const seen5=[];
+ const ok5=await history(file,'tmdb_5',own5,{limit:100,source:{versions:async arg=>{seen5.push(arg.storageId);return verify(arg);}}});
+ assert.deepEqual([ok5.body.history.status,seen5.sort()],['present',['a1','tmdb_5']]);
+ const foreign=await history(file,'tmdb_5',{...own5,bundles:{...own5.bundles,tmdb_5:{current:{...prediction(22,3),r2Key:KEY,contentSha256:SHA},history:[]}}},{limit:100,source:{versions:verify}});
+ assert.equal(foreign.body.history.events.find(e=>e.identity==='tmdb_5|prediction|current|0').version.status,'invalid','a key of another storage id is foreign even when it is valid for its own');
  // Without a version reader the pointer is `unchecked`, never `linked` or `none`; versions are read for the events of the page only.
  const unchecked=await history(file,'tmdb_5',s,{limit:100});
  assert.deepEqual([unchecked.body.history.status,unchecked.body.history.events.find(e=>e.identity==='a1|prediction|current|0').version.status],['partial','unchecked']);
@@ -578,8 +599,8 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
 {
  // Fact records: a rating needs an explicit `value` member (a number, or null for a known unrated state); anything else is unproven.
  const ev=(rating_)=>({seedRoots:{'letterboxd:a1':'k'},paths:{k:['k']},records:{k:{etag:'e',value:record('k',{letterboxd:'a1'},{rating:rating_,ratingHistory:[]}),hop:null,kind:null}}});
- for(const bad of [{},{value:'bad'},{value:Number.NaN},{value:undefined},{observedAt:d(1)},[],'x',5])assert.equal(factsFromEvidence(['letterboxd:a1'],ev(bad)).proven,false,JSON.stringify(bad));
- for(const good of [undefined,null,{value:null},{value:3.5,observedAt:d(1)}])assert.equal(factsFromEvidence(['letterboxd:a1'],ev(good)).proven,true,JSON.stringify(good));
+ for(const bad of [{},{value:'bad'},{value:Number.NaN},{value:undefined},{observedAt:d(1)},[],'x',5,{value:0},{value:0.3},{value:5.5},{value:4.25},{value:-1},{value:Infinity},{value:'4'},{value:true}])assert.equal(factsFromEvidence(['letterboxd:a1'],ev(bad)).proven,false,JSON.stringify(bad));
+ for(const good of [undefined,null,{value:null},{value:3.5,observedAt:d(1)},{value:0.5},{value:5},{value:1}])assert.equal(factsFromEvidence(['letterboxd:a1'],ev(good)).proven,true,JSON.stringify(good));
  assert.equal(factsFromEvidence(['letterboxd:a1'],{...ev(null),records:{k:{...ev(null).records.k,value:{...ev(null).records.k.value,ratingHistory:[1]}}}}).proven,false,'a history entry that is not an object');
  // Integration: a stored record whose rating has no value member is unproven; an explicit null value is a known unrated state, present with value null.
  const bad=world({lids:['a1'],facts:{'tmdb-5':{links:{letterboxd:'a1',tmdb:'5'},extra:{rating:{},ratingHistory:[]}}}});

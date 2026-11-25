@@ -12,7 +12,8 @@
 //  * typed invalidation `409 history_changed` with `identity_moved`, `alias_set_changed`, `coverage_changed` or `source_changed`;
 //  * `present` only with complete candidate coverage, every source readable and valid, and a complete Diary read; otherwise `partial`.
 // The event shapes are the legacy builders' own (src/domain/film-history.js, loaded below), and the one-hop migration overlay is the legacy reader's own
-// (LetterboxdFacts.overlay), so the readers cannot drift apart on a field.
+// (LetterboxdFacts.overlay) and its rating invariant (LetterboxdFacts.validValue), and the immutable-version pointer rule is the maintained one
+// (predictionVersionLinked), so the readers cannot drift apart.
 //
 // Ratings facts are NOT read a second time: the fact records come from the bounded G1 evidence of `readRatings` (the same bytes the coverage read and
 // the after-statement fences), reached only through the proven path of an authorized seed. An injected reader can neither add a record nor change one.
@@ -58,6 +59,7 @@ export const HISTORY_CHANGED_REASONS=['identity_moved','alias_set_changed','cove
 const legacy=vm.runInNewContext(fs.readFileSync(new URL('./domain/film-history.js',import.meta.url),'utf8')
  +'\n;({historyTime,historyValue,predictionHistoryEvent,ratingHistoryEvent,legacyRatingEvent,diaryViewingEvent,compareHistoryEvents})',{});
 const letterboxdFacts=vm.runInNewContext(fs.readFileSync(new URL('./letterboxd-facts.js',import.meta.url),'utf8')+'\n;LetterboxdFacts',{});
+const versionRule=vm.runInNewContext(fs.readFileSync(new URL('./domain/prediction-versions.js',import.meta.url),'utf8')+'\n;({predictionVersionLinked})',{});
 const plain=value=>JSON.parse(JSON.stringify(value));
 const digestOf=value=>'sha256:'+createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const eventIdOf=(storageId,sourceEventId)=>storageId+'|'+sourceEventId;
@@ -116,10 +118,10 @@ export function factsFromEvidence(seeds,evidence){
    if(overlaid&&!held.sources.has(source.factKey)){held.record=letterboxdFacts.overlay(source.value,held.record);held.sources.add(source.factKey);}
   }
  };
- // A fact record the history can use: its history is a list of objects, and a rating, when present, is an object with an explicit `value` member (a number,
- // or null for a known unrated state). A rating without a value member is not a known state.
+ // A fact record the history can use: its history is a list of objects, and a rating, when present, is an object with an explicit `value` member that holds the
+ // maintained rating invariant (0.5..5 in half-star steps, or null for a known unrated state). A rating without a value member, or out of range, is not a known state.
  const sound=value=>isObject(value)&&(value.ratingHistory===undefined||Array.isArray(value.ratingHistory)&&value.ratingHistory.every(isObject))
-  &&(value.rating===undefined||value.rating===null||isObject(value.rating)&&Object.hasOwn(value.rating,'value')&&(value.rating.value===null||finite(value.rating.value)));
+  &&(value.rating===undefined||value.rating===null||isObject(value.rating)&&Object.hasOwn(value.rating,'value')&&(value.rating.value===null||letterboxdFacts.validValue('rating',value.rating.value)));
  for(const seed of seeds){
   const root=evidence?.seedRoots?.[seed],path=evidence?.paths?.[root],start=evidence?.records?.[root];
   if(root===undefined||!path||!start||!sound(start.value)){proven=false;continue;}
@@ -355,7 +357,14 @@ async function readOpenHistory(resolution,budget,sources,page,set,ratings,fence)
  for(const event of slice){
   if(event.type!=='prediction')continue;
   const held=built.records.get(event.identity),record=held?.record;
-  if(!record?.r2Key&&!record?.contentSha256)continue;
+  if(record?.r2Key==null&&record?.contentSha256==null)continue;
+  // The maintained pointer rule (predictionVersionLinked): a key that parses as a version object of THIS storage id and names the record's own SHA-256. A
+  // partial, malformed or foreign pointer is invalid and its body is never requested; `none` is only a record with both pointer fields absent (skipped above).
+  if(!versionRule.predictionVersionLinked(record,held.storageId)){
+   event.version={status:'invalid',r2Key:legacy.historyValue(record,'r2Key'),contentSha256:legacy.historyValue(record,'contentSha256')};
+   versionProblem=true;
+   continue;
+  }
   let checked=null;
   if(typeof sources.predictionVersion==='function'){
    const limits=HISTORY_SOURCE_LIMITS.predictionVersion;
@@ -364,10 +373,10 @@ async function readOpenHistory(resolution,budget,sources,page,set,ratings,fence)
     throw new SourceFailure('history_source_unavailable','predictionVersion');
    if(result.status==='over_cap'||result.bytes>limits.maxBytes||result.scanned>limits.maxScanned)throw new SourceFailure('history_source_over_cap','predictionVersion');
    if(!VERSION_STATUSES.includes(result.status))throw new SourceFailure('history_source_unavailable','predictionVersion');
-   // Only `linked` certifies a pointer, and only when it names the very pointer and hash this record carries.
-   const named=(!record.r2Key||result.r2Key===record.r2Key)&&(!record.contentSha256||result.contentSha256===record.contentSha256);
+   // Only `linked` certifies a pointer, and only when the answer names BOTH of the record's own fields.
+   const named=result.r2Key===record.r2Key&&result.contentSha256===record.contentSha256;
    checked={...result,status:result.status==='linked'&&!named?'invalid':result.status};
-   checks.push({source:'predictionVersion',key:record.r2Key??held.storageId,status:result.status,token:result.token});
+   checks.push({source:'predictionVersion',key:record.r2Key,status:result.status,token:result.token});
   }
   event.version=checked?{status:checked.status,r2Key:checked.r2Key??null,contentSha256:checked.contentSha256??null}
    :{status:'unchecked',r2Key:legacy.historyValue(record,'r2Key'),contentSha256:legacy.historyValue(record,'contentSha256')};
