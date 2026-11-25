@@ -134,11 +134,13 @@ function recordRatingChange(record,incoming,effective){
   if(key===FACTS_KEYS.viewIndex)return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
   return readRawJSON(env,key);
  }
- async function casJSON(env,key,empty,apply){
+ async function casJSON(env,key,empty,apply,{extra=[]}={}){
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
-   try{const owned=await RatingsD1.casOwned(env,key,empty,apply);if(owned.owned)return owned.result;}
+   try{const owned=await RatingsD1.casOwned(env,key,empty,apply,{extra});if(owned.owned)return owned.result;}
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
   }
+  // AIR-599: statements that must commit with the document exist only on the D1-owned store; the R2 stand-in has no batch, so such a write is refused whole, never half done.
+  if(extra.length)throw new FactsError('atomic_unavailable','The document store cannot commit the write atomically');
   if(key===FACTS_KEYS.viewIndex)throw new FactsError('view_index_not_owned','The view index has no raw store; it is written only through the D1 ratings domain');
   for(let attempt=0;attempt<5;attempt++){
    const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
@@ -617,6 +619,15 @@ function recordRatingChange(record,incoming,effective){
  // AIR-489 / ADR 0166 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
  // (src/letterboxd-diary-identity.js). Reuses the receipt pattern of ADR 0105 and the alias protocol of linkFilm; nothing is merged.
  const DIARY_IDENTITY_KEY=FACTS_PREFIX+'scans/diary-identity.json',DIARY_IDENTITY_CAP=200;
+ // AIR-599 (sixth review of PR #1009): THE contract of the check-reservation fence of a Letterboxd identity effect, built here once and consumed unchanged by the Ratings D1 writes (ratings-d1) and the canonical D1 writes
+ // (canonical-mutations) through `env.effectGuard = {sql, params}`. The SQL boolean holds only while the LOGICALLY RECONSTRUCTED check document still contains this holder's `"reservation":{"checkId":"<id>"` text. The document
+ // is stored in parts cut every 60,000 bytes with no regard to JSON tokens, so a needle may span two adjacent parts: besides one part, the tail of each part joined to the head of the next is searched (the needle is far
+ // shorter than a part, so it spans at most two). It asserts the TOKEN (the reservation still on the entry), not the wall clock. Same batch, no schema, no second authority.
+ function reservationGuard(checkId){
+  if(typeof checkId!=='string'||!/^[\w-]{8,80}$/.test(checkId))return null;
+  const needle='"reservation":{"checkId":"'+checkId+'"',length=needle.length;
+  return {sql:'(EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND instr(body,?)>0) OR EXISTS (SELECT 1 FROM ratings_document a JOIN ratings_document b ON b.key=a.key AND b.part=a.part+1 WHERE a.key=? AND instr(substr(a.body,-?)||substr(b.body,1,?),?)>0))',params:[DIARY_IDENTITY_KEY,needle,DIARY_IDENTITY_KEY,length-1,length-1,needle]};
+ }
  // The movie id each lid's record already carries, from the link index and the record (one read of the index, one per lid).
  async function diaryLinks(env,lids){
   const {value:index}=await readJSON(env,FACTS_KEYS.links),out=new Map();
@@ -669,19 +680,121 @@ function recordRatingChange(record,incoming,effective){
   return outcome;
  }
  async function readAdmissionReceipts(env){return readJSON(env,ADMISSIONS_KEY);}
- async function readDiaryIdentity(env){const {value}=await readJSON(env,DIARY_IDENTITY_KEY);return value&&value.schemaVersion===1&&value.films&&typeof value.films==='object'?value:{schemaVersion:1,films:{}};}
- // set: {lid:{reason,attempts,lastAttemptAt,nextAttemptAt}}, clear: [lid]. Oldest attempts leave first above the cap.
- async function updateDiaryIdentity(env,{set={},clear=[]}={}){
-  if(!Object.keys(set).length&&!clear.length)return {changed:false};
-  return casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{}},current=>{
-   const films={...(current.films||{})};let changed=false;
-   for(const lid of clear)if(films[lid]){delete films[lid];changed=true;}
-   for(const [lid,item] of Object.entries(set)){if(!LID.test(lid))continue;if(JSON.stringify(films[lid])!==JSON.stringify(item)){films[lid]=item;changed=true;}}
-   const ids=Object.keys(films);
-   if(ids.length>DIARY_IDENTITY_CAP){ids.sort((a,b)=>String(films[a].lastAttemptAt||'')<String(films[b].lastAttemptAt||'')?-1:1);for(const id of ids.slice(0,ids.length-DIARY_IDENTITY_CAP)){delete films[id];changed=true;}}
-   return changed?{schemaVersion:1,films}:null;
-  });
+ // AIR-599 / ADR 0207 decision 4b (review of PR #1009): ONE document holds the whole shared state of the Letterboxd check, so every transition is one compare-and-swap: `films` (at most 200 entries) and `backlog`
+ // (at most 2,000 ids the full `films` could not take: {lid:{slug,queuedAt,attempts,requeued?}}). An id is in exactly one of the two, and an id moves between them only inside one write.
+ const DIARY_BACKLOG_CAP=2000;
+ const normDiary=value=>{const ok=value&&value.schemaVersion===1&&value.films&&typeof value.films==='object';return ok?{...value,backlog:value.backlog&&typeof value.backlog==='object'&&!Array.isArray(value.backlog)?value.backlog:{}}:{schemaVersion:1,films:{},backlog:{}};};
+ async function readDiaryIdentity(env){const {value}=await readJSON(env,DIARY_IDENTITY_KEY);return normDiary(value);}
+ // The same document with its stored version: the compare-and-swap token of the owner `requeue` and `dismiss` route.
+ async function readDiaryIdentityVersioned(env){const {value,etag}=await readJSON(env,DIARY_IDENTITY_KEY);return {doc:normDiary(value),version:etag??null};}
+ // The backlog as a view of the same document (the version is the document's).
+ async function readDiaryBacklog(env){const read=await readDiaryIdentityVersioned(env);return {doc:{schemaVersion:1,ids:read.doc.backlog},version:read.version};}
+ // Only a SETTLED entry may be evicted (`owner_dismissed`, the one settled state the document keeps: a verified id is cleared, not kept). A link intent, a pending claim, a reserved, transport-retained, not-now or
+ // below-cap entry and an entry at the attempt cap are never evicted.
+ const diaryEvictable=entry=>!!entry&&entry.reason==='owner_dismissed';
+ const backlogRecord=(hint,at)=>({slug:typeof hint?.slug==='string'&&/^[a-z0-9-]{1,200}$/.test(hint.slug)?hint.slug:null,queuedAt:ISO.test(String(hint?.queuedAt||''))?hint.queuedAt:at,attempts:Number.isInteger(hint?.attempts)&&hint.attempts>0?Math.min(hint.attempts,6):0});
+ // One write of the shared document.
+ //  set: {lid: entry}, clear: [lid], backlogAdd: {lid: hint} (an id already in the backlog keeps its record), backlogRemove: [lid], checkedAt: the time of a real check that got an answer (`lastCheckAt`, for the Monitor).
+ //  expect / expectBacklog: {lid: JSON text of the entry / backlog record the caller READ, or null for none}. Everything the call does for an id is installed only while BOTH still equal what the caller read; otherwise
+ //  nothing is done for that id and it is returned in `conflicts`, so a stale write never overwrites an owner `requeue` / `dismiss`, another caller's check or an intake that landed in between.
+ //  `extra`: [sql, params] guard statements that ride in the SAME batch (a guard that fails rolls the write back; the ledger row token of a seed). Without a D1-owned store a write with `extra` is refused whole (`atomic_unavailable`).
+ //  Above the entry cap the settled entries leave first; when the cap is still exceeded the ids this call ADDED are refused (`refused`): they are not entries, they stay (or are put, from `backlogOnRefuse`) in the backlog,
+ //  and an id the full backlog cannot hold is returned in `full`. An existing entry is never dropped.
+ async function updateDiaryIdentity(env,{set={},clear=[],backlogAdd={},backlogRemove=[],backlogOnRefuse={},expect=null,expectBacklog=null,checkedAt=null,extra=[]}={}){
+  if(!Object.keys(set).length&&!clear.length&&!Object.keys(backlogAdd).length&&!backlogRemove.length&&!checkedAt)return {changed:false,refused:[],conflicts:[],full:[]};
+  let refused=[],conflicts=[],full=[];
+  const out=await casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{},backlog:{}},current=>{
+   const before=current.films||{},backlogBefore=current.backlog||{},films={...before},backlog={...backlogBefore};let changed=false;refused=[];conflicts=[];full=[];
+   const text=(map,lid)=>Object.hasOwn(map,lid)?JSON.stringify(map[lid]):null;
+   const moved=lid=>(expect&&Object.hasOwn(expect,lid)&&text(before,lid)!==expect[lid])||(expectBacklog&&Object.hasOwn(expectBacklog,lid)&&text(backlogBefore,lid)!==expectBacklog[lid]);
+   let lastCheckAt=typeof current.lastCheckAt==='string'?current.lastCheckAt:null;
+   if(checkedAt&&ISO.test(checkedAt)&&(!lastCheckAt||checkedAt>lastCheckAt)){lastCheckAt=checkedAt;changed=true;}
+   const skip=new Set();
+   for(const lid of new Set([...Object.keys(set),...clear,...backlogRemove,...Object.keys(backlogAdd)]))if(moved(lid)){conflicts.push(lid);skip.add(lid);}
+   for(const lid of clear)if(!skip.has(lid)&&films[lid]){delete films[lid];changed=true;}
+   for(const [lid,item] of Object.entries(set)){if(!LID.test(lid)||skip.has(lid))continue;if(JSON.stringify(films[lid])!==JSON.stringify(item)){films[lid]=item;changed=true;}}
+   for(const lid of backlogRemove)if(!skip.has(lid)&&backlog[lid]){delete backlog[lid];changed=true;}
+   let ids=Object.keys(films);
+   if(ids.length>DIARY_IDENTITY_CAP){
+    const settled=ids.filter(id=>diaryEvictable(films[id])).sort((a,b)=>String(films[a].lastAttemptAt||'')<String(films[b].lastAttemptAt||'')?-1:1);
+    for(const id of settled.slice(0,ids.length-DIARY_IDENTITY_CAP)){delete films[id];changed=true;}
+    ids=Object.keys(films);
+    if(ids.length>DIARY_IDENTITY_CAP){
+     const added=ids.filter(id=>!before[id]);
+     refused=added.slice(Math.max(0,added.length-(ids.length-DIARY_IDENTITY_CAP)));
+     const nowIso=new Date().toISOString();
+     for(const id of refused){
+      delete films[id];
+      // The refused id stays recoverable: its previous backlog record is restored, else the caller's hint is recorded.
+      if(!backlog[id]){
+       if(Object.hasOwn(backlogBefore,id))backlog[id]=backlogBefore[id];
+       else if(backlogOnRefuse[id]&&Object.keys(backlog).length<DIARY_BACKLOG_CAP)backlog[id]=backlogRecord(backlogOnRefuse[id],nowIso);
+       else full.push(id);
+      }
+     }
+    }
+   }
+   for(const [lid,hint] of Object.entries(backlogAdd)){
+    if(!LID.test(lid)||skip.has(lid)||backlog[lid]||films[lid])continue;
+    if(Object.keys(backlog).length>=DIARY_BACKLOG_CAP){full.push(lid);continue;}
+    backlog[lid]=backlogRecord(hint,new Date().toISOString());changed=true;
+   }
+   if(JSON.stringify(backlog)!==JSON.stringify(backlogBefore))changed=true;
+   return changed?{...current,schemaVersion:1,films,backlog,...(lastCheckAt?{lastCheckAt}:{})}:null;
+  },{extra});
+  return {...(out||{}),refused,conflicts,full};
  }
+ // The owner `requeue` and `dismiss` for ids wherever the shared check holds them: the entry, the backlog record, and (through `extra`, the ledger statements the caller planned) the Watchlist ledger row. ONE
+ // compare-and-swap of the document whose stored version the owner saw, in ONE D1 batch with `extra`: all three change or none does. A moved document, or a moved ledger row (the statements carry its token), refuses the
+ // whole request (`stale_revision`, nothing written). The document is written in every request, so `extra` always rides in a batch. Without a D1-owned store the write is refused whole (`atomic_unavailable`).
+ // `requeue` resets `attempts` (and `streak`) to 0 on the entry and the backlog record, keeps `queuedAt` and records who, when and why; an id with a live check reservation refuses the whole action (`check_in_flight`); `dismiss` settles an entry as `owner_dismissed`
+ // and removes a backlog record. `createMissing` (the report lane) gives an id found nowhere a backlog record on `requeue`.
+ async function ownerAction(env,{action,lids,slugs={},createMissing=false,expectedVersion,by,why,at,extra=[]}){
+  const results={};let stale=false,full=false,inFlight=[];
+  try{
+   await casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{},backlog:{}},(raw,etag)=>{
+    if((etag??null)!==(expectedVersion??null)){stale=true;return null;}
+    // The audit of an owner action is bounded: who (100 chars), when, why (200). A backlog record keeps only who and when (the reason is kept on the entry), so the worst serialized document stays near 1 MB.
+    const current=normDiary(raw),requeued={by:String(by).slice(0,100),at,why:String(why).slice(0,200)},requeuedLight={by:requeued.by,at};
+    // An id with a LIVE check reservation has an effect in flight (a source check, an admission, a link): the action is refused whole, nothing is written, so it can never be reported as committed while that effect can still land.
+    // The reservation expires by itself (a step that was cut off), and the owner retries then or after the step finishes.
+    inFlight=lids.filter(lid=>{const reservation=current.films[lid]?.reservation;return reservation&&Date.parse(reservation.until)>Date.parse(at);});
+    if(inFlight.length)return null;
+    const films={...current.films},backlog={...current.backlog};full=false;
+    for(const lid of lids){
+     const entry=films[lid],record=backlog[lid];let done=null;
+     if(entry){
+      const {reservation:_dropped,...rest}=entry;
+      if(action==='requeue'){
+       const reason=LINK_REASONS_FACTS.has(entry.reason)||entry.reason==='claim_pending'?entry.reason:'owner_requeued';
+       films[lid]={...rest,reason,class:'not_now',attempts:0,streak:0,queuedAt:entry.queuedAt||entry.lastAttemptAt||at,nextAttemptAt:at,requeued};done='requeued';
+      }else{films[lid]={...rest,reason:'owner_dismissed',class:'settled',nextAttemptAt:null,lastAttemptAt:at,requeued:{...requeued,action:'dismiss'}};done='dismissed';}
+     }
+     if(record){
+      if(action==='requeue'){backlog[lid]={...record,attempts:0,requeued:requeuedLight};done=done||'requeued';}
+      else{delete backlog[lid];done=done||'dismissed';}
+     }
+     if(!done&&action==='requeue'&&createMissing){
+      if(Object.keys(backlog).length>=DIARY_BACKLOG_CAP){full=true;results[lid]='backlog_full';continue;}
+      backlog[lid]={...backlogRecord({slug:slugs[lid],queuedAt:at,attempts:0},at),requeued:requeuedLight};done='created';
+     }
+     results[lid]=done||'absent';
+    }
+    if(full)return null; // a full backlog refuses the whole request: nothing is written, the ledger rows stay as they are
+    return {...current,schemaVersion:1,films,backlog,ownerActionAt:at};
+   },{extra});
+  }catch(error){
+   // Nothing was written: the batch is atomic. Contention (the document moved, or a ledger row's token did not hold) is the owner's to re-read.
+   if(error&&error.code==='write_contention')return {state:'stale_revision',results:{}};
+   throw error;
+  }
+  if(stale)return {state:'stale_revision',results:{}};
+  if(inFlight.length)return {state:'check_in_flight',results:{},ids:inFlight};
+  if(full)return {state:'backlog_full',results};
+  const after=await readDiaryIdentityVersioned(env);
+  return {state:'applied',results,version:after.version,entries:Object.fromEntries(lids.map(lid=>[lid,after.doc.films[lid]??null])),backlog:Object.fromEntries(lids.map(lid=>[lid,after.doc.backlog[lid]??null]))};
+ }
+ const LINK_REASONS_FACTS=new Set(['linking','link_failed']);
 
  // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries are offered: an INFERRED link (ADR 0104) is a title/year match, not proof of the lid, so it is never offered, and the claim planner refuses a pair the import marked as inferred (`identity`, or its `inferredPairs` entry written before the alias) whichever flow offers it (since ADR 0192 no unlink can withdraw such a link; a mistaken one is repaired case by case). Never throws into the import. Inactive until the
  // claim module's activation line is turned on. A replay of a committed chunk offers it again: that is the recovery of an interrupted claim (the import is owner-driven, so a replay is its ordinary retry).
@@ -782,5 +895,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,DIARY_IDENTITY_KEY,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

@@ -218,6 +218,15 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-check-legacy-report.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-owner-race-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-owner-action-atomic.mjs": {
+  "suite": "core"
+ },
  "import-fence-helper.mjs": {
   "suite": "core"
  },
@@ -231,6 +240,9 @@ export const FILES={
   "suite": "core"
  },
  "canonical-letterboxd-claim.mjs": {
+  "suite": "core"
+ },
+ "prediction-alias-bridge-cohort.mjs": {
   "suite": "core"
  },
  "canonical-film-writers-mutation.mjs": {
@@ -344,6 +356,9 @@ export const FILES={
   "suite": "core"
  },
  "film-readiness.mjs": {
+  "suite": "core"
+ },
+ "film-history-aggregate.mjs": {
   "suite": "core"
  },
  "canonical-readiness-classes.mjs": {
@@ -480,6 +495,9 @@ export const FILES={
   "note": "8,312-film write stays in core. newTrips*350<60000 is a cap on round trips at a fixed 350ms model, not the runner clock. localMs is only logged."
  },
  "discovery-archive-import.mjs": {
+  "suite": "core"
+ },
+ "admin-identity-owner-action.mjs": {
   "suite": "core"
  },
  "admin-identity-revoke-page.mjs": {
@@ -654,6 +672,9 @@ export const FILES={
   "suite": "core"
  },
  "letterboxd-view-double.mjs": {
+  "suite": "core"
+ },
+ "reservation-guard-fixture.mjs": {
   "suite": "core"
  },
  "view-index-d1-input.mjs": {
@@ -1056,6 +1077,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-import.mjs": {
   "suite": "core"
  },
  "identity-evidence-writer.mjs": {

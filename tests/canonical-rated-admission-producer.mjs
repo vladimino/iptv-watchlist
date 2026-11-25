@@ -287,8 +287,8 @@ const KEYS=['film_admission','film_credits','film_facts','film_localization_proj
   await applyRatedAdmissionRetention(envOf(file),{event:'m:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
   const before=st(file);
   assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
-  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),43);
-  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_43/.test(String(error.cause?.message)));
+  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),44);
+  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_44/.test(String(error.cause?.message)));
   assert.deepEqual(st(file),before,'nothing was written');
   await assert.rejects(()=>FA.readRetentionWatermark(envOf(file)),error=>error.code==='film_person_unavailable');
  }
@@ -633,6 +633,52 @@ async function putPayload(env,runId,report){
  const third=await Candidates.identityStep({BUCKET:env.BUCKET,DB:env.DB},{sha,code:'sc603'});
  assert.equal(third.verified,true);
  assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:603'"),'603');
+}
+
+// AIR-599 / ADR 0207 decision 4b: through the Letterboxd Sync's fenced env (producerFence kind `letterboxd`) the admission batch and its receipt transitions assert the Sync epoch.
+// A stale epoch admits nothing (no Film, no admission row, no applied receipt); the running epoch admits as before; another fence kind is not bound by these writers.
+{
+ const file=database('open');
+ assert.equal(sqlite(file,"INSERT INTO letterboxd_sync_mode (id,mode,target,from_mode,epoch,drain,quarantine_reason,quarantined_at,changed_at,revision,write_id) VALUES (1,'cloudflare',NULL,'switching',5,NULL,NULL,NULL,'"+T0+"',1,'w')").status,0);
+ const stale={...envOf(file),producerFence:{kind:'letterboxd',epoch:4}};
+ const out=await applyRatedAdmissionRetention(stale,{event:'diary:stale',admissions:[{receiptKey:'tmdb_604',receipt:receipt(604)}],now:()=>T}).catch(error=>({thrown:error.code}));
+ assert.ok(out.thrown||out.state!=='complete'||Number(out.failed||0)+Number(out.unknown||0)+Number(out.refused||0)>0,'a stale epoch is not a complete admission: '+JSON.stringify(out));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='604'"),0,'a stale Sync epoch admits nothing');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:604'"),0);
+ assert.equal(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE state='applied'"),0);
+ await assert.rejects(()=>FA.admitRatedFilm(stale,{receiptKey:'tmdb_604',receipt:receipt(604),expectedRevision:0,at:T,requestId:'req-stale'}),error=>error.code==='letterboxd_epoch_fence','the writer names the moved epoch');
+ const running={...envOf(file),producerFence:{kind:'letterboxd',epoch:5}};
+ const ok=await applyRatedAdmissionRetention(running,{event:'diary:running',admissions:[{receiptKey:'tmdb_604',receipt:receipt(604)}],now:()=>T2});
+ assert.equal(ok.state,'complete',JSON.stringify(ok));assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:604'"),'604');
+ // the switch away (mode no longer `cloudflare`) fences the same epoch too
+ assert.equal(sqlite(file,"UPDATE letterboxd_sync_mode SET mode='switching',target='external',epoch=6,revision=2 WHERE id=1").status,0);
+ await assert.rejects(()=>FA.admitRatedFilm(running,{receiptKey:'tmdb_605',receipt:receipt(605),expectedRevision:0,at:T,requestId:'req-moved'}),error=>error.code==='letterboxd_epoch_fence');
+ // another producer fence kind is not bound by the admission writer (unchanged behaviour of other producers)
+ const other=await FA.admitRatedFilm({...envOf(file),producerFence:{kind:'dictionary'}},{receiptKey:'tmdb_605',receipt:receipt(605),expectedRevision:0,at:T,requestId:'req-other'});
+ assert.equal(other.admitted,true);
+}
+
+// AIR-599 (fifth and sixth review of PR #1009): an env carrying the check reservation of a Letterboxd identity effect (`effectGuard`) admits only while the shared check document still holds that reservation, also when the
+// reservation text is CUT BY THE PART BOUNDARY of the stored document (parts of 60,000 bytes with no regard to JSON tokens). A released, taken-over or voided reservation is refused AT COMMIT (no Film, no admission row).
+{
+ const {guardOf,splitRows,DIARY_KEY}=await import('./reservation-guard-fixture.mjs');
+ const file=database('open');
+ const insert=rows=>rows.map(([key,part,body,etag,at])=>"INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('"+key+"',"+part+",'"+body+"','"+etag+"','"+at+"');").join('\n');
+ // the live reservation `c-live-0001` is cut inside the needle at byte 60000
+ assert.equal(sqlite(file,insert(splitRows('c-live-0001',20,T0))).status,0);
+ const gone={...envOf(file),effectGuard:guardOf('c-gone-0002')};
+ await assert.rejects(()=>FA.admitRatedFilm(gone,{receiptKey:'tmdb_610',receipt:receipt(610),expectedRevision:0,at:T,requestId:'req-gone'}));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='610'"),0,'no admission without the reservation');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:610'"),0);
+ const live={...envOf(file),effectGuard:guardOf('c-live-0001')};
+ const ok=await FA.admitRatedFilm(live,{receiptKey:'tmdb_610',receipt:receipt(610),expectedRevision:0,at:T,requestId:'req-live'});
+ assert.equal(ok.admitted,true,'the live reservation, cut by the part boundary, admits');
+ // the reservation replaced (another holder) or removed: refused
+ assert.equal(sqlite(file,"DELETE FROM ratings_document WHERE key='"+DIARY_KEY+"';\n"+insert(splitRows('c-other-0003',7,T0))).status,0);
+ await assert.rejects(()=>FA.admitRatedFilm(live,{receiptKey:'tmdb_611',receipt:receipt(611),expectedRevision:0,at:T,requestId:'req-replaced'}));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='611'"),0,'a replaced reservation admits nothing');
+ assert.equal(sqlite(file,"DELETE FROM ratings_document WHERE key='"+DIARY_KEY+"'").status,0);
+ await assert.rejects(()=>FA.admitRatedFilm(live,{receiptKey:'tmdb_611',receipt:receipt(611),expectedRevision:0,at:T,requestId:'req-removed'}));
 }
 
 console.log('canonical-rated-admission-producer: ok');
