@@ -241,7 +241,7 @@ const file=fresh('d1'),env=world(file);
 
  // (3) an APPLIED attempt that matches the intent (a lost response): the row finishes WITHOUT a fetch and without fresh evidence
  reset();
- const lost=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3',receipt:{tmdb:'900073',archiveSha256:SHA,title:'Fixture RE',year:2010},now:()=>new Date(NOW).toISOString()});
+ const lost=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3',receipt:{tmdb:'900073',archiveSha256:SHA,title:'Fixture RE',year:2010},evidence:{subject:{kind:'letterboxd_short_code',value:'rc3'},relation:'same_work',object:{kind:'tmdb_movie',value:'900073'},polarity:'asserts',route:'letterboxd_rated_archive',method:'page_check',sourceRoot:'b'.repeat(64),sourceRef:'archive-step:'+SHA.slice(0,12),sourceScope:SHA,observedAt:new Date(NOW).toISOString()},now:()=>new Date(NOW).toISOString()});
  assert.equal(lost.outcome,'admitted');
  seedRow(row('rc3','900073','/film/fixture-rc-73/','Fixture RE',2010));
  const evBefore=evidence(file).length;calls.length=0;
@@ -250,6 +250,17 @@ const file=fresh('d1'),env=world(file);
  assert.equal(boxdCalls(),0,'no fetch: the applied attempt proves the admission');
  assert.equal(evidence(file).length,evBefore,'no evidence is manufactured for a recovery that made no check');
  assert.equal(rowOf('rc3').state,'verified');
+
+ // (3b) the pair is admitted but THIS archive never recorded its evidence (the invocation died before it): the row is not settled from the intent: both sources are really reacquired and the evidence is recorded
+ reset();
+ const p3b=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3b',receipt:{tmdb:'900079',archiveSha256:'a'.repeat(64),title:'Fixture RJ',year:2005},now:()=>new Date(NOW).toISOString()});
+ assert.equal(p3b.outcome,'admitted');
+ seedRow(row('rc3b','900079','/film/fixture-rc-79/','Fixture RJ',2005));add('rc3b','fixture-rc-79','900079','Fixture RJ',2005);
+ calls.length=0;
+ const due3b=await step();
+ assert.equal(due3b.verified,true,JSON.stringify(due3b));
+ assert.ok(boxdCalls()>0,'the obligation is not provably fulfilled: a real check is made');
+ assert.deepEqual(rows(file,"SELECT route,source_scope FROM film_identity_evidence WHERE subject_value='rc3b'").map(item=>[item.route,item.source_scope]),[['letterboxd_rated_archive',SHA]],'and its evidence is recorded');
 
  // (4) a LIVE attempt of the key: the row waits, no fetch, nothing changes
  reset();
@@ -452,16 +463,35 @@ const file=fresh('d1'),env=world(file);
  // (3) an APPLIED attempt of A proves the work: the item finishes from the intent WITHOUT a fetch and without fresh evidence, even though the page now names B
  reset();
  await seed(env,'hw3');
- const evBefore=evidence(file).length;
- const admitted=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3',receipt:{tmdb:'900063',archiveSha256:'a'.repeat(64),title:'Fixture HD',year:2019},now:()=>new Date(NOW).toISOString()});
+ const admitted=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3',receipt:{tmdb:'900063',archiveSha256:'a'.repeat(64),title:'Fixture HD',year:2019},evidence:{subject:{kind:'letterboxd_lid',value:'hw3'},relation:'same_work',object:{kind:'tmdb_movie',value:'900063'},polarity:'asserts',route:'watchlist_admission',method:'page_check',sourceRoot:'c'.repeat(64),sourceRef:'diary:hw3',observedAt:new Date(NOW).toISOString()},now:()=>new Date(NOW).toISOString()});
  assert.equal(admitted.outcome,'admitted');
  await putIntent('hw3','900063');add('hw3','fixture-h-900063','900064','Fixture HE',2018);
  calls.length=0;
+ const evAfterSetup=evidence(file).length;
  const settled=await resolve1('hw3','fixture-h-900063','watchlist_admission');
  assert.deepEqual([settled.outcomes.get('hw3').class,settled.outcomes.get('hw3').reason],['settled','verified'],JSON.stringify([...settled.outcomes]));
  assert.equal(boxdCalls(),0,'no fetch: the applied attempt proves the work');
  assert.equal((await Facts.diaryLinks(env,['hw3'])).get('hw3').tmdb,'900063','linked to the INTENDED movie, not the one the page names now');
- assert.equal(evidence(file).length,evBefore,'a recovery that made no check writes no evidence');
+ assert.equal(evidence(file).length,evAfterSetup,'a recovery that made no check writes no evidence');
+
+ // (3b) the admission exists but the caller's OWN evidence row does not (the intent is a NEW check of an admitted pair whose invocation died before its evidence was written, or the other caller's route): the
+ // item is NOT settled from the intent: a real check is due, and it records the evidence
+ reset();
+ await seed(env,'hw3b');
+ assert.equal((await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3b',receipt:{tmdb:'900071',archiveSha256:'a'.repeat(64),title:'Fixture HK',year:2012},now:()=>new Date(NOW).toISOString()})).outcome,'admitted');
+ await putIntent('hw3b','900071');add('hw3b','fixture-h-900071','900071','Fixture HK',2012);
+ calls.length=0;
+ const due=await resolve1('hw3b','fixture-h-900071','watchlist_admission');
+ assert.equal(due.outcomes.get('hw3b').class,'settled',JSON.stringify([...due.outcomes]));
+ assert.ok(boxdCalls()>0,'the obligation is not provably fulfilled: the source is really reacquired');
+ assert.deepEqual(evidence(file).filter(item=>item.subject_value==='hw3b').map(item=>item.route),['watchlist_admission'],'and the evidence of that check is recorded');
+ // the same intent, the real check now names ANOTHER movie: source_changed, never a link
+ reset();
+ await seed(env,'hw3c');
+ assert.equal((await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3c',receipt:{tmdb:'900072',archiveSha256:'a'.repeat(64),title:'Fixture HL',year:2011},now:()=>new Date(NOW).toISOString()})).outcome,'admitted');
+ await putIntent('hw3c','900072');add('hw3c','fixture-h-900072','900073','Fixture HM',2010);
+ const changed3c=await resolve1('hw3c','fixture-h-900072','watchlist_admission');
+ assert.deepEqual([changed3c.outcomes.get('hw3c').class,changed3c.outcomes.get('hw3c').reason],['definite','source_changed'],JSON.stringify([...changed3c.outcomes]));
 
  // (4) a genuine SECOND check of an admitted pair is recorded through the keyed evidence-only operation
  reset();
@@ -509,6 +539,28 @@ const file=fresh('d1'),env=world(file);
  assert.equal(injected,1,'the history moved between the plan and the terminal write');
  assert.deepEqual([fenced.outcomes.get('hw6').class,fenced.outcomes.get('hw6').reason],['definite','source_changed'],JSON.stringify([...fenced.outcomes]));
  assert.equal(rows(file,"SELECT state FROM canonical_write_receipt WHERE request_id='late-A'")[0].state,'abandoned','the replan settled the newcomer before answering again');
+
+ // (6b) an answer that COSTS an attempt (a 404) is fenced by the history like any terminal write: another attempt appears under the key before the entry is written -> refused, replanned, charged ONCE, one fetch
+ reset();
+ await seed(env,'hw6b');
+ let injected6=0;
+ const racing6={...env,DB:d1Standin(file,{onBatch:async statements=>{
+  if(!injected6&&statements.some(item=>/letterboxd\/facts\/scans\/diary-identity\.json/.test(item.text||''))&&statements.some(item=>/operation_key/.test(item.text||'')&&/admission:lid:hw6b/.test(item.text||''))){injected6++;pendingReceipt('hw6b','late-6b',false);}
+ }})};
+ const charged=await Identity.resolve(racing6,[{lid:'hw6b',slug:'fixture-h-gone'}],opts({route:'ratings_diary'}));
+ assert.equal(injected6,1,'the history moved between the plan and the charged write');
+ assert.deepEqual([charged.outcomes.get('hw6b').class,charged.outcomes.get('hw6b').reason,charged.outcomes.get('hw6b').attempts],['gone','not_found',1],JSON.stringify([...charged.outcomes]));
+ assert.equal(boxdCalls(),1,'the replan reused the answer: ONE source request');
+ assert.equal(rows(file,"SELECT state FROM canonical_write_receipt WHERE request_id='late-6b'")[0].state,'abandoned');
+
+ // (6c) a TRUSTED BRIDGE for the id names ANOTHER movie than its unresolved intent: the bridge shortcut (which performs no check) must neither replace the intent nor link: the coordinator settles it
+ reset();
+ await seed(env,'hw6c');await putIntent('hw6c','900080');add('hw6c','fixture-h-900080','900080','Fixture HN',2009);
+ sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,updated_at) VALUES ('film:tmdb:900081',1,'tmdb:900081','"+STAMP+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:900081','tmdb','900081',1,0),('film:tmdb:900081','letterboxd','hw6c',1,0)");
+ const bridged=await resolve1('hw6c','fixture-h-900080');
+ assert.notEqual((await Facts.diaryLinks(env,['hw6c'])).get('hw6c').tmdb,'900081','the bridge shortcut did not link the other movie over the intent');
+ assert.equal(intentOf8(await entry('hw6c'))??'900080','900080','the intent was not replaced');
+ void bridged;
 
  // (7) a TRANSPORT stop (403) after the reconcile never discards the intent: the entry keeps `intent` A, and the next check that names B is still `source_changed`
  reset();
@@ -560,6 +612,30 @@ const file=fresh('d1'),env=world(file);
  assert.equal(puts.includes(ADMISSIONS),false,'no R2 admissions object at d1');
  assert.equal((await Facts.diaryLinks(env,['Wa1'])).get('Wa1').tmdb,'900090','linked');
  assert.equal(evidence(file).filter(item=>item.subject_value==='Wa2').length,0,'the conflict wrote no evidence');
+}
+
+// ===== W2. between the Diary write and the ledger settlement: a competing attempt reserves under the key -> the ledger refuses its settlement (the row keeps its token and is read again) =====
+{
+ reset();
+ const GUARD='INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
+ await seed(env,'Wb1');
+ const film={id:'Wb1',title:'TWb1',year:2003,url:'https://letterboxd.com/film/fixture-wb-2003/'};
+ const r=await WatchlistD1.publishSnapshot(env,[film],{scanId:'sw2',observedAt:'2026-11-25T11:30:00.000Z',runId:'r-sw2',slotKey:'k'},{now:Date.parse('2026-11-25T11:30:00.000Z')});
+ assert.equal(r.ok,true,JSON.stringify(r));
+ let competed=0;
+ const settling={...env,DB:d1Standin(file,{onBatch:async statements=>{
+  if(!competed&&statements.some(item=>/UPDATE watchlist_admission_pending/.test(item.text||''))){
+   competed++;
+   sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('late-wb','film_admission','rated_admission_retention','film','film:tmdb:900095','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()-3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:Wb1')");
+  }
+ }})};
+ const bridge={MAX_ATTEMPTS:Identity.MAX_ATTEMPTS,resolve:(e,items,o)=>Identity.resolve(e,items,{...o,fetchImpl}),diaryLinks:(e,lids)=>Facts.diaryLinks(e,lids)};
+ const wnow=Date.now();
+ const out=await admissionStep({repository:WatchlistD1,identity:bridge,epochGuard:()=>[GUARD,[]]})({env:settling,epoch:1,now:()=>wnow,deadline:wnow+600000},{limit:3,now:wnow});
+ const ledgerRow=rows(file,"SELECT state,attempts,last_reason FROM watchlist_admission_pending WHERE lid='Wb1'")[0];
+ assert.equal(competed,1,'a competing attempt appeared between the Diary write and the ledger settlement');
+ assert.equal(out.counts.rowChanged>=1,true,JSON.stringify(out.counts));
+ assert.deepEqual([ledgerRow.state,ledgerRow.attempts],['pending',0],'the ledger refused the settlement: the row is unchanged and is read again');
 }
 
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

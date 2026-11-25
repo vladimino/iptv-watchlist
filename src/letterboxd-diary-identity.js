@@ -182,6 +182,7 @@ const LetterboxdDiaryIdentity=(()=>{
   if(!wanted.length){if(backlogRemove.length)await LetterboxdFacts.updateDiaryIdentity(env,{backlogRemove,expectBacklog:Object.fromEntries(backlogRemove.map(lid=>[lid,JSON.stringify(backlogIds[lid])])),expect:Object.fromEntries(backlogRemove.map(lid=>[lid,JSON.stringify(stored.films[lid])]))}).catch(()=>null);return {labels,outcomes,counts};}
   let links;
   try{links=await LetterboxdFacts.diaryLinks(env,wanted.map(item=>item.lid));}catch{notNowAll('unavailable');return {labels,outcomes,counts:{...counts,skipped:wanted.length}};}
+  const fences=new Map();
   const set={},clear=[],claimPairs=[],checked=new Set(),settled=new Map();let fetched=0,stopped=false,gate=null;
   // AIR-599 (review of PR #1009): every write of this step is bound to the entry as this step READ it. `base` is that state per id (a JSON text, or null when there was no entry) and moves only with this step's own
   // successful intent write; the document's compare-and-swap installs a replacement for an id only while the stored entry still equals its base. An owner `requeue` or `dismiss`, or another caller's check, that landed
@@ -293,7 +294,7 @@ const LetterboxdDiaryIdentity=(()=>{
     let outcome;
     try{outcome=await checkOne(env,item,{clock,fetchImpl,remaining});}catch(error){outcome={state:'pending',reason:'check_failed'};}
     if(outcome.stop){stopped=true;}
-    if(outcome.state!=='verified')return {ok:false,reason:outcome.reason};
+    if(outcome.state!=='verified'){const kind=classify(outcome.reason);return {ok:false,reason:outcome.reason,charged:kind==='gone'||kind==='definite'};}
     verdict=outcome.verdict;
     if(WRITE_RESERVE_MS>remaining())return {ok:false,reason:'deferred'};
     // The durable intent is written before the first effect, but never over a DIFFERENT one: the coordinator answers `source_changed` for that.
@@ -303,7 +304,7 @@ const LetterboxdDiaryIdentity=(()=>{
      evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:evidenceSha256,sourceRef:'diary:'+lid,observedAt:iso(clock())}};
    };
    const finalize=async(result,guard)=>{
-    record(item,D1_TERMINAL[result.outcome]||'admission_failed');
+    record(item,result.outcome==='source_unavailable'?String(result.reason||'check_failed'):D1_TERMINAL[result.outcome]||'admission_failed');
     try{
      const out=await LetterboxdFacts.updateDiaryIdentity(env,{set:{[lid]:set[lid]},expect:expectOf([lid]),extra:[...guardsOf([lid]),guard.statement]});
      if(out?.conflicts?.includes(lid)||out?.refused?.includes(lid)){delete set[lid];counts.pending--;return {refused:true};}
@@ -314,13 +315,14 @@ const LetterboxdDiaryIdentity=(()=>{
      throw error;
     }
     stored.films[lid]=set[lid];base.set(lid,JSON.stringify(set[lid]));delete set[lid];
+    fences.set(lid,guard.statement);
     return {wrote:true};
    };
    let out;
    try{
     const effectEnv=late()?null:guarded(lid);
     if(!effectEnv){defer(item,prior);return;}
-    out=await LetterboxdAdmissionD1.admitVerifiedFilm(effectEnv,{kind:'lid',lid,intent:intended?{tmdb:intended}:null,pendingEvidence:prior?.pendingEvidence||null,reacquire,finalize,now:()=>iso(clock())});
+    out=await LetterboxdAdmissionD1.admitVerifiedFilm(effectEnv,{kind:'lid',lid,intent:intended?{tmdb:intended}:null,evidenceProof:intended?{subjectKind:'letterboxd_lid',subjectValue:lid,route}:null,pendingEvidence:prior?.pendingEvidence||null,reacquire,finalize,now:()=>iso(clock())});
    }catch(error){record(item,error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||'deferred');return;}
    const tmdb=verdict?String(verdict.tmdb):intended;
    switch(out.outcome){
@@ -333,7 +335,7 @@ const LetterboxdDiaryIdentity=(()=>{
     }
     case 'other_code':case 'conflict':case 'source_changed':return;
     case 'wait':defer(item,prior);outcomes.set(lid,{checked:false,class:'not_now',reason:'in_flight',retryAt:out.dueAt??null,attempts:Number(stored.films[lid]?.attempts)||0,streak:Number(stored.films[lid]?.streak)||0,terminal:false});return;
-    case 'source_unavailable':if(out.reason==='deferred'){defer(item,prior);return;}record(item,out.reason||'check_failed');return;
+    case 'source_unavailable':if(out.reason==='deferred'){defer(item,prior);return;}if(out.charged&&out.finalized)return;record(item,out.reason||'check_failed');return;
     case 'held':case 'redirect':record(item,'admission_held');return;
     default:
      // The pair is admitted but the evidence of THIS check is not proven recorded: the repair intent stays, with the evidence to record, so the next step records it WITHOUT a fetch and only then links.
@@ -409,7 +411,8 @@ const LetterboxdDiaryIdentity=(()=>{
    // 1. An existing trusted D1 bridge is consumed, never re-proved or re-registered.
    let bridge=null;
    try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){defer(item,prior);continue;}bridge=null;}
-   if(bridge?.state==='ok'&&bridge.tmdb){
+   // At `d1` an unresolved intent (or an evidence obligation) of this id is settled by the coordinator, never replaced or bypassed by a bridge shortcut that performed no check.
+   if(bridge?.state==='ok'&&bridge.tmdb&&!(admissionAtD1&&(intentOf(prior)!==null||prior?.pendingEvidence))){
     if(late()){defer(item,prior);continue;}
     if(!(await take(item,stored.films[lid]||null)))continue;
     if(!(await intend(item,bridge.tmdb))){release(item);counts.deferred++;continue;}
@@ -511,6 +514,9 @@ const LetterboxdDiaryIdentity=(()=>{
    if(checked.has(lid)){const key=cls==='not_now'||cls==='intent'?'notNow':cls;counts[key]=(counts[key]||0)+1;}
    outcomes.set(lid,{checked:checked.has(lid),class:cls,reason:entry.reason,retryAt:entry.nextAttemptAt??null,attempts:n,streak:Number(entry.streak)||0,terminal:n>=MAX_ATTEMPTS&&cls!=='settled',...(entry.checkId&&checked.has(lid)?{checkId:entry.checkId}:{})});
   }
+  // The history guard each terminal write of this step carried (a statement a caller's OWN batch can ride with): the Watchlist ledger settles its row with it, so a competing attempt that reserved or applied between
+  // this write and that settlement refuses the settlement (the row stays as it was and is read again).
+  for(const [lid,statement] of fences){const outcome=outcomes.get(lid);if(outcome)outcome.historyGuard=statement;}
   // ADR 0184: the canonical Letterboxd claim of the ids whose Ratings link is now durable (after the facts and the settled pending document). Never throws, never delays the rating or the Event.
   // INACTIVE (the module's activation constant is off): nothing is requested and nothing is stored. ACTIVE: an id whose claim is not proved (refused, unknown, deferred, failed, not attempted for budget or cap) keeps a bounded
   // `claim_pending` entry that later ordinary steps serve, also when the id has left Diary page 1; a proved claim clears it. Attempts are bounded like every source retry and the entry stays visible after the last one.
