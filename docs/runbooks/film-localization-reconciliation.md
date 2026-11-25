@@ -50,54 +50,88 @@ The reconciler writes only rows the previous code already reads with the same re
 
 ## Production operation plan (AIR-664, DRAFT: awaiting plan review; authorizes nothing)
 
-[AIR-664](https://trello.com/c/Og9XxXfy) is the Stage 4 **operation**. Everything below is a proposal for review. Each numbered gate needs its own owner decision; a green review of this plan is not an operation GO.
+[AIR-664](https://trello.com/c/Og9XxXfy) is the Stage 4 **operation**. This section is a proposal. It grants no operation GO, accepts no storage choice and creates no card. The live cohort (Films, stale, held) is **unknown** until a read-only scan has run.
 
-### 0. Blockers found offline (no live read was made)
+### 0. What is blocked, and by what
 
-1. **No entry point.** The module is dormant (asserted by the test): no Worker route, MCP tool, Workflow or script can call it. A production dry run therefore needs new code. Proposed shape, following the existing `letterboxd_claim_backfill` precedent in [MCP reference](../reference/api/mcp.md): an owner-only MCP tool with `mode` `dry_run` (default, read only) and `apply` (explicit `confirmGo`, run id, the two authority generations, `expectedCount` and `expectedDigest` copied from a dry run). No SQL, Film id list or key is accepted from the caller. This code is an **implementation GO**, proposed as its own card so that AIR-664 stays a pure operation.
-2. **No checkpoint storage.** `applyLocalizationReconcile` requires a durable `checkpoint` port and no store exists. A receipt carries no payload, so the intent is the only pre-image. Options (owner decision; ADR required, one at a time per the facilitation protocol):
-   - **R2 immutable object per intent** (recommended). Server-built key from the run id and Film id, `put` only if absent (equal digest is an idempotent success), a second object for the settlement, read back by `recover`. No migration, no schema change; the key family is fixed in code and never taken from an argument. Not atomic with the D1 batch, which the contract does not need (record BEFORE write, settle AFTER).
-   - **New D1 table.** Strongest queryability, but a migration with its own apply gate and contract-version change.
-   - **Operator-held (rejected).** `record` must resolve inside the Worker before the write; a chat or Trello copy cannot be that.
+| Capability | Blocked by | Needs a checkpoint store? |
+| --- | --- | --- |
+| **Read-only dry run and wave planning** | Only the missing callable entry point: the module is dormant (asserted by the test), so no route, MCP tool, Workflow or script can call it. | **No.** It records nothing. |
+| **Mutation** (apply, resume, restore) | The entry point, the approved durable checkpoint store, an owner-only operator that can recover after a lost response or process, and an exact-intent execution path (§2) the shipped API does not have. | **Yes** |
 
-### 1. Read-only preflight (L0, immediately before any dry run)
+The two are separable: the read-only capability can be delivered and run first, and its live scan (L0 read, subject to the read side-effect gates) measures the real cohort before any storage decision is made.
 
-Read live, never from this page: Film/Person marker `d1`/`open` and its generation; owner-review domain `d1` with writes `open` or `held`; schema version; feature flags and executor modes; no active Workflow chain or lease that would write Film rows; the receipt check from [Rollback of the code](#rollback-of-the-code) (`film_localization_reconcile` receipts not `applied` or `abandoned` must be 0). Any other value stops the operation.
+### 1. Read-only preflight (L0, immediately before a scan or wave)
 
-### 2. Dry run and cohort
+Read live, never from this page: Film/Person marker `d1`/`open` and its generation; owner-review domain `d1` with writes `open` or `held`; schema version; feature flags and executor modes; whether a Film-writing Workflow chain or lease is live; unfinished `film_localization_reconcile` receipts (the query in [Rollback of the code](#rollback-of-the-code)). A mismatch is a stop before any effect.
 
-- The dry run scans every Film by keyset pages of at most 50 raw ids and reports `stale`, `held` (with reason), `noop`, `absent`, `unavailable`, `wouldWrite`. Total Films and the stale count are **unknown until this run**; nothing in this plan assumes them.
-- The cohort is exactly the `stale` Films of one dry run, pinned by `expectedCount` and a digest over the sorted `id:digest` lines of their intents. A different state at apply is a refusal with `writes: 0`.
-- Every `held` Film is listed with its reason and **left untouched**; resolving a hold is a separate owner decision (the reconciler never deletes a row or manufactures a review decision).
-- **Zero eligible is an explicit no-op:** the evidence records the dry run, the generations and `writes: 0`; no apply is requested.
+### 2. Bounded wave contract (what the shipped API can and cannot do)
 
-### 3. Cap and waves (provisional, reviewable)
+Verified against the code: `dryRunLocalizationReconcile` returns a **report** (`stale` entries with images, no intent, no digest); `applyLocalizationReconcile` **replans** each raw Film id at a fresh `at`, accepts no approved set and may write a Film that became stale after the scan; the intent digest binds `at`, the planned revision and both full images, so two independently regenerated plans never compare equal. `resumeLocalizationReconcile` already executes one **exact, verified intent** through the checkpointed, receipted path. The operation is therefore built from three bounded steps and never runs a fresh unconstrained apply pass:
 
-Code maxima stay as shipped (50 examined, 25 written per call). Proposed waves: **pilot 1 to 3 Films**, read back, then waves of at most 10, then at most 25, each read back before the next. Rationale: one wave must be small enough to verify by hand and restore exactly; the values are provisional tuning, not product constraints, and may change on review. No time window is needed for correctness (the revision CAS and the owner-review token fence concurrent writers); an operator may still choose a quiet period.
+1. **Discover (read only, one page per call).** A keyset page of at most 50 raw Film ids from a continuation cursor. The operation scope is the whole Film table, walked page by page; no call scans the catalog or computes a global digest. Each page reports `complete` (every Film classified, `unavailable` empty) or `incomplete`. A page with zero `stale` Films is a normal, complete page. **Zero eligible overall** is claimed only when the scan reached `hasMore: false` with every page complete, no `unavailable`, no stopped page and the pinned authority generations unchanged; any other ending is `unknown`, never "none".
+2. **Derive a wave (read only, new capability).** For one page and a write cap of at most 25, the server picks a stable write time `at` and derives the **exact immutable set of intents** (same code path as `intentOf`, one clock reading). It answers: `at`, page boundaries (`after`, last id), the authority pins, the intent count, and a digest over the sorted `id:intentDigest` lines of **that wave only**. Intent bodies stay server side. Request identities are server-generated; the caller supplies no Film id, key or SQL.
+3. **Execute exactly that wave (write).** The caller passes the wave identity (`after`, `limit`, `at`, pins, count, digest). The server **rederives** the wave with the same `at` and compares count, digest, pins and page boundaries **before any effect**. A mismatch is a **preflight refusal: `writes: 0`, nothing recorded**. `at` is accepted only if it is a valid past time inside a short freshness window (provisional); the digest binds it, so a forged value cannot change the content. On a match, for each intent in id order: `checkpoint.record` (fail closed), then the exact-intent resume path (one fenced receipted batch), then `settle`. No new Film is added to the wave.
 
-### 4. Fences, receipts and stop conditions
+**Race after the preflight.** There is no all-or-nothing promise across Films (each Film is its own atomic batch). Before starting the **next** Film the wave stops on a `moved`, `unknown`, `held` or checkpoint outcome. The answer lists, separately: Films already committed (intents), the stopping Film and its outcome, intents **not attempted**, and intents with an **unknown** outcome. Remaining candidates are **replanned by a new derive** from the last fully settled cursor; a `moved` Film gets a NEW intent, never a replay of the old one. A Film that turned `held` between derive and execute either fails the digest check (before effects) or stops the wave (after).
 
-Fences are the shipped ones (revision CAS, owner-review token, pre-image row, marker open). Stop at the first of: `localization_checkpoint_failed`, `localization_checkpoint_settle_failed`, any `unknown` outcome (recover first, never retry blind), more `moved` than the owner accepted for the wave, a `held` reason not present in the approved dry run, a readback mismatch, or any collateral delta. A stopped pass reports `cursor` and `failedId`; resume only through `resumeLocalizationReconcile` with the recorded intent.
+**Tuning is delegated engineering** inside the approved safety envelope (code maxima 50 examined and 25 written; the stop conditions below; the freshness window; a pilot wave first). Page size, wave size and pacing are not an owner prompt per wave.
 
-### 5. Readback after each wave
+### 3. Operator surface (owner-only, bounded, no caller-supplied identities)
 
-- Each written Film: the stored row equals the intent `postImage`, the revision is `postRevision`, and the applied receipt carries the intent request id and digest.
-- Effective value and owner precedence: a Film with an owner row keeps the owner value; no reviewed or owner row changed.
-- No collateral change: row counts and digests of every other `film_dimension` dimension, `owner_review_entry`, `film_localization_source` (only the preserved legacy rows named by the intents may appear), redirects and Person tables are unchanged; receipt count delta equals the writes.
-- Stale cases: the repeated dry run lists no previously written Film as `stale` (idempotence).
-- Unknown outcome: `recoverLocalizationReconcile` settles it read only before anything else happens.
+Mutation is not usable with `dry_run`/`apply` alone: a lost response or process leaves intents that must be found again. Proposed modes of one owner-only tool, all addressing recorded intents by **server-derived** identity (run id and request id from the store), never a caller-supplied intent body:
 
-### 6. Rollback and restore
+| Mode | Writes | Purpose |
+| --- | --- | --- |
+| `discover` | no | one page, §2 step 1 |
+| `plan_wave` | no | §2 step 2 |
+| `apply_wave` | yes | §2 step 3 |
+| `status` | no | list unfinished and recent intents with current checkpoint state |
+| `recover` | no | **read-only classification** (`applied`, `not_applied`, `unknown`) of a recorded intent against its receipt and revision. It settles nothing by itself. |
+| `settle` / `resume` | yes | record the classification as a durable checkpoint transition, or re-issue the same recorded intent (same request id and digest) |
+| `restore` | yes | restore of a recorded applied intent under the existing exact-revision rule |
 
-The restore token is the recorded apply intent, valid only while the Film is still at exactly `postRevision` with the row equal to `postImage` (`localization_restore_moved` otherwise). Any later change is handled by a **separately approved forward correction** (another reconciler run), never a blind restore. A restore does not remove a preserved legacy source row. Code rollback follows [Rollback of the code](#rollback-of-the-code).
+### 4. Checkpoint store: decision brief (both options PROPOSED; nothing accepted or rejected)
 
-### 7. Evidence and documentation impact
+The owner decision is the **material storage and operational architecture**, not whether checkpoint safety is implemented: it is required by the shipped contract either way. Required properties for either option: durable record **before** the write; conditional create that cannot overwrite a pre-image; full-intent identity and readback; idempotent recovery; transition history instead of an overwritten state (`unknown` can become `applied`, and `not_applied` can be followed by a new attempt); discoverability of unfinished intents; an explicit retention rule; the same owner-only authorization.
 
-Sanitized dated evidence under `docs/evidence/film-person/` at execution: Film ids and counts, digests, generations and outcomes; **no localization payloads and no intent bodies** (they stay in the checkpoint store). Affected documents once code exists: this runbook, [MCP reference](../reference/api/mcp.md), the persistence diagram if R2 is chosen, a new ADR for the checkpoint store, the [read side effects](../reference/api/read-side-effects.md) audit (the dry run must stay write free), the [deployment runbook](deployment.md). This offline step's evidence: [AIR-664 operation plan](../evidence/film-person/air-664-localization-reconcile-operation-plan-2026-11-25.md).
+| Property | R2 (immutable objects) | New D1 tables |
+| --- | --- | --- |
+| Conditional create | A real conditional `put` (`onlyIf` does-not-exist), not GET then unconditional PUT. A precondition failure reads the object and compares the **full canonical intent**: equal is an idempotent success, different is `checkpoint_conflict` and a stop. A timeout or error reads back by the same rule; if it still cannot be read, the intent counts as **not recorded** and nothing is written. | Insert with a primary key on the request id; conflict compared the same way. |
+| Transitions | Immutable **event objects** with a per-intent sequence (`…/<requestId>/<seq>-<state>.json`), each conditionally created; current state is the highest contiguous sequence; a sequence conflict means another writer: re-read, never overwrite. The intent object is never rewritten. | Append-only event table; the intent row is immutable (trigger or constraint). |
+| Discoverability | Listing by run prefix in bounded pages plus a wave manifest object; list consistency is proven by the implementation tests. | A SQL query on a state view. |
+| Migration | None. | A migration with its own owner-gated apply, a schema-contract version change and D1 `rows_written` (a measurement, not a threshold). |
+| Atomicity with the domain write | Not atomic (the contract needs record-before and settle-after only). | Same: record and write are separate statements. |
+| Retention | An explicit policy: intents are kept until the cohort is accepted and the restore window is closed; **this operation never deletes**; cleanup is a separately approved action. Contents are catalogue localization values: private bucket, never GitHub or Trello. | Same policy; deletion is a separately approved action. |
 
-### Proposed operation GO (text for the owner; not granted)
+### 5. Stop conditions
 
-L3 plan, one operation: run `film_localization_reconcile` (after its implementation is merged and deployed) against the cohort of one dry run, in the approved waves, with the approved checkpoint store, the stop conditions above and the exact-revision restore. Allowed side effects: the `film_dimension` localization row of the cohort Films, the legacy source rows named by their intents, the receipts of this kind and the checkpoint objects. Everything else (sync, model, TMDB, Discovery, flags, Tasks, Access, migrations, lease resets, retries outside the recorded intent) stays forbidden. Revocation: the owner says stop; the tool is not called again.
+`localization_checkpoint_failed`; `localization_checkpoint_settle_failed`; `checkpoint_conflict`; any `unknown` outcome (classify with `recover`, settle, never retry blind); a preflight mismatch (no effect); a `held` reason or `unavailable` Film not present in the approved scan; a readback mismatch; an authority pin that moved. A stop leaves the cursor at the last Film fully settled.
+
+### 6. Effects and readback
+
+**Allowed effects:** the `localization` row of the wave Films; the legacy `film_localization_source` rows named by their intents; the **`canonical_revision` increment** of each Film on every applied write or restore; `canonical_write_receipt` rows of kind `film_localization_reconcile`; the checkpoint records. Nothing else.
+
+- **Track by identity, not by count.** Per intent: request id, digest, planned and applied revision, and its checkpoint transitions. Report **attempted, applied, not_applied, failed, unknown and recovered** separately. A pending, failed or abandoned receipt can exist **without** a localization write, and a replay may add no receipt, so "receipt delta = writes" is not a check.
+- **Per written Film:** the stored row equals the intent `postImage`, the revision is `postRevision`, the applied receipt carries the intent request id and digest.
+- **Protected versus derived.** Independent `reviewed` or `owner` control rows and every `owner_review_entry` are protected and must be unchanged. A **marked derived owner projection** whose decision was revoked or changed is exactly what the reconciler is meant to update or replace, so it is an expected delta, not collateral.
+- **Scoped readsets, not global digests.** Compare pre and post reads of the wave Films and of their linked authority rows, with attribution: a change to any other row is attributed through its receipt origin and revision. Unrelated concurrent producers are legitimate and are not "collateral writes"; there is no requirement that a table or the catalog is globally unchanged.
+- **Idempotence:** a repeated scan of the wave Films lists none as `stale` unless a newer input moved.
+
+### 7. Restore and rollback
+
+The restore token is the recorded apply intent, valid only while the Film is still at exactly `postRevision` with the row equal to `postImage`; otherwise a **separately approved forward correction** (a new derive and wave). A restore increments the revision and does not remove a preserved legacy source row. Code rollback follows [Rollback of the code](#rollback-of-the-code).
+
+### 8. One L3 approval with holdpoints, and delivery cards (proposed, not created)
+
+**Proposed prerequisite cards (draft, in this order, none created or activated):**
+1. *Read-only operator*: `discover`, `plan_wave`, `status`, and the exact-intent derivation (no store). Unblocks the live scan; checks `tests/get-write-audit.mjs` and [read side effects](../reference/api/read-side-effects.md) because the dry run must stay write free.
+2. *Checkpoint store and ADR* for the option the owner chooses (a Proposed ADR cannot merge before the owner decision).
+3. *Write operator*: `apply_wave`, `recover`, `settle`, `resume`, `restore` over exact recorded intents.
+
+**One L3 plan, one approval,** with these holdpoints and no other per-section decision: H1 after the read-only scan evidence shows the real cohort; H2 after the pilot wave readback; H3 on any stop condition and at completion. The final plan states: the live gates (§1), the actor (the owner-only IPTV MCP identity), the envelope (≤25 per wave, freshness window, pilot first), the stop conditions (§5), the allowed effects (§6) and the restore and rollback scope (§7). Revocation: the owner says stop and the tool is not called again. Evidence is sanitized and dated under `docs/evidence/film-person/`: Film ids, counts, digests, generations and outcomes; **no localization payloads and no intent bodies**.
+
+**Affected documents when code exists:** this runbook, the [MCP reference](../reference/api/mcp.md), the persistence diagram and a new ADR if R2 is chosen, the [deployment runbook](deployment.md). Offline evidence of this step: [AIR-664 operation plan](../evidence/film-person/air-664-localization-reconcile-operation-plan-2026-11-25.md).
 
 ## Not authorized here
 
