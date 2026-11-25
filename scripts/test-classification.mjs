@@ -328,6 +328,9 @@ export const FILES={
  "canonical-read-model.mjs": {
   "suite": "core"
  },
+ "film-aggregate-resolver.mjs": {
+  "suite": "core"
+ },
  "canonical-readiness-classes.mjs": {
   "suite": "core"
  },
@@ -887,6 +890,9 @@ export const FILES={
   "suite": "core"
  },
  "film-person-authority.mjs": {
+  "suite": "core"
+ },
+ "film-dimension-parity.mjs": {
   "suite": "core"
  },
  "film-person-backfill.mjs": {
