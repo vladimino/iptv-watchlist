@@ -68,11 +68,11 @@ export function createStatementBudget(limit=REQUEST_STATEMENT_BUDGET){
 // Materialization is bounded in SQL: the key lists are capped before a round runs (at most IDENTITY_MAX_FILMS Films, the claim pairs and movie ids of at most
 // IDENTITY_MAX_CLAIM_ROWS claim rows), and every row column reads at most its cap + 1 rows (LIMIT), so an overflow is detected from the extra row and no
 // column ever aggregates an unbounded set.
-// Index use: film(id) PK, film_redirect(from_id) PK, canonical_revision(kind,id) PK, film_external_id PK (film_id,...), film_external_id_by_scheme_value,
-// no index for the ledger. OPEN OWNER DECISION (ADR 0216 decision 7, review of PR #1000): the read of the retirement ledger BY MOVIE ID has no
-// index (movie_id is unindexed; the ledger has no Film foreign key and retires a movie id whatever Film row exists, as RETIREMENT_SQL in canonical-catalog-reader.js
-// reads it), so it is a scan of the owner's append-only ledger. It is not an accepted exception: an index (a schema migration) or an explicit bounded exception
-// needs the owner's decision; this dormant module adds neither.
+// Index use: film(id) PK, film_redirect(from_id) PK, canonical_revision(kind,id) PK, film_external_id PK (film_id,...), film_external_id_by_scheme_value, and
+// for the retirement ledger by movie id the non-unique index tmdb_retirement_decision_movie ON tmdb_retirement_decision(movie_id): the owner's decision of
+// 25 Nov 2026 (option A, review of PR #1000). The ledger has no Film foreign key and retires a movie id whatever Film it names, so it must be read by movie id.
+// That index is delivered by AIR-667 (migration, real-chain and production readback), a prerequisite of activation (AIR-648); until it is installed this
+// dormant statement would scan the ledger, and it must not be activated before then.
 const LIST='(SELECT value FROM json_each(?))';
 const capped=(columns,from,inner=columns)=>'(SELECT json_group_array(json_array('+columns+')) FROM (SELECT '+inner+' FROM '+from+' LIMIT ?))';
 const DECISION='seq,film_id,kind,movie_id,tv_id,supersedes_seq';

@@ -246,17 +246,23 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
  assert.deepEqual([moved.verdict,moved.reason],['conflict','competing_owner'],'the closed round sees both rows of the pair');
 }
 
-// EXPLAIN QUERY PLAN of the snapshot statement: every lookup uses an index, except the movie-id read of the owner's retirement ledger. That scan is an
-// OPEN OWNER DECISION (ADR 0216 decision 7; index migration or explicit bounded exception), pinned here so it cannot spread unnoticed, not accepted.
+// EXPLAIN QUERY PLAN of the snapshot statement (ADR 0216 decision 7). Owner decision of 25 Nov 2026 on PR #1000: option A, a non-unique index
+// tmdb_retirement_decision_movie ON tmdb_retirement_decision(movie_id), delivered by AIR-667 (migration, real chain and production readback). This
+// synthetic fixture installs exactly that index when the chain does not have it yet (IF NOT EXISTS: the same test holds before and after AIR-667 lands)
+// and asserts the target plan: every lookup is index-served, the ledger is SEARCHed by that index and never scanned. Nothing here applies a migration.
 {
  const file=database();
+ sqlite(file,'CREATE INDEX IF NOT EXISTS tmdb_retirement_decision_movie ON tmdb_retirement_decision (movie_id)');
  const params=['["film:x"]','["film:x"]','["film:x"]','["film:x"]','65','[["tmdb","1"]]','65','["1"]','65'];
  let i=0;const text=IDENTITY_SNAPSHOT_SQL.replace(/\?/g,()=>{const v=params[i++];return /^\d+$/.test(v)?v:q(v);});
+ assert.equal(i,params.length,'every parameter is bound');
  const out=sqliteSync([file],{input:'EXPLAIN QUERY PLAN '+text+';',encoding:'utf8'});
  assert.equal(out.status,0,out.stderr);
  const plan=out.stdout.split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
+ // Allowed scans: the bound json_each key lists, a constant row and the LIMITed derived tables of the capped columns; never a base table.
  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$/.test(d));
- assert.deepEqual(scans,['SCAN tmdb_retirement_decision'],plan.join('\n'));
+ assert.deepEqual(scans,[],plan.join('\n'));
+ assert.ok(plan.some(d=>/^SEARCH tmdb_retirement_decision USING (COVERING )?INDEX tmdb_retirement_decision_movie\b/.test(d)),plan.join('\n'));
  for(const index of ['film_external_id_by_scheme_value'])assert.ok(plan.some(d=>d.includes(index)),index+'\n'+plan.join('\n'));
 }
 
