@@ -73,10 +73,13 @@ const SMALL={
  assert.equal(measured.steady.volume.departed,2);
  assert.equal(measured.steady.volume.personStateUnits,'unmeasured');
  assert.equal(measured.steady.report.writes,0);
- assert.equal(measured.steady.report.changed,0);
+ // ADR 0218 C1 (AIR-662): the two observed films of the small layout that have a title and no identity row now plan the one-time minimal identity row with titleSource
+ // (formerly skipped as no_identity_row); every other steady unit stays a no-op. Planned, not written: the harness writes nothing (writes 0 above).
+ assert.equal(measured.steady.report.changed,2);
  assert.equal(measured.steady.report.fingerprint.complete,true);
  assert.equal(measured.steady.report.byKind.film_facts.units,8);
- assert.equal(measured.steady.report.byKind.film_facts.noop,8);
+ assert.equal(measured.steady.report.byKind.film_facts.noop,6);
+ assert.equal(measured.steady.report.byKind.film_facts.changed,2);
  assert.equal(measured.steady.report.byKind.person_state,undefined);
  assert.ok(measured.steady.report.byKind.person_mutation.units>0);
  assert.ok(measured.steady.report.byKind.film_credits.units>0);
@@ -89,7 +92,7 @@ const SMALL={
  assert.equal(measured.elevated.returnedSteadyDeparted,2);
  assert.ok(measured.elevated.volume.films>measured.steady.volume.films);
  assert.ok(measured.elevated.volume.personRows>measured.steady.volume.personRows);
- assert.equal(measured.elevated.report.changed,0);
+ assert.equal(measured.elevated.report.changed,4,'ADR 0218 C1: the one-time identity rows of the observed films without one (planned, not written)');
  assert.equal(measured.elevated.report.writes,0);
  assert.equal(measured.elevated.watchlistManifest.consistent,true);
  assert.equal(measured.elevated.watchlistManifest.rowCount,12);
