@@ -701,6 +701,9 @@ export const FILES={
  "d1-lookup-indexes-0036-production.mjs": {
   "suite": "core"
  },
+ "migration-0040-retirement-movie-index.mjs": {
+  "suite": "core"
+ },
  "watchlist-bootstrap.mjs": {
   "suite": "core"
  },
@@ -1754,6 +1757,9 @@ export const FILES={
  "synopsis.mjs": {
   "suite": "fixture",
   "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "test-pass-record.mjs": {
+  "suite": "core"
  },
  "test-classification.mjs": {
   "suite": "core"
