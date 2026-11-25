@@ -422,6 +422,7 @@ async function writeBatch(env,gate,statements){
    let again;
    try{again=await readAuthority(env);}catch{throw failed('film_person_unavailable',error);}
    if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_fence',error);
+   if(await fenced.letterboxdEpochMoved(db,gate))throw failed('letterboxd_epoch_fence',error);
    throw failed('receipt_state_conflict',error);
   }
   throw failed('film_person_unavailable',error);
@@ -546,9 +547,10 @@ export async function receiptedWrite(env,input,hooks){
  const atomic=hooks?.atomic===true;
  if(!atomic)exceptionOf({exception:hooks?.exception},hooks?.approvedExceptions||APPROVED_EXCEPTIONS);
  const policy=input.policy||RETRY_POLICY,clock=input.now||(()=>new Date().toISOString());
+ // AIR-599 / ADR 0207 decision 4b: through the Letterboxd Sync's fenced env every receipt transition (reserve, retry, settle) asserts the Sync epoch too.
  const status=await receiptsStatus(env);
  if(status==='no_schema')throw failed('receipt_schema_missing');
- const gate=assertWritable(await readAuthority(env));
+ const gate=fenced.bindLetterboxdFence(env,assertWritable(await readAuthority(env)));
  if(status==='no_baseline')throw failed('receipt_baseline_missing');
  // AIR-600 R1: with `operationKey` and `history` the receipt is RESERVED under its key: the insert carries the key and, in the same batch, asserts that the key's history still has the fingerprint
  // the caller observed and holds no unresolved receipt. Any other outcome (the history moved, another attempt is unresolved, this id already exists) is `operation_key_moved` or
@@ -607,7 +609,8 @@ export async function reconcileReceipts(env,{operations,now=()=>new Date().toISO
  await assertReceiptsAvailable(env);
  const clock=typeof now==='function'?now:()=>now;
  const at=clock();
- const gate=await readAuthority(env);
+ // AIR-599: a reconcile pass running through the Letterboxd Sync's fenced env settles receipts only under the running Sync epoch.
+ const gate=fenced.bindLetterboxdFence(env,await readAuthority(env));
  const due=await listReceipts(env,{dueBefore:at,limit,origin});
  const result={marker:gate.state,origin,considered:due.length,applied:[],replayed:[],abandoned:[],needsReview:[],waiting:[],failed:[]};
  if(gate.state!=='open'){result.waiting=due.map(row=>({requestId:row.requestId,reason:'marker_not_open'}));return result;}

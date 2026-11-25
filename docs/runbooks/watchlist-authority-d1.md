@@ -36,6 +36,9 @@ Staged rows of an attempt that was never promoted are garbage of an interrupted 
 | `watchlist_authority_moved` | the marker (state, writes or generation) changed between the read and the response | A retryable 409; the next request sees the new state. |
 | `effects_pending` (repository) | a no-op scan found undrained causal effects | The Workflow drains them oldest version first and then advances success (AIR-570). |
 | `admission_ledger_full` | `watchlist_admission_pending` at its cap | A visible hold, never a silent drop. Owner action on the pending ids. |
+| ledger row `terminal` (AIR-599) | the shared check's attempt cap (six `gone`/`definite` outcomes; transport failures never count), or `owner_dismissed`; rows written before AIR-599 may say `age_exceeded` | Owner review on `/admin/identity` (lanes `watchlist_admission` and `diary_identity`); `requeue` or `dismiss` through [`POST /api/admin/identity-work/owner-action`](../reference/api/admin.md#owner-requeue-and-dismiss-of-the-shared-letterboxd-check-post-apiadminidentity-workowner-action). A bulk recovery of legacy rows is an L2 contract naming the ids (card DR), never a manual SQL reset. |
+| `letterboxd_admission_overdue` with unknown age (AIR-599) | a legacy ledger row whose first-seen snapshot was pruned before AIR-599 | Reported, never terminated. Owner review on `/admin/identity`; the legacy report lists them. New rows keep their snapshot header, so they cannot become unknown. |
+| `diary_cap` / backlog (AIR-599) | the 200-entry Diary check document holds no evictable entry | Not now: the id waits in the backlog and enters first when a place returns; Monitor `letterboxd_identity_cap_refused`. Free places by resolving or dismissing entries, never by deleting the document. |
 
 ## Boundary
 

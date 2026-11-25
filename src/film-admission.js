@@ -73,7 +73,8 @@ export async function admitRatedFilm(env,input){
  if(!checked.ok){const error=failed('admission_not_verified');error.reason=checked.reason;throw error;}
  const admission=checked.admission;
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
- const gate=assertWritable(await readAuthority(env));
+ // AIR-599 / ADR 0207 decision 4b: called through the Letterboxd Sync's fenced env, the admission batch asserts the Sync epoch, so a stale Sync epoch cannot admit.
+ const gate=fenced.bindLetterboxdFence(env,assertWritable(await readAuthority(env)));
  const db=database(env);
  let target,prior,holder;
  try{

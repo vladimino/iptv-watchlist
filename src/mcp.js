@@ -94,9 +94,11 @@ async function mcpAccessKey(teamDomain,kid){
 }
 // Trust only the signed Cf-Access-Jwt-Assertion header. Identity headers, the
 // CF_Authorization cookie and the client's opaque OAuth bearer token are ignored.
-async function mcpVerifyAccess(request,env){
+// AIR-599: `audience` lets another owner-only route verify the same signed assertion against its own Access application (the `All Workers` AUD); the default is `IPTV MCP`.
+async function mcpVerifyAccess(request,env,{audience:audienceOf=null}={}){
  const forbidden={ok:false,status:403,message:'Forbidden'};
- const teamDomain=mcpTeamDomain(env.MCP_ACCESS_TEAM_DOMAIN),audience=typeof env.MCP_ACCESS_AUD==='string'?env.MCP_ACCESS_AUD.trim():'';
+ const audienceRaw=audienceOf===null?env.MCP_ACCESS_AUD:audienceOf;
+ const teamDomain=mcpTeamDomain(env.MCP_ACCESS_TEAM_DOMAIN),audience=typeof audienceRaw==='string'?audienceRaw.trim():'';
  if(!teamDomain||!/^[A-Za-z0-9_-]{16,256}$/.test(audience))return {ok:false,status:503,message:'MCP authorization is not configured'};
  const token=request.headers.get('Cf-Access-Jwt-Assertion');
  if(!token||token.length>MCP_MAX_JWT_LENGTH)return forbidden;
@@ -117,7 +119,7 @@ async function mcpVerifyAccess(request,env){
  if(claims.iat!==undefined&&(typeof claims.iat!=='number'||claims.iat>now+MCP_CLOCK_SKEW_SECONDS))return forbidden;
  // Managed OAuth forwards a user identity. Service-token assertions have an empty sub.
  if(typeof claims.sub!=='string'||!claims.sub)return forbidden;
- return {ok:true};
+ return {ok:true,subject:claims.sub,email:typeof claims.email==='string'?claims.email:null};
 }
 
 function mcpMediaType(value){return typeof value==='string'?value.split(';')[0].trim().toLowerCase():'';}

@@ -204,6 +204,14 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
  assert.equal(model.mode,'cloudflare');assert.equal(model.sideEffects,'none');assert.equal(model.slot.key,'2026-11-21T1030');
  const facts=await run('Monitor.collect(__env,'+T('2026-11-21T09:45:00Z')+',null)');
  assert.equal(facts.letterboxd.mode,'cloudflare');
+ // AIR-599 (review of PR #1009): the real fact reader of the shared Letterboxd check. Nothing waiting is healthy and readable; an unreadable ledger is reported, never read as zero.
+ const check=facts.letterboxd.identityCheck;
+ assert.ok(check&&!check.error&&check.ledgerUnreadable===false,'the identity check facts are read: '+JSON.stringify(check));
+ assert.deepEqual([check.work,check.backlog,check.overdue,check.overdueUnknown],[0,0,0,0]);
+ db.sql('ALTER TABLE watchlist_admission_pending RENAME TO watchlist_admission_pending_hidden');
+ const broken=await run('Monitor.collect(__env,'+T('2026-11-21T09:45:00Z')+',null)');
+ assert.equal(broken.letterboxd.identityCheck.ledgerUnreadable,true,'an unreadable ledger is a fact, not a zero');
+ db.sql('ALTER TABLE watchlist_admission_pending_hidden RENAME TO watchlist_admission_pending');
 }
 async function slot(now){
  const started=await LetterboxdSync.ensure(env,{now});

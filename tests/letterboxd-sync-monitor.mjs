@@ -61,7 +61,27 @@ for(const bad of [null,undefined,{error:true}]){const r=Policy.evaluateLetterbox
 {
  const text=fs.readFileSync('src/monitor.js','utf8');
  assert.match(text,/letterboxdFacts=\(env,now\)=>guarded/);
- assert.match(text,/model\.mode==='external'\?null:model/);
+ assert.match(text,/model\.mode==='external'\?null:\{\.\.\.model,identityCheck:await identityCheckFacts\(env,now\)\}/);
  assert.match(text,/!env\?\.DB\)return null/);
+}
+// 8. AIR-599 / ADR 0207 decision 4b (and review of PR #1009): one fact reader of the shared Letterboxd check, three conditions.
+{
+ const H=3600000,at=hours=>new Date(NOW-hours*H).toISOString();
+ const check=extra=>model({identityCheck:{lastCheckAt:at(2),work:0,oldestWorkAt:null,atCap:0,backlog:0,backlogFull:false,ledgerUnreadable:false,overdue:0,overdueUnknown:0,...extra}});
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check(),NOW)),[],'a recent check and nothing waiting is healthy');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:at(25)}),NOW)),[],'an old check with nothing waiting is not stale');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:at(25),work:2,oldestWorkAt:at(30)}),NOW)),['letterboxd_identity_check_stale']);
+ // work that arrived after the last answer: the clock starts at its queue time, so fresh work does not alarm, and work that has NEVER been answered does after 24 h
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:at(100),work:1,oldestWorkAt:at(1)}),NOW)),[],'work queued an hour ago is not stale');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:null,work:3,oldestWorkAt:at(26)}),NOW)),['letterboxd_identity_check_stale'],'a queue that only ever hit transport failures alerts after 24 h');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:null,work:3,oldestWorkAt:at(20)}),NOW)),[]);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:at(1),work:3,oldestWorkAt:at(90)}),NOW)),[],'progress was made an hour ago');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({overdue:3}),NOW)),['letterboxd_admission_overdue']);
+ const unknown=Policy.evaluateLetterboxd(check({overdueUnknown:2}),NOW);assert.deepEqual(keys(unknown),['letterboxd_admission_overdue']);assert.match(unknown.issues[0].message,/unknown age/);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:4}),NOW)),['letterboxd_identity_cap_refused']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:2000,backlogFull:true}),NOW)),['letterboxd_identity_backlog_full']);
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(model({identityCheck:{error:'unreadable'}}),NOW)),['letterboxd_identity_check_unreadable']);
+ const ledger=Policy.evaluateLetterboxd(check({ledgerUnreadable:true,overdue:null,overdueUnknown:null}),NOW);assert.deepEqual(keys(ledger),['letterboxd_identity_check_unreadable'],'an unreadable ledger is reported, never read as nothing waiting');assert.match(ledger.issues[0].message,/ledger/);
+ assert.equal(Policy.evaluateLetterboxd(check({overdue:1}),NOW).state,'degraded');
 }
 console.log('letterboxd-sync-monitor ok');

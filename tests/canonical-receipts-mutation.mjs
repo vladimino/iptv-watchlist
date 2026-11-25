@@ -46,7 +46,7 @@ const MUTANTS=[
  ['the guard accepts version 17','sql',"WHERE id = 1 AND version = 18\n AND (","WHERE id = 1 AND version >= 17\n AND (",'1'],
  ['the guard does not check the tables','sql',") = 8\n);",") >= 0\n);",'1'],
  // the protocol
- ['a write is made without the marker gate','js',"const gate=assertWritable(await readAuthority(env));\n if(status==='no_baseline')","const gate=await readAuthority(env);\n if(status==='no_baseline')",'4.2'],
+ ['a write is made without the marker gate','js',"const gate=fenced.bindLetterboxdFence(env,assertWritable(await readAuthority(env)));\n if(status==='no_baseline')","const gate=fenced.bindLetterboxdFence(env,await readAuthority(env));\n if(status==='no_baseline')",'4.2'],
  ['a write is made without the receipt table','js',"if(status==='no_schema')throw failed('receipt_schema_missing');\n const gate","const gate",'4.2'],
  ['the receipt batch carries no fence head','js',"const all=[...fenced.head(gate,[]),...statements];","const all=[...statements];",'7.5'],
  ['a different request under one id is a replay','js',"if(!sameRequest(row,request))throw failed('receipt_conflict');","",'4.1'],
@@ -90,7 +90,7 @@ const MUTANTS=[
  ["unreceipted ignores the baseline (pure)",'js',"if(Number(change.revision)<=Number(baseline[key]||0)){","if(false){",'15,9'],
  ["unreceipted ignores the baseline (database)",'js',"WHERE r.revision>COALESCE(b.revision,0) AND NOT EXISTS","WHERE r.revision>0 AND NOT EXISTS",'15'],
  ["the baseline count counts every revision",'js',"WHERE r.revision<=b.revision'","WHERE 1'",'15'],
- ["a receipt is written without the baseline check",'js',"readAuthority(env));\n if(status==='no_baseline')throw failed('receipt_baseline_missing');","readAuthority(env));",'15'],
+ ["a receipt is written without the baseline check",'js',"readAuthority(env)));\n if(status==='no_baseline')throw failed('receipt_baseline_missing');","readAuthority(env)));",'15'],
  ["a missing baseline reads as ready",'js',"return Number(row?.baseline)===1?'ready':'no_baseline';","return 'ready';",'15'],
  ["a baseline row is accepted while held",'sql',"BEFORE INSERT ON canonical_receipt_baseline\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')\n OR","BEFORE INSERT ON canonical_receipt_baseline\nFOR EACH ROW\nWHEN 0\n OR",'15'],
  ["the watermark can be updated",'sql',"CREATE TRIGGER canonical_receipt_watermark_no_update\nBEFORE UPDATE ON canonical_receipt_watermark\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],

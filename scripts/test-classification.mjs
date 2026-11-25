@@ -218,6 +218,15 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-check-legacy-report.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-owner-race-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-owner-action-atomic.mjs": {
+  "suite": "core"
+ },
  "import-fence-helper.mjs": {
   "suite": "core"
  },
@@ -479,6 +488,9 @@ export const FILES={
  "discovery-archive-import.mjs": {
   "suite": "core"
  },
+ "admin-identity-owner-action.mjs": {
+  "suite": "core"
+ },
  "admin-identity-revoke-page.mjs": {
   "suite": "core"
  },
@@ -651,6 +663,9 @@ export const FILES={
   "suite": "core"
  },
  "letterboxd-view-double.mjs": {
+  "suite": "core"
+ },
+ "reservation-guard-fixture.mjs": {
   "suite": "core"
  },
  "view-index-d1-input.mjs": {
