@@ -2,10 +2,10 @@
 
 **Status:** Proposed  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-25, from `main` `7d8d4b3`; revised after the [independent review](https://github.com/vladimino/iptv-watchlist/pull/1005#issuecomment-7168898942) of `d184a9e`  
+**Recorded at:** 2026-11-25, from `main` `7d8d4b3`; revised after the [first independent review](https://github.com/vladimino/iptv-watchlist/pull/1005#issuecomment-7168898942) of `d184a9e` and the [second independent review](https://github.com/vladimino/iptv-watchlist/pull/1005#issuecomment-7169971080) of `4f88e5c`  
 **Approval source:** not documented (awaiting an ADR-specific Product Owner decision on each open choice below)  
-**Related work:** [AIR-655](https://trello.com/c/YIPK38Tg). Native prerequisite [AIR-644](https://trello.com/c/nFBGvvnU) ([ADR 0218](0218-film-lifecycle-dimensions-revision.md), Accepted). Builds on Accepted [ADR 0134](0134-discovery-admission-producer-wiring.md), [ADR 0155](0155-retire-enrichment-projector-cron.md), [ADR 0211](0211-catalog-enrichment-producer.md), [ADR 0214](0214-film-metadata-per-field-provenance.md), [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md) and [ADR 0218](0218-film-lifecycle-dimensions-revision.md). Evidence: the [AIR-627 census continuation](https://trello.com/c/IOERZ9GI#comment-6b06a0deb3fbeaeb5f93f8b2) and its [disposition](https://trello.com/c/IOERZ9GI#comment-6b06d8c178a1d27ed10c4e8f). Coordinated with, and not extending, [AIR-614](https://trello.com/c/wUHl13Yw), [AIR-615](https://trello.com/c/fCXSmk7K), PV1 [AIR-631](https://trello.com/c/i8td3wu0), PVE [AIR-636](https://trello.com/c/0jJADYxg), AIR-662 (projection-aware localization write, ADR 0218 decision 3) and the Proposed source-independent admission record of [AIR-643](https://trello.com/c/e1Q9H1bG) (ADR 0217, [PR #996](https://github.com/vladimino/iptv-watchlist/pull/996)).  
-**Supersedes:** None. This record does **not** amend ADR 0214 (decision 8 below)  
+**Related work:** [AIR-655](https://trello.com/c/YIPK38Tg). Native prerequisite [AIR-644](https://trello.com/c/nFBGvvnU) ([ADR 0218](0218-film-lifecycle-dimensions-revision.md), Accepted). Builds on Accepted [ADR 0134](0134-discovery-admission-producer-wiring.md), [ADR 0155](0155-retire-enrichment-projector-cron.md), [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md), [ADR 0211](0211-catalog-enrichment-producer.md), [ADR 0214](0214-film-metadata-per-field-provenance.md), [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md) and [ADR 0218](0218-film-lifecycle-dimensions-revision.md). Evidence: the [AIR-627 census continuation](https://trello.com/c/IOERZ9GI#comment-6b06a0deb3fbeaeb5f93f8b2) and its [disposition](https://trello.com/c/IOERZ9GI#comment-6b06d8c178a1d27ed10c4e8f). Coordinated with, and not extending, [AIR-614](https://trello.com/c/wUHl13Yw), [AIR-615](https://trello.com/c/fCXSmk7K), AIR-600 (the receipt `operation_key`, migration `0039`), PV1 [AIR-631](https://trello.com/c/i8td3wu0), PVE [AIR-636](https://trello.com/c/0jJADYxg), AIR-662 (projection-aware localization write, ADR 0218 decision 3) and the Proposed source-independent admission record of [AIR-643](https://trello.com/c/e1Q9H1bG) (ADR 0217, [PR #996](https://github.com/vladimino/iptv-watchlist/pull/996)).  
+**Supersedes:** None. This record does **not** amend ADR 0214 (decision 5)  
 **Superseded by:** None
 
 ## Context
@@ -13,175 +13,241 @@
 ### What exists (main `7d8d4b3`, 25 Nov 2026)
 
 - **The only canonical writer for a Discovery Film is minimal by design.** Since the projector was retired ([ADR 0155](0155-retire-enrichment-projector-cron.md)), a Discovery admission reaches canonical state only through the `film_mutation` unit of [ADR 0134](0134-discovery-admission-producer-wiring.md) decision 5 (`src/canonical-discovery-admission-producer.js`): the Film, the trusted `tmdb` claim and a title written only when blank. It never writes `film_metadata`, credits, Persons, aliases, localization or `canonical_identity`.
-- **Every richer writer is bounded to another cohort.** EPG `film_facts` and credits target Watchlist Films only (`src/canonical-producer-workflow.js`); `metadata_sync` is Watchlist only; the dictionary covers its entries; the ADR 0211 catalog-enrichment producer (C1, not yet delivered) is scoped to `film_rated_admission.verified_at >= cutoff_at` (ADR 0211 decision 4). AIR-614 and AIR-615 widen C1 to rated and Watchlist cohorts, not to Discovery-only Films.
-- **The Discovery payload is a mixed serving record, not a TMDB observation.** `discovery_admission.payload_json` is built from a verified `movie/<id>?language=ru-RU&append_to_response=credits,translations,alternative_titles` response (`src/discovery.js`), but:
-  - some fields are TMDB by construction: `runtime`, `genres`, `url` (built from the id), `directors` and `actors` (capped at ten each, with ids `tmdb_director/<id>`, `tmdb_actor/<id>`);
-  - `year` and `synopsis` fall back to the EPG candidate (`candidate.year`, `candidate.description`) when TMDB has no release year or overview (`src/discovery.js:352`);
-  - `poster` can be kept from an earlier payload by the admission conflict clause or filled later by `POSTER_UPDATE_SQL` (`src/discovery-authority.js`), so its source and time are not those of the body;
-  - `aliases` and `shows` (availability) change on every EPG touch without any TMDB request (`touchCanonicalFilm`); `movieTitles` mixes ru, uk, en and RU/UA/US/GB titles without a language;
-  - a revalidation (`revalidateDrift`) re-fetches the detail but only appends missing authority titles to the stored record; it does not publish a fresh complete body, and `discoveredAt` is kept;
-  - there is **no observation time** of the TMDB response anywhere.
+- **Every richer writer is bounded to another cohort.** EPG `film_facts` and credits target Watchlist Films only (`src/canonical-producer-workflow.js`); `metadata_sync` is Watchlist only; the dictionary covers its entries; the ADR 0211 catalog-enrichment producer (C1, not yet delivered) is scoped to the **activated** scope of ADR 0211 decision 4 (initially `film_rated_admission.verified_at >= cutoff_at`; widenings C3a and C3b are separate decisions). AIR-614 and AIR-615 widen C1 to rated and Watchlist cohorts, not to Discovery-only Films.
+- **Fetchers.** Discovery is already a TMDB fetcher: its verified detail response (`movie/<id>?language=ru-RU&append_to_response=credits,translations,alternative_titles`) is the source of its payload. C1 is the *catalog-enrichment* fetcher (Letterboxd, TMDB, Wikidata). Neither is replaced here.
+- **The Discovery payload is a mixed serving record, not a TMDB observation.** `discovery_admission.payload_json`:
+  - some fields are TMDB by construction: `runtime`, `genres`, `url` (built from the id), `directors` and `actors` (capped at ten each, ids `tmdb_director/<id>`, `tmdb_actor/<id>`);
+  - `year` and `synopsis` fall back to the EPG candidate (`candidate.year`, `candidate.description`) when TMDB has none (`src/discovery.js:352`);
+  - `poster` can be kept from an earlier payload by the admission conflict clause or filled later by `POSTER_UPDATE_SQL` (`src/discovery-authority.js`);
+  - `aliases` and `shows` change on every EPG touch without a TMDB request; `movieTitles` mixes languages;
+  - a revalidation (`revalidateDrift`) re-fetches the detail but only appends missing authority titles; `discoveredAt` is kept;
+  - there is **no observation time** of the TMDB response.
 - **Serving already uses the payload.** The Film page and Finds read title, year, runtime, genres, poster and credits from it. Data are lost only on the canonical fallback (`catalogCanonicalFilmFromD1`), in `/api/d1/films` and in any reader of canonical state (ADR 0216).
-- **No Discovery Film has a Russian title in canonical state**, minimal or not.
-- **The `discovery_admission` key is the Discovery key** (`tmdb_<n>`), not `film.id`. It reaches a Film only through the trusted `tmdb` claim (the 21 Films without a literal `film:tmdb:<n>` row resolve that way).
+- **The `discovery_admission` key is the Discovery key** (`tmdb_<n>`), not `film.id`. It reaches a Film only through the trusted `tmdb` claim.
 
 ### Census (AIR-627, L0, dated 25 Nov 2026, main `681b5c1`, Film/Person g2, EPG P519)
 
-Dated aggregates, not live counts and not guarantees. Implementation cards re-measure with bounded predicates.
+Dated aggregates, not live counts and not guarantees. The **eligible historical counts are not known**: the census does not say how many Films miss each field, and a Film may miss only some. What it does show:
 
 | Group | Size | Canonical state | Serving payload presence (not proof of source) |
 | --- | --- | --- | --- |
 | Minimal Discovery Films (since 16 Nov, `film_mutation` only) | 2 525; 1 213 airing in P519 | no `film_metadata`, credits, aliases, dimensions; `canonical_identity` NULL | year/runtime 2 525, synopsis 2 524, genres 2 524, actors 2 523, directors 2 519, poster 2 517 |
-| Projector-era Discovery Films | 9 730 | projector credits and aliases; `film_dimension` copies (metadata `fresh`) but no `film_metadata` row for 8 216 of 8 620 `fresh` | about 99.5 % |
+| Projector-era Discovery Films | 9 730 | **have** projector credits and aliases; `film_dimension` copies; `film_metadata` rows exist for only 414 Films in the whole catalog, so most lack core metadata | about 99.5 % |
 | Future admissions | about 2 525 in about 9 days (a dated estimate) | as the minimal group | — |
 | Rated (714; 473 with metadata missing) and Watchlist (391) | — | owned by C1 / AIR-614 / AIR-615 | out of scope |
 
-The groups overlap only through the classification of decision 3. `canonical_identity` NULL is not a proof of missing identity: each of these Films holds a trusted, non-conflicting `tmdb` claim.
+So the gap differs by group: minimal Films miss everything; projector-era Films mostly miss core metadata and a Russian title but keep credits. No Discovery Film has a Russian title in canonical state. `canonical_identity` NULL is not a proof of missing identity: each of these Films holds a trusted, non-conflicting `tmdb` claim.
 
 ### The problem
 
-Canonical Film/Person D1 is the authority (ADR 0216), but for about 12 000 Discovery Films it holds only an id, a claim and a title. Readers that do not go through Discovery lose year, runtime, synopsis, poster, genres, credits and every Russian title, and nobody owns refresh. The serving payload cannot simply be copied: it does not say which values are TMDB, when they were observed or whether they are complete.
+Canonical Film/Person D1 is the authority (ADR 0216), but for Discovery Films it holds an id, a claim and a title, and for the minimal group nothing else. Readers that do not go through Discovery lose year, runtime, synopsis, poster, genres, credits and every Russian title, and nobody owns refresh. The serving payload cannot simply be copied: it does not say which values are TMDB, when they were observed or whether they are complete.
 
 ### Settled decisions this record keeps
 
 - `film_mutation` stays minimal (ADR 0134 decision 5). This record adds separate units.
 - After intake the canonical row is the authority; the Discovery payload stays Discovery's own serving record.
-- ADR 0218: processing dimensions (identity, metadata, fingerprint, prediction) are not written or read for decisions. The **effective localization projection** is control state and is written only by the AIR-662 projection-aware operation (ADR 0218 decision 3). The `film_dimension` rows of projector-era Films are retired processing copies; their lock predicate (`status='reviewed' OR authority='owner'`) stays control and is respected.
-- `writeFilmFacts` is the single metadata writer; the ADR 0214 rules (rank, locks, hold, history) and the ADR 0211 rules (anchors, agreement, credits namespace, expected set) apply unchanged. This record adds no precedence, identity or provenance rule and **does not amend ADR 0214**.
+- **ADR 0218** keeps a `film_dimension` row only for: an applied owner or reviewed decision, the ADR 0214 metadata lock, `titleSource`, and the **effective-localization projection kept for read cost**. Identity, metadata, fingerprint and prediction rows are otherwise copies and are neither written nor read for decisions here. The lock predicate (`status='reviewed' OR authority='owner'`) and `titleSource` are respected.
+- `writeFilmFacts` is the single metadata writer; the ADR 0214 rules (rank, locks, hold, history) and the ADR 0211 rules (anchors, agreement, credits namespace, expected set, write intent, epochs) apply unchanged. This record adds no precedence, identity or provenance rule and does **not amend ADR 0214**.
 - Identity is never inferred from a title or a year. Nothing here creates, merges, redirects or retires a Film, or writes a claim, alias or `canonical_identity`.
 - Mass enrichment waits for delivered and naturally accepted C1 ([AIR-607](https://trello.com/c/Daq02gYy)) and ADR 0214 `enforce` ([AIR-636](https://trello.com/c/0jJADYxg)); this gates activation, not this design.
 
 ## Decision
 
-**Common contract.** Decisions 1–8 are the technical contract of the recommended direction (1C, 2A, 3A, 4A). They resolve defects, not owner choices. The owner choices follow in "Open choices"; a different selection removes the decisions that depend on it and nothing else.
+**Common contract.** Decisions 1–9 are the technical contract of the recommended direction (1C, 2A, 3A, 4A). They resolve defects, not owner choices. The owner choices follow in "Open choices"; a different selection removes only the decisions that depend on it.
 
-### 1. A versioned TMDB observation, stored by Discovery from the response it already has
+### 1. A versioned TMDB observation, published by Discovery on every verified detail
 
-Discovery stores one **TMDB observation** per movie id, in its own row, built **only** from the verified detail response, never from the serving payload.
+Discovery stores one **TMDB observation** per movie id, in its own row, built **only** from a verified detail response, never from the serving payload.
 
-**Storage.** A new table `discovery_tmdb_observation`, keyed by `tmdb_id` (the identity of the source, not `film_id`), columns:
+**Storage.** Table `discovery_tmdb_observation`, keyed by `tmdb_id`, columns:
 - `observation_version` (starts at 1);
 - `observed_at`: the time the verified response was received, set by the code that received it;
-- `seq`: a strictly increasing integer assigned as `1 + MAX(seq)` inside the same fenced batch as the row write (Discovery writes are serialized by `discovery_lease` and the transfer fence, so commit order equals `seq` order); an index on `seq`;
-- `digest`: 64 hex characters, computed in application code from the canonical JSON of the semantic body below (**not** a SQL function, which D1 does not guarantee). Guards compare stored `(seq, digest)` by equality;
+- `seq`: a strictly increasing integer taken from a **durable high-water row** (`discovery_observation_seq(id=1, high_water)`), incremented in the same fenced batch as the observation write. It is not `MAX(seq)`, so a deletion cannot make it regress. A restore of the observation table without that row is an owner L3 operation: intake refuses with `seq_regressed` whenever its cursor is above `high_water`;
+- `digest`: 64 hex characters of the canonical JSON of the semantic body (decision below), computed in application code (D1 offers no guaranteed SQL hash). Guards compare stored `(seq, digest)` by equality;
 - `body_json`: the bounded semantic body.
 
-**Semantic body** (`observed_at` and `seq` excluded from the digest, so an unchanged re-observation has the same digest):
-- **core**: `year` (from `release_date` only), `runtime`, `synopsis` (ru-RU overview), `poster` (the `poster_path` URL), `url`, `genres` (ru-RU names). Each field is `value`, `absent` (a complete response without it; a blank string is absent) or `unreadable` (wrong type or malformed). EPG fallbacks (`candidate.year`, `candidate.description`), a retained or later-updated poster, aliases and availability **never** enter the observation;
-- **credits**: `directors` and `actors` from the response's `credits` section in source order, each with a validated positive-integer person id and name, bounded to the C1 limits (**at most 20 directors, 10 actors**, ADR 0211 decision 3), with `directors_total`, `actors_total` and the gap `directors_truncated` when more than 20. The serving payload keeps its own ten-director cap; the observation does not inherit it. A missing `credits` section is `unreadable`; a present section with none is `absent`;
-- **translations**: a deterministic selection of the Russian title from `translations.translations` entries with `iso_639_1 = 'ru'`: one distinct non-blank title is `value`; several entries are decided by `iso_3166_1 = 'RU'`, and if still different the selection is `ambiguous` and nothing is written; a section with no `ru` entry is `absent`; a missing or malformed section is `unreadable`. The response `title` (the ru-RU-or-fallback title) is **not** a Russian title and is not used.
+**Semantic body** (`observed_at` and `seq` excluded from the digest):
+- **core**: `year` (from `release_date` only), `runtime`, `synopsis` (ru-RU overview), `poster` (`poster_path` URL), `url`, `genres` (ru-RU names). Each is `value`, `absent` (a complete response without it; a blank string is absent) or `unreadable` (wrong type). EPG fallbacks, a retained or later-updated poster, aliases and availability **never** enter the observation;
+- **credits**: `directors` and `actors` from the response's `credits` section in source order, each with a validated positive-integer person id and name, bounded to the C1 limits (**at most 20 directors, 10 actors**, ADR 0211 decision 3), with `directors_total`, `actors_total` and the gap `directors_truncated`. A missing `credits` section is `unreadable`; a present empty one is `absent`;
+- **translations**: a deterministic selection of the Russian title from entries with `iso_639_1 = 'ru'`: one distinct non-blank title is `value`; several are decided by `iso_3166_1 = 'RU'`, and if still different the selection is `ambiguous` and nothing is written; no `ru` entry is `absent`; a missing or malformed section is `unreadable`. The response `title` is not a Russian title;
 - **section presence** per `core`, `credits`, `translations`.
 
-**When it is written.** Only after a **successful verified detail**, in the same fenced batch family as the admission write, with no extra network request:
-- a new admission (the build at `src/discovery.js:352` and the two sibling builds);
-- **a revalidation** whose detail is verified, **even when no alias is missing** (today it writes nothing in that case). This is the one behavior change to Discovery's flow, in the same budget accounting as its existing writes (`writeEstimate`).
+**Occurrence versus content.** The **digest** says whether the content changed; the **occurrence** (`observed_at`, `seq`) says that a verified detail saw it at that time. Every verified detail publishes: an unchanged digest still moves `observed_at` and `seq`, because under ADR 0214 decision 3 the same data seen later is a newer observation of the same rank (`observed_at` is the third rank component) and can outrank an intervening automatic value; keeping the first `observed_at` forever would not be rank-based refresh. The cost is one row write per verified detail, which Discovery already performs at its own bounded rate; no extra request is implied.
 
-A failed, unverified or skipped detail writes no observation. An unchanged digest keeps the row and its `seq` (no new work); a changed digest moves `seq`.
+**When it is published.** Only after a **successful verified detail**, in the same fenced batch family as the admission write and under the same authority guard as the admission upsert: the Discovery lease, `discovery_transfer.state <> 'loading'` and the marker route (`ADMISSION_FENCE_SQL`). Sites: a new admission (the build at `src/discovery.js:352` and its two sibling builds) and a **revalidation** whose detail is verified, **even when no alias is missing** (today it writes nothing then). A failed, unverified or skipped detail writes nothing.
 
-**Old payloads.** Historical payload values are **not observations**. Inventory (static, from code; to be re-verified by fixture):
+**Unique current mapping.** An observation maps to a Film only when exactly one `discovery_admission` row is `state='current'` for `media_kind='movie'` and the `tmdb_id`, and the id resolves through exactly one trusted, non-conflicting `tmdb` claim, not retired and not a redirect source. The batches of decision 4 assert this with a count subquery. Anything else is an `unresolved_identity` disposition (decision 3), never a guess.
+
+**Producer enablement and old versions.** Publishing is controlled by its own row (`discovery_observation_control`: `mode` `off`/`on`, `floor_seq`, `revision`), created `off`; enabling it is an owner production operation with readback (card I1c), done only after the version that publishes is deployed. `floor_seq` is the `high_water` at enablement. A Film whose detail was verified only by an older Worker version has no observation; it is counted as class 4 (decision 3), not lost, and enters when Discovery next verifies it. The producer is independent of intake: observations accumulate dormant.
+
+**Old payloads.** Historical payload values are not observations. Inventory (static, to be re-verified by fixture):
 
 | Payload field | By construction | Proof |
 | --- | --- | --- |
-| `runtime`, `genres`, `url`, `directors`, `actors` | built from `movie` | TMDB-derived, observation time unknown, credits capped at ten each |
+| `runtime`, `genres`, `url`, `directors`, `actors` | built from `movie` | TMDB-derived, time unknown, credits capped at ten each |
 | `year`, `synopsis` | `movie` value **or** EPG fallback | unprovable |
-| `poster` | TMDB URL, but possibly retained or updated by another path | unprovable as to time and path |
+| `poster` | TMDB URL, possibly retained or updated by another path | unprovable as to time and path |
 | `aliases`, `movieTitles`, `shows` | mixed | not metadata |
 
-`discoveredAt` is the first admission time and is never used as an observation time, including on a legacy refetch. See decision 8 for what this means for history.
+`discoveredAt` is never an observation time, including on a legacy refetch. See decision 8.
 
-### 2. One owner per part: explicitly non-overlapping scopes, fenced in every batch
+### 2. One owner per part: explicit scopes, persisted dispositions, fences in every batch
 
-**Parts** are `core` (`film_metadata` fields and, when needed, nothing in `film_sync_state`), `credits` (Persons and credits) and `localization` (the `tmdb` source row and the effective projection). Intake owns all three for a Film **only while the Film is in the intake scope**, and C1 owns all three for every Film in the C1 domain. The two are disjoint by construction, and each batch asserts it.
+**Parts** are `core` (`film_metadata` and its field rows), `credits` (Persons and credits) and `localization` (the `tmdb` source row and the effective projection). Intake owns a part of a Film only while the Film's **persisted disposition** is `intake`.
 
-**Intake scope (live predicate, evaluated at plan and asserted in each batch):** the Film exists and is not a redirect source; it has exactly one trusted, non-conflicting `tmdb` movie claim `<n>`, no other trusted owner of that id and no `tmdb_retirement_decision`; and **none** of:
-- a Letterboxd anchor (a trusted `letterboxd` claim, by any value), or a C1 state row of any state (`complete`, `needs_attention`, `identity_disagreement`, paused, due), so a failed, disagreeing, paused or newly eligible C1 Film is never written by intake;
-- membership of the C1 domain: a `film_rated_admission` row, a `film_retention` row, a `watchlist_film` row, or a scope widening of C1 (C3a, C3b) covering it;
-- an EPG-chain target (Watchlist).
+**Dispositions** (persisted per resolved Film, with the evidence and time):
+- `intake`: in the intake scope, below;
+- `owned_by_c1`: actually in C1's **activated** scope, proven by C1's own state (its control `mode`, its scope and `cutoff_at`, its Film state row, and, for Watchlist Films, the source membership of ADR 0216, not the `watchlist_film` projection alone). Never inferred from a lid, a retention row or a rated record;
+- `held_unowned`: excluded from intake conservatively but **not** in any activated C1 scope. Exclusion is safe; labeling such a Film as handed to C1 would strand it outside both domains, so it is recorded as held, with its reason (`letterboxd_anchor`, `rated_outside_c1_scope`, `retention`, `watchlist_projection`, `epg_target`, `c1_state_present`) and counted;
+- `unresolved`, `superseded`: decision 3.
 
-A Film that enters the C1 domain or gains a Letterboxd anchor later leaves the intake scope: the next batch fails its guard, the unit replans and records `handed_to_catalog_enrichment`, and intake never writes it again. C1 never selects an intake-scope Film (its scope is the rated and Watchlist domain). The overlap of a Discovery Film that is also rated or on the Watchlist belongs entirely to C1.
+**Intake scope (evaluated at plan and asserted in each batch):** the Film exists and is not a redirect source; it has the unique current mapping of decision 1; and **none** of: a trusted `letterboxd` claim; a C1 state row of any state; a `film_rated_admission`, `film_retention` or `watchlist_film` row; an EPG-chain target. A missing `watchlist_film` projection is **not** a negative Watchlist membership: the exclusion is on the *presence* of any signal, and absence of all signals only makes the Film eligible, never proves it is outside Watchlist. Because the predicate is conservative, a Film that is in doubt is `held_unowned`, never written.
 
-**Agreement.** Intake relies only on the `tmdb` anchor. Since a Letterboxd anchor excludes the Film, the writer's derived agreement is `not_required` and the ADR 0214 confidence is `confirmed`. Intake never uses the `unconfirmed` rank as permission, never invokes the ADR 0211 transport-only fallback, and a known disagreement or a Letterboxd anchor added between plan and commit fails the anchor-digest assertion (ADR 0214 decision 4).
+**Re-entry is excluded by policy and persisted.** Once a Film leaves `intake` (to `owned_by_c1` or `held_unowned`), the exclusion is stored on its state row and intake never writes it again, whatever the live predicate later says; only an explicit owner `reopen` can return it. This prevents oscillation between two writers. A held Film is disposed of by the card that owns its domain (AIR-614, AIR-615, a C1 widening) or by HA (decision 8); this record neither solves nor hides that cohort.
 
-**Precedence.** With only a TMDB anchor, only the `tmdb` source applies. The ADR 0214 rank applies unchanged: confidence first, then the ADR 0211 source order, then `observed_at`, then `value_digest`; **only a `confirmed` observation replaces a different value** (decision 8 of ADR 0214); `unknown` legacy values are replaced only by such an observation; an `owner` value, a pinned field or a dimension-locked Film is never touched; in `hold` mode intake only fills and adopts; no automatic clear exists.
+**Handoff in both directions.** On `owned_by_c1`, intake writes its attribution (decision 4) and any `superseded_credits` hold to the Film's handoff record; a C1 widening (C3a, C3b) that admits a previously intake-written Film requires C1's planner to read that record, and that precondition belongs to the widening card, not to this one. In the other direction, C1's own pre-existing credits and `film_json` write intent are read by intake's namespace and attribution guards; a Film with any C1 state row is never `intake`.
 
-**Credits.** The ADR 0211 one-namespace rule applies: intake's namespace is `tmdb_actor/<id>` and `tmdb_director/<id>`. A Film that already has credits in the other namespace (for example `actor/<slug>`) gets no credits, and the part records `credits_other_namespace`; a Film with credits in both namespaces gets none; a Film with credits only in the TMDB namespace gets only the missing ones. The expected set (from the observation, 20 and 10 at most) is stored per Film. Only entries with a valid person id are written; name-only credits are not. On an anchor correction, credits that intake added under the old anchor are held as `superseded_credits` (`needs_attention`) until the owner's retry, exactly as ADR 0211 decision 3b; units already applied before the correction stay and are never relabeled.
+**Agreement.** Intake relies only on the `tmdb` anchor. A Letterboxd anchor excludes the Film, so the writer's derived agreement is `not_required` and the ADR 0214 confidence `confirmed`. Intake never uses the `unconfirmed` rank as permission and never invokes the ADR 0211 transport-only fallback. A known disagreement, or a Letterboxd anchor added between plan and commit, fails the anchor-digest assertion (ADR 0214 decision 4) and moves the Film to `held_unowned`.
 
-**Localization.** Intake writes only its own `tmdb` `film_localization_source` row, through the AIR-662 projection-aware operation (a new receipt kind and digest, the effective projection recomputed in the same batch, the Film revision CAS **and** the owner-review authority and content token, ADR 0218 decision 3). It writes nothing when the selection is `absent`, `ambiguous` or `unreadable` (recorded as a gap). The existing resolver chooses the effective title; reviewed and owner rows win.
+**Precedence.** With only a TMDB anchor, only the `tmdb` source applies. The ADR 0214 rank applies unchanged: confidence first, then source order, then `observed_at`, then `value_digest`; **only a `confirmed` observation replaces a different value** (ADR 0214 decision 8); `unknown` legacy values are replaced only by such an observation; an `owner` value, a pinned field or a dimension-locked Film is never touched; in `hold` mode intake only fills and adopts; no automatic clear exists.
 
-**No sync clocks.** Intake never sets `film_sync_state.metadata_at` or any C1 clock; observation presence is not a C1 completion.
+**Credits.** The ADR 0211 one-namespace rule applies: intake's namespace is `tmdb_actor/<id>`, `tmdb_director/<id>`. A Film that already has credits in the other namespace (for example `actor/<slug>`, from the EPG chain or C1) gets none and records `credits_other_namespace`; credits in both namespaces get none; credits only in the TMDB namespace get only the missing ones. The expected set (≤ 20 directors, 10 actors) is stored. Only entries with a valid person id are written.
 
-**Persons and credits** are separate units with the same gates as the Film unit: each Person batch and the credits batch assert the scope predicate, the stored observation `(seq, digest)`, the anchor digest and the control state, not merely a later Film CAS. A stale plan is refused at the Person unit.
+**Localization.** Intake writes only its own `tmdb` `film_localization_source` row, through the AIR-662 projection-aware operation (a new receipt kind and digest, the effective projection recomputed in the same batch, the Film revision CAS **and** the owner-review authority and content token, ADR 0218 decision 3). It writes nothing when the selection is `absent`, `ambiguous` or `unreadable` (a recorded gap). The existing resolver chooses the effective title; reviewed and owner rows win.
 
-### 3. Classification, coverage and per-part state
+**No sync clocks.** Intake never sets `film_sync_state.metadata_at` or any C1 clock from observation presence.
 
-**Classification** is ordered, exhaustive and disjoint (first match wins), over Discovery admissions resolved to Films through the verified claim. It is a **measured snapshot** (a bounded dry run recorded as evidence, with counts), not stored state:
+### 3. Resolution, reopening and coverage
+
+**One durable disposition for every observation.** State is keyed by the stable source identity `tmdb_id`, with the resolved `film_id` as a column, so an observation whose Film does not exist yet still has a row.
+
+`discovery_intake_item(tmdb_id PRIMARY KEY, film_id, disposition, resolved_anchor_digest, plan_epoch, last_seq, recheck_at, reason, updated_at)`, with an index on `(disposition, recheck_at)`.
+
+**The cursor advances only after durable disposition.** `discovery_intake_cursor(applied_through_seq)` moves in the **same batch** that writes the item rows of every selected observation (`due`, `unresolved`, `held_unowned`, `owned_by_c1`, `superseded`). It reads `WHERE seq > cursor ORDER BY seq LIMIT N` through the `seq` index; no payload is loaded or scanned.
+
+**Reopening beyond a new observation is event-driven plus a bounded indexed recheck.** A seq cursor only finds new occurrences, so every other trigger has its own path:
+
+| Trigger | How intake finds it | Bound |
+| --- | --- | --- |
+| a new occurrence (same or changed digest) | the `seq` cursor | `N` per tick |
+| a previously `unresolved` identity (no Film yet, an ambiguous admission, a retired or conflicting claim) | `recheck_at` index over `disposition='unresolved'`; re-resolution through the claim and the unique current mapping; on a changed mapping `plan_epoch` rises and the item is replanned | `M` rechecks per tick |
+| an anchor, claim or retirement change | each batch asserts `anchor_digest`; the recheck compares `resolved_anchor_digest`; a mismatch raises `plan_epoch`, invalidates the item and holds `superseded_credits` | `M` per tick |
+| a lock release, a reviewed-localization change, an owner `retry` or `reopen` | the owner routes set `recheck_at = now` on the item (an owner action is the event); otherwise the periodic recheck finds it | `M` per tick |
+| a C1 domain transition | the recheck of `intake` items reads C1's state and scope; a transition is persisted per decision 2 | `M` per tick |
+| a failed unit's retry | `retry_at` on the part state (D1 only, never an upstream request) | per unit |
+
+The recheck is a **re-evaluation of eligibility from D1**, ordered by `recheck_at` with a `LIMIT` over an index, not a scan and not an upstream refresh. Its worst-case latency is the recheck interval (set by the I2a measurement). There is no time-based fetch and no extra TMDB request.
+
+**Cutover.** `floor_seq` (decision 1) is the start of the stream. Intake applies **every** observation with `seq > floor_seq`, so observations published between producer enablement (I1c) and activation (A1) are not stranded, and a same-digest re-observation after activation is a new `seq` handled like any other. There is no separate cutoff that would drop that cohort.
+
+**No-op rule, with the actual comparison.** For each field the single writer plans from the stored value and field row against the observation: **fill** (blank), **adopt** (equal value with an older or no field row: the row takes the newer `observed_at`), **replace** (different value and the observation outranks per ADR 0214), **keep** (the stored value outranks or is locked), or **no-op** (equal value and a field row already at least as recent). A no-op issues no statement and **no receipt is fabricated**; the item records `noop` with the compared tokens. Applied receipts stay as history.
+
+**Classification of items** (a measured snapshot for evidence, ordered, exhaustive, disjoint, first match wins):
 
 | # | Class | Rule |
 | --- | --- | --- |
-| 1 | `superseded_admission` | the admission is not `current`; counted, never forced into scope |
-| 2 | `unresolved_identity` | the tmdb id resolves to no Film, to several, to a conflicting or untrusted claim, a retired id or a redirected Film |
-| 3 | `c1_domain` | outside the intake scope by decision 2 (Letterboxd anchor, C1 state, rated, retention, Watchlist) |
-| 4 | `no_observation` | in scope, no stored observation (every historic Film at the start) |
-| 5 | `observation_pending` | an observation exists and some expected part is not applied |
-| 6 | `settled` | the applied token equals the stored `(seq, digest)` and every part is `present`, `gap` or `blocked` |
+| 1 | `superseded_admission` | the admission is not `current` |
+| 2 | `unresolved_identity` | no Film, several Films, an ambiguous current admission, a conflicting or untrusted claim, a retired id or a redirect source |
+| 3 | `owned_by_c1` | disposition of decision 2, with C1's evidence |
+| 4 | `held_unowned` | disposition of decision 2, counted by reason |
+| 5 | `no_observation` | in the intake scope, no stored observation (every historic Film at the start, and Films verified only by an old Worker version) |
+| 6 | `observation_pending` | an observation is stored and its token is not yet applied or a part is `due` or failed |
+| 7 | `processed` | the stored `(seq, digest)` token is applied and every part has a recorded outcome |
 
-The old H1/H2 labels are not used as scopes: an alias-only Film is class 4 or 5 by the same rule, and a partially filled Film is class 5. Counts of every class, including 1–3, are part of every evidence report; none is silently dropped.
+**`processed` is processing, not coverage.** The cursor and the item state only say that work was done for a token. **Coverage is reported separately**, per part and per field, by an independent predicate over canonical state (ADR 0218's usable-value rules), with these outcomes: `canonical_present` (a usable value is stored, whatever its source, including an existing value preserved when the observation was blank); `observed_absent` (a complete response without it); `unknown` (unreadable, not yet applied or unresolved); `gap` (`directors_truncated`, `translation_ambiguous`, `credits_other_namespace`, `locked`); `blocked` (`superseded_credits`, `held`). No report claims that canonical D1 is complete because an observation exists, and a field never counts as covered from a processed cursor.
 
-**Per-part state** (not one `done` row): `discovery_intake_state(film_id, part, applied_seq, applied_digest, anchor_digest, expected_json, outcome_json, gaps_json, state, reason, attempts, retry_at, due_since, updated_at)`, `PRIMARY KEY (film_id, part)` with `part IN ('core','credits','localization')`. Each field or credit has an outcome `present`, `absent` (proved by a complete response), `unknown` (unreadable or not yet applied), `gap` (for example `directors_truncated`, `translation_ambiguous`, `credits_other_namespace`, `locked`) or `blocked` (`superseded_credits`, `handed_to_catalog_enrichment`). Coverage is reported per part and never as a single total. `unreadable` and `absent` are different outcomes, so no false negative follows from a missing section.
+**Per-part state** mirrors ADR 0211 decision 3 instead of inventing a model: `discovery_intake_part(tmdb_id, part, state, refresh_epoch, source_version, expected_json, gaps_json, intent_json, attempt_id, failures, retry_at, due_since, updated_at)`, `PRIMARY KEY (tmdb_id, part)`, `part IN ('core','credits','localization')`, where `source_version` is the applied observation token.
 
-**Cohort cutoff and replay** use `seq`, a real stored token: the control row holds `cutoff_seq`; an observation is in the stream when `seq > cutoff_seq`. Row write times (`discoveredAt`, `updated_at`) are never a cutoff, because an EPG touch moves them.
+### 4. Units, keys, receipts, attribution and fences
 
-**Work reopens** only on: a new observation with a changed digest (`seq` moves); a changed anchor digest of the Film; a lock release or a reviewed-localization change that affects a blocked part; a failed unit's `retry_at` (a D1-only retry, never an upstream request); an owner retry. There is no time-based refresh and no extra TMDB call.
+**Stable work identity.** The receipt `operation_key` names the **item**, not the observation, as in ADR 0207 decision 3 and `src/canonical-receipts.js` (AIR-600, schema 39): `intake:<film_id>:core`, `intake:<film_id>:credits`, `intake:<film_id>:localization`, and for a Person unit `intakeperson:<person_id>`. A changed observation therefore reconciles the unresolved receipts of the earlier one. The **attempt digest** (and the request id) binds what changes between plans: the observation token `(seq, digest)`, the `anchor_digest`, the part's `refresh_epoch` and the intent. The existing **history cap of 100 receipts per key** is visible: a reservation past it is refused (`operation_key_history_exhausted`), the item becomes `needs_attention` with that reason, and a person looks at the Film.
 
-### 4. Delivery, receipts and fences
+**Durable intent and owned attempt.** Before each unit the intake records its **write intent** on the part row (`intent_json`): the fields or credits the unit will add, the anchor digest, the `refresh_epoch`, the observation token, the `operation_key` and the `attempt_id` and request id of the reserved receipt. An owned-attempt fence: every state write asserts the lease, the part's `attempt_id` and its `refresh_epoch`, so a stale tick cannot overwrite a newer plan. Finalization after a lost response: the reconcile protocol finds the unit's receipt by key, the registered readback decides (`applied`, `not_applied`, `settle_by_request_id`, `content_present`, `reread_and_replan`), and the intent says what was written and under which anchor; the state row is finalized in a batch that asserts the key's history fingerprint. A replaced intent (a new plan over an unresolved attempt) abandons the old attempt through that protocol, never silently.
 
-- **Unit identity.** A deterministic `operation_key` per unit: `intake:<film>:<part>:<seq>:<digest-prefix>` and, for a Person unit, the person id. Intent is durable before the write: the **reconcile-then-reserve** protocol of ADR 0207 decision 3 (history fingerprint, settle unresolved receipts, an atomic reservation, a loser replans). Each unit kind is registered in `PRODUCER_OPERATIONS` with a replan from the stored observation and a `readback`; an unknown outcome is settled by readback, never replayed blind.
-- **Guards in every batch, canonical and state.** The stored observation `(seq, digest)` equality; the Film's claim ownership (the exact `tmdb` row trusted and non-conflicting, no other owner, no retirement, not a redirect source) and anchor digest; the intake scope predicate (decision 2); the admission row `state='current'` with the same `tmdb_id`; the Discovery authority marker route and generation (as `ADMISSION_FENCE_SQL`); the control row `mode='on'` **and** `revision` equal to the plan's; the intake lease `lease_id` and `lease_until`; and, for localization, the AIR-662 fences. A pause, a takeover, a deadline, a moved digest or a marker movement therefore fails the batch: the unit replans and **none of these is a strike** (ADR 0128: systemic stop or recoverable refusal; three strikes only for the same unit, digest and class).
-- **Events are not lost.** The observation row (with its `seq`) is written in the same fenced batch as the admission upsert, so an admission and its observation commit together. The intake drains by an **indexed bounded cursor** over `seq` (`discovery_intake_cursor(applied_through_seq)`): one batch inserts `due` state rows for up to N observations above the cursor and advances the cursor in the same batch. No payload is loaded or scanned, and the order is `seq`, so older work is not starved by newer.
-- **Where and when it runs.** In its own step under its own lease (`projection_run`, `projection = 'discovery_intake'`), **not** inside `upsertAdmissions`, the EPG publication path or the hourly tick's critical work. It respects the ADR 0135 EPG pause windows. The **trigger** (cron tick, Workflow step or Task) and its measured reserved budget are **not decided here**; they are part of the activation gate, and no flag or schedule is authorized by this record.
-- **Control and audit.** One control row (`mode` in `off`, `on`, `paused`; `revision`; `cutoff_seq`; `updated_at`, `updated_by`), created `off`. Each transition is an owner production operation with readback, each raising `revision`; activation is not reachable from `/admin/settings`. `paused` stops new units at once, and in-flight batches fail on the control revision guard (no blanket claim without that fence).
-- **Rollback.** Written values stay; there is no bulk delete. A wrong value is corrected by the ADR 0214 owner route or replaced by a later `confirmed` observation. A code revert is not a rollback of data.
+**Credit attribution across observations and handoff.** A table `discovery_intake_credit(film_id, person_id, role, anchor_digest, observation_seq, request_id, applied_at)` records every credit unit that was applied, one row per credit, kept across later observations and handoffs. A later anchor correction reads it to hold `superseded_credits` (`needs_attention`, released only by the owner's retry), so casts are never mixed and the hold is never lost; it is the record decision 2 hands to C1.
 
-### 5. Provenance and ADR 0214 (no amendment)
+**Person units** are keyed by person, insert only absent Persons, and assert **absent-target** protection (`NOT EXISTS` person) and the Person's revision when it exists, because another origin (the EPG chain, C1) may create the same Person concurrently; the loser is a no-op. A credits unit refuses a credit whose Person is missing (`film_person_reference`).
 
-Intake's field rows are `tier='automatic'`, `source='tmdb'`, `origin='catalog_enrichment'` (the audit column accepts it; the CHECK stays unchanged), anchor `tmdb=<n>`, the current `anchor_digest`, `agreement='not_required'`, `observed_at` the observation's real time. Intake is distinguished by the `write_key` prefix `intake:` and by its state table, not by a new `origin` value. This avoids a CHECK migration (a SQLite table rebuild with history and trigger compatibility) and any amendment of ADR 0214. Whether the single writer accepts a second declared caller with that origin is verified in I2 review. If PV1 (AIR-631) has not applied its DDL when I2 is accepted, a dedicated `origin` value may instead be coordinated into PV1 first; that is a PV1 change, decided there, not silently extended here.
+**Guards in every canonical and state batch** (Film, Person, credit, localization, state), asserted inside the batch, not only at planning:
 
-### 6. Cost and capacity (counted, not assumed)
+| Guard | Asserted by |
+| --- | --- |
+| stored observation `(seq, digest)` equality for `tmdb_id` | every unit |
+| claim ownership: the exact `tmdb` row trusted and non-conflicting, no other trusted owner, no retirement, not a redirect source; `anchor_digest` | Film, credits, localization |
+| the unique current admission mapping | Film, credits, localization |
+| disposition `intake` and no persisted exclusion | every unit and state write |
+| credit namespace: no credit of another namespace | credits |
+| metadata lock, owner pins, reviewed localization | core, localization |
+| Person absent-target and revision | Person |
+| Discovery marker route and generation, `discovery_transfer.state <> 'loading'` | every unit |
+| control row `mode='on'` and `revision` equal to the plan's | every unit and state write |
+| intake lease `lease_id` and `lease_until`; the part's `attempt_id` and `refresh_epoch` | every state write |
+| AIR-662 fences: Film revision CAS and owner-review token | localization |
 
-D1 only; no TMDB, Letterboxd or Wikidata request. The unit accounting is C1's (ADR 0211 decision 5): each receipted unit is a reconcile read, a reservation, a fenced batch and a state settle.
+A pause, a takeover, a deadline, a moved digest or a marker movement fails the batch; the unit replans, and **none of these is a strike** (ADR 0128: three strikes only for the same unit, digest and class). A pause is effective for in-flight batches only through the control-revision guard.
 
-| Unit | Count per Film | Statements per unit (incl. guards) |
-| --- | --- | --- |
-| core | 1 | reconcile, reservation, one batch (≤ 12 guards), settle: about 4 round trips |
-| localization | 1 (AIR-662 operation; up to 3 in ADR 0211's accounting) | about 4 round trips each |
-| Person | 0 to 30 (one per **missing** Person, up to 20 directors + 10 actors) | about 4 round trips each, with Film, observation and scope guards |
-| credits | 1 | about 4 round trips |
+**Events are not lost.** The observation row (with its `seq`) is written in the same fenced batch as the admission upsert, and the cursor of decision 3 advances only after the items are durable.
 
-So a Film costs **about 12 round trips at best and about 130 in the worst case** (all 30 Persons missing), not 10 to 25. The unit budget per tick starts at C1's 12 units (core 1, localization up to 3, Persons per missing Person, credits 1), so a worst-case Film needs about three ticks and continues from canonical state.
+**Where and when it runs.** In its own step under its own lease (`projection_run`, `projection = 'discovery_intake'`), not inside `upsertAdmissions`, the EPG publication path or the hourly tick's critical work; it respects the ADR 0135 EPG pause windows. The **trigger** (cron tick, Workflow step or Task) is **not decided here**; it is part of the activation gate with its own owner approval, and no flag or schedule is authorized.
 
-**Capacity is unproven.** At an hourly tick and 12 units, a typical Film of about seven units drains about two Films per tick, which is close to C1's bound; the dated estimate of about 280 admissions per day (and C1's 48 per day) are estimates, not guarantees. Intake's advantage over 1B is **no upstream request and no upstream deadline**, not a proven drain rate. Before activation the dormant unit records per-tick wall time, statements, units and Films, and activation requires a measured capacity above the observed admission rate with margin; otherwise the cadence or the unit budget is its own owner decision. Nothing here is a Free-plan ceiling (Workers Paid baseline); these are measurements, not gates by themselves.
+**Control and audit.** One control row (`mode` `off`/`on`/`paused`; `revision`; `updated_at`, `updated_by`), created `off`; each transition is an owner production operation with readback and raises `revision`; activation is not reachable from `/admin/settings`.
+
+**Rollback.** Written values stay; there is no bulk delete. A wrong value is corrected by the ADR 0214 owner route or replaced by a later `confirmed` observation. A code revert is not a rollback of data.
+
+### 5. Provenance and ADR 0214 (no amendment, with an explicit audit gate)
+
+Intake's field rows are `tier='automatic'`, `source='tmdb'`, `origin='catalog_enrichment'`, anchor `tmdb=<n>`, the current `anchor_digest`, `agreement='not_required'`, `observed_at` the observation's real time, `write_key` prefixed `intake:`. The contract reads `origin` as an **audit column that is never compared** (ADR 0214 decision 2), and the acceptance counts of decision 13 come from the C1 tick outbox and the EPG producer outcome, not from the `origin` column, so reuse changes no accepted rank or count.
+
+**Audit before implementation (I2a, blocking).** Static reading cannot prove that no reader classifies by `origin` or by the `write_key` prefix: the history reader, the owner view, the visibility counts and any report must be searched. If any does, intake needs a distinct value. That is an `origin` CHECK rebuild (history and trigger compatibility, rollback) and **an accepted-rule change to ADR 0214 and a PV1 change** (AIR-631): it is exposed to the owner as its own decision **before implementation**, not silently carried here. The single writer's acceptance of a second declared caller with that origin is checked in the same audit. If PV1's DDL has not been applied when I2a is accepted, a dedicated `origin` can be coordinated into PV1 first, as a PV1 decision.
+
+### 6. Cost and capacity (counted, measurable while dormant)
+
+D1 only; no TMDB, Letterboxd or Wikidata request. The accounting is C1's (ADR 0211 decision 5): each receipted unit is a reconcile read with the history fingerprint, a reservation batch, a fenced canonical batch and a state-settle batch.
+
+| Unit | Per Film | Round trips per unit | Notes |
+| --- | --- | --- | --- |
+| core | 1 | 4 (reconcile+fingerprint read, reservation, fenced batch with up to 12 guards and up to seven writes, settle) | fill, adopt, replace and no-op differ in writes |
+| localization | 1 (up to 3 in ADR 0211's accounting) | 4 | AIR-662 operation, source row plus projection |
+| Person | 0 to 30 (one per missing Person) | 4 each | Person absent-target guard, plus Film, observation and scope guards |
+| credits | 1 | 4 | up to 30 credit rows, namespace guard |
+| item and cursor maintenance | per observation | 1 to 2 | drain batch, recheck |
+
+A Film costs about **12 round trips at best and about 140 in the worst case** (core, localization, credits, all 30 Persons missing, plus maintenance), each carrying its guards, rows and state writes; the exact statements per batch, rows written and wall time are **measured**, not assumed. The unit budget per tick starts at C1's 12 units (core 1, localization up to 3, Persons per missing Person, credits 1), so a worst-case Film needs about three ticks and continues from canonical state.
+
+**Capacity is unproven, and measurable while dormant.** The dated 280 admissions per day and C1's 48 per day are estimates, not guarantees; an hourly tick at 12 units drains about two typical Films, close to C1's own bound. Intake's advantage over 1B is **no upstream request and no upstream deadline**, not a proven drain rate. Capacity is measured **without a production canonical write**: in offline fixtures on the real migrated schema with representative recorded inputs (counts and shapes, no private rows), or in a **separately approved bounded shadow** that reads and plans without writing. Activation requires a measured capacity above the observed admission rate with margin, including the recheck budget; if capacity fails, the trigger, cadence or unit budget is a **separate owner approval**. These are measurements, not gates by themselves (Workers Paid baseline).
 
 ### 7. Delivery graph (no card is created by this ADR)
 
-1. **I1a: observation contract code (offline, dormant):** the builder from the verified response, the projection and digest, Discovery writes the observation in the admission batch family, revalidation publishes after a verified detail; the migration file for `discovery_tmdb_observation`. Old-version compatibility: old code ignores the table.
-2. **I1b: apply the I1 schema** (separate owner operation with readback; validates old-code compatibility).
-3. **I2a: intake unit, state, cursor and control (offline, dormant):** the migration file, units registered, fences, tests, measurement hooks.
-4. **I2b: apply the I2 schema** (separate owner operation).
-5. **A1: activation of the stream:** only after delivered AIR-607 and AIR-636 natural acceptance, AIR-662 delivered, both schemas applied and dormant/old-version compatibility validated, measured capacity (decision 6) and the trigger and schedule gate; owner GO, readback and natural acceptance in `Верификация`.
-6. **HA: acquisition for history** (decision 8): its own decision, never part of A1.
-7. **H3: historical Russian localization** is separately designed and authorized acquisition if wanted. A typed translation selection (decision 1) fixes only the future.
+1. **I1a: observation contract (offline, dormant):** builder, projection and digest, the high-water row, `discovery_tmdb_observation` and its control, the publish on every verified detail, migration files. Old code ignores the tables.
+2. **I1b: apply the I1 schema** (owner operation with readback; old-version compatibility validated).
+3. **I1c: enable the observation producer** (owner operation with readback; records `floor_seq`; the publishing version is deployed first; old versions drain by simply not publishing).
+4. **I2a: intake unit, items, parts, credit attribution, cursor, control (offline, dormant),** with the `origin` audit of decision 5, the capacity fixtures of decision 6 and the tests below.
+5. **I2b: apply the I2 schema** (owner operation).
+6. **A1: activation of the stream:** only after AIR-607 and AIR-636 natural acceptance, **AIR-600 R1 (`operation_key`, migration `0039`) applied**, AIR-662 delivered, both schemas applied and dormant/old-version compatibility validated, measured capacity, the origin audit closed, and the trigger and schedule approval; owner GO, readback, natural acceptance in `Верификация`.
+7. **HA: historical disposition planning (L0, near-term, concrete):** see decision 8.
 
 No temporary flag, schedule or Task is introduced without its own gate.
 
-### 8. History: a trade-off outside choices 1 to 4
+### 8. History: a concrete planning deliverable, and one trade-off for the owner
 
-Historical payloads are not observations (decision 1), so under the accepted ADR 0214 they cannot become `automatic` provenance. The recommended direction therefore writes **only Films that have a stored observation**: the future stream, and any historic Film whose detail Discovery verifies again (a revalidation now publishes an observation). The rest stay class `no_observation`, counted, served from the payload, and not written.
+Historical payloads are not observations (decision 1), so under the accepted ADR 0214 they cannot become `automatic` provenance. The recommended direction therefore writes **only Films that have a stored observation**: the stream, and any historic Film whose detail Discovery verifies again.
 
-**Trade-off for the owner, separate from choices 1 to 4:**
-- **T1-a (default, nothing proposed):** history waits for observations. No legacy adoption, no change of any accepted rule. A bounded acquisition (HA) is a later decision, because it needs TMDB budget or a rule.
-- **T1-b (a candidate, not part of this decision):** a bounded legacy adoption that fills **blank** fields only, from payload fields TMDB-derived by construction (`runtime`, `genres`, `url`, credit ids), as `unknown`-confidence values with no field row and no time claim, never replacing, never `year`, `synopsis` or `poster`. It would write values that no observation proves and would be the first such rule since ADR 0214, so it needs its own owner decision and probably its own record.
+**HA is a planning deliverable, not an optional future action.** An L0 card, started once A1's design is accepted and runnable in parallel with I1/I2, produces:
+- **measured eligible cohorts**, bounded and indexed, by the classification of decision 3 and by missing field and part (core fields, credits, Russian title), excluding `held_unowned`, `unresolved`, `superseded` and rated/Watchlist Films, with their overlaps;
+- **acquisition alternatives** with cost and gates: Discovery re-verification through its existing detail path and budget; a C1 pass; a localization-only pass; **one shared detail fetch whose single response feeds both the observation (HA) and the Russian-title selection (H3)**, so no Film is fetched twice;
+- a recommendation on T1 below and the gates for any historical write.
 
-Because T1-a defers history, selecting 3B ("all at activation") needs T1-b first.
+HA writes nothing and fetches nothing. H3 (historical Russian localization) is part of HA's alternatives, not a separate silent decision, and 2A alone does not solve history.
+
+**Trade-off for the owner (T1), presented once, after the contract above:**
+- **T1-a (recommended): defer.** This record decides nothing about legacy adoption; history waits for observations (the stream, natural re-verification) or for the plan HA produces.
+- **T1-b: decide a bounded legacy adoption now.** Fill **blank** fields only, from payload values TMDB-derived by construction (`runtime`, `genres`, `url`), as `unknown`-confidence values without a field row and without a time claim, never replacing. It is a real additional policy decision, not part of 3A and not a bypass of ADR 0214. It **cannot make history complete**: no `year`, `synopsis`, `poster` or Russian title, and credits only up to the payload's ten and ten (projector-era Films already have credits). It likely needs its own record.
+
+Choice 3B ("everything at activation") is **not deliverable**: it requires a separately accepted historical plan (HA), and T1-b alone does not provide one.
+
+### 9. Documentation and dependencies
+
+Implementation cards update: the Discovery observation and authority contracts (`docs/architecture/discovery-and-resolution.md`), `docs/architecture/film-person-lifecycle.md`, `docs/reference/domain/film-person.md`, `docs/reference/data/d1-schema.md` and the migration registry, the producer, receipt and state contracts, the provenance reference, `docs/architecture/scheduling-and-orchestration.md` or the Scheduled Task contract (the trigger), and the Discovery and producer runbooks. The stale statements found by AIR-627 (`film-person-lifecycle.md` on `writeFilmFacts` writing dimensions from wired producers; `film-person.md` on Discovery metadata) are corrected in I2a. No Mermaid change is made by this record. ADR 0218's control and lock state are preserved.
 
 ## Open choices
 
@@ -189,20 +255,20 @@ Because T1-a defers history, selecting 3B ("all at activation") needs T1-b first
 
 | Option | What it means | Benefits | Drawbacks |
 | --- | --- | --- | --- |
-| **1A** Retain minimal + payload serving | No canonical write; readers add a Discovery section | zero writes and no new producer | canonical stays incomplete for about 12 000 Films; every non-Discovery reader depends on Discovery; a superseded admission loses its data; no refresh owner; contradicts "canonical is the authority" |
-| **1B** Extend C1 (ADR 0211) to Discovery admissions | C1 fetches TMDB (and Letterboxd when anchored) per Film | one producer; fresh data; full ADR 0211/0214 contracts | at C1's bound (2 Films per hourly tick) a stream of about 280 per day never drains and the backlog takes years; raising the bound is its own decision and adds TMDB pressure for data Discovery already fetched |
-| **1C** Discovery stores a versioned observation; a bounded intake applies it (recommended) | decisions 1 to 8 | no upstream request; reuses every accepted writer protection; C1 stays the only fetcher; one owner per part by disjoint scopes | a second automatic filler of `film_metadata` (disjoint from C1 by decision 2); changes Discovery's revalidation to publish observations; new tables and a measured capacity gate; history is not covered without T1 |
+| **1A** Retain minimal + payload serving | No canonical write; readers add a Discovery section | zero writes and no new producer | canonical stays incomplete; every non-Discovery reader depends on Discovery; a superseded admission loses its data; no refresh owner; contradicts "canonical is the authority" |
+| **1B** Extend C1 (ADR 0211) to Discovery admissions | C1 fetches TMDB (and Letterboxd when anchored) per Film | one producer; fresh data; full ADR 0211/0214 contracts | at C1's bound (2 Films per hourly tick) a stream of about 280 per day never drains; raising the bound is its own decision and adds TMDB pressure for data Discovery already fetched |
+| **1C** Discovery publishes a versioned observation; a bounded intake applies it (recommended) | decisions 1 to 9 | no upstream request; reuses every accepted writer protection; explicit scopes and persisted dispositions; capacity measurable while dormant | a second automatic filler of `film_metadata`, kept disjoint from C1; Discovery publishes on every verified detail; new tables and a measured capacity gate; the `origin` audit may require a PV1 change; history is not covered without HA |
 | **1D** Widen `film_mutation` itself | write metadata and credits inside the admission batch | no second unit | breaks ADR 0134 decision 5 and the admission budget; one failure mode for admission and enrichment |
 
-**Recommendation: 1C.** The data are already acquired under a verified identity, and re-fetching them (1B) spends the shared TMDB budget; 1A leaves the authority empty. The recommendation does not rest on a drain-rate claim (decision 6).
+**Recommendation: 1C.** The data are already acquired under a verified identity; 1A leaves the authority empty and 1B re-fetches. The recommendation does not rest on a drain-rate claim.
 
 ### Choice 2. Russian localization
 
 | Option | What it means | Benefits | Drawbacks |
 | --- | --- | --- | --- |
-| **2A** Typed selection in the observation (recommended) | the deterministic `ru` translation selection of decision 1, written as the `tmdb` source row through the AIR-662 operation | no extra request; exact; ambiguous or missing writes nothing | history has no observation, so no Russian title until HA or H3 |
-| **2B** C1 fetches translations for every Discovery Film | one TMDB request per Film | covers history | the 1B capacity problem for localization alone |
-| **2C** Leave localization missing | — | nothing to build | the gap stays for all Discovery Films |
+| **2A** Typed selection in the observation (recommended) | the deterministic `ru` translation selection of decision 1, written as the `tmdb` source row through the AIR-662 operation | no extra request; exact; ambiguous or missing writes nothing | history has no observation, so no Russian title until HA's plan |
+| **2B** C1 fetches translations for every Discovery Film | one TMDB request per Film | covers history | the 1B capacity problem for localization alone, and a duplicate of Discovery's own response |
+| **2C** Leave localization missing | — | nothing to build | the gap stays |
 
 **Recommendation: 2A.** No title is derived from `movieTitles`, `aliases` or the response `title`.
 
@@ -210,9 +276,9 @@ Because T1-a defers history, selecting 3B ("all at activation") needs T1-b first
 
 | Option | What it means |
 | --- | --- |
-| **3A** Stream first (recommended) | `cutoff_seq` at activation; Films with an observation after it, plus any Film Discovery re-verifies, are applied. History without an observation (class 4) is a separate scope HA, never written from legacy payloads; H3 separate |
-| **3B** Everything at activation | the stream plus the historic Films at once; requires T1-b first |
-| **3C** Future only | class 4 stays on payload serving forever |
+| **3A** Stream first (recommended) | intake applies every observation above `floor_seq`; history without an observation is decided by HA's plan, never written from legacy payloads |
+| **3B** Everything at activation | not deliverable: it needs a separately accepted historical plan (decision 8); listed for completeness and recommended against |
+| **3C** Future only | class 5 stays on payload serving; HA's plan is not pursued |
 
 **Recommendation: 3A**, which separates the first natural acceptance of a new writer from any historical write, as ADR 0211 C3a/C3b and ADR 0214 PVE do.
 
@@ -220,18 +286,22 @@ Because T1-a defers history, selecting 3B ("all at activation") needs T1-b first
 
 | Option | What it means |
 | --- | --- |
-| **4A** Event-driven through ADR 0214 (recommended) | work reopens only on the triggers of decision 3 (a changed observation digest, a changed anchor, a lock release, an owner retry); the ADR 0214 rank decides replacement; C1's own triggers stay the only fetch-based refresh |
-| **4B** Fill-only forever | intake fills blanks and never replaces; stale values wait for C1 or the owner |
-| **4C** Periodic refresh | a window and sweep; this is the ADR 0214 PVT question and would pre-empt that card |
+| **4A** Event-driven through ADR 0214 (recommended) | work reopens on the triggers of decision 3 (a new occurrence, an anchor change, a lock release, an owner action, a bounded D1 recheck); the ADR 0214 rank decides; C1's own triggers stay the only fetch-based refresh |
+| **4B** Fill-only forever | intake fills blanks and never replaces |
+| **4C** Periodic refresh | a window and sweep; the ADR 0214 PVT question, which this would pre-empt |
 
-**Recommendation: 4A.** It reuses the accepted rank and costs nothing when nothing changes.
+**Recommendation: 4A.**
+
+### T1 (decision 8)
+
+A trade-off outside choices 1 to 4: **T1-a (recommended)** defer legacy adoption to HA, or **T1-b** decide a bounded legacy adoption now.
 
 ## Field, source, reader and writer matrix (recommended direction)
 
 | Field | Source (observation) | Canonical target | Writer | Reader after intake | Rule |
 | --- | --- | --- | --- | --- | --- |
-| year, runtime, synopsis, poster, url, genres | core section (never EPG or retained values) | `film_metadata` + `film_metadata_field` | `writeFilmFacts` (intake) | ADR 0216 display section, fallback, `/api/d1/films` | fill, then the ADR 0214 rank; `absent` and `unreadable` write nothing |
-| directors, actors | credits section, ≤ 20 and ≤ 10, valid ids | `person`, `film_person_credit` | Person and credit units | `PAGE_CREDIT_SQL`, fallback | add-only within one namespace; `superseded_credits` on correction |
+| year, runtime, synopsis, poster, url, genres | core section (never EPG or retained values) | `film_metadata` + `film_metadata_field` | `writeFilmFacts` (intake) | ADR 0216 display section, fallback, `/api/d1/films` | fill, adopt, replace or keep by the ADR 0214 rank; `absent` and `unreadable` write nothing |
+| directors, actors | credits section, ≤ 20 and ≤ 10, valid ids | `person`, `film_person_credit`, `discovery_intake_credit` | Person and credit units | `PAGE_CREDIT_SQL`, fallback | add-only within one namespace; attribution kept; `superseded_credits` on correction |
 | Russian title | translation selection | `film_localization_source` (`tmdb`) + effective projection | AIR-662 operation | effective localization (ADR 0218 decision 3) | existing resolver; ambiguous writes nothing |
 | `title`, `original`, `aliases`, `movieTitles`, `shows` | — | not written | — | Discovery only | `original_title` stays ADR 0120 |
 | `canonical_identity`, claims, aliases | — | not written | — | — | identity stays claim-based |
@@ -242,50 +312,51 @@ Because T1-a defers history, selecting 3B ("all at activation") needs T1-b first
 Listed per choice above, and in decision 8 (T1-a, T1-b). Not offered:
 - **Payload intake inside C1:** C1's per-tick bound and lease are sized for upstream fetches; it would keep the capacity problem or need two C1 modes.
 - **Parsing a Russian title from `movieTitles`:** rejected; the languages share a script and the card forbids title guessing.
-- **A new `origin` value:** deferred to a PV1 coordination (decision 5); a CHECK rebuild here is avoided.
+- **A new `origin` value now:** deferred to the I2a audit and PV1 (decision 5).
 
 ## Examples
 
-- **Stream Film.** `tmdb_123` is admitted at 10:00 with an observation (`seq` 4001, year 2004, runtime 101, six core fields, 2 directors, 10 actors, translation `ru` "Пример"). The Film is in scope (no Letterboxd anchor, not rated or Watchlist). Intake writes six fields (`origin='catalog_enrichment'`, `write_key` `intake:…`, `observed_at` 10:00), the missing Persons and credits, and one `tmdb` localization source through the AIR-662 operation.
-- **Poster-only change.** `POSTER_UPDATE_SQL` fills the poster of an admission: the serving payload changes, **no observation is written**, no work reopens.
-- **EPG touch.** An airing adds an alias and a show: the payload changes, the observation digest is unchanged, nothing reopens.
-- **Unchanged-title reconfirmation.** A revalidation verifies the detail with no new alias: an observation is now published; an identical digest keeps `seq`, a runtime change moves it and reopens `core`.
-- **A Film that gets rated.** A `film_rated_admission` row appears: the next intake batch fails its scope guard and records `handed_to_catalog_enrichment`; C1 owns it.
-- **Identity correction.** The trusted claim moves from `tmdb:5` to `tmdb:6`: the anchor digest changes, intake's old credits are held as `superseded_credits`, and the unit applies only an observation of `tmdb:6`.
+- **Stream Film.** `tmdb_123` is admitted with an observation (`seq` 4001, year 2004, runtime 101, six core fields, 2 directors, 10 actors, translation `ru` "Пример"). Its disposition is `intake`. Intake writes six fields (`origin='catalog_enrichment'`, `write_key` `intake:…`, `observed_at` the observation's), the missing Persons and credits (attributed in `discovery_intake_credit`) and one `tmdb` localization source through the AIR-662 operation.
+- **Same data seen later.** A revalidation verifies the detail again with an identical digest: `observed_at` and `seq` move; the item rechecks; a field whose row is already at least as recent is a no-op (no receipt); a field whose row an intervening automatic value of the same rank displaced is re-adopted.
+- **Poster-only change.** `POSTER_UPDATE_SQL` fills a poster: the payload changes, no observation is published, nothing reopens.
+- **EPG touch.** An airing adds an alias: the payload changes, no observation, nothing reopens.
+- **A Film that gets rated.** A `film_rated_admission` row appears: the next batch fails its disposition guard; the item is `held_unowned` (`rated_outside_c1_scope`) unless C1's activated scope proves it `owned_by_c1`; intake never writes it again, and the held Film is counted.
+- **Identity correction.** The trusted claim moves from `tmdb:5` to `tmdb:6`: the anchor digest and `plan_epoch` change, the credits intake added under `tmdb:5` are held as `superseded_credits` from `discovery_intake_credit`, and the unit applies only an observation of `tmdb:6`.
+- **Observation before the Film exists.** An observation arrives for a `tmdb_id` with no canonical Film: the cursor advances with an `unresolved` item; the recheck resolves it once `film_mutation` has admitted the Film.
 
-## Synthetic test plan (for I1a and I2a)
+## Synthetic test plan (for I1a and I2a, on the real migrated schema)
 
-- **Observation:** source contamination (EPG `year`/`description` fallback, retained poster, `POSTER_UPDATE_SQL`, alias and availability changes never enter it); the digest is stable across `observed_at`; translation selection (single `ru`, several with `RU`, ambiguous, absent, unreadable); credits bounds (20/10, truncation gap, invalid ids dropped); revalidation publishes only after a verified detail and never on failure; no extra network request.
-- **Old payload:** a legacy payload yields no observation and class `no_observation`; `discoveredAt` is never an observation time.
-- **Scope:** C1 due, failed, disagreeing, paused and newly eligible Films are excluded; a newly added lid and a rated or Watchlist Film hand off; overlapping plans; a Film leaving scope between plan and commit fails the guard.
-- **Agreement and rank:** a Letterboxd anchor added between plan and commit; the fallback never grants intake; confidence before source; only `confirmed` replaces a different value; `hold` fills only; owner pin, dimension lock and reviewed localization untouched; no clear.
-- **Credits:** one namespace, both namespaces, existing EPG or C1 credits, missing Persons, `superseded_credits`, a stale plan refused at the Person unit.
-- **Classification and coverage:** the six classes are exhaustive and disjoint; an alias-only Film; partial metadata; a superseded admission; per-part outcomes `present`, `absent`, `unknown`, `gap`, `blocked`; no full-coverage claim after partial success; absent versus unreadable.
-- **Refresh:** a no-op repeat; a changed anchor with an unchanged digest reopens; real `seq` movement; a lock release; no time-based reopen.
-- **Delivery:** lost response per unit kind; a changed source with an unresolved receipt; reconcile-before-reserve; a stale lease, pause, takeover, deadline, digest movement and marker movement are not strikes; cursor drain loses no event between the admission batch and intake and does not starve older work.
+- **Observation:** source contamination (EPG fallbacks, retained poster, `POSTER_UPDATE_SQL`, alias and availability changes never enter); digest stability across `observed_at`; same digest later moves `seq` and `observed_at`; translation selection (single, several with `RU`, ambiguous, absent, unreadable); credits bounds (20/10, truncation gap, invalid ids); publication only after a verified detail, never on failure; no extra request; `seq` monotonic across deletion and across a missing high-water row (`seq_regressed`); the transfer `loading` state refuses publication; ambiguous or non-unique current admission is `unresolved`.
+- **Cutover:** observations between I1c and A1 are applied; a same-digest re-observation after A1 is a new `seq`; a Film verified only by an old version is class 5.
+- **Old payload:** no observation; `discoveredAt` is never an observation time.
+- **Dispositions:** C1 due, failed, disagreeing, paused and newly eligible Films are excluded; a missing `watchlist_film` projection is not a negative; rated outside C1's scope is `held_unowned`, not `owned_by_c1`; persisted exclusion survives a live predicate that flips back; re-entry only by owner `reopen`; handoff carries attribution and a `superseded_credits` hold both ways.
+- **Agreement and rank:** a Letterboxd anchor added between plan and commit; the fallback never grants intake; confidence before source; only `confirmed` replaces a different value; `hold` fills only; owner pin, dimension lock and reviewed localization untouched; no clear; fill, adopt, replace, keep and no-op each, with no receipt for a no-op.
+- **Credits:** one namespace, both namespaces, existing EPG or C1 credits, missing Persons, concurrent cross-origin Person creation (absent-target), `superseded_credits`, a stale plan refused at the Person unit.
+- **Reopen:** a previously unresolved identity; a mapping that changes (epoch and invalidation); an anchor change with an unchanged digest; a lock release; an owner action setting `recheck_at`; a C1 domain transition; the cursor advances only with durable items; no scan per tick.
+- **Receipts:** a moved observation with a pending receipt of the previous one (reconciled under the stable key); pause and takeover; a replaced intent; a post-commit crash and lost response settled by readback; the 100-receipt cap is visible and not a strike; deadline, lease and marker movement are not strikes.
+- **Coverage:** the seven classes are exhaustive and disjoint; `processed` is not coverage; `canonical_present` preserves an existing value on a blank observation; `observed_absent` versus `unknown`; an alias-only Film; partial metadata; gaps and blocks reported per part.
 - **Localization:** the AIR-662 receipt and owner-review fence; `ambiguous` writes nothing; the effective projection equals the resolver output on the rows read back.
+- **Capacity:** the dormant fixtures record statements, batches, rows and time per unit for all 30 Persons, reconciliation, intent, state and guards.
 
 ## Consequences
 
-- Canonical D1 becomes complete for Discovery Films that have an observation, with no new upstream load; the ADR 0216 aggregate and fallback stop losing their data.
-- Discovery gains an observation table and a revalidation write; two new schemas (I1, I2) with two owner apply operations.
-- One more automatic writer of `film_metadata`, kept disjoint from C1 by explicit scopes and fenced in every batch.
-- History is not covered by this record (decision 8); the payload keeps serving it.
-- Capacity is a measured activation gate, not a claim.
+- Fields present in an observation become present in canonical D1 for in-scope Discovery Films, with no new upstream load; fields absent from an observation, held and unresolved Films stay unknown or gapped and are reported as such. This does not make canonical D1 complete.
+- Discovery gains an observation table, a high-water row, a control row and a publish on every verified detail; two new schemas (I1, I2) with two owner apply operations and a producer enablement.
+- One more automatic writer of `film_metadata`, kept disjoint from C1 by persisted dispositions and fenced in every batch.
+- History is not covered by this record; HA plans it, and T1 is the owner's trade-off.
+- Capacity and the `origin` question are explicit gates, not claims.
 
 ## Recovery and migration boundary
 
-This record authorizes nothing: no migration file apply, no control row change, no scope, no schedule, no production write, no Discovery, TMDB or sync run. Each step of the delivery graph has its own gate. Code rollback does not remove stored observations or written values; correction is through the ADR 0214 owner route or a forward write. Old code ignores the new tables.
+This record authorizes nothing: no migration apply, no producer enablement, no control row change, no scope, no schedule, no shadow run, no production write, no Discovery, TMDB or sync run. Each step of the delivery graph has its own gate. Code rollback does not remove stored observations or written values; correction is through the ADR 0214 owner route or a forward write. Old code ignores the new tables.
 
 ## Evidence
 
 - **Original decision:** pending owner selections on [AIR-655](https://trello.com/c/YIPK38Tg).
 - **Implementation:** none.
-- **Dated verification:** the AIR-627 census of 25 Nov 2026 (L0, `rows_written=0`), linked in Context; the code references in Context were read statically on `main` `7d8d4b3`.
-- **Uncertainty:** the admission rate (a dated estimate); the share of TMDB entries with a `ru` translation or credits beyond the caps; the per-Film statement counts (estimates); how many historic Films will be re-verified by Discovery and so receive an observation; whether the single writer accepts a second declared caller with `origin='catalog_enrichment'` (to be verified in I2).
+- **Dated verification:** the AIR-627 census of 25 Nov 2026 (L0, `rows_written=0`), linked in Context; the code references (`src/discovery.js`, `src/discovery-authority.js`, `src/canonical-receipts.js`, migrations `0039`) were read statically on `main` `7d8d4b3`.
+- **Uncertainty:** the eligible historical counts per field and part; the admission rate (a dated estimate); the share of TMDB entries with a `ru` translation or more credits than the caps; per-batch statements, rows and time (to be measured); whether a reader classifies by `origin` or the `write_key` prefix; the applied state of migration `0039`; how many historic Films Discovery will re-verify.
 
 ## Follow-ups
 
-I1a, I1b, I2a, I2b, A1, HA and H3 as in decision 7, each its own card. The stale statements found by AIR-627 (`docs/architecture/film-person-lifecycle.md` on `writeFilmFacts` writing dimensions from wired producers; `docs/reference/domain/film-person.md` on Discovery metadata) are corrected in I2a.
-
-Documentation impact of the implementation cards: `docs/architecture/film-person-lifecycle.md`, `docs/architecture/discovery-and-resolution.md`, `docs/reference/domain/film-person.md`, `docs/reference/data/d1-schema.md`, `docs/reference/scheduled-tasks.md` or `docs/architecture/scheduling-and-orchestration.md` (the trigger), the producer, state and receipt contracts, the Discovery and producer runbooks, and the migration registry. No Mermaid change is made by this record.
+I1a, I1b, I1c, I2a, I2b, A1 and HA as in decision 7, each its own card; any historical write is decided after HA.
