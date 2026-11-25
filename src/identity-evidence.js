@@ -1,4 +1,4 @@
-// AIR-601 / ADR 0213 (Accepted), card E1 of the ADR 0207 delivery graph: the Film identity evidence ledger, initial slice (migrations/0040_film_identity_evidence.sql).
+// AIR-601 / ADR 0213 (Accepted), card E1 of the ADR 0207 delivery graph: the Film identity evidence ledger, initial slice (migrations/0041_film_identity_evidence.sql).
 // DORMANT: nothing in the Worker imports this module, it is not bundled, and no route, Workflow, cron or producer calls it. Card A1 wires the admission routes to it at
 // ADR 0207 mode `d1`; until then the table stays empty. Nothing here READS the ledger to decide anything (ADR 0213 decision 8): ADR 0184 keeps the Ratings marks,
 // ADR 0170 its exact archive join, and the catalog and Discovery their own reads.
@@ -26,7 +26,7 @@ import {assertWritable,database,failed,one,readAuthority} from './film-person-au
 import {fenced} from './canonical-mutations.js';
 import {RETRY_POLICY,defineOperation,digestOf,receiptedWrite,requestIdOf} from './canonical-receipts.js';
 
-export const IDENTITY_EVIDENCE_SCHEMA=40;
+export const IDENTITY_EVIDENCE_SCHEMA=41;
 export const IDENTITY_EVIDENCE_TABLE='film_identity_evidence';
 export const IDENTITY_EVIDENCE_OPERATION='identity_evidence';
 export const IDENTITY_EVIDENCE_ORIGIN='identity_evidence';
@@ -182,8 +182,8 @@ export function evidenceInsertStatement(plan,{filmId,requestId,at}={}){
   r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,instant(at,'at')]];
 }
 
-// `absent` (schema below 40 and no table: the legitimate pre-migration state), `ready`, or `film_person_unavailable` thrown for anything else (an unreadable database,
-// a version at or above 40 without the table): the writer fails closed and never treats a damaged schema as "no ledger".
+// `absent` (schema below 41 and no table: the legitimate pre-migration state), `ready`, or `film_person_unavailable` thrown for anything else (an unreadable database,
+// a version at or above 41 without the table): the writer fails closed and never treats a damaged schema as "no ledger".
 export async function identityEvidenceStatus(env){
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');

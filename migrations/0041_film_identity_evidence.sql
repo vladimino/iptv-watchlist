@@ -1,12 +1,13 @@
--- Schema v40: the Film identity evidence ledger, initial slice (ADR 0213, Accepted; AIR-601, card E1 of the ADR 0207 delivery graph). One row per typed,
+-- Schema v41: the Film identity evidence ledger, initial slice (ADR 0213, Accepted; AIR-601, card E1 of the ADR 0207 delivery graph). One row per typed,
 -- source-aware PROPOSITION about a subject (and, for a relation, an object): who observed it (`route`), how it was established (`method`), the underlying source content
 -- (`source_root`), the route's own reference (`source_ref`), the part a reader filters on (`source_scope`), and one of three polarities (`asserts`, `restricts`,
 -- `refutes`). It sits BESIDE the canonical claims (`film_external_id`) and decides nothing: no reader uses it when it is introduced (ADR 0213 decision 8).
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1 is a separate owner GO (card M1 of ADR 0207). No
 -- Worker code reads or writes the table: the writer helper (src/identity-evidence.js) is not bundled and nothing calls it until card A1. The table starts EMPTY and nothing
 -- is backfilled; the historical reconstruction (ADR 0213 decision 6, cards E3a and E3b) is a separate owner decision with its own GO.
--- It follows a complete version 39 (0039, the receipt operation key) and refuses anything else before a table is created: the first statement inserts a second schema_contract row and so aborts the file.
--- The version becomes 40 and never goes down. The number is the next free one on `main` at implementation and is renumbered at merge if another migration lands first.
+-- It follows a complete version 40 (0040, the retirement ledger movie index, after 0039, the receipt operation key) and refuses anything else before a table is created:
+-- the first statement inserts a second schema_contract row and so aborts the file. The version becomes 41 and never goes down. It was written as 0040 and renumbered
+-- to 0041 at merge because AIR-667's 0040 landed first.
 -- APPEND-ONLY: there is no update and no delete (triggers). A wrong row is answered by a later row (a scoped `refutes`), never by an edit. `seq` orders rows causally.
 -- Identifiers, digests, typed source ids and ISO-8601 UTC times only: no title, name, payload or personal data.
 -- D1 evaluates a LIKE or GLOB pattern of at most 50 bytes, so every time CHECK is split into short GLOB and substr() tests.
@@ -15,11 +16,13 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version = 39
+ WHERE id = 1 AND version = 40
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'table' AND name IN ('film_person_authority', 'canonical_revision', 'canonical_write_receipt', 'canonical_producer_outcome')
  ) = 4
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'canonical_write_receipt' AND sql LIKE '%operation_key%')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'tmdb_retirement_decision_movie')
 );
 
 CREATE TABLE film_identity_evidence (
@@ -189,6 +192,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 40,
-    note = 'Schema v40: the Film identity evidence ledger (empty, append-only, inert until written by the admission routes). Follows a complete version 39.'
-WHERE id = 1 AND version = 39;
+SET version = 41,
+    note = 'Schema v41: the Film identity evidence ledger (empty, append-only, inert until written by the admission routes). Follows a complete version 40.'
+WHERE id = 1 AND version = 40;

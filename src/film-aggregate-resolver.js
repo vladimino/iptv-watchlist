@@ -71,7 +71,7 @@ export function createStatementBudget(limit=REQUEST_STATEMENT_BUDGET){
 // Index use: film(id) PK, film_redirect(from_id) PK, canonical_revision(kind,id) PK, film_external_id PK (film_id,...), film_external_id_by_scheme_value, and
 // for the retirement ledger by movie id the non-unique index tmdb_retirement_decision_movie ON tmdb_retirement_decision(movie_id): the owner's decision of
 // 25 Nov 2026 (option A, review of PR #1000). The ledger has no Film foreign key and retires a movie id whatever Film it names, so it must be read by movie id.
-// That index is delivered by AIR-667 (migration, real-chain and production readback), a prerequisite of activation (AIR-648); until it is installed this
+// That index is migration 0040 (AIR-667); its production apply and readback are a prerequisite of activation (AIR-648). Until it is applied this
 // dormant statement would scan the ledger, and it must not be activated before then.
 const LIST='(SELECT value FROM json_each(?))';
 const capped=(columns,from,inner=columns)=>'(SELECT json_group_array(json_array('+columns+')) FROM (SELECT '+inner+' FROM '+from+' LIMIT ?))';

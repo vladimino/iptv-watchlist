@@ -1,4 +1,4 @@
-// AIR-601 / ADR 0213 (Accepted), card E1 of the ADR 0207 delivery graph: the Film identity evidence ledger, initial slice. Migration 0040 (a file only), the pure model
+// AIR-601 / ADR 0213 (Accepted), card E1 of the ADR 0207 delivery graph: the Film identity evidence ledger, initial slice. Migration 0041 (a file only), the pure model
 // and key, the writer helper inside a fenced canonical batch, and the receipted `identity_evidence` operation, on the sqlite3-CLI D1 stand-in. No Worker, R2, network or
 // production access. Covered: the migration's refusal and its constraints and triggers (append-only, marker, shape, Film-bound, scope, supersession, reconstruction
 // provenance), normalized keys, the initial-slice guard, ADR 0213 scenarios 1-8 and 11 at this layer (the admission routes that call the helper are card A1), receipt
@@ -17,11 +17,11 @@ import {SOURCE_CHANGED as ADAPTER_SOURCE_CHANGED} from '../src/canonical-produce
 import {EVIDENCE_PRESENT,SOURCE_CHANGED,IDENTITY_EVIDENCE_OPERATION,IDENTITY_EVIDENCE_ORIGIN,METHODS,POLARITIES,RELATIONS,ROUTES,SUBJECT_KINDS,evidenceInsertStatement,evidenceKeyOf,identityEvidenceDigest,
  identityEvidenceOperation,identityEvidenceRequestId,identityEvidenceStatus,initialSliceShape,normalizeEvidence,planIdentityEvidence,readEvidence,recordIdentityEvidence} from '../src/identity-evidence.js';
 
-const NEW='0040_film_identity_evidence.sql';
+const NEW='0041_film_identity_evidence.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
-assert.ok(files.includes(NEW),'0040 exists');
+assert.ok(files.includes(NEW),'0041 exists');
 const chain=files.slice(0,files.indexOf(NEW));
-assert.equal(chain[chain.length-1],'0039_receipt_operation_key.sql','0040 follows 0039');
+assert.equal(chain[chain.length-1],'0040_tmdb_retirement_decision_movie_index.sql','0041 follows 0040');
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-identity-evidence-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const read=name=>fs.readFileSync('migrations/'+name,'utf8');
@@ -32,7 +32,7 @@ const ok=(file,text)=>{const r=sqlite(file,text);assert.equal(r.status,0,r.stder
 const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.status,0,'expected a refusal: '+text);if(pattern)assert.match(r.stderr,pattern,text);};
 const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stack||error));return true;};
 
-const template38=path.join(root,'t39.sqlite'),template=path.join(root,'t40.sqlite');
+const template38=path.join(root,'t40.sqlite'),template=path.join(root,'t41.sqlite');
 ok(template38,chain.map(read).join('\n'));
 fs.copyFileSync(template38,template);
 ok(template,read(NEW));
@@ -79,17 +79,25 @@ async function admissionBatch(env,{filmId=FILM,expected,plans,requestId='admissi
  await fenced.commit(env,gate,statements,entities);
 }
 
-// ===== 1. the migration: it follows a complete 39, creates nothing otherwise, and adds one empty table =====
+// ===== 1. the migration: it follows a complete 40, creates nothing otherwise, and adds one empty table =====
 {
- const t37=path.join(root,'t38.sqlite');
+ const t37=path.join(root,'t39.sqlite');
  ok(t37,chain.slice(0,-1).map(read).join('\n'));
  const tables=file=>one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','trigger','index')");
  const before=tables(t37);
  refused(t37,read(NEW));
- assert.equal(tables(t37),before,'a refused file creates nothing (schema 38)');
- assert.equal(one(t37,'SELECT version FROM schema_contract WHERE id=1'),38);
+ assert.equal(tables(t37),before,'a refused file creates nothing (schema 39)');
+ assert.equal(one(t37,'SELECT version FROM schema_contract WHERE id=1'),39);
+ // A version 40 without the 0040 index is not a complete 40: refused, nothing created.
+ const noIndex=path.join(root,'t40-no-index.sqlite');
+ fs.copyFileSync(template38,noIndex);
+ ok(noIndex,'DROP INDEX tmdb_retirement_decision_movie');
+ const beforeNoIndex=tables(noIndex);
+ refused(noIndex,read(NEW));
+ assert.equal(tables(noIndex),beforeNoIndex,'a refused file creates nothing (40 without its index)');
+ assert.equal(one(noIndex,'SELECT version FROM schema_contract WHERE id=1'),40);
  refused(template,read(NEW),/UNIQUE|PRIMARY/);
- assert.equal(one(template,'SELECT version FROM schema_contract WHERE id=1'),40);
+ assert.equal(one(template,'SELECT version FROM schema_contract WHERE id=1'),41);
  assert.equal(one(template,'SELECT COUNT(*) FROM schema_contract'),1,'one schema_contract row');
  assert.equal(one(template,'SELECT COUNT(*) FROM film_identity_evidence'),0,'the table starts empty');
  assert.deepEqual(rows(template,'SELECT mode,cutover,generation FROM film_person_authority'),[{mode:'r2',cutover:'open',generation:0}],'the marker is not moved');
@@ -98,7 +106,7 @@ async function admissionBatch(env,{filmId=FILM,expected,plans,requestId='admissi
   'table:film_identity_evidence','trigger:film_identity_evidence_film_bound','trigger:film_identity_evidence_insert_conflict','trigger:film_identity_evidence_insert_open','trigger:film_identity_evidence_insert_shape','trigger:film_identity_evidence_no_delete',
   'trigger:film_identity_evidence_no_update','trigger:film_identity_evidence_scope_target','trigger:film_identity_evidence_supersedes_target']);
  const downgrade=database('r2');
- refused(downgrade,'UPDATE schema_contract SET version=39 WHERE id=1',/schema_contract_downgrade/);
+ refused(downgrade,'UPDATE schema_contract SET version=40 WHERE id=1',/schema_contract_downgrade/);
 }
 
 // ===== 2. the SQL contract: append-only, the marker, the model's shape, Film-bound rows, explicit unknowns only on reconstruction, scope and supersession =====
@@ -493,7 +501,7 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  await assert.rejects(()=>recordIdentityEvidence(envOf(absent),{evidence:diary(),filmId:FILM}),code('identity_evidence_unavailable'));
  const damaged=database('open');
  ok(damaged,'DROP TABLE film_identity_evidence');
- await assert.rejects(()=>identityEvidenceStatus(envOf(damaged)),code('film_person_unavailable'),'schema 40 without the table is never "no ledger"');
+ await assert.rejects(()=>identityEvidenceStatus(envOf(damaged)),code('film_person_unavailable'),'schema 41 without the table is never "no ledger"');
  assert.equal(await identityEvidenceStatus(envOf(database('open'))),'ready');
  // A `prepared` (or `r2`) marker is not served (ADR 0162): refused as unavailable, never written.
  await assert.rejects(()=>recordIdentityEvidence(envOf(database('prepared')),{evidence:diary(),filmId:FILM}),code('film_person_unavailable'));

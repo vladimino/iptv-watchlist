@@ -701,6 +701,9 @@ export const FILES={
  "d1-lookup-indexes-0036-production.mjs": {
   "suite": "core"
  },
+ "migration-0040-retirement-movie-index.mjs": {
+  "suite": "core"
+ },
  "watchlist-bootstrap.mjs": {
   "suite": "core"
  },
