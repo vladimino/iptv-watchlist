@@ -50,6 +50,7 @@ const R2_ONLY=[
 
 const KNOWN_CONFLICTS=new Set([
  'identity_collision',
+ 'film_retirement_protected_rows',
  'Fingerprint conflicts',
  'Prediction conflicts',
  'Profile version conflicts',
@@ -706,7 +707,11 @@ async function applyUnit(repositories,unit){
   if(identityKept(saved,unit.input.film))return {outcome:'explained',reason:'identity_control_kept'};
   const wanted=unit.input.film?.localization?.value??null;
   const stored=saved?.dimensions?.localization?.value??null;
-  if(wanted!=null&&stored!==wanted)return {outcome:'explained',reason:'reviewed_kept'};
+  if(wanted!=null&&stored!==wanted){
+   // Name what held the stored title: a reviewed row (reviewed_kept) or a provisional/owner/unknown control row W2 cannot prove redundant.
+   const held=saved?.dimensions?.localization;
+   return {outcome:'explained',reason:held?.status==='reviewed'?'reviewed_kept':'localization_control_kept'};
+  }
   return applied(saved);
  }
  if(unit.kind==='link')return applied(await repositories.canonical.applyLink(unit.input));
@@ -744,6 +749,9 @@ async function receiptExists(db,unit){return !!(await db.get('SELECT 1 AS ok FRO
 function knownReason(error){
  const message=String(error?.message||'');
  if(KNOWN_CONFLICTS.has(message))return message;
+ // The in-batch twin of the W3 plan check (src/canonical-repository.js retireFilm): a protected row that appeared after the plan makes its guarded
+ // insert violate this NOT NULL, which aborts the whole batch. Nothing else inserts a NULL redirect target.
+ if(/NOT NULL constraint failed: film_redirect\.to_film_id/i.test(message))return 'film_retirement_protected_rows';
  if(/FOREIGN KEY/i.test(message))return 'reference_missing';
  return 'unapplied';
 }

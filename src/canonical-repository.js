@@ -361,7 +361,7 @@ function metadataView(row){return {schemaVersion:row.schema_version,year:row.yea
 function updatedAtOf(entity){return entity.localization?.updatedAt||entity.identity?.updatedAt;}
 function json(value){return value==null?null:JSON.stringify(value);}
 function parseJson(value){return value?JSON.parse(value):null;}
-const FILM_LOCALIZATION_UPSERT=()=>`INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO UPDATE SET status=excluded.status,source=excluded.source,source_version=excluded.source_version,provenance_json=excluded.provenance_json,value=excluded.value,authority=excluded.authority,last_error=excluded.last_error,failure_reason=excluded.failure_reason,retry_at=excluded.retry_at,attempts=excluded.attempts,next_action=excluded.next_action,updated_at=excluded.updated_at WHERE ${REPLACEABLE_LOCALIZATION_SQL} OR (${REVIEWED_LOCALIZATION_KNOWN} AND ((authority='owner' AND excluded.status='reviewed' AND excluded.authority='owner') OR (COALESCE(authority,'')<>'owner' AND excluded.status='reviewed' AND (excluded.authority IN ('dictionary','owner') OR excluded.source='dictionary'))))`;
+const FILM_LOCALIZATION_UPSERT=()=>`INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO UPDATE SET status=excluded.status,source=excluded.source,source_version=excluded.source_version,provenance_json=excluded.provenance_json,value=excluded.value,authority=excluded.authority,last_error=excluded.last_error,failure_reason=excluded.failure_reason,retry_at=excluded.retry_at,attempts=excluded.attempts,next_action=excluded.next_action,updated_at=excluded.updated_at WHERE ${REPLACEABLE_LOCALIZATION_SQL} OR (${PROVISIONAL_LOCALIZATION_SQL} AND excluded.status='reviewed' AND (excluded.authority IN ('dictionary','owner') OR excluded.source='dictionary')) OR (${REVIEWED_LOCALIZATION_KNOWN} AND ((authority='owner' AND excluded.status='reviewed' AND excluded.authority='owner') OR (COALESCE(authority,'')<>'owner' AND excluded.status='reviewed' AND (excluded.authority IN ('dictionary','owner') OR excluded.source='dictionary'))))`;
 const identityHeld=()=>`EXISTS (SELECT 1 FROM film_dimension WHERE film_id=excluded.id AND dimension='identity' AND NOT ${REPLACEABLE_IDENTITY_SQL})`;
 // An imported identity or localization row: no processing fields (ADR 0218 F2) and no titleSource (an import ranks no title).
 function importedDimension(state){
@@ -396,10 +396,14 @@ const allowedAuthority=dimension=>dimension==='localization'?LOCALIZATION_AUTHOR
 // replaceableIdentity below; a test runs both over the same rows.
 export const REPLACEABLE_IDENTITY_SQL=`(status IN (${sqlList(DIMENSION_STATUSES.identity.filter(status=>status!=='reviewed'))}) AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
 
-// SQL predicate of a localization row W2 may replace: a missing or provisional row with no authority and a readable provenance. A reviewed row is
-// replaced only through the review upgrade rules of the upsert below; an owner or dictionary authority on a non-reviewed row, an unknown status or an
-// unreadable provenance is unknown_legacy (stage-1 parity) and is never replaced by an import. The JS twin is replaceableLocalization.
-export const REPLACEABLE_LOCALIZATION_SQL=`(status IN ('missing','provisional') AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
+// SQL predicate of a localization row W2 may replace by an ordinary automatic import: an EMPTY row (`missing`, no value, no authority, readable
+// provenance). A provisional row that carries a value is the stage-1 `control` class when it is the sole record, and the schema-3/4 offline targets
+// have no source-row table to prove it redundant, so W2 keeps it (a different incoming value is reported, not written). A provisional
+// row is replaced only by an authorized reviewed upgrade (PROVISIONAL_LOCALIZATION_SQL below). An owner or dictionary authority on a non-reviewed
+// row, an unknown status or an unreadable provenance is unknown_legacy and is never replaced. The JS twins are replaceableLocalization and
+// provisionalLocalization.
+export const REPLACEABLE_LOCALIZATION_SQL=`(status='missing' AND (value IS NULL OR value='') AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
+export const PROVISIONAL_LOCALIZATION_SQL=`(status='provisional' AND ${noAuthority} AND ${PROVENANCE_HELD}=0)`;
 const REVIEWED_LOCALIZATION_KNOWN=`(status='reviewed' AND (${noAuthority} OR authority IN (${sqlList(LOCALIZATION_AUTHORITY)})) AND ${PROVENANCE_HELD}=0)`;
 
 // SQL predicate of a row that W3 must not delete: a lock or any reviewed/owner row, a titleSource, an unknown_legacy shape (unknown status,
@@ -420,12 +424,17 @@ export function replaceableIdentity(row){
  return DIMENSION_STATUSES.identity.includes(row.status)&&row.status!=='reviewed'&&!fenceFilled(row.authority);
 }
 
-export function replaceableLocalization(row){
- if(!row)return true;
+function readableProvenance(row){
  const provenance=fenceParse(row.provenance_json);
  if(!provenance.ok||(provenance.value!=null&&!fencePlain(provenance.value)))return false;
- if(fencePlain(provenance.value)&&provenance.value.titleSource!==undefined)return false;
- return (row.status==='missing'||row.status==='provisional')&&!fenceFilled(row.authority);
+ return !(fencePlain(provenance.value)&&provenance.value.titleSource!==undefined);
+}
+export function replaceableLocalization(row){
+ if(!row)return true;
+ return readableProvenance(row)&&row.status==='missing'&&!fenceFilled(row.value)&&!fenceFilled(row.authority);
+}
+export function provisionalLocalization(row){
+ return !!row&&readableProvenance(row)&&row.status==='provisional'&&!fenceFilled(row.authority);
 }
 
 // The reasons a row is protected from W3, empty when it is not.

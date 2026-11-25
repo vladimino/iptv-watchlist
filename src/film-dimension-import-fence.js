@@ -37,8 +37,8 @@ export function offlineImportFenceSql(tables){
  const data=[...new Set(tables)].filter(name=>!internal(name)&&!GATE_TABLES.has(name)).map(safeName).sort();
  if(!data.length)throw new Error('offline_import_fence_no_tables');
  return [
-  `CREATE TABLE IF NOT EXISTS ${OFFLINE_IMPORT_CONTRACT_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, tables_json TEXT NOT NULL) STRICT`,
-  `CREATE TABLE IF NOT EXISTS ${OFFLINE_IMPORT_SESSION_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1), opened_at TEXT NOT NULL) STRICT`,
+  CONTRACT_TABLE_SQL,
+  SESSION_TABLE_SQL,
   `INSERT INTO ${OFFLINE_IMPORT_CONTRACT_TABLE} (id, version, tables_json) VALUES (1, ${OFFLINE_IMPORT_CONTRACT_VERSION}, '${JSON.stringify(data)}')`,
   ...CONTRACT_GUARDS,
   ...data.flatMap(table=>OPERATIONS.map(operation=>fenceTriggerSql(table,operation))),
@@ -55,25 +55,45 @@ export function schemaTablesOf(sql){
 export const withOfflineImportFence=sql=>sql.replace(/;\s*$/,'')+';\n'+offlineImportFenceSql(schemaTablesOf(sql));
 
 const normalized=text=>String(text||'').replace(/\s+/g,' ').trim();
+// The gate tables are part of the contract: a session table without CHECK (id = 1) could hold a second row that the write triggers (any row) honour
+// but a probe of id = 1 never sees, leaving the target open to every old importer.
+const CONTRACT_TABLE_SQL=`CREATE TABLE ${OFFLINE_IMPORT_CONTRACT_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL, tables_json TEXT NOT NULL) STRICT`;
+const SESSION_TABLE_SQL=`CREATE TABLE ${OFFLINE_IMPORT_SESSION_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1), opened_at TEXT NOT NULL) STRICT`;
+const tableShape=sql=>normalized(sql).replace(/^CREATE TABLE IF NOT EXISTS /i,'CREATE TABLE ');
 
-// Read before any write: the contract version, the session table and the exact trigger of every table and operation.
-export async function verifyImportFence(db){
+// Read before any write: the contract version, the exact gate tables, the declared and the actual coverage, the exact trigger of every table and
+// operation, and that no session row exists (any row, as the triggers test). `schemaVersions` (optional) also pins the supported schema_contract version
+// of the target: the two CLI paths (scripts/offline-import.mjs, scripts/d1-backfill.mjs) pass the versions they can write.
+export async function verifyImportFence(db,{schemaVersions=null}={}){
  const objects=await db.all("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','trigger')");
- const tables=objects.filter(item=>item.type==='table').map(item=>item.name);
+ const tableRows=objects.filter(item=>item.type==='table');
+ const tables=tableRows.map(item=>item.name);
  if(!tables.includes(OFFLINE_IMPORT_CONTRACT_TABLE)||!tables.includes(OFFLINE_IMPORT_SESSION_TABLE))return {ok:false,reason:'import_target_unfenced'};
- const contract=await db.get(`SELECT version,tables_json FROM ${OFFLINE_IMPORT_CONTRACT_TABLE} WHERE id=1`);
- if(!contract)return {ok:false,reason:'import_target_unfenced'};
+ const shapes=new Map(tableRows.map(item=>[item.name,tableShape(item.sql)]));
+ if(shapes.get(OFFLINE_IMPORT_CONTRACT_TABLE)!==CONTRACT_TABLE_SQL||shapes.get(OFFLINE_IMPORT_SESSION_TABLE)!==SESSION_TABLE_SQL)return {ok:false,reason:'import_target_fence_invalid',missing:['gate_table_shape']};
+ const contracts=await db.all(`SELECT id,version,tables_json FROM ${OFFLINE_IMPORT_CONTRACT_TABLE}`);
+ if(contracts.length!==1||contracts[0].id!==1)return {ok:false,reason:'import_target_unfenced'};
+ const contract=contracts[0];
  if(contract.version!==OFFLINE_IMPORT_CONTRACT_VERSION)return {ok:false,reason:'import_target_contract_unsupported',version:contract.version,supported:OFFLINE_IMPORT_CONTRACT_VERSION};
+ const data=tables.filter(name=>!internal(name)&&!GATE_TABLES.has(name)).sort();
+ let declared;
+ try{declared=JSON.parse(contract.tables_json);}catch{declared=null;}
+ if(!Array.isArray(declared)||JSON.stringify([...declared].sort())!==JSON.stringify(data))return {ok:false,reason:'import_target_fence_invalid',missing:['declared_coverage']};
  const triggers=new Map(objects.filter(item=>item.type==='trigger').map(item=>[item.name,item]));
  const missing=[];
- for(const table of tables.filter(name=>!internal(name)&&!GATE_TABLES.has(name)))for(const operation of OPERATIONS){
+ for(const table of data)for(const operation of OPERATIONS){
   const found=triggers.get(fenceTriggerName(table,operation));
   if(!found||found.tbl_name!==table||normalized(found.sql)!==normalized(fenceTriggerSql(table,operation)))missing.push(table+':'+operation);
  }
  for(const guard of CONTRACT_GUARDS){const name=guard.split(' ')[2];if(normalized(triggers.get(name)?.sql)!==normalized(guard))missing.push(name);}
  if(missing.length)return {ok:false,reason:'import_target_fence_invalid',missing};
- const open=await db.get(`SELECT opened_at FROM ${OFFLINE_IMPORT_SESSION_TABLE} WHERE id=1`);
- if(open)return {ok:false,reason:'import_target_session_open',openedAt:open.opened_at};
+ const open=await db.all(`SELECT id,opened_at FROM ${OFFLINE_IMPORT_SESSION_TABLE}`);
+ if(open.length)return {ok:false,reason:'import_target_session_open',openedAt:open[0].opened_at};
+ if(schemaVersions){
+  const schema=tables.includes('schema_contract')?await db.get('SELECT version FROM schema_contract WHERE id=1'):null;
+  const version=schema?.version??null;
+  if(!schemaVersions.includes(version))return {ok:false,reason:'import_target_schema_unsupported',version,supported:schemaVersions};
+ }
  return {ok:true,version:contract.version};
 }
 
@@ -106,4 +126,4 @@ export function openImportSession(db,{now=()=>new Date().toISOString()}={}){
 }
 
 // The protected-row predicates live in the repository itself (it is bundled and may not import); re-exported here for the importer and tests.
-export {DIMENSION_STATUSES,PROTECTED_ROW_SQL,REPLACEABLE_IDENTITY_SQL,REPLACEABLE_LOCALIZATION_SQL,protectedReasons,replaceableIdentity,replaceableLocalization} from './canonical-repository.js';
+export {DIMENSION_STATUSES,PROTECTED_ROW_SQL,REPLACEABLE_IDENTITY_SQL,PROVISIONAL_LOCALIZATION_SQL,REPLACEABLE_LOCALIZATION_SQL,protectedReasons,provisionalLocalization,replaceableIdentity,replaceableLocalization} from './canonical-repository.js';

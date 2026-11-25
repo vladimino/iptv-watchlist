@@ -97,7 +97,7 @@ const PREDICATES={
  held_localization_not_recorded:d=>['film_alias','person_alias','localization_conflict'].includes(d.table)&&d.kind==='only_projector',
  noop_write_keeps_updated_at:d=>['film_metadata','watchlist_film'].includes(d.table)&&d.kind==='column'&&d.column==='updated_at'&&String(d.projector)>String(d.canonical),
  canonical_identity_requires_trusted_tmdb:d=>d.table==='film'&&d.kind==='column'&&d.column==='canonical_identity'&&d.projector!==null&&d.canonical===null,
- projector_import_stage2_dimensions:d=>d.table==='film_dimension'&&((d.kind==='only_canonical'&&['metadata','fingerprint','prediction'].includes(d.row?.dimension))||(d.kind==='column'&&/\|identity$/.test(d.key)&&['next_action','last_error','failure_reason','retry_at','attempts'].includes(d.column)&&(d.projector===null||d.projector==='none'||d.projector===0))),
+ projector_import_stage2_dimensions:d=>d.table==='film_dimension'&&((d.kind==='column'&&/\|localization$/.test(d.key)&&d.projectorRow?.status==='provisional'&&!d.projectorRow?.authority&&['value','source','source_version','provenance_json','updated_at'].includes(d.column))||(d.kind==='only_canonical'&&['metadata','fingerprint','prediction'].includes(d.row?.dimension))||(d.kind==='column'&&/\|identity$/.test(d.key)&&['next_action','last_error','failure_reason','retry_at','attempts'].includes(d.column)&&(d.projector===null||d.projector==='none'||d.projector===0))),
  credit_ordinals_kept:d=>d.table==='film_person_credit'&&d.kind==='column'&&d.column==='ordinal',
 };
 const KNOWN=new Map([...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS].map(item=>[item.id,item]));

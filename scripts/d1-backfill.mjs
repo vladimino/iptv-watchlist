@@ -223,7 +223,7 @@ export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggr
  if(version!==SCHEMA_VERSION)throw new BackfillStop('schema_version_mismatch',{expected:SCHEMA_VERSION,actual:version});
  // AIR-661 / ADR 0218 decision 7: the frozen schema-4 target must also carry the offline import contract, read here, before the identity receipt
  // or any other write. A target without it is refused; installing the contract on a real D1 database is its own owner GO.
- const fence=await verifyImportFence(adapter);
+ const fence=await verifyImportFence(adapter,{schemaVersions:[SCHEMA_VERSION]});
  findings.schema.importContract=fence.ok?fence.version:null;
  if(!fence.ok)throw new BackfillStop(fence.reason,{missing:fence.missing?.slice(0,20)??null,version:fence.version??null});
  const receipts=await adapter.all('SELECT source_key,source_sha256,target_id,imported_at FROM import_receipt WHERE target_table=? ORDER BY imported_at',[IDENTITY_TARGET_TABLE]);

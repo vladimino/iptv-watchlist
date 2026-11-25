@@ -9,7 +9,7 @@ import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {importBatch} from '../src/offline-importer.js';
-import {DIMENSION_STATUSES,OFFLINE_IMPORT_CONTRACT_VERSION,PROTECTED_ROW_SQL,REPLACEABLE_IDENTITY_SQL,REPLACEABLE_LOCALIZATION_SQL,fenceTriggerSql,offlineImportFenceSql,openImportSession,protectedReasons,replaceableIdentity,replaceableLocalization,schemaTablesOf,verifyImportFence,withOfflineImportFence} from '../src/film-dimension-import-fence.js';
+import {DIMENSION_STATUSES,OFFLINE_IMPORT_CONTRACT_VERSION,PROTECTED_ROW_SQL,REPLACEABLE_IDENTITY_SQL,PROVISIONAL_LOCALIZATION_SQL,REPLACEABLE_LOCALIZATION_SQL,fenceTriggerSql,offlineImportFenceSql,openImportSession,protectedReasons,provisionalLocalization,replaceableIdentity,replaceableLocalization,schemaTablesOf,verifyImportFence,withOfflineImportFence} from '../src/film-dimension-import-fence.js';
 import {KNOWN_STATUSES} from '../src/domain/film-dimension-parity.js';
 import {createCanonicalRepository as createOldCanonicalRepository} from './fixtures/air-661-old-importer/canonical-repository.baseline.js';
 import {importBatch as oldImportBatch} from './fixtures/air-661-old-importer/offline-importer.baseline.js';
@@ -88,7 +88,26 @@ assert.deepEqual(schemaTablesOf(V4).sort(),query(target({fence:false,schema:V4})
  const altered=await verifyImportFence((()=>{const file=target();exec(file,"DROP TRIGGER offline_import_fence_film_delete;CREATE TRIGGER offline_import_fence_film_delete BEFORE DELETE ON film FOR EACH ROW WHEN 0 BEGIN SELECT RAISE(ABORT, 'offline_import_target_fenced'); END;");return openSqlite(file);})());
  assert.deepEqual(altered.missing,['film:delete'],'a trigger with the right name and the wrong body is not the fence');
  const uncovered=await verifyImportFence((()=>{const file=target();exec(file,'CREATE TABLE later_table (id INTEGER PRIMARY KEY) STRICT');return openSqlite(file);})());
- assert.deepEqual(uncovered.missing,['later_table:insert','later_table:update','later_table:delete'],'a table added after the install is not covered: refused');
+ assert.deepEqual(uncovered.missing,['declared_coverage'],'a table added after the install makes the declared coverage inconsistent: refused');
+ // Gate-table shape, a second session row, declared/actual coverage and the schema version, each on a real SQLite target.
+ const mutate=(sql)=>{const file=target({schema:V4});exec(file,'DROP TRIGGER offline_import_contract_no_update;DROP TRIGGER offline_import_contract_no_delete;'+sql);return openSqlite(file);};
+ const noCheck=target({fence:false,schema:V4});
+ exec(noCheck,offlineImportFenceSql(schemaTablesOf(V4)).replace('CHECK (id = 1), opened_at',', opened_at'));
+ assert.equal((await verifyImportFence(openSqlite(noCheck))).reason,'import_target_fence_invalid','a session table without CHECK (id = 1)');
+ exec(noCheck,"INSERT INTO offline_import_session (id,opened_at) VALUES (2,'x')");
+ const second=await verifyImportFence(openSqlite(noCheck));
+ assert.equal(second.reason,'import_target_fence_invalid','the malformed session table is refused before its stray row is even read');
+ const sessionRow2=target({schema:V4});
+ assert.throws(()=>exec(sessionRow2,"INSERT INTO offline_import_session (id,opened_at) VALUES (2,'x')"),/CHECK|constraint/i,'the valid session table cannot hold a second row');
+ assert.equal((await verifyImportFence(mutate("UPDATE offline_import_contract SET tables_json='[\"film\"]'"))).reason,'import_target_fence_invalid');
+ assert.deepEqual((await verifyImportFence(mutate("UPDATE offline_import_contract SET tables_json='not json'"))).missing,['declared_coverage']);
+ assert.throws(()=>mutate("INSERT INTO offline_import_contract (id,version,tables_json) VALUES (2,1,'[]')"),/CHECK|constraint/i,'the contract table cannot hold a second row');
+ assert.equal((await verifyImportFence(mutate("DROP TABLE offline_import_session;CREATE TABLE offline_import_session (id INTEGER PRIMARY KEY, opened_at TEXT NOT NULL) STRICT"))).reason,'import_target_fence_invalid');
+ // The supported schema_contract version of each CLI path.
+ const v4=openSqlite(target({schema:V4}));
+ assert.deepEqual(await verifyImportFence(v4,{schemaVersions:[3,4]}),{ok:true,version:1});
+ assert.equal((await verifyImportFence(openSqlite(target({schema:V4})),{schemaVersions:[5]})).reason,'import_target_schema_unsupported');
+ assert.deepEqual(await verifyImportFence(openSqlite(target({schema:V1})),{schemaVersions:[3,4]}),{ok:false,reason:'import_target_schema_unsupported',version:1,supported:[3,4]});
  const open=target();exec(open,"INSERT INTO offline_import_session (id,opened_at) VALUES (1,'crashed')");
  assert.equal((await verifyImportFence(openSqlite(open))).reason,'import_target_session_open');
  // Every operation on every data table is gated; the session row lets a write through only inside its own batch.
@@ -150,11 +169,12 @@ for(const [name,make,reason] of [['unfenced',()=>target({fence:false}),'import_t
  assert.deepEqual(legacy('film:unlocked'),before.unlocked,'unlocked metadata and a stale fingerprint byte-identical');
  await repo.saveFilm({film:film('film:fresh','Fresh')});
  assert.deepEqual(dims(file,'film:fresh').map(item=>item.dimension),['identity','localization'],'a new Film gets identity and localization only');
- for(const dimension of ['identity','localization']){
-  const stored=row(file,'film:keep',dimension);
-  assert.equal(stored.updated_at,LATER,dimension+' replaced');
-  assert.deepEqual([stored.last_error,stored.failure_reason,stored.retry_at,stored.attempts,stored.next_action],[null,null,null,0,'none'],dimension+': no processing field imported');
- }
+ const identity=row(file,'film:keep','identity');
+ assert.equal(identity.updated_at,LATER,'the replaceable identity row is replaced');
+ assert.deepEqual([identity.last_error,identity.failure_reason,identity.retry_at,identity.attempts,identity.next_action],[null,null,null,0,'none'],'no processing field imported');
+ const fresh=row(file,'film:fresh','localization');
+ assert.deepEqual([fresh.last_error,fresh.failure_reason,fresh.retry_at,fresh.attempts,fresh.next_action],[null,null,null,0,'none'],'a new localization row carries no processing field');
+ assert.equal(row(file,'film:keep','localization').value,'Сохранённое','the stored provisional title is the sole record on this target, so it is kept');
  assert.equal(saved.originalTitle,'Import Title');
 }
 
@@ -177,7 +197,23 @@ for(const [name,make,reason] of [['unfenced',()=>target({fence:false}),'import_t
   await repo.saveFilm({film:film('film:l','Import Title')});
   assert.deepEqual(row(file,'film:l','localization'),before,name+': localization byte-identical');
  }
- // A replaceable provisional row is replaced; a reviewed dictionary import upgrades it (the review rule), without processing fields.
+ // A stored provisional title is the stage-1 control class when it is the sole record, and a schema-3/4 target has no source table to prove it
+ // redundant: a different provisional title and a missing localization both leave it byte-identical, with and without a race.
+ for(const [name,incoming] of [['different provisional',state('localization','provisional',{value:'Другое',source:'wikidata'})],['missing',state('localization','missing')]]){
+  const sole=target();seed(sole,'film:sole',{identity:{}});
+  const before=row(sole,'film:sole','localization');
+  await repoOf(sole).repo.saveFilm({film:film('film:sole','Import',{localization:incoming})});
+  assert.deepEqual(row(sole,'film:sole','localization'),before,'sole-record provisional title kept against '+name);
+  const raced=target();seed(raced,'film:sole',{identity:{},localization:{status:'missing',value:null}});
+  const handle=repoOf(raced);
+  handle.db.race(()=>write(raced,"UPDATE film_dimension SET status='provisional',value='Появилось' WHERE film_id='film:sole' AND dimension='localization'"));
+  await handle.repo.saveFilm({film:film('film:sole','Import',{localization:incoming})});
+  assert.equal(row(raced,'film:sole','localization').value,'Появилось','a value that appears after the plan is kept against '+name);
+ }
+ // An EMPTY localization row is replaced by an automatic value; an authorized reviewed upgrade (dictionary/owner) replaces a provisional title.
+ const empty=target();seed(empty,'film:e',{identity:{},localization:{status:'missing',value:null}});
+ await repoOf(empty).repo.saveFilm({film:film('film:e','Import')});
+ assert.equal(row(empty,'film:e','localization').value,'Импорт');
  const file=target();seed(file,'film:u',{identity:{}});
  const {repo}=repoOf(file);
  await repo.saveFilm({film:film('film:u','Import',{localization:state('localization','reviewed',{source:'dictionary',sourceVersion:'dictionary',value:'Словарь',provenance:{authority:'dictionary'}})})});
@@ -200,11 +236,11 @@ for(const [name,make,reason] of [['unfenced',()=>target({fence:false}),'import_t
  for(let at=0;at<samples.length;at+=400){
   const chunk=samples.slice(at,at+400);
   const values=chunk.map((item,i)=>`(${at+i},${literal(item.dimension)},${literal(item.status)},${literal(item.provenance_json)},${literal(item.authority)},${literal(item.value)})`).join(',');
-  for(const result of query(file,`WITH s(i,dimension,status,provenance_json,authority,value) AS (VALUES ${values}) SELECT i,${REPLACEABLE_IDENTITY_SQL} AS identity,${REPLACEABLE_LOCALIZATION_SQL} AS localization,${PROTECTED_ROW_SQL} AS protected FROM s ORDER BY i`)){
+  for(const result of query(file,`WITH s(i,dimension,status,provenance_json,authority,value) AS (VALUES ${values}) SELECT i,${REPLACEABLE_IDENTITY_SQL} AS identity,${REPLACEABLE_LOCALIZATION_SQL} AS localization,${PROVISIONAL_LOCALIZATION_SQL} AS provisional,${PROTECTED_ROW_SQL} AS protected FROM s ORDER BY i`)){
    const sample=samples[result.i];
    assert.equal(!!result.protected,protectedReasons(sample).length>0,'protected twin: '+JSON.stringify(sample));
    if(sample.dimension==='identity')assert.equal(!!result.identity,replaceableIdentity(sample),'identity twin: '+JSON.stringify(sample));
-   if(sample.dimension==='localization')assert.equal(!!result.localization,replaceableLocalization(sample),'localization twin: '+JSON.stringify(sample));
+   if(sample.dimension==='localization'){assert.equal(!!result.localization,replaceableLocalization(sample),'localization twin: '+JSON.stringify(sample));assert.equal(!!result.provisional,provisionalLocalization(sample),'provisional twin: '+JSON.stringify(sample));}
   }
  }
  // The stage-1 classes W3 must keep: dictionary authority on a non-reviewed row (unknown_legacy), a provisional title that may be the sole record or an
@@ -269,9 +305,14 @@ for(const [name,make,reason] of [['unfenced',()=>target({fence:false}),'import_t
  assert.equal(first.stopped,false,JSON.stringify(first.stopReasons));
  assert.equal(first.explained,1);
  assert.equal(first.ledger.find(item=>item.targetId==='film:owned')?.reason,'identity_control_kept');
+ // The retained control title is reported as such, never as a reviewed row.
+ const soleFile=target();seed(soleFile,'film:sole',{identity:{}});
+ const soleDb=openSqlite(soleFile);
+ const soleRun=await importBatch(soleDb,repositoriesOf(soleDb),{importedAt:AT,units:[unit('film:sole','Sole','sha-sole')]});
+ assert.equal(soleRun.ledger.find(item=>item.targetId==='film:sole')?.reason,'localization_control_kept');
+ assert.equal(row(soleFile,'film:sole','localization').value,'Сохранённое');
  assert.equal(first.applied,5);
- assert.deepEqual(dims(file,'film:owned').filter(item=>item.dimension!=='localization'),before.filter(item=>item.dimension!=='localization'),'the owned Film kept every row but its replaceable provisional localization');
- assert.equal(row(file,'film:owned','localization').value,'Импорт','which the import replaced, as W2 allows');
+ assert.deepEqual(dims(file,'film:owned'),before,'the owned Film kept every row, its sole-record provisional title included');
  const perUnit=db.stats.writes/units.length;
  assert.ok(perUnit<=40,'bounded write statements per Film unit: '+perUnit);
  const snapshot=dump(file);
@@ -285,6 +326,42 @@ for(const [name,make,reason] of [['unfenced',()=>target({fence:false}),'import_t
  assert.equal(query(file,"SELECT COUNT(*) AS n FROM film_dimension WHERE dimension IN ('fingerprint','prediction','metadata') AND film_id LIKE 'film:n%'")[0].n,0,'no derived row inserted');
  assert.equal(query(file,'SELECT COUNT(*) AS n FROM offline_import_session')[0].n,0,'the session is closed after the run');
  assert.throws(()=>exec(file,"UPDATE film SET original_title='x'"),/offline_import_target_fenced/,'and the target is gated again');
+}
+
+// ---- 11. A valid closed target stays closed after a successful and after a failed batch; the typed W3 refusal reaches the ledger ----------------------
+{
+ const file=target();
+ const db=openSqlite(file);
+ const repositories=repositoriesOf(db);
+ const old=()=>{const handle=openSqlite(file);return {handle,repos:repositoriesOf(handle,createOldCanonicalRepository)};};
+ const refusedByContract=async label=>{
+  const {handle,repos}=old();
+  const before=dump(file);
+  const run=await oldImportBatch(handle,repos,{importedAt:LATER,units:[personUnit('sha-old-'+label),unit('film:o'+label,'Old','sha-old-f'+label)]}).catch(error=>({thrown:String(error.message)}));
+  assert.ok(run.thrown?/offline_import_target_fenced/.test(run.thrown):run.applied===0,label+': the old importer applied nothing');
+  assert.equal(dump(file),before,label+': the old importer changed nothing');
+  assert.equal((await verifyImportFence(openSqlite(file))).ok,true,label+': the target is still a valid closed contract');
+ };
+ await refusedByContract('fresh');
+ const ok=await importBatch(db,repositories,{importedAt:AT,units:[unit('film:s1','Survivor','sha-s1'),unit('film:r1','Retired','sha-r1')]});
+ assert.equal(ok.applied,2);
+ await refusedByContract('after-success');
+ // A failed batch: a link whose retired Film gains a protected row after the plan (the in-batch guard aborts the transaction).
+ write(file,"UPDATE film_dimension SET status='provisional',value='Единственное' WHERE film_id='film:r1' AND dimension='localization'");
+ const linkUnit=sha=>({family:'watchlist',kind:'link',sourceKey:'watchlist.json',sourceSha256:sha,targetTable:'film',targetId:'film:s1',unportable:false,input:{survivor:film('film:s1','Survivor'),redirect:{from:'film:r1',to:'film:s1',at:LATER}}});
+ const planRefused=await importBatch(db,repositories,{importedAt:AT,units:[linkUnit('sha-link-plan')]});
+ const planEntry=planRefused.ledger.find(item=>item.targetId==='film:s1');
+ assert.deepEqual([planEntry.outcome,planEntry.reason],['conflict','film_retirement_protected_rows'],'the plan-time refusal keeps its typed reason in the ledger');
+ assert.equal(filmRow(file,'film:r1').original_title,'Retired');
+ write(file,"UPDATE film_dimension SET status='missing',value=NULL WHERE film_id='film:r1' AND dimension='localization'");
+ db.race(()=>write(file,"UPDATE film_dimension SET status='provisional',value='Единственное' WHERE film_id='film:r1' AND dimension='localization'"));
+ const batchRefused=await importBatch(db,repositories,{importedAt:AT,units:[linkUnit('sha-link-batch')]});
+ const batchEntry=batchRefused.ledger.find(item=>item.targetId==='film:s1');
+ assert.deepEqual([batchEntry.outcome,batchEntry.reason],['conflict','film_retirement_protected_rows'],'the in-batch refusal keeps its typed reason in the ledger');
+ assert.equal(filmRow(file,'film:r1').original_title,'Retired','nothing was retired');
+ assert.equal(query(file,'SELECT COUNT(*) AS n FROM film_redirect')[0].n,0);
+ assert.equal(query(file,'SELECT COUNT(*) AS n FROM offline_import_session')[0].n,0,'the failed batch left no session row');
+ await refusedByContract('after-failure');
 }
 
 console.log('film-dimension-import-fence: the offline import contract (write gate keyed on the import session, version, every trigger) refuses the frozen pre-stage-2 importer at its first write of any kind (batch, enrichment W2, link/retirement) with nothing changed, and the current importer refuses a missing, future, incomplete or open target before any write; W2 keeps metadata, fingerprint and prediction rows byte-identical, inserts none, imports no processing field, keeps title and every control or unknown_legacy identity and localization row; W3 keeps every reviewed, owner, titleSource, unknown and valued localization row at the plan and in the batch; JS and SQL predicates agree; replay is idempotent and bounded');
