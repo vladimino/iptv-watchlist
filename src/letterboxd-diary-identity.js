@@ -288,14 +288,14 @@ const LetterboxdDiaryIdentity=(()=>{
    const lid=item.lid,intended=intentOf(prior);
    let verdict=null;
    const reacquire=async()=>{
-    if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS)return {ok:false,reason:'deferred'};
+    if(stopped||STEP_LIMIT<=fetched||STEP_BUDGET_MS>remaining())return {ok:false,reason:'deferred'};
     fetched++;counts.checked++;checked.add(lid);
     let outcome;
     try{outcome=await checkOne(env,item,{clock,fetchImpl,remaining});}catch(error){outcome={state:'pending',reason:'check_failed'};}
-    if(outcome.stop)stopped=true;
+    if(outcome.stop){stopped=true;}
     if(outcome.state!=='verified')return {ok:false,reason:outcome.reason};
     verdict=outcome.verdict;
-    if(remaining()<WRITE_RESERVE_MS)return {ok:false,reason:'deferred'};
+    if(WRITE_RESERVE_MS>remaining())return {ok:false,reason:'deferred'};
     // The durable intent is written before the first effect, but never over a DIFFERENT one: the coordinator answers `source_changed` for that.
     if(intended===null||intended===String(verdict.tmdb)){if(!(await intend(item,verdict.tmdb)))return {ok:false,reason:'deferred'};}
     const evidenceSha256=await evidenceDigestOf(item,verdict);
