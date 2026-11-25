@@ -149,7 +149,8 @@ const LetterboxdRatedCandidates = (() => {
   function stopFrom(error) {
     const name = error && error.name;
     if (name === 'TimeoutError' || name === 'AbortError') return {stop: 'timeout'};
-    return {stop: 'fetch_failed'};
+    // AIR-599: `network` lets the Diary check classify this as `network_error`; every other caller keeps reading `fetch_failed`.
+    return {stop: 'fetch_failed', network: true};
   }
   async function readBounded(response, limit) {
     const body = response && response.body;
@@ -190,7 +191,7 @@ const LetterboxdRatedCandidates = (() => {
     let url = 'https://boxd.it/' + code;
     for (let hop = 0; hop < 4; hop++) {
       const fetched = await boundedFetch(fetchImpl, url, {redirect: 'manual', headers: {Accept: 'text/html'}}, PAGE_MS, PAGE_BYTES);
-      if (fetched.stop) return {stop: fetched.stop};
+      if (fetched.stop) return fetched.network ? {stop: fetched.stop, network: true} : {stop: fetched.stop};
       const response = fetched.response;
       const status = response.status;
       const headers = response.headers;
@@ -205,7 +206,7 @@ const LetterboxdRatedCandidates = (() => {
       const html = fetched.text;
       const stop = LetterboxdIdentity.transportStop(status, headers, html);
       if (stop) return {stop};
-      if (status !== 200) return {review: 'fetch_failed'};
+      if (status !== 200) return {review: 'fetch_failed', status}; // AIR-599: the status lets the Diary check split a 404 from a 5xx
       const landing = new URL(url);
       if (!LetterboxdIdentity.isFilmPage(landing)) return {review: 'not_film_page'};
       return {html, landing};
@@ -216,11 +217,11 @@ const LetterboxdRatedCandidates = (() => {
   async function movieDetail(env, tmdb, fetchImpl) {
     if (!env || !env.TMDB_API_READ_ACCESS_TOKEN) return {stop: 'tmdb_unavailable'};
     const fetched = await boundedFetch(fetchImpl, 'https://api.themoviedb.org/3/movie/' + encodeURIComponent(tmdb) + '?language=en-US', {headers: {Authorization: 'Bearer ' + env.TMDB_API_READ_ACCESS_TOKEN, Accept: 'application/json'}}, DETAIL_MS, DETAIL_BYTES);
-    if (fetched.stop) return {stop: fetched.stop};
+    if (fetched.stop) return fetched.network ? {stop: fetched.stop, network: true} : {stop: fetched.stop};
     const body = fetched.text;
     const stop = LetterboxdIdentity.transportStop(fetched.response.status, fetched.response.headers, body);
     if (stop) return {stop};
-    if (fetched.response.status !== 200) return {review: 'tmdb_fetch_failed'};
+    if (fetched.response.status !== 200) return {review: 'tmdb_fetch_failed', status: fetched.response.status};
     try {return {detail: JSON.parse(body)};} catch {return {review: 'tmdb_fetch_failed'};}
   }
 

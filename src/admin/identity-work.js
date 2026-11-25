@@ -6,7 +6,7 @@
 // The contract is docs/reference/domain/identity-work-inventory.md and ADR 0170.
 const IDENTITY_WORK_CURSOR_MAX=6000;
 const IDENTITY_WORK_ADMISSION_CAP=5000;
-const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/imports/<archiveSha256>/rated-candidates.json','letterboxd/imports/ (delimiter list)','film_rated_admission (D1)','watchlist_admission_pending (D1)'];
+const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/imports/<archiveSha256>/rated-candidates.json','letterboxd/imports/ (delimiter list)','film_rated_admission (D1)','watchlist_admission_pending (D1)','letterboxd/facts/scans/diary-identity.json (Ratings documents)'];
 
 function identityWorkPinOf(registryToken,limboPin){
  return ['I1',encodeURIComponent(registryToken),encodeURIComponent(limboPin??'')].join('|');
@@ -88,6 +88,14 @@ function identityWorkOrder(registryRead,listing,selected){
  // Archives the registry does not know are paged after the registered ones, labelled unindexed, never presented as an empty queue.
  return indexed.concat(listing.prefixes.filter(sha=>!known.has(sha)));
 }
+// AIR-599: one read of the shared Diary check document and its backlog with their stored versions (read only; the Ratings document store or the legacy raw store, as LetterboxdFacts reads them).
+async function identityWorkReadDiary(env){
+ if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdFacts.readDiaryIdentityVersioned!=='function')return {error:'reader_unavailable'};
+ try{
+  const [main,backlog]=await Promise.all([LetterboxdFacts.readDiaryIdentityVersioned(env),LetterboxdFacts.readDiaryBacklog(env)]);
+  return {doc:main.doc,version:main.version,backlog:backlog.doc,backlogVersion:backlog.version,cap:LetterboxdFacts.DIARY_IDENTITY_CAP,backlogCap:LetterboxdFacts.DIARY_BACKLOG_CAP};
+ }catch(error){return {error:typeof error?.code==='string'?error.code:'unavailable'};}
+}
 async function adminIdentityWorkRoute(request,env,url){
  if(request.method!=='GET')return adminError('method_not_allowed',405);
  const params=url.searchParams;
@@ -102,7 +110,11 @@ async function adminIdentityWorkRoute(request,env,url){
  const wantsMemory=IdentityWorkInventory.laneEnabled(query,'film')||IdentityWorkInventory.laneEnabled(query,'epg_observation');
  const wantsCandidates=IdentityWorkInventory.laneEnabled(query,'letterboxd_rated_candidate');
  const wantsAdmissions=IdentityWorkInventory.laneEnabled(query,'watchlist_admission');
+ const wantsDiary=IdentityWorkInventory.laneEnabled(query,'diary_identity');
  let admissionCoverage=null;
+ // AIR-599 / ADR 0207 decision 4b: the shared Diary check document and its backlog (read only), for the `diary_identity` lane and for the class and streak of the ledger rows.
+ const diaryRead=wantsDiary||wantsAdmissions?await identityWorkReadDiary(env):null;
+ const classify=typeof LetterboxdDiaryIdentity!=='undefined'?reason=>LetterboxdDiaryIdentity.classify(reason):null;
  const limbo=wantsMemory?await identityWorkLimbo(env,pin!==null||decoded!==null,nowMs):null;
  const registryRead=wantsCandidates?await identityWorkReadRegistry(env):{state:'not_read',registry:null,etag:null,token:'not_read'};
  const currentPin=identityWorkPinOf(registryRead.token,limbo&&!limbo.error?limbo.pin:(limbo?'unavailable':''));
@@ -129,7 +141,7 @@ async function adminIdentityWorkRoute(request,env,url){
    try{read=typeof WatchlistD1==='undefined'?{ok:false,reason:'repository_unavailable'}:await WatchlistD1.admissionInventory(env,{filter,after:place.version>=0?{version:place.version,lid:place.lid}:null,limit:limit-rows.length,now:nowMs});}catch{read={ok:false,reason:'unavailable'};}
    if(!read.ok){admissionCoverage={state:'unavailable',reason:read.reason||'unavailable'};continue;}
    if(place.gen!==null&&place.gen!==read.generation)return adminError('stale_cursor',400);
-   const served=IdentityWorkInventory.filterRows(IdentityWorkInventory.admissionRows(read.rows,{nowMs}),query);
+   const served=IdentityWorkInventory.filterRows(IdentityWorkInventory.admissionRows(read.rows,{nowMs,classify,diary:diaryRead&&!diaryRead.error?diaryRead.doc:null}),query);
    rows.push(...served);
    admissionCoverage={state:read.more?'partial':'complete',reason:read.more?'more_pages':null,observed:served.length};
    if(read.more){const last=read.rows[read.rows.length-1];next={lane,version:last.firstSeenVersion,lid:last.lid,gen:read.generation};break;}
@@ -137,7 +149,9 @@ async function adminIdentityWorkRoute(request,env,url){
   }
   if(lane!=='letterboxd_rated_candidate'){
    const source=lane==='watchlist_admission'?(admissions&&!admissions.error?IdentityWorkInventory.admissionRows(admissions.rows,{nowMs}):[]):limbo&&!limbo.error?(lane==='film'?IdentityWorkInventory.filmRows(limbo.items):IdentityWorkInventory.observationRows(limbo.items)):[];
-   const laneRows=IdentityWorkInventory.filterRows(IdentityWorkInventory.sortLaneRows(source),query);
+   const laneRows=lane==='diary_identity'
+    ?IdentityWorkInventory.filterRows(diaryRead&&!diaryRead.error?IdentityWorkInventory.diaryRows(diaryRead.doc,diaryRead.backlog,{nowMs,maxAttempts:typeof LetterboxdDiaryIdentity!=='undefined'?LetterboxdDiaryIdentity.MAX_ATTEMPTS:6,classify}):[],query)
+    :IdentityWorkInventory.filterRows(IdentityWorkInventory.sortLaneRows(source),query);
    if(limit-rows.length<=0){next=startOf(lane);break;}
    const served=IdentityWorkInventory.pageMemoryLane(laneRows,same?position:{index:-1},limit-rows.length);
    if(served.error)return adminError('stale_cursor',400);
@@ -175,6 +189,7 @@ async function adminIdentityWorkRoute(request,env,url){
  if(IdentityWorkInventory.laneEnabled(query,'film'))coverage.film=identityWorkLaneCoverage('film',limbo);
  if(IdentityWorkInventory.laneEnabled(query,'epg_observation'))coverage.epg_observation=identityWorkLaneCoverage('epg_observation',limbo);
  if(wantsAdmissions&&admissionCoverage)coverage.watchlist_admission=admissionCoverage;
+ if(wantsDiary)coverage.diary_identity=diaryRead&&!diaryRead.error?{state:'complete',version:diaryRead.version,backlogVersion:diaryRead.backlogVersion,entries:Object.keys(diaryRead.doc.films||{}).length,backlog:Object.keys(diaryRead.backlog.ids||{}).length,cap:diaryRead.cap,backlogCap:diaryRead.backlogCap}:{state:'unavailable',reason:diaryRead?.error||'unavailable'};
  if(wantsCandidates){
   const registryUsable=registryRead.state==='present'||registryRead.state==='absent';
   const enumeration=registryUsable?LetterboxdImportRegistry.enumerate(registryRead.registry,listing)
@@ -191,3 +206,4 @@ async function adminIdentityWorkRoute(request,env,url){
   vocabulary:{types:IdentityWorkInventory.IDENTITY_LANES,dispositions:IdentityWorkInventory.IDENTITY_DISPOSITIONS},
  });
 }
+
