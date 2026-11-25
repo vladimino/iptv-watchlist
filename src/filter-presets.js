@@ -40,7 +40,8 @@ function normalizePresetQuery(input){
  if(['archive','future'].includes(params.get('period')))add('period',params.get('period'));
  const query=cleanPresetText(params.get('q')||'',200);if(query)add('q',query);
  const searchIn=presetSearchScope(params.get('searchIn'));if(searchIn)add('searchIn',searchIn);
- if(['personal','expiring','relevance','title'].includes(params.get('sort')))add('sort',params.get('sort'));
+ // AIR-626: a stored `sort=relevance` (a retired sort) is dropped here, on every read and write, so the preset opens with the default «Для меня».
+ if(['personal','expiring','title'].includes(params.get('sort')))add('sort',params.get('sort'));
  for(const genre of uniquePresetValues(params.getAll('genre').map(value=>cleanPresetText(value,80)).filter(Boolean)).sort((a,b)=>a.localeCompare(b,'ru')))add('genre',genre);
  for(const mechanic of uniquePresetValues(params.getAll('mechanic').filter(value=>/^[a-z0-9_]{1,80}$/.test(value))).sort())add('mechanic',mechanic);
  for(const mood of uniquePresetValues(params.getAll('mood').filter(value=>/^[a-z0-9_]{1,80}$/.test(value))).sort((a,b)=>a.localeCompare(b,'ru')))add('mood',mood);

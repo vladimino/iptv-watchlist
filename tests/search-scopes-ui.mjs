@@ -64,14 +64,14 @@ const now=Date.parse('2026-10-24T12:00:00Z');
 run(`viewClock=${now};report={updatedAt:'2026-10-24T12:00:00Z',window:{from:${now}-72*3600000,to:${now}+24*3600000},films:[]};films=[
  {id:'days',title:'28 дней спустя',original:'28 Days Later',year:2002,runtime:113,genres:['Ужасы'],directors:[{id:'boyle',name:'Дэнни Бойл',original:'Danny Boyle',aliases:['Бойл']}],actors:[],synopsis:'Вирус в Лондоне.',shows:[{channel:'Первый',start:${now}+3600000,end:${now}+7200000}]},
  {id:'robocop',title:'Робокоп',original:'RoboCop',year:2014,runtime:117,genres:['Боевик'],directors:[],actors:[{id:'weaver',name:'Сигурни Уивер',original:'Sigourney Weaver',aliases:['Уивер']}],synopsis:'Действие перенесено в 2028 год.',shows:[{channel:'Первый',start:${now}+3600000,end:${now}+7200000}]}
-];enrichment={films:{}};urlReady=true;state.query='28';state.sort='relevance';state.sortExplicit=false;state.searchScopes={titles:true,people:false,plot:true}`);
+];enrichment={films:{}};urlReady=true;state.query='28';state.sort='personal';state.sortExplicit=false;state.searchScopes={titles:true,people:false,plot:true}`);
 run('render()');
 assert.equal(new URL(window.location.href).searchParams.get('searchIn'),'titles,plot');
 run('openEventsScreen(document.querySelector("#activity-expand"))');
 window.history.back();
 assert.equal(new URL(window.location.href).searchParams.get('searchIn'),'titles,plot');
 assert.equal(run('JSON.stringify(state.searchScopes)'),JSON.stringify({titles:true,people:false,plot:true}));
-window.history.pushState(null,'','/?q=28&sort=relevance');
+window.history.pushState(null,'','/?q=28');
 run('state.searchScopes=defaultSearchScopes()');
 window.history.back();
 assert.equal(run('JSON.stringify(state.searchScopes)'),JSON.stringify({titles:true,people:false,plot:true}));

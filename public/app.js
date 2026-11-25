@@ -119,10 +119,9 @@ function readUrlState(url){
  defaults.shortlistMode=normalizeShortlistMode(p.get('shortlist'));
  if(p.get('view')==='watchlist')defaults.includeUnscheduled=true;
  defaults.period=normalizePeriod(p.get('period'))||'all';
- if(p.get('sort')==='relevance'&&normalizeSearch(p.get('q')||''))defaults.sort='relevance';
- // AIR-382: «Для меня» is the default. The retired `time` sort (an old link) and any unknown value fall back to it, or to relevance while a search is typed.
- else if(['title','personal','expiring'].includes(p.get('sort'))){defaults.sort=p.get('sort');defaults.sortExplicit=true;}
- else if(normalizeSearch(p.get('q')||''))defaults.sort='relevance';
+ // AIR-382, AIR-626: «Для меня» is the default, with or without a search query. The retired `time` and `relevance` sorts (old links,
+ // history entries and return targets) and any unknown value fall back to it; the parameter is dropped at the next URL normalization.
+ if(['title','personal','expiring'].includes(p.get('sort'))){defaults.sort=p.get('sort');defaults.sortExplicit=true;}
  if(['any','new','rewatch'].includes(p.get('viewing')))defaults.viewing=p.get('viewing');
  defaults.query=p.get('q')||'';
  defaults.genres=new Set(p.getAll('genre').map(genre=>genre.trim()).filter(Boolean));
@@ -824,13 +823,8 @@ function rankSearchEntry(entry,normalized,tokens,scopes){
  if(ranks.some(rank=>rank===null))return null;
  return Math.max(...ranks);
 }
-function applySearchInput(value){
- const hadQuery=normalizeSearch(state.query).length>0;
- state.query=value;
- const hasQuery=normalizeSearch(value).length>0;
- if(hasQuery&&!hadQuery&&!state.sortExplicit&&state.sort==='personal')state.sort='relevance';
- if(!hasQuery&&hadQuery&&!state.sortExplicit&&state.sort==='relevance')state.sort='personal';
-}
+// AIR-626: typing, changing or clearing the query never changes the chosen sort.
+function applySearchInput(value){state.query=value;}
 function availabilityTime(film,now=viewingClock()){const model=viewingWindow(now);const starts=(film?.shows||[]).map(show=>inArchive(model,show)||inFuture(model,show)?showStart(show):null).filter(start=>start!==null);return starts.length?Math.max(...starts)+72*3600000:null;}
 function isLastChance(film,now=viewingClock()){const until=archiveDeadline(film,now);return until!==null&&until>now&&until-now<8*3600000;}
 function filmTmdbViewKey(film){const tmdb=String(film?.tmdbId??'');return /^[1-9]\d{0,11}$/.test(tmdb)?'tmdb_'+tmdb:null;}
@@ -1381,7 +1375,7 @@ function card(film){
  const badges=catalogBadge(film)+soonBadge(film);
  return `<article class="movie-card${film.catalogOnly?' is-catalog':''}${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${posterFrame(poster,badges)}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film,{catalog:!!film.catalogOnly})}</h3><p class="original">${escapeHTML(film.original||'')}</p><span class="film-year">${film.year||''}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='soon'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':''}${filmSupportsStarted(film)?startedButton(film):''}</article>`;
 }
-function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=archiveDeadline(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
+function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=archiveDeadline(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
 
 // AIR-434 (ADR 0114): the shortlist is two disjoint sets of FILMS, «Доступно» (film-level `available`: a ready archive) and «Скоро» (film-level `soon`: no ready
 // archive, a show on air or starting inside the next 24 hours). A film is in exactly one or in none; no archive film ever fills «Скоро», however few candidates there are.
@@ -2238,7 +2232,8 @@ function applyPresetQuery(query){
 }
 // A saved scenario is "current" only when its canonical app parameters equal the filters on screen. A manual change drops the mark.
 // The key is canonical: the old values of a preset saved before AIR-434 (`period=future`, `shortlist=today|now`) read as the same state as `period=soon` / `shortlist=soon`, and a default is absent.
-function presetKey(query){const keys=new Set(APP_QUERY_KEYS);return [...new URLSearchParams(String(query||''))].filter(([key])=>keys.has(key)).map(([key,value])=>key==='period'?[key,normalizePeriod(value)||'all']:key==='shortlist'?[key,normalizeShortlistMode(value)]:[key,value]).filter(([key,value])=>!(key==='period'&&value==='all')&&!(key==='shortlist'&&value==='available')).map(([key,value])=>key+'='+value).sort().join('&');}
+// A sort the page no longer offers (`relevance`, AIR-626) loads as the implicit default and is absent from the key too.
+function presetKey(query){const keys=new Set(APP_QUERY_KEYS);return [...new URLSearchParams(String(query||''))].filter(([key])=>keys.has(key)).map(([key,value])=>key==='period'?[key,normalizePeriod(value)||'all']:key==='shortlist'?[key,normalizeShortlistMode(value)]:[key,value]).filter(([key,value])=>!(key==='period'&&value==='all')&&!(key==='shortlist'&&value==='available')&&!(key==='sort'&&!['title','personal','expiring'].includes(value))).map(([key,value])=>key+'='+value).sort().join('&');}
 function presetIsCurrent(preset,key){return !!preset&&key!==null&&presetKey(preset.query)===key;}
 function currentPresetKey(){try{return presetKey(presetQuery());}catch{return null;}}
 function markCurrentPreset(){
