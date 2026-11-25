@@ -15,7 +15,7 @@ import {evidenceKeyOf,normalizeEvidence} from '../src/identity-evidence.js';
 import {changeWriter} from '../src/identity-evidence-writer.js';
 import * as Import from '../src/identity-evidence-import.js';
 
-const {planManifest,loadManifest,sealRun,loadAndSealManifest,importRun,readImportRun,readImportReport,readStagedManifest,manifestDigest,chunkStatements,guardCondition,identityEvidenceImportStatus,GUARD_TABLES}=Import;
+const {planManifest,loadManifest,sealRun,loadAndSealManifest,importRun,stopImportRun,readImportRun,readImportReport,readStagedManifest,manifestDigest,chunkStatements,guardCondition,identityEvidenceImportStatus,GUARD_TABLES}=Import;
 
 const NEW='0044_identity_evidence_reconstruction_import.sql',PREVIOUS='0043_film_redirect_by_target.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -52,7 +52,8 @@ const evidence=(i,over={})=>({subject:{kind:'discovery_observation',value:OBS(i)
 const record=(i,{revision=1,over={}}={})=>({source:source(i,revision),rows:[{evidence:evidence(i,over)}]});
 const records=(count,from=1)=>Array.from({length:count},(_,index)=>record(from+index));
 const seedAll=(file,count,from=1)=>{for(let i=from;i<from+count;i++)seed(file,i);};
-const OPTIONS={runId:'run-1',family:'b',cohortAt:COHORT,writers:['discovery_decision','discovery_owner']};
+// Family `a` needs no live writer; the run still NAMES the two Discovery writers so a `pending` state refuses it. Family `b` (which needs both `on`) has its own section.
+const OPTIONS={runId:'run-1',family:'a',cohortAt:COHORT,writers:['discovery_decision','discovery_owner']};
 const plan=(list,over={})=>planManifest({...OPTIONS,records:list,...over});
 const ledger=file=>rows(file,'SELECT evidence_key,origin,reconstruction_run,reconstructed_from,request_id,source_order,film_id FROM film_identity_evidence ORDER BY seq');
 const envOf=file=>({DB:d1Standin(file)});
@@ -68,6 +69,7 @@ const staged=async(file,list,over={})=>{
  return {env,...result};
 };
 const run=(env,digest,over={})=>importRun(env,{runId:over.runId||'run-1',approvedDigest:digest,owner:'operator-a',now:at(2000),...over});
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input}));
 
 // ===== 1. the migration: it follows a complete 42, creates nothing otherwise and leaves the ledger and every other object untouched =====
@@ -127,9 +129,10 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  assert.equal(dup.report.duplicates.length,1);
  assert.equal(dup.report.duplicates[0].owner,dup.manifest.chunks[0].sources[0].token);
  assert.ok(dup.report.excluded.some(item=>item.reason==='no_rows_after_keys'));
- // The same source twice is one record.
+ // The same source twice with the same descriptor is ONE record: its rows merge, and an identical mapping is a reported duplicate (never a silent drop).
  const twice=await plan([record(1),record(1)]);
- assert.deepEqual(twice.report.excluded.map(item=>item.reason),['duplicate_source']);
+ assert.deepEqual(twice.report.counts,{chunks:1,sources:1,rows:1});
+ assert.equal(twice.report.duplicates.length,1);assert.deepEqual(twice.report.excluded,[]);
  // Duplicate inputs that disagree on `source_order` are a reported conflict and the key is left out (ADR 0215 decision 7, step 3).
  const owner=order=>({subject:{kind:'discovery_observation',value:OBS(9)},relation:'candidate_for',object:{kind:'tmdb_movie',value:'109'},polarity:'asserts',route:'owner_action',method:'owner_statement',sourceRoot:'intent-9',observedAt:SEEN,sourceOrder:order});
  const conflict=await plan([{source:source(9,1),rows:[{evidence:owner(1)}]},{source:source(9,2),rows:[{evidence:owner(2)}]},record(1)]);
@@ -153,14 +156,14 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  const tooLarge=await plan([{source:source(1),rows:Array.from({length:201},(_,k)=>({evidence:evidence(1,{object:{kind:'tmdb_movie',value:String(1000+k)}})}))},record(2)]);
  assert.deepEqual(tooLarge.report.excluded.map(item=>item.reason),['record_too_large']);
  // R2 objects: eligible only when frozen by contract and with the residual window accepted; the pinned ETag is in the manifest and the window in the report.
- const r2=(over={})=>({source:{kind:'r2_object',key:'admin/actions/discovery_identity_correct/v1/a.json',etag:'etag-1',r2:'admin_action_applied',residualAccepted:true,...over},rows:[{evidence:evidence(1)}]});
+ const r2=(over={})=>({source:{kind:'r2_object',key:'admin/actions/discovery_identity_correct/v1/a.json',record:'whole',etag:'etag-1',r2:'admin_action_applied',residualAccepted:true,...over},rows:[{evidence:evidence(1)}]});
  const withR2=await plan([r2()]);
  assert.equal(withR2.manifest.chunks[0].sources[0].etag,'etag-1');
- assert.equal(withR2.report.r2Residual.length,1);assert.match(withR2.report.r2Residual[0].window,/ETag re-read/);
+ assert.equal(withR2.report.r2Residual.length,1);assert.match(withR2.report.r2Residual[0].window,/ETag re-read/);assert.deepEqual(withR2.report.r2Residual[0].chunks,[1]);
  assert.deepEqual((await plan([r2({residualAccepted:false}),record(2)])).report.excluded.map(item=>item.reason),['r2_residual_not_accepted']);
  assert.deepEqual((await plan([r2({r2:'admin_action_pending'}),record(2)])).report.excluded.map(item=>item.reason),['r2_not_frozen']);
  // Refused inputs.
- await assert.rejects(()=>plan([]),code('identity_evidence_import_invalid'));
+ await assert.rejects(()=>plan(null),code('identity_evidence_import_invalid'));
  await assert.rejects(()=>plan([{source:{...source(1),table:'film'},rows:[{evidence:evidence(1)}]}]),code('identity_evidence_import_invalid'));
  await assert.rejects(()=>plan([{source:{...source(1),guard:{'written_at#$.x':1}},rows:[{evidence:evidence(1)}]}]),code('identity_evidence_import_invalid'));
  await assert.rejects(()=>plan([{source:{...source(1),guard:{payload_json:true}},rows:[{evidence:evidence(1)}]}]),code('identity_evidence_import_invalid'));
@@ -467,15 +470,16 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  assert.equal((await readImportRun(env,'run-1')).state,'running');
 }
 {
- // Stale lease: owner A sends one chunk and disappears; a live lease of another owner is refused; after expiry owner B takes over with a NEW attempt and finishes; a chunk
- // that A sends under its stale attempt fails the run assertion and the receipt fence and writes nothing.
+ // Stale lease on the DATABASE clock: owner A sends one chunk and disappears; a live lease of another owner is refused; after the expiry owner B takes over with a NEW attempt and
+ // finishes; a chunk that A sends under its stale attempt fails the run assertion and the receipt's fence and writes nothing.
  const file=copy(template);seedAll(file,130);
  const {env,digest}=await staged(file,records(130));
- const partial=await run(env,digest,{owner:'operator-a',maxChunks:1,leaseMs:5000,now:at(2000)});
+ const partial=await run(env,digest,{owner:'operator-a',maxChunks:1,leaseMs:1000});
  assert.equal(partial.done,false);assert.equal(partial.chunks.length,1);
  assert.equal(ledger(file).length,50);
- await assert.rejects(()=>run(env,digest,{owner:'operator-b',now:at(3000)}),code('identity_evidence_import_lease_held'));
- const claimed=await run(env,digest,{owner:'operator-b',maxChunks:1,leaseMs:5000,now:at(20000)});
+ await assert.rejects(()=>run(env,digest,{owner:'operator-b'}),code('identity_evidence_import_lease_held'));
+ await sleep(1150);
+ const claimed=await run(env,digest,{owner:'operator-b',maxChunks:1,leaseMs:60000});
  assert.equal(claimed.chunks.length,2);
  assert.equal((await readImportRun(env,'run-1')).attempt,2,'a resumed attempt takes a new lease');
  const staleChunk=(await readStagedManifest(env,'run-1')).chunks[2];
@@ -484,16 +488,34 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  assert.equal(ledger(file).length,100,'the stale batch wrote nothing');
  // Even without the run assertion, the receipt's own trigger refuses an attempt that is not the live one.
  refused(file,"INSERT INTO identity_evidence_import_receipt (run_id,chunk_no,attempt,staged_keys,inserted,already_imported,live_covered,reconstructed_equivalent,recorded_at) VALUES ('run-1',3,1,30,30,0,0,0,"+lit(at(20500))+")",/identity_evidence_import_receipt_fence/);
- // The lease also expires at the receipt's own time.
- refused(file,"INSERT INTO identity_evidence_import_receipt (run_id,chunk_no,attempt,staged_keys,inserted,already_imported,live_covered,reconstructed_equivalent,recorded_at) VALUES ('run-1',3,2,30,30,0,0,0,"+lit(at(90000))+")",/identity_evidence_import_receipt_fence/);
  // A chunk number that is not the next one, and a staged count that is not the chunk's.
  refused(file,"INSERT INTO identity_evidence_import_receipt (run_id,chunk_no,attempt,staged_keys,inserted,already_imported,live_covered,reconstructed_equivalent,recorded_at) VALUES ('run-1',1,2,50,50,0,0,0,"+lit(at(20500))+")",/identity_evidence_import_receipt_(taken|fence)/);
  refused(file,"INSERT INTO identity_evidence_import_receipt (run_id,chunk_no,attempt,staged_keys,inserted,already_imported,live_covered,reconstructed_equivalent,recorded_at) VALUES ('run-1',3,2,29,29,0,0,0,"+lit(at(20500))+")",/identity_evidence_import_receipt_fence/);
  refused(file,"INSERT INTO identity_evidence_import_receipt (run_id,chunk_no,attempt,staged_keys,inserted,already_imported,live_covered,reconstructed_equivalent,recorded_at) VALUES ('run-1',3,2,30,10,0,0,0,"+lit(at(20500))+")",/CHECK constraint failed/);
- const finished=await run(env,digest,{owner:'operator-b',now:at(21000)});
+ const finished=await run(env,digest,{owner:'operator-b'});
  assert.equal(finished.state,'complete');
  assert.equal(ledger(file).length,130);
  assert.deepEqual(finished.totals,{stagedKeys:130,inserted:130,alreadyImported:0,liveCovered:0,reconstructedEquivalent:0},'resume writes the exact manifest once');
+}
+{
+ // A batch PREPARED while the lease was live and DELIVERED after it expired, with no takeover yet, must not commit: the lease is checked on the database's clock at commit, not on
+ // the caller's timestamp. The run assertion and the receipt trigger both refuse; nothing lands and the run is untouched.
+ const file=copy(template);seedAll(file,60);
+ const {env,digest}=await staged(file,records(60));
+ await run(env,digest,{maxChunks:1,leaseMs:1000});
+ const second=(await readStagedManifest(env,'run-1')).chunks[1];
+ const prepared=chunkStatements({run:{runId:'run-1',manifestSha256:digest},chunk:second,attempt:1,at:at(5)});
+ await sleep(1150);
+ await assert.rejects(()=>env.DB.batch(prepared.map(([sql,params])=>env.DB.prepare(sql).bind(...params))),/CHECK constraint failed/);
+ assert.equal(ledger(file).length,50,'the delayed batch wrote nothing');
+ const unchanged=await readImportRun(env,'run-1');
+ assert.deepEqual([unchanged.state,unchanged.attempt],['running',1],'no takeover, no stop');
+ // The receipt trigger alone is also on the database clock (a caller-supplied `recorded_at` in the past does not help).
+ refused(file,"INSERT INTO identity_evidence_import_receipt (run_id,chunk_no,attempt,staged_keys,inserted,already_imported,live_covered,reconstructed_equivalent,recorded_at) VALUES ('run-1',2,1,10,10,0,0,0,"+lit(at(5))+")",/identity_evidence_import_receipt_fence/);
+ refused(file,"UPDATE identity_evidence_import_run SET state='complete',updated_at='"+at(5)+"' WHERE run_id='run-1'",/identity_evidence_import_run_transition/);
+ // The expired lease is taken over (a new attempt) and the run finishes; the same owner can also renew a live lease.
+ assert.equal((await run(env,digest,{owner:'operator-b'})).state,'complete');
+ assert.equal(ledger(file).length,60);
 }
 {
  // Two concurrent claimers: exactly one holds the lease and finishes; the other is refused. Two concurrent runs of overlapping keys write each key once.
@@ -540,10 +562,11 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  assert.equal((await run(env,digest,{now:at(2700)})).state,'complete');
 }
 
-// ===== 8. R2 sources: the pinned ETag is re-read before the chunk =====
+// ===== 8. R2 sources: a LOGICAL record inside a PHYSICAL object; the pinned ETag is re-read before EVERY submission =====
+const OBJECT='admin/actions/discovery_identity_correct/v1/a.json';
+const r2Record=(i,record,over={})=>({source:{kind:'r2_object',key:OBJECT,record:record||('rec-'+i),etag:'etag-1',r2:'admin_action_applied',residualAccepted:true,...over},rows:[{evidence:evidence(i)}]});
 {
- const object=(over={})=>({kind:'r2_object',key:'admin/actions/discovery_identity_correct/v1/a.json',etag:'etag-1',r2:'admin_action_applied',residualAccepted:true,...over});
- const list=()=>[{source:object(),rows:[{evidence:evidence(1)}]},record(2)];
+ const list=()=>[r2Record(1),record(2)];
  const file=copy(template);seedAll(file,2);
  const {env,digest,report}=await staged(file,list());
  assert.equal(report.r2Residual.length,1);
@@ -551,16 +574,208 @@ const key=async input=>evidenceKeyOf(normalizeEvidence({origin:'live',...input})
  await assert.rejects(()=>run(env,digest),code('identity_evidence_import_r2_unavailable'));
  assert.equal(ledger(file).length,0);
  // The ETag changed: the run stops and the chunk is not imported.
- await assert.rejects(()=>run(env,digest,{now:at(99999),readEtag:async()=>'etag-2'}),code('identity_evidence_import_r2_moved'));
+ await assert.rejects(()=>run(env,digest,{readEtag:async()=>'etag-2'}),code('identity_evidence_import_r2_moved'));
  assert.equal(ledger(file).length,0);
  assert.equal((await readImportRun(env,'run-1')).stopReason,'r2_moved');
- // The same ETag: imported, and each object is read once per chunk that uses it.
+ // The same ETag: imported, and each object is read once per submission of a chunk that uses it.
  const fine=copy(template);seedAll(fine,2);
  const staged2=await staged(fine,list());
  const reads=[];
  const result=await run(staged2.env,staged2.digest,{readEtag:async key=>{reads.push(key);return 'etag-1';}});
- assert.equal(result.state,'complete');assert.deepEqual(reads,['admin/actions/discovery_identity_correct/v1/a.json']);
+ assert.equal(result.state,'complete');assert.deepEqual(reads,[OBJECT]);
  assert.equal(ledger(fine).length,2);
+ // The post-import readback states the pinned ETag, the chunks and the residual window of the object (ADR 0215 decision 7, step 6).
+ const readback=await readImportReport(staged2.env,'run-1');
+ assert.deepEqual(readback.r2Objects.map(item=>({key:item.key,etag:item.etag,chunks:item.chunks,records:item.records,receiptedChunks:item.receiptedChunks})),[{key:OBJECT,etag:'etag-1',chunks:[1],records:1,receiptedChunks:[1]}]);
+ assert.match(readback.r2Objects[0].window,/ETag re-read before each submission/);
+}
+{
+ // Family (a) shape: MANY distinct logical records from ONE frozen object, staged across bounded chunks (714 records: 703 inferred pairs and 11 records whose root is unknown).
+ const total=714;
+ const file=copy(template);
+ const list=Array.from({length:total},(_,index)=>{const i=index+1;return {source:{kind:'r2_object',key:'verified-films.json',record:'admission-'+i,etag:'etag-v1',r2:'verified_films_after_a2',residualAccepted:true},
+  rows:[{evidence:evidence(i,i>703?{sourceRoot:null}:{})}]};});
+ const {env,digest,manifest,report}=await staged(file,list);
+ assert.deepEqual(report.counts,{chunks:15,sources:total,rows:total},'every record is a source of its own, none dropped for sharing the object');
+ assert.equal(new Set(manifest.chunks.flatMap(chunk=>chunk.sources.map(source=>source.token))).size,total,'distinct logical records, distinct tokens');
+ assert.ok(manifest.chunks.every(chunk=>chunk.sources.every(source=>source.etag==='etag-v1'&&source.key==='verified-films.json')),'the physical object and its ETag are on every source');
+ assert.deepEqual(report.r2Residual.map(item=>({key:item.key,chunks:item.chunks.length})),[{key:'verified-films.json',chunks:15}]);
+ const reads=[];
+ const result=await run(env,digest,{readEtag:async key=>{reads.push(key);return 'etag-v1';}});
+ assert.equal(result.state,'complete');assert.equal(result.totals.inserted,total);
+ assert.equal(reads.length,15,'the object is re-read for every chunk that uses it');
+ assert.equal(ledger(file).length,total);
+ const rootless=ledger(file).filter(row=>row.reconstructed_from!==null&&/^r2:/.test(row.reconstructed_from));
+ assert.equal(rootless.length,total,'each row names its own logical record');
+ assert.equal(new Set(rootless.map(row=>row.reconstructed_from)).size,total);
+ // Replay by a later run (a new cohort, the object rewritten with another ETag): the same records are the same keys, and the rootless ones stay distinct per record.
+ const again=await staged(file,list.map(item=>({...item,source:{...item.source,etag:'etag-v2'}})),{runId:'run-2'});
+ const replayed=await run(again.env,again.digest,{runId:'run-2',readEtag:async()=>'etag-v2'});
+ assert.deepEqual(replayed.totals,{stagedKeys:total,inserted:0,alreadyImported:total,liveCovered:0,reconstructedEquivalent:0},'an exact-record replay is idempotent across ETags');
+ const back=await readImportReport(env,'run-1');
+ assert.deepEqual(back.r2Objects.map(item=>[item.key,item.records,item.chunks.length,item.receiptedChunks.length]),[['verified-films.json',total,15,15]]);
+ assert.equal((await readStagedManifest(env,'run-1')&&await manifestDigest(await readStagedManifest(env,'run-1'))),digest,'readback of the staged object records');
+ // The same logical record with a contradicting ETag or descriptor is a source conflict: all of it is left out.
+ const conflict=await plan([r2Record(1,'x'),r2Record(2,'x',{etag:'other'})]);
+ assert.equal(conflict.report.counts.rows,0);assert.equal(conflict.manifest,null);assert.deepEqual(conflict.report.excluded.map(item=>item.reason),['source_conflict']);
+}
+{
+ // The ETag is re-read before EVERY submission, not once per chunk: a transport failure before the commit, then the object changes, and the retry must stop with nothing written.
+ const file=copy(template);seedAll(file,3);
+ const {manifest,digest}=await plan([r2Record(1),r2Record(2),r2Record(3)]);
+ let etag='etag-1',failed=0;
+ const env={DB:flaky(file,{before:async texts=>{if(isReceipt(texts)&&failed++===0){etag='etag-2';throw new Error('network lost before commit');}}})};
+ await loadAndSealManifest(env,{manifest,approvedDigest:digest,now:at(10)});
+ await assert.rejects(()=>run(env,digest,{readEtag:async()=>etag}),code('identity_evidence_import_r2_moved'));
+ assert.equal(ledger(file).length,0,'zero new ledger rows');
+ assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_import_receipt'),0,'no receipt');
+ assert.equal((await readImportRun(env,'run-1')).stopReason,'r2_moved');
+ // A lost RESPONSE after a committed receipt is settled by the receipt and never undone by a later ETag change; the next chunk is the one that stops.
+ const second=copy(template);seedAll(second,60);
+ const list=Array.from({length:60},(_,index)=>r2Record(index+1));
+ const planned=await plan(list);
+ let moved='etag-1',lost=false;
+ const env2={DB:flaky(second,{after:async texts=>{if(isReceipt(texts)&&!lost){lost=true;moved='etag-2';throw new Error('network lost after commit');}}})};
+ await loadAndSealManifest(env2,{manifest:planned.manifest,approvedDigest:planned.digest,now:at(10)});
+ await assert.rejects(()=>run(env2,planned.digest,{readEtag:async()=>moved}),code('identity_evidence_import_r2_moved'));
+ assert.equal(ledger(second).length,50,'chunk 1 committed and stays');
+ assert.equal(one(second,'SELECT COUNT(*) FROM identity_evidence_import_receipt'),1,'its receipt stays');
+}
+
+// ===== 9. the review contract: same-source conflicts, mandatory writers, report-only dry run, truthful readback, stale stops, REPLACE-proof sources =====
+{
+ // Repeated inputs of ONE source compare their descriptors and ALL their mappings: contradictory data is never first-wins.
+ const owner=(order,over={})=>({subject:{kind:'discovery_observation',value:OBS(9)},relation:'candidate_for',object:{kind:'tmdb_movie',value:'109'},polarity:'asserts',route:'owner_action',method:'owner_statement',sourceRoot:'intent-9',observedAt:SEEN,sourceOrder:order,...over});
+ const sameSource=(...rows)=>rows.map(rowEvidence=>({source:source(9,1),rows:[{evidence:rowEvidence}]}));
+ const conflict=await plan([...sameSource(owner(1),owner(2)),record(1)]);
+ assert.equal(conflict.report.counts.rows,1,'the key whose source_order disagrees inside one source is left out');
+ assert.equal(conflict.report.conflicts.length,1);
+ const agree=await plan(sameSource(owner(2),owner(2)));
+ assert.equal(agree.report.conflicts.length,0);assert.equal(agree.report.duplicates.length,1);assert.deepEqual(agree.report.counts,{chunks:1,sources:1,rows:1});
+ // Disjoint keys of one repeated source are all kept (merged), not silently lost.
+ const merged=await plan([{source:source(9,1),rows:[{evidence:owner(2)}]},{source:source(9,1),rows:[{evidence:owner(2,{object:{kind:'tmdb_movie',value:'110'}})}]}]);
+ assert.deepEqual(merged.report.counts,{chunks:1,sources:1,rows:2});
+ // Changed guard fields or ETag between two inputs of one source: a reported source conflict, all its rows are left out.
+ const guardClash=await plan([record(1),{source:{...source(1),guard:{written_at:'2026-11-09T00:00:00.000Z'}},rows:[{evidence:evidence(1,{object:{kind:'tmdb_movie',value:'999'}})}]},record(2)]);
+ assert.deepEqual(guardClash.report.counts,{chunks:1,sources:1,rows:1});
+ assert.deepEqual(guardClash.report.excluded.map(item=>item.reason),['source_conflict']);
+ assert.equal(guardClash.report.conflicts[0].reason,'source_descriptor');
+}
+{
+ // A report-only dry run: nothing eligible is a well-defined zero-row result, never a throw and never something an import GO can stage.
+ for(const [name,records_] of [['an empty extraction',[]],['no rows',[{source:source(1),rows:[]}]],
+  ['all excluded R2 objects',[r2Record(1,undefined,{residualAccepted:false}),r2Record(2,undefined,{r2:'admin_action_pending'})]],
+  ['all conflicting',[{source:source(1),rows:[{evidence:evidence(1)}]},{source:{...source(1),guard:{written_at:'x'}},rows:[{evidence:evidence(1)}]}]]]){
+  const result=await plan(records_);
+  assert.equal(result.manifest,null,name);assert.equal(result.digest,null,name);
+  assert.equal(result.report.disposition,'no_import',name);
+  assert.deepEqual(result.report.counts,{chunks:0,sources:0,rows:0},name);
+  assert.ok(result.report.excluded.length>0||records_.length===0,name+': reasons are reported');
+ }
+ const file=copy(template);
+ await assert.rejects(()=>loadManifest(envOf(file),{manifest:null,approvedDigest:'0'.repeat(64)}),code('identity_evidence_import_invalid'));
+ assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_import_run'),0,'no zero-chunk run is created');
+ const eligible=await plan(records(2));
+ assert.equal(eligible.report.disposition,'import_candidate');
+}
+{
+ // The pending-writer guard is derived from the FAMILY, not from the extractor: a family `b` manifest cannot omit the Discovery writers, and the database requires both `on`.
+ await assert.rejects(()=>plan(records(1),{family:'b',writers:[]}),code('identity_evidence_import_invalid'));
+ await assert.rejects(()=>plan(records(1),{family:'b',writers:['discovery_decision']}),code('identity_evidence_import_invalid'));
+ assert.deepEqual((await plan(records(1),{family:'b',writers:undefined})).manifest.writers,['discovery_decision','discovery_owner'],'the default is the required set');
+ const omitted=await plan(records(1),{family:'b',writers:undefined});
+ const stripped=JSON.parse(JSON.stringify(omitted.manifest));stripped.writers=[];
+ const omittedDigest=await manifestDigest(omitted.manifest);
+ await assert.rejects(()=>loadManifest(envOf(copy(template)),{manifest:stripped,approvedDigest:omittedDigest}),code('identity_evidence_import_invalid'));
+ // Pure dry runs and staging work before any writer is active; the IMPORT needs both `on`.
+ const file=copy(template);seedAll(file,60);
+ const {env,digest}=await staged(file,records(60),{family:'b',writers:undefined});
+ const setting=(writer,kind,generation,extra={})=>changeWriter(env,{writer,kind,expectedGeneration:generation,reason:'test',deployedVersion:'abc',evidenceLink:'https://example.test/e',...extra});
+ await assert.rejects(()=>run(env,digest),code('identity_evidence_import_blocked'));
+ await setting('discovery_decision','activate',0);await setting('discovery_decision','drain_complete',1,{drainEvidence:'drained'});
+ await assert.rejects(()=>run(env,digest),code('identity_evidence_import_blocked'));
+ assert.equal((await readImportRun(env,'run-1')).state,'sealed','one writer `on` and the other absent: refused');
+ await setting('discovery_owner','activate',0);
+ await assert.rejects(()=>run(env,digest),code('identity_evidence_import_blocked'));
+ await setting('discovery_owner','drain_complete',1,{drainEvidence:'drained'});
+ assert.equal((await run(env,digest,{maxChunks:1})).chunks.length,1);
+ // A writer switched `off` mid-run stops the next chunk (nothing of it lands); switched back `on`, the run resumes.
+ await setting('discovery_owner','deactivate',2);
+ await assert.rejects(()=>run(env,digest),code('identity_evidence_import_blocked'));
+ assert.equal(ledger(file).length,50);assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_import_receipt'),1);
+ await setting('discovery_owner','activate',3);await setting('discovery_owner','drain_complete',4,{drainEvidence:'drained again'});
+ assert.equal((await run(env,digest)).state,'complete');
+ // The run's own list cannot lower it: it is immutable, and an empty list in the run row changes nothing for family `b`.
+ refused(file,"UPDATE identity_evidence_import_run SET writers_json='[]',updated_at='"+at(1)+"'",/identity_evidence_import_run_transition/);
+}
+{
+ // The report is truthful: only RECEIPTED chunks and the exact identity predicate. Run 2 stops in chunk 2 on a collision while an earlier reconstruction of an unrelated row of that
+ // chunk exists; that row is never reported as equivalent, and the reported pairs equal the receipts' total.
+ const owner=(order)=>({subject:{kind:'discovery_observation',value:OBS(52)},relation:'candidate_for',object:{kind:'tmdb_movie',value:'152'},polarity:'asserts',route:'owner_action',method:'owner_statement',sourceRoot:'intent-52',observedAt:SEEN,sourceOrder:order});
+ const file=copy(template);seedAll(file,55);seed(file,1,2);seed(file,51,2);
+ const first=await staged(file,[record(1),record(51),{source:source(52),rows:[{evidence:owner(1)}]}]);
+ await run(first.env,first.digest);
+ const second=await staged(file,[record(1,{revision:2}),...records(49,2),record(51,{revision:2}),{source:source(52,1),rows:[{evidence:owner(7)}]}],{runId:'run-2'});
+ await assert.rejects(()=>run(second.env,second.digest,{runId:'run-2'}),code('identity_evidence_import_collision'));
+ const back=await readImportReport(second.env,'run-2');
+ assert.equal(back.receipts.length,1,'only chunk 1 committed');
+ assert.equal(back.totals.reconstructedEquivalent,1);
+ assert.equal(back.equivalents.length,1,'the pair of the never-committed chunk 2 (record 51) is not reported');
+ assert.equal(back.equivalentsMatchReceipts,true);
+ assert.deepEqual(back.equivalents.map(item=>item.existingRun),['run-1']);
+ // A completed run agrees with its receipts too, and a partial run (stopped by the owner) never reports an uncommitted pair.
+ const third=await staged(file,[record(1,{revision:2}),record(51,{revision:2})],{runId:'run-3'});
+ const finished=await run(third.env,third.digest,{runId:'run-3'});
+ const done=await readImportReport(third.env,'run-3');
+ assert.equal(done.equivalents.length,finished.totals.reconstructedEquivalent+0);assert.equal(done.equivalentsMatchReceipts,true);
+}
+{
+ // A stale attempt cannot stop its successor. A is inside a slow R2 read (it holds attempt 1) when its lease expires and B takes over; A's late "moved" answer must not stop the run.
+ const file=copy(template);seedAll(file,60);
+ const list=Array.from({length:60},(_,index)=>r2Record(index+1));
+ const {env,digest}=await staged(file,list);
+ let release,inside;
+ const gate=new Promise(resolve=>{release=resolve;});
+ const entered=new Promise(resolve=>{inside=resolve;});
+ const slow=run(env,digest,{owner:'operator-a',leaseMs:1000,readEtag:async()=>{inside();await gate;return 'changed-by-a-stale-view';}});
+ const outcome=slow.then(()=>null,error=>error);
+ await entered;
+ await sleep(1150);
+ const takeover=await run(env,digest,{owner:'operator-b',maxChunks:1,readEtag:async()=>'etag-1'});
+ assert.equal(takeover.chunks.length,1);
+ assert.equal((await readImportRun(env,'run-1')).attempt,2);
+ release();
+ const error=await outcome;
+ assert.equal(error?.code,'identity_evidence_import_lease_lost',String(error?.stack));
+ const after=await readImportRun(env,'run-1');
+ assert.deepEqual([after.state,after.attempt,after.leaseOwner,after.stopReason],['running',2,'operator-b',null],'the successor is untouched');
+ assert.equal((await run(env,digest,{owner:'operator-b',readEtag:async()=>'etag-1'})).state,'complete');
+ // The separately authorized operator stop IS unconditional, and the lease holder then fails its fence.
+ const other=copy(template);seedAll(other,60);
+ const staged2=await staged(other,records(60));
+ await run(staged2.env,staged2.digest,{owner:'operator-a',maxChunks:1,leaseMs:60000});
+ const stopped=await stopImportRun(staged2.env,{runId:'run-1',now:at(50)});
+ assert.deepEqual([stopped.state,stopped.stopReason],['stopped','owner']);
+ await assert.rejects(()=>run(staged2.env,staged2.digest,{owner:'operator-a'}),code('identity_evidence_import_stopped'));
+ assert.equal(ledger(other).length,50);
+}
+{
+ // A source record is insert-only on BOTH of its unique keys: INSERT OR REPLACE or an upsert with the same token at a free ordinal (or the same ordinal with another token) deletes
+ // nothing, with recursive triggers off and on, before the seal.
+ for(const recursive of ['OFF','ON']){
+  const file=copy(template);seedAll(file,2);
+  const env=envOf(file);const {manifest,digest}=await plan(records(2));
+  await loadManifest(env,{manifest,approvedDigest:digest,now:at(10)});
+  const token=manifest.chunks[0].sources[0].token;
+  const before=one(file,'SELECT COUNT(*) FROM identity_evidence_import_source');
+  const insert=(verb,ordinal,tok)=>'PRAGMA recursive_triggers='+recursive+';'+verb+" INTO identity_evidence_import_source (run_id,chunk_no,ordinal,kind,source_table,source_key,guard_json,source_token) VALUES ('run-1',1,"+ordinal+",'d1_row','discovery_decision_history','{}','{}',"+lit(tok)+")";
+  refused(file,insert('INSERT OR REPLACE',9,token),/identity_evidence_import_sealed/);
+  refused(file,insert('REPLACE',9,token),/identity_evidence_import_sealed/);
+  refused(file,insert('INSERT OR REPLACE',1,'another-token'),/identity_evidence_import_sealed/);
+  refused(file,insert('INSERT',9,token)+" ON CONFLICT(run_id,source_token) DO UPDATE SET ordinal=9",/identity_evidence_import_sealed/);
+  assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_import_source'),before,'recursive_triggers='+recursive+': no source was replaced');
+  assert.equal(await manifestDigest(await readStagedManifest(env,'run-1')),digest,'the staging is intact');
+ }
 }
 
 // ===== 9. dormant: nothing in the Worker imports the import path, nothing reads the ledger or the staging =====

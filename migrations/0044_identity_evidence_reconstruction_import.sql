@@ -77,7 +77,7 @@ CREATE TABLE identity_evidence_import_chunk (
 
 -- A frozen source record and its guard fields. `d1_row`: a row of an allowlisted D1 table, `source_key` the canonical JSON of its key columns and `guard_json` of the fields a
 -- chunk asserts at commit by equality (the SQL is built by the operator from a closed allowlist, never from this text). `r2_object`: a frozen R2 object, `source_key` its key,
--- `etag` the ETag the dry run pinned (D1 cannot assert it; the operator re-reads it before the chunk). `source_token` is the `reconstructed_from` of every row it yields.
+-- `record_ref` the logical record inside it, `etag` the ETag the dry run pinned (the PHYSICAL object guard, one per chunk that uses the object; D1 cannot assert it, so the operator re-reads it before every submission). `source_token` is the `reconstructed_from` of every row it yields.
 CREATE TABLE identity_evidence_import_source (
  run_id TEXT NOT NULL,
  chunk_no INTEGER NOT NULL,
@@ -85,12 +85,14 @@ CREATE TABLE identity_evidence_import_source (
  kind TEXT NOT NULL CHECK (kind IN ('d1_row', 'r2_object')),
  source_table TEXT CHECK (source_table IS NULL OR (length(source_table) BETWEEN 1 AND 100 AND source_table NOT GLOB '*[^a-z0-9_]*')),
  source_key TEXT NOT NULL CHECK (length(source_key) BETWEEN 1 AND 1000),
+ -- `r2_object` only: the durable LOGICAL record inside the physical object (one object holds many source records, for example the frozen legacy admissions); NULL for `d1_row`.
+ record_ref TEXT CHECK (record_ref IS NULL OR (length(record_ref) BETWEEN 1 AND 300 AND record_ref NOT GLOB '*[^!-~]*')),
  guard_json TEXT CHECK (guard_json IS NULL OR (json_valid(guard_json) AND json_type(guard_json) = 'object' AND length(guard_json) <= 4000)),
  etag TEXT CHECK (etag IS NULL OR length(etag) BETWEEN 1 AND 200),
  source_token TEXT NOT NULL CHECK (length(source_token) BETWEEN 1 AND 300 AND source_token NOT GLOB '*[^!-~]*'),
  PRIMARY KEY (run_id, chunk_no, ordinal),
  FOREIGN KEY (run_id, chunk_no) REFERENCES identity_evidence_import_chunk (run_id, chunk_no),
- CHECK ((kind = 'd1_row' AND source_table IS NOT NULL AND guard_json IS NOT NULL AND etag IS NULL) OR (kind = 'r2_object' AND source_table IS NULL AND guard_json IS NULL AND etag IS NOT NULL))
+ CHECK ((kind = 'd1_row' AND source_table IS NOT NULL AND guard_json IS NOT NULL AND etag IS NULL AND record_ref IS NULL) OR (kind = 'r2_object' AND source_table IS NULL AND guard_json IS NULL AND etag IS NOT NULL AND record_ref IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX identity_evidence_import_source_token ON identity_evidence_import_source (run_id, source_token);
 
@@ -161,7 +163,7 @@ BEGIN SELECT RAISE(ABORT, 'identity_evidence_import_sealed'); END;
 CREATE TRIGGER identity_evidence_import_source_open BEFORE INSERT ON identity_evidence_import_source FOR EACH ROW
 WHEN NOT EXISTS (SELECT 1 FROM identity_evidence_import_run WHERE run_id = NEW.run_id AND state = 'staging')
  OR EXISTS (SELECT 1 FROM identity_evidence_import_seal WHERE run_id = NEW.run_id)
- OR EXISTS (SELECT 1 FROM identity_evidence_import_source WHERE run_id = NEW.run_id AND chunk_no = NEW.chunk_no AND ordinal = NEW.ordinal)
+ OR EXISTS (SELECT 1 FROM identity_evidence_import_source WHERE run_id = NEW.run_id AND (source_token = NEW.source_token OR (chunk_no = NEW.chunk_no AND ordinal = NEW.ordinal)))
 BEGIN SELECT RAISE(ABORT, 'identity_evidence_import_sealed'); END;
 
 -- A row names its staged source record and carries that record's token as its `reconstructed_from`.
@@ -234,7 +236,8 @@ END;
 -- ===== The run's state machine. Identity, digest, counts and writers never change. =====
 -- staging -> sealed (only with a seal row), staging|sealed|running -> stopped (a recorded reason: the safe direction, any time), sealed -> running (the first lease),
 -- running -> running (a renewal by the owner of a live lease, or a takeover of an EXPIRED lease by a new attempt), running -> complete (every chunk has a receipt, the lease is live).
--- A claim or takeover refuses while a writer named by the run is `pending`. `stopped` and `complete` are terminal.
+-- A claim or takeover refuses while a writer named by the run is `pending`, and a family `b` run needs BOTH Discovery writers `on` (ADR 0215 decision 7: family (b) imports after E2a and E2c are `on`), whatever the run's own list says.
+-- EVERY lease comparison uses the database's own clock (the transaction time), never a caller-supplied timestamp: a batch prepared before the lease expired cannot commit after it. `stopped` and `complete` are terminal.
 CREATE TRIGGER identity_evidence_import_run_update BEFORE UPDATE ON identity_evidence_import_run FOR EACH ROW
 WHEN NEW.run_id <> OLD.run_id OR NEW.family <> OLD.family OR NEW.manifest_sha256 <> OLD.manifest_sha256 OR NEW.cohort_at <> OLD.cohort_at
  OR NEW.chunk_count <> OLD.chunk_count OR NEW.source_count <> OLD.source_count OR NEW.row_count <> OLD.row_count OR NEW.writers_json <> OLD.writers_json OR NEW.created_at <> OLD.created_at
@@ -242,24 +245,27 @@ WHEN NEW.run_id <> OLD.run_id OR NEW.family <> OLD.family OR NEW.manifest_sha256
   (OLD.state = 'staging' AND NEW.state = 'sealed' AND NEW.attempt = OLD.attempt
    AND EXISTS (SELECT 1 FROM identity_evidence_import_seal WHERE run_id = OLD.run_id AND manifest_sha256 = OLD.manifest_sha256 AND sealed_at = NEW.updated_at))
   OR (OLD.state IN ('staging', 'sealed', 'running') AND NEW.state = 'stopped' AND NEW.attempt = OLD.attempt AND NEW.lease_owner IS OLD.lease_owner AND NEW.lease_expires_at IS OLD.lease_expires_at)
-  OR (OLD.state = 'sealed' AND NEW.state = 'running' AND NEW.attempt = 1 AND NEW.lease_expires_at > NEW.updated_at
-   AND NOT EXISTS (SELECT 1 FROM identity_evidence_writer w WHERE w.state = 'pending' AND w.writer IN (SELECT value FROM json_each(OLD.writers_json))))
-  OR (OLD.state = 'running' AND NEW.state = 'running' AND NEW.attempt = OLD.attempt + 1 AND OLD.lease_expires_at <= NEW.updated_at AND NEW.lease_expires_at > NEW.updated_at
-   AND NOT EXISTS (SELECT 1 FROM identity_evidence_writer w WHERE w.state = 'pending' AND w.writer IN (SELECT value FROM json_each(OLD.writers_json))))
-  OR (OLD.state = 'running' AND NEW.state = 'running' AND NEW.attempt = OLD.attempt AND NEW.lease_owner = OLD.lease_owner AND OLD.lease_expires_at > NEW.updated_at AND NEW.lease_expires_at > OLD.lease_expires_at)
-  OR (OLD.state = 'running' AND NEW.state = 'complete' AND NEW.attempt = OLD.attempt AND NEW.lease_owner IS OLD.lease_owner AND NEW.lease_expires_at IS OLD.lease_expires_at AND OLD.lease_expires_at > NEW.updated_at
+  OR (OLD.state = 'sealed' AND NEW.state = 'running' AND NEW.attempt = 1 AND NEW.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+   AND NOT EXISTS (SELECT 1 FROM identity_evidence_writer w WHERE w.state = 'pending' AND w.writer IN (SELECT value FROM json_each(OLD.writers_json)))
+   AND NOT (OLD.family = 'b' AND (SELECT COUNT(*) FROM identity_evidence_writer w WHERE w.state = 'on' AND w.writer IN ('discovery_decision', 'discovery_owner')) < 2))
+  OR (OLD.state = 'running' AND NEW.state = 'running' AND NEW.attempt = OLD.attempt + 1 AND OLD.lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND NEW.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+   AND NOT EXISTS (SELECT 1 FROM identity_evidence_writer w WHERE w.state = 'pending' AND w.writer IN (SELECT value FROM json_each(OLD.writers_json)))
+   AND NOT (OLD.family = 'b' AND (SELECT COUNT(*) FROM identity_evidence_writer w WHERE w.state = 'on' AND w.writer IN ('discovery_decision', 'discovery_owner')) < 2))
+  OR (OLD.state = 'running' AND NEW.state = 'running' AND NEW.attempt = OLD.attempt AND NEW.lease_owner = OLD.lease_owner AND OLD.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND NEW.lease_expires_at > OLD.lease_expires_at)
+  OR (OLD.state = 'running' AND NEW.state = 'complete' AND NEW.attempt = OLD.attempt AND NEW.lease_owner IS OLD.lease_owner AND NEW.lease_expires_at IS OLD.lease_expires_at AND OLD.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
    AND (SELECT COUNT(*) FROM identity_evidence_import_receipt WHERE run_id = OLD.run_id) = OLD.chunk_count)
  )
 BEGIN SELECT RAISE(ABORT, 'identity_evidence_import_run_transition'); END;
 
 -- ===== The receipt fence, in the database =====
 -- The receipt is the last statement of the chunk's batch, so a refusal here rolls the whole chunk back. It requires: the run `running`; THIS attempt holding the live lease
--- at the receipt's own time; `chunk_no` the next one; the staged key count equal to the receipt's; and no matching live writer `pending`.
+-- at the receipt's own time; `chunk_no` the next one; the staged key count equal to the receipt's; no matching live writer `pending`; and, for family `b`, both Discovery writers `on`.
 CREATE TRIGGER identity_evidence_import_receipt_fence BEFORE INSERT ON identity_evidence_import_receipt FOR EACH ROW
 WHEN NOT EXISTS (
   SELECT 1 FROM identity_evidence_import_run r
-  WHERE r.run_id = NEW.run_id AND r.state = 'running' AND r.attempt = NEW.attempt AND r.lease_expires_at > NEW.recorded_at
+  WHERE r.run_id = NEW.run_id AND r.state = 'running' AND r.attempt = NEW.attempt AND r.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   AND NOT EXISTS (SELECT 1 FROM identity_evidence_writer w WHERE w.state = 'pending' AND w.writer IN (SELECT value FROM json_each(r.writers_json)))
+  AND NOT (r.family = 'b' AND (SELECT COUNT(*) FROM identity_evidence_writer w WHERE w.state = 'on' AND w.writer IN ('discovery_decision', 'discovery_owner')) < 2)
  )
  OR NEW.chunk_no <> (SELECT COUNT(*) FROM identity_evidence_import_receipt WHERE run_id = NEW.run_id) + 1
  OR NEW.staged_keys <> (SELECT row_count FROM identity_evidence_import_chunk WHERE run_id = NEW.run_id AND chunk_no = NEW.chunk_no)
