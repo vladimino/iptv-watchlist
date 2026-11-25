@@ -1195,6 +1195,9 @@ export const FILES={
  "prediction-catalog-held-event.mjs": {
   "suite": "core"
  },
+ "ratings-diary-admission-d1.mjs": {
+  "suite": "core"
+ },
  "ratings-diary-identity.mjs": {
   "suite": "core"
  },

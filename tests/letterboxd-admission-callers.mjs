@@ -12,6 +12,8 @@ import {execFileSync} from 'node:child_process';
 import {webcrypto} from 'node:crypto';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
+import * as WatchlistD1 from '../src/watchlist-d1.js';
+import {admissionStep} from '../src/letterboxd-sync-admission.js';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
 
@@ -349,9 +351,9 @@ const file=fresh('d1'),env=world(file);
 
  // refused AFTER the link: a concurrent writer admits the code for another Film between the plan (before the link) and the admission (after it). Terminal: no fact, the link stays, an admission conflict entry
  {
-  let injected=false;
+  let injected=false,seen5=0;
   const racing={...env,DB:d1Standin(file,{onQuery:async text=>{
-   if(!injected&&/operation_key=.admission:lid:Bz5./.test(text)){
+   if(!injected&&/operation_key=.admission:lid:Bz5./.test(text)&&++seen5>=2){
     injected=true;
     sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,updated_at) VALUES ('film:tmdb:700099',1,'tmdb:700099','"+STAMP+"');INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:700099','700099','Bz5','"+'a'.repeat(64)+"','Rival',1970,'d1','tmdb_700099','"+STAMP+"','rival-5','"+STAMP+"')");
    }
@@ -365,6 +367,26 @@ const file=fresh('d1'),env=world(file);
   assert.equal((await Facts.diaryLinks(env,['Bz5'])).get('Bz5').tmdb,null,'but no fact record was written for it');
   assert.equal(admissionRows(file).filter(item=>item.source_code==='Bz5').length,1,'only the rival admission exists');
   assert.equal(evidence(file).filter(item=>item.subject_value==='Bz5').length,0,'no evidence row for the refused item');
+ }
+
+ // a conflict verdict is fenced by the operation history: another attempt appears under the key before the chunk receipt is written -> the chunk stops (409), nothing is recorded; a LIVE attempt stops it before any verdict
+ {
+  const ADD=(lid,tmdb)=>D1.admitVerifiedFilm(env,{kind:'lid',lid,receipt:{tmdb,archiveSha256:'a'.repeat(64),title:'Held',year:1981},now:()=>new Date(NOW).toISOString()});
+  assert.equal((await ADD('Bz6','700020')).outcome,'admitted');
+  let movedAt=0;
+  const watching={...env,DB:d1Standin(file,{onQuery:async text=>{
+   if(!movedAt&&/CASE WHEN/.test(text)&&/operation_key/.test(text)&&/admission:lid:Bz6/.test(text)){
+    movedAt++;
+    sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('late-6','film_admission','rated_admission_retention','film','film:tmdb:700020','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()-3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:Bz6')");
+   }
+  }})};
+  const response=await Facts.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body([item('Bz6','700021')],6))}),watching,'/api/letterboxd/baseline/commit');
+  assert.equal(movedAt,1);assert.equal(response.status,409);assert.equal((await response.json()).code,'admission_not_settled','a verdict against a moved history is not recorded');
+  // a live attempt of the key: the chunk stops before any verdict
+  assert.equal((await ADD('Bz7','700022')).outcome,'admitted');
+  sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('live-7','film_admission','rated_admission_retention','film','film:tmdb:700022','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()+3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:Bz7')");
+  const live=await post(body([item('Bz7','700023')],7));
+  assert.deepEqual([live.status,live.json.code],[409,'admission_not_settled'],'a live attempt stops the chunk (non-terminal)');
  }
 
  // an identity that is held (an untrusted claim on the movie id) is non-terminal: 409, the chunk is re-sent, and succeeds once the hold is gone
@@ -511,6 +533,33 @@ const file=fresh('d1'),env=world(file);
  assert.equal(thrown,1);
  const after8=await entry('hw8');
  assert.equal(intentOf8(after8),'900060','the durable intent is still A, never B');
+}
+
+// ===== W. the Watchlist admission step (`letterboxd-sync-admission.js`, the real ledger of the Watchlist repository) over the real Diary check, at d1 =====
+{
+ reset();
+ const publish=async(list,id,at)=>{const r=await WatchlistD1.publishSnapshot(env,list,{scanId:id,observedAt:at,runId:'r-'+id,slotKey:'k'},{now:Date.parse(at)});assert.equal(r.ok,true,JSON.stringify(r));return r;};
+ const ledger=()=>Object.fromEntries(rows(file,'SELECT lid,state,attempts,last_reason,resolved_by FROM watchlist_admission_pending').map(r=>[r.lid,r]));
+ const GUARD='INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
+ const identityBridge={MAX_ATTEMPTS:Identity.MAX_ATTEMPTS,resolve:(e,items,o)=>Identity.resolve(e,items,{...o,fetchImpl}),diaryLinks:(e,lids)=>Facts.diaryLinks(e,lids)};
+ const stepCtx=(now)=>({env,epoch:1,now:()=>now,deadline:now+600000});
+ const wnow=Date.now();
+ await seed(env,'Wa1');await seed(env,'Wa2');
+ add('Wa1','fixture-w-2001','900090','Fixture WA',2001);add('Wa2','fixture-w-2002','900091','Fixture WB',2002);
+ // Wa2's code is held by another Film already
+ assert.equal((await D1.admitVerifiedFilm(env,{kind:'lid',lid:'Wa2',receipt:{tmdb:'900099',archiveSha256:'a'.repeat(64),title:'Other WB',year:1999},now:()=>new Date(NOW).toISOString()})).outcome,'admitted');
+ const film=(id,slug,year)=>({id,title:'T'+id,year,url:'https://letterboxd.com/film/'+slug+'/'});
+ await publish([film('Wa1','fixture-w-2001',2001),film('Wa2','fixture-w-2002',2002)],'sw','2026-11-25T11:00:00.000Z');
+ const step=admissionStep({repository:WatchlistD1,identity:identityBridge,epochGuard:()=>[GUARD,[]]});
+ const out=await step(stepCtx(wnow),{limit:3,now:wnow});
+ assert.equal(out.resolved,1,JSON.stringify(out));
+ const rowsNow=ledger();
+ assert.deepEqual([rowsNow.Wa1.state,rowsNow.Wa2.state,rowsNow.Wa2.last_reason,rowsNow.Wa2.attempts],['resolved','pending','admission_conflict',1],JSON.stringify(rowsNow));
+ const evw=evidence(file).filter(item=>item.subject_value==='Wa1');
+ assert.deepEqual(evw.map(item=>item.route),['watchlist_admission'],'the Watchlist caller\'s own route is on the evidence row');
+ assert.equal(puts.includes(ADMISSIONS),false,'no R2 admissions object at d1');
+ assert.equal((await Facts.diaryLinks(env,['Wa1'])).get('Wa1').tmdb,'900090','linked');
+ assert.equal(evidence(file).filter(item=>item.subject_value==='Wa2').length,0,'the conflict wrote no evidence');
 }
 
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

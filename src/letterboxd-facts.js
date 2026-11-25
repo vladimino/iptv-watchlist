@@ -604,8 +604,8 @@ function recordRatingChange(record,incoming,effective){
 
  // AIR-602 / ADR 0207 decision 3, at the marker mode `d1`: the admission of ONE inferred item through the D1 coordinator. The evidence row is the `restricts` row of the title and year search (ADR 0213:
  // never proof). -> 'admitted' | 'present' | 'present_other_code' | 'refused_after_link'; a non-terminal answer stops the chunk before its receipt (the same chunk is re-sent).
- async function admitInferredAtD1(env,item,origin,chunk){
-  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,receipt:{tmdb:String(item.tmdb),archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year},
+ async function admitInferredAtD1(env,item,origin,chunk,terminalGuards=[]){
+  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,finalize:async(result,guard)=>{terminalGuards.push(guard);return {wrote:true};},receipt:{tmdb:String(item.tmdb),archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year},
    evidence:{subject:{kind:'letterboxd_lid',value:item.lid},relation:'same_work',object:{kind:'tmdb_movie',value:String(item.tmdb)},polarity:'restricts',route:'letterboxd_export_import',method:'title_year_search',sourceRoot:origin.archiveSha256,sourceRef:'chunk:'+chunk,observedAt:new Date().toISOString()},
    now:()=>new Date().toISOString()});
   if(out.outcome==='admitted'||out.outcome==='present')return out.outcome;
@@ -857,7 +857,7 @@ function recordRatingChange(record,incoming,effective){
    if(current){if(current.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was opened with other items');intent=current;return null;}
    intent={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,films:items.map(item=>item.lid),viewBefore:before,openedAt:new Date().toISOString()};return intent;
   });
-  const counts={},films=[],records=[];let conflicts=0;
+  const counts={},films=[],records=[],terminalGuards=[];let conflicts=0;
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb};
    let admitted=null,d1Admission=null;
@@ -869,7 +869,12 @@ function recordRatingChange(record,incoming,effective){
      // AIR-602 / ADR 0207 decision 3 (table, inferred commit), at the marker mode `d1`: no R2 entry. The pair is classified against D1 BEFORE the link (read only): a code held by another Film is a conflict (no link, no
      // fact); another code on the Film is `present_other_code` (no admission, the link and the facts proceed); a held or redirected identity is non-terminal (the chunk stops before its receipt). The admission itself
      // follows the link, so nothing has to be withdrawn when the link conflicts.
+     // The key's history is RECONCILED first (a live attempt waits, stale ones are abandoned, an applied one is validated), so this verdict is never computed against an unsettled history; the history guard it
+     // returns is re-checked before the chunk receipt (the terminal write of this writer, an R2 document that cannot carry the assertion) is written.
+     const reconciled=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,settleOnly:true,now:()=>new Date().toISOString()});
+     if(reconciled.outcome!=='needs_check')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+reconciled.outcome+'): the chunk stops before its receipt');
      const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
+     if(plan.outcome==='conflict'||plan.outcome==='other_code')terminalGuards.push(reconciled.guard);
      if(plan.outcome==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'conflict'});continue;}
      if(plan.outcome==='held'||plan.outcome==='redirect')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
      d1Admission=plan.outcome==='other_code'?'present_other_code':'planned';
@@ -893,7 +898,7 @@ function recordRatingChange(record,incoming,effective){
     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;
    }
    if(d1Admission==='planned'){
-    const out=await admitInferredAtD1(env,item,origin,chunk);
+    const out=await admitInferredAtD1(env,item,origin,chunk,terminalGuards);
     if(out==='refused_after_link'){
      // The batch refused after the link (a concurrent writer admitted the code for another Film): terminal. No fact and no claim; the inferred-marked link stays (it is never a claim proof, ADR 0184); the entry
      // is an admission conflict for owner repair.
@@ -925,6 +930,9 @@ function recordRatingChange(record,incoming,effective){
    }
   }
   const entries=films.map(film=>film.conflict?film:{...film,observations:film.observations.map(({fact,observationId})=>({fact,observationId}))});
+  // AIR-602 (review of PR #1018): every terminal verdict of this chunk (a conflict, another code on the Film, a refusal after the link) was computed against an operation history; the receipt records them, so the
+  // history must still be the one observed. The receipt is an R2 document and cannot carry the assertion: it is checked immediately before the write, and a moved history stops the chunk before its receipt (re-send).
+  for(const guard of terminalGuards)if(!(await guard.holds()))throw new FactsError('admission_not_settled','The operation history of an admission moved: the chunk stops before its receipt');
   const next={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,committedAt:new Date().toISOString(),films:films.length,conflicts,outcomes:counts,entries,viewBefore:intent.viewBefore};
   await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next);
   // After the receipt: a claim is never written for a chunk whose commit could still fail.

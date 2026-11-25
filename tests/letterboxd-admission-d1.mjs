@@ -11,7 +11,8 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {ADMISSION_KINDS,admissionOperationKey,admitVerifiedFilm,planAdmissionD1} from '../src/letterboxd-admission-d1.js';
 import {admissionDigestD1,RATED_ADMISSION_ORIGIN} from '../src/canonical-rated-admission-producer.js';
-import {readOperationHistory} from '../src/receipt-operation-key.js';
+import {readOperationHistory,runOperationKey} from '../src/receipt-operation-key.js';
+import {evidenceOperationKey,recordIdentityEvidenceKeyed} from '../src/identity-evidence.js';
 
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-admission-d1-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -308,6 +309,35 @@ const revision=(file,id)=>Number(rows(file,"SELECT revision FROM canonical_revis
  const ok=await admitVerifiedFilm(running,{...itemOf(),now:clock(60000)});
  assert.equal(ok.outcome,'admitted',JSON.stringify(ok));
  assert.equal(admissionRows(file).length,1);
+}
+
+// ===== 13. the keyed evidence-only operation: its own key, redirect-aware, a lost response settles from the ledger =====
+{
+ const file=fresh();
+ const env=envOf(file);
+ const first=await admitVerifiedFilm(env,{...itemOf({lid:'Ab1',tmdb:'603'}),now:clock()});
+ assert.equal(first.outcome,'admitted');
+ const second=evidenceOf({lid:'Ab1',tmdb:'603',root:sha('f'),route:'watchlist_admission'});
+ // the Film was merged into a survivor meanwhile: the write targets the Film that holds the id NOW
+ sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,updated_at) VALUES ('film:survivor',1,'tmdb:1','"+STAMP+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:603','film:survivor','"+STAMP+"')");
+ const out=await recordIdentityEvidenceKeyed(env,{evidence:second,filmId:'film:tmdb:603',now:clock(60000)},{run:runOperationKey});
+ assert.deepEqual([out.state,out.written],['written',true],JSON.stringify(out));
+ const row=evidenceRows(file).find(item=>item.source_root===sha('f'));
+ assert.equal(row.film_id,'film:survivor','bound to the surviving Film, not the retired one');
+ const keyOf=rows(file,"SELECT evidence_key FROM film_identity_evidence WHERE source_root='"+sha('f')+"'")[0].evidence_key;
+ assert.deepEqual(rows(file,"SELECT state,operation_key FROM canonical_write_receipt WHERE operation_key='"+evidenceOperationKey(keyOf)+"'").map(item=>[item.state,item.operation_key]),[['applied','evidence:'+keyOf]],'under its own key');
+ // a lost response: the same call again (even for the retired Film id) settles from the ledger and writes nothing
+ const before=JSON.stringify([evidenceRows(file),receipts(file)]);
+ const again=await recordIdentityEvidenceKeyed(env,{evidence:second,filmId:'film:tmdb:603',now:clock(120000)},{run:runOperationKey});
+ assert.deepEqual([again.state,again.written],['present',false]);
+ assert.equal(JSON.stringify([evidenceRows(file),receipts(file)]),before);
+ // a live attempt of the evidence key is a wait, never a success; an unknown Film is refused
+ const third=evidenceOf({lid:'Ab1',tmdb:'603',root:sha('9'),route:'ratings_diary'});
+ const key3=(await (await import('../src/identity-evidence.js')).planIdentityEvidence(third)).evidenceKey;
+ sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('ev-live','identity_evidence','identity_evidence','film','film:survivor','"+sha('7')+"',0,2,'pending',1,'"+new Date(Date.now()+3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'"+evidenceOperationKey(key3)+"')");
+ const waiting=await recordIdentityEvidenceKeyed(env,{evidence:third,filmId:'film:survivor',now:()=>new Date().toISOString()},{run:runOperationKey});
+ assert.deepEqual([waiting.state,waiting.written],['wait',false],'a live attempt is not success');
+ await assert.rejects(()=>recordIdentityEvidenceKeyed(env,{evidence:evidenceOf({lid:'Zz9',tmdb:'1',root:sha('8')}),filmId:'film:nope',now:clock()},{run:runOperationKey}),code('identity_evidence_unknown_film'));
 }
 
 console.log('Letterboxd D1 admission coordinator (AIR-602) passed.');
