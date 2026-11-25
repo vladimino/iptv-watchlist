@@ -402,7 +402,7 @@ if(section('12')){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-film-writers'))importers.push(full.replace(/\\/g,'/'));}};
  walk('src');
- assert.deepEqual(importers.sort(),['src/canonical-metadata-sync-producer.js','src/canonical-producer-adapters.js','src/canonical-producers.js','src/film-localization-projection.js'],'only the producers module, the dormant receipt adapter, metadata_sync and the ADR 0218 projection writer import the film writers');
+ assert.deepEqual(importers.sort(),['src/canonical-metadata-sync-producer.js','src/canonical-producer-adapters.js','src/canonical-producers.js','src/film-localization-projection.js','src/film-localization-reconciler.js'],'only the producers module, the dormant receipt adapter, metadata_sync, the ADR 0218 projection writer and the dormant stage 4 reconciler import the film writers');
  for(const f of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(f))assert.ok(!fs.readFileSync(f,'utf8').includes('canonical-film-writers'),f+' does not bundle it');
  // AIR-374 P3c: the Discovery admission unit needs this module, so build.mjs carries it in ONE named scope (and nowhere else).
  { const build=fs.readFileSync('build.mjs','utf8'); assert.equal(build.split('src/canonical-film-writers.js').length-1,1,'one bundle scope'); assert.ok(build.includes("scopedImports('src/canonical-film-writers.js','CanonicalFilmWriters'"),'the scope is CanonicalFilmWriters'); }

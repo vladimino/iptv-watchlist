@@ -4,6 +4,8 @@
 // discovery marker: D1 when it is d1, otherwise R2 (AIR-320).
 const DISCOVERY_WORKFLOW_STATE_KEY='epg/discovery-workflow.json';
 const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
+// AIR-682 (owner decision, 25 Nov 2026): wall-clock budget of one paged chunk run by the Workflow. The synchronous default stays 40 s (PAGED_CHUNK_BUDGET_MS).
+const DISCOVERY_WORKFLOW_CHUNK_BUDGET_MS=300000;
 const DISCOVERY_WORKFLOW_STALL_LIMIT=3;
 const DISCOVERY_WORKFLOW_WRITE_LIMIT=3;
 const DISCOVERY_WORKFLOW_STEP_CAP=160;
@@ -576,7 +578,7 @@ async function renewDiscoverySeries(env,pinned){
 async function runWorkflowChunk(env,meter){
  const before=await readContinuation(env);
  try{
-  const outcome=await advanceDiscovery(env,{caller:'internal'});
+  const outcome=await advanceDiscovery(env,{caller:'internal',chunkBudgetMs:DISCOVERY_WORKFLOW_CHUNK_BUDGET_MS});
   const saved=outcome?.diagnostic?.saved?.owned===true;
   const busy=outcome?.stage==='busy'||outcome?.discovery?.reason==='busy';
   return {threw:false,progress:saved,busy,until:outcome?.discovery?.nextCatchUpAt||null,summary:chunkSummary(outcome),saved};

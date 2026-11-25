@@ -355,6 +355,9 @@ export const FILES={
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
+ "film-readiness.mjs": {
+  "suite": "core"
+ },
  "film-history-aggregate.mjs": {
   "suite": "core"
  },
@@ -944,6 +947,9 @@ export const FILES={
  "film-localization-projection.mjs": {
   "suite": "core"
  },
+ "film-localization-reconciler.mjs": {
+  "suite": "core"
+ },
  "film-person-backfill.mjs": {
   "suite": "core"
  },
@@ -1086,6 +1092,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence-writer.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-discovery-decision.mjs": {
   "suite": "core"
  },
  "identity-work-inventory.mjs": {
