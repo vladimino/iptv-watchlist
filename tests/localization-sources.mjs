@@ -283,9 +283,10 @@ const code=expected=>error=>error.code===expected;
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('localization-sources'))importers.push(full);}};
  walk('src');
+ // AIR-662: the ADR 0218 projection writer (src/film-localization-projection.js) reuses the resolver; it is imported only by the metadata_sync unit (tests/film-localization-projection.mjs).
  // AIR-660: the offline dimension parity reader (src/film-dimension-parity.js and its pure half) is imported by nothing in src, which tests/film-dimension-parity.mjs proves.
  // The only importer is the equally inactive canonical read model (AIR-372), which tests/canonical-read-model.mjs proves is itself imported by nothing. The film writers (AIR-374 P2a) are imported by the producers module only, which tests/canonical-film-writers.mjs proves.
- assert.deepEqual(importers.filter(file=>!file.endsWith('localization-sources.js')&&!file.endsWith('canonical-read-model.js')&&!file.endsWith('canonical-producers.js')&&!file.endsWith('canonical-film-writers.js')&&!file.endsWith('canonical-metadata-sync-producer.js')&&!file.endsWith('film-dimension-parity.js')),[],'no Worker source file imports localization-sources');
+ assert.deepEqual(importers.filter(file=>!file.endsWith('localization-sources.js')&&!file.endsWith('canonical-read-model.js')&&!file.endsWith('canonical-producers.js')&&!file.endsWith('canonical-film-writers.js')&&!file.endsWith('canonical-metadata-sync-producer.js')&&!file.endsWith('film-dimension-parity.js')&&!file.endsWith('film-localization-projection.js')),[],'no Worker source file imports localization-sources');
  for(const file of ['scripts/build.mjs','scripts/build-worker.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('localization-sources'),file+' does not bundle or name it');
  assert.ok(fs.readFileSync('migrations/README.md','utf8').includes(NEW),'migrations/README.md lists 0014');
  assert.ok(!/localization_source/.test(fs.readFileSync('src/canonical-repository.js','utf8')),'the projector path does not write the source tables');
