@@ -1,9 +1,9 @@
 # ADR 0215: The full identity evidence model: each domain step writes its own evidence under its own fence, bare sightings stay in their domains, and history is mapped record by record
 
-**Status:** Proposed  
-**Original decision date:** not decided. The owner selected all nine choices on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622); exact wording on [AIR-616](https://trello.com/c/DZNk9uMJ#comment-6b067f103671a1cae1b82f63)). Q1 = Q1-a followed the same day ([owner choice](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7155532290)). These are directions, not the final disposition of this record.  
+**Status:** Accepted  
+**Original decision date:** 2026-11-25 ([final owner disposition](https://trello.com/c/DZNk9uMJ#comment-6b068bb6a944a15be3f7ca46): «принимаю»). The owner selected the nine choices the same day ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622)) and Q1 = Q1-a ([owner choice](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7155532290)).  
 **Recorded at:** 2026-11-24. Renumbered from 0214 the same day, because [PR #988](https://github.com/vladimino/iptv-watchlist/pull/988) took that number first.  
-**Approval source:** not yet decided. The owner approved the roadmap card on 24 Nov 2026 ([AIR-616](https://trello.com/c/DZNk9uMJ)); that is not an architecture decision.  
+**Approval source:** [Product Owner final disposition of 25 Nov 2026](https://trello.com/c/DZNk9uMJ#comment-6b068bb6a944a15be3f7ca46), accepting this record after the [final independent review](https://github.com/vladimino/iptv-watchlist/pull/989#pullrequestreview-6053326537) (technical PASS on `2726025a`; `3d9e0b89` adds only the requested editorial corrections). Selections: 0215-1 = A, 2 = A, 3 = B, 4 = A, 5 = A, 6 = A, 7 = A, 8a = A, 8b = C, Q1-a. This is an architecture acceptance only, with no implementation, migration, activation, import or production GO.  
 **Related work:**
 - [AIR-616](https://trello.com/c/DZNk9uMJ), card EP of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) decision 7, requested by owner choice 0213-4 = A ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)). It is not a prerequisite of [AIR-275](https://trello.com/c/4x7hH0gI).
 - The initial slice: [AIR-601](https://trello.com/c/Pl6RUDI9) (E1).
@@ -360,7 +360,7 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 - **0215-8b, selected C: a bridge row only with a causal root.** Not chosen: A, keying by the receipt `request_id` (rootless live rows), and B below.
 - **0215-8b B. Keep ADR 0213's key with the root for bridge rows.** The same occurrence would get a different key when a retry loses the hand-over, so one claim could produce two rows that look like two sources. Not recommended.
 - **Consequence of C.** The backfill, replays, pre-A2 links and the nine historical claims have no bridge row. That is a stated, bounded gap, not a negative.
-- **No null-root coverage exception is proposed.** Under every 0215-8b option, a rootless row never counts as covered by another row.
+- **No null-root coverage exception.** Under every 0215-8b option, a rootless row never counts as covered by another row.
 
 ## Consequences
 
@@ -389,7 +389,7 @@ Each card proves its rows of this matrix on the real caller paths, offline. Natu
 
 ## Owner choices
 
-Selected by the owner on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622)). Final disposition of the revised record is pending.
+Selected by the owner on 25 Nov 2026 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/989#issuecomment-7154757622)); the record was accepted the same day ([final owner disposition](https://trello.com/c/DZNk9uMJ#comment-6b068bb6a944a15be3f7ca46)).
 
 | # | Choice | Selected |
 | --- | --- | --- |
