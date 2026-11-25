@@ -106,6 +106,8 @@ On a laptop the heaviest mutation files of the non-functional suite (`canonical-
 TEST_JOBS=2 git push
 ```
 
+The hook also passes `--isolate-measurements`: every non-functional file that is not a mutant-kill `*-mutation*.mjs` file (wall-clock, memory and latency checks such as `film-person-reader.mjs` and `discovery-chunk-budget.mjs`) runs alone after the parallel phase, while the mutation files keep running in parallel. Beside five mutation files those bounds failed in turn on three hooked pushes on 25 Nov 2026 although each file passed alone. CI and the nightly workflow run without the option.
+
 `npm test`, `npm run test:all` run by hand, and CI keep the 300 s default.
 
 Git opens the SSH connection to GitHub before it runs the hook, and the full suite takes about ten minutes, so an idle connection can be closed under it: the hook passes and the push then dies with exit 141 (SIGPIPE) without updating the remote. Keep the connection alive for a push that runs the suite:
