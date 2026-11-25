@@ -85,6 +85,37 @@ Historical: the enrichment projector asserted the marker and generation in every
 
 Readiness before the handoff (AIR-374 P6, offline, dormant): `handoffReadiness` is computed from the marker, the schema contract, the lease and window rows, three counts and frozen registries (former gaps with their fenced writers and differential coverage, producer wiring, readers, the receipts protocol). It reads only and writes nothing; with the current repository it reports not ready (`empty_class_not_loaded` for the H1 classes). `metadata_sync` and `rated_admission_retention` are wired (typed Film identity, durable intent only for an unsettled batch; rated admission walks a watchlist scan with a cursor of at most 12 units). Freeze `reader_not_moved` is cleared. That registry is not rewritten for activation. The operator's `activationReadiness` is the H2 gate: GET programme/watchlist already move to D1 at `open`; remaining freeze writers are frozen R2 mirrors, not dual D1 writers. The differential harness (`tests/canonical-differential.mjs`) replays the removed projector's write path from the retained repository module as a regression baseline at `prepared` and the canonical writers at `open` from one identical starting database and classifies every difference; no runtime topology, data flow or trust boundary changes.
 
+## Proposed: unified Film read contract ([ADR 0216](../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md), Proposed, not implemented)
+
+A canonical Film exists independently of its facts. The proposed `FilmAggregateV1` is a read-only composition per request over the existing domain readers. It adds no table, writer or authority. Identity is the only fatal section; every other section reports its own status and freshness token. Nothing below is deployed.
+
+```mermaid
+flowchart TB
+    req["GET one typed id<br/>tmdb_n, lid or film:id"]
+    resolve["Bounded identity resolver<br/>redirects, conflict, retirement"]
+    fatal["404 absent, 409 conflict,<br/>410 retired, 503 unavailable"]
+    ids["Survivor Film and its<br/>verified storage ids"]
+    display["display<br/>film_metadata, localization"]
+    watch["watchlist<br/>ADR 0203 authority version"]
+    avail["availability<br/>published EPG generation"]
+    personal["personal<br/>ratings domain D1"]
+    pred["predictions<br/>prediction_pointer, lineage"]
+    agg["FilmAggregateV1<br/>per-section status and version"]
+    req --> resolve
+    resolve -->|not found| fatal
+    resolve -->|found| ids
+    ids --> display
+    ids --> watch
+    ids --> avail
+    ids --> personal
+    ids --> pred
+    display --> agg
+    watch --> agg
+    avail --> agg
+    personal --> agg
+    pred --> agg
+```
+
 ### Identity consumer: prediction recovery intent
 
 The owner-only prediction recovery preview and confirm ([ADR 0165](../adr/0165-scoped-prediction-recovery-intent.md), Accepted) read a film's canonical identity only through `catalogFilmIdentityBridge` at `open`: the one trusted, non-conflicting typed claim of a Film without a redirect. A stored id that is not that claim, an absent, retired or conflicting identity, or any marker state other than `open` refuses the film. A retained Film outside the queue's admission is refused in v1; it is never admitted as a side effect of a recovery read or confirm.
