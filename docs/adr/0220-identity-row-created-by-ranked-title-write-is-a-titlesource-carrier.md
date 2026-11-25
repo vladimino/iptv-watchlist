@@ -4,7 +4,7 @@
 **Original decision date:** 2026-11-25, selected as C1-1 by the Product Owner in chat and [relayed by the Coordinator](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168990950). That relay is a transcription; the durable owner-authored approval link is **not yet recorded** and is required before this ADR can be Accepted or merged (ADR merge gate).  
 **Recorded at:** 2026-11-25, against `main` `7d8d4b3` and PR #1008 HEAD `286d422`  
 **Approval source:** Pending: owner-authored direct approval link, to be added here and in the registry at disposition. Interim record: the relayed selection above.  
-**Related work:** [AIR-662](https://trello.com/c/P8cCPv1V), [PR #1008](https://github.com/vladimino/iptv-watchlist/pull/1008) (independent review finding P1-3). Narrows Accepted [ADR 0218](0218-film-lifecycle-dimensions-revision.md) decision 5; coordinated with [AIR-660](https://trello.com/c/daGePESx) (parity classification) and [AIR-661](https://trello.com/c/1Rv634jd) (guarded import and retirement, PR #1006, open).  
+**Related work:** [AIR-662](https://trello.com/c/P8cCPv1V), [PR #1008](https://github.com/vladimino/iptv-watchlist/pull/1008) (independent review finding P1-3). Narrows Accepted [ADR 0218](0218-film-lifecycle-dimensions-revision.md) decision 5; coordinated with [AIR-660](https://trello.com/c/daGePESx) (parity classification) and [AIR-661](https://trello.com/c/1Rv634jd) (guarded import and retirement, merged as `5e61ab3`).  
 **Supersedes:** In part, one sentence of [ADR 0218](0218-film-lifecycle-dimensions-revision.md) decision 5 ("That row has the current verdict as `status`"). It amends nothing else.  
 **Superseded by:** None
 
@@ -35,7 +35,7 @@ Everything else in ADR 0218 decision 5 stands, including the atomic `titleSource
 ### Compatibility
 
 - **AIR-660 parity classifier.** `unresolved` is a known identity status. A carrier row classifies as `control` (reason `title_source`) whatever the derived verdict is (`found`, `conflict`, `unavailable`); it is never `stale_copy` and never `unknown_legacy`. Fixtures: `tests/film-localization-projection.mjs`.
-- **AIR-661 guarded import and retirement (PR #1006, open).** Its replaceable-identity and protected-row predicates key off `titleSource` in `provenance_json` and the known identity status list, which contains `unresolved`; a carrier row is therefore kept (control) by the importer and the retirement fence. The AIR-661 executor is informed on that PR; no change of its predicates is required by this decision.
+- **AIR-661 guarded import and retirement (merged, `5e61ab3`).** Its replaceable-identity and protected-row predicates key off `titleSource` in `provenance_json` and the known identity status list, which contains `unresolved`; a carrier row is therefore kept (control) by the importer and the retirement fence. No change of its predicates is required by this decision; a test over `replaceableIdentity` and `DIMENSION_STATUSES.identity` at `5e61ab3` confirms a carrier row (status `unresolved`, `titleSource` only) is not replaceable and the status is known.
 - **Readers and fixtures.** No D1 reader or route reads the identity status for a decision (ADR 0218 inventory); the offline lifecycle reader reads `unresolved` as "not resolved", which is true of a Film whose identity the row does not assert. The dictionary producer no longer names `no_identity_row` and hands the title to the writer.
 
 ## Alternatives considered
@@ -60,7 +60,7 @@ Code-only and reversible by deploy; rows it wrote stay valid. No flag, schema ap
 - **Original decision:** [relayed selection C1-1](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168990950); [options put to the owner](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168814532) (executor response, P1-3); [review of `9c716b4`](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168269692) and [re-review of `286d422`](https://github.com/vladimino/iptv-watchlist/pull/1008#issuecomment-7168938794).
 - **Implementation:** PR #1008 (`IDENTITY_CARRIER_STATUS` in `src/canonical-film-writers.js`).
 - **Dated verification:** 2026-11-25, local fixtures on SQLite (no production reads): the carrier status is identical for a clean Film, a competing claim, an unsettled `tmdb_tv` claim and a retired movie claim; the carrier insert issues no claim read; the carrier classifies as `control` for every derived verdict.
-- **Uncertainty:** the AIR-661 predicates were read from its open PR head and may change before it merges.
+- **Uncertainty:** the AIR-661 predicates were read at the merged `5e61ab3`; a later change of them would need to keep keying off `titleSource` and the known status list.
 
 ## Follow-ups
 
