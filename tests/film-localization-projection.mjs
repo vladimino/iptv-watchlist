@@ -445,6 +445,83 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  assert.equal((await write({DB:d1Standin(file4)},file4,[src('tmdb','x',T1)])).reason,'protected_row_differs');
 }
 
+// ---- 5d. Consumers agree with the writer: a marked owner projection is a projection of the current decision in the delivered parity reader AND the derived display resolver ----
+{
+ const {readDimensionParity}=await load('film-dimension-parity.js');
+ const {readFilms}=await load('canonical-read-model.js');
+ const parityOf=async(file,id=FID)=>{const result=await readDimensionParity({DB:d1Standin(file)});return result.classified.find(item=>item.film_id===id&&item.dimension==='localization');};
+ const titleOf=async(file,id=FID)=>(await readFilms({DB:d1Standin(file)},[id])).items.get(id).title;
+ const file=database();seedFilm(file);addOwner(file);
+ const env={DB:d1Standin(file)};
+ await write(env,file,[src('tmdb','Схватка',T1)]);
+ // materialized and the decision stands: agree (a copy of owner_review_entry), and the derived reader resolves the owner value from the entry
+ let row=await parityOf(file);
+ assert.deepEqual([row.class,row.reasons],['agree',['owner_projection']]);
+ assert.deepEqual([(await titleOf(file)).value,(await titleOf(file)).tier],['Жара','owner']);
+ // the decision is REMOVED: the parity reader reports a stale projection (control, kept, NEVER a stale_copy: no retirement eligibility) and the derived reader no longer promotes the old row to owner authority
+ ownerCommit(file,{value:null});
+ row=await parityOf(file);
+ assert.deepEqual([row.class,row.reasons,row.expected],['control',['owner_projection_stale'],{tier:'automatic',source:'tmdb'}]);
+ assert.notEqual(row.class,'stale_copy');
+ const afterRevocation=await titleOf(file);
+ assert.deepEqual([afterRevocation.value,afterRevocation.tier,afterRevocation.source],['Схватка','automatic','tmdb'],'the derived resolver reads the sources, not the stale row, once the entry is gone');
+ // the decision CHANGES: stale as well, resolved to the new owner value
+ ownerCommit(file,{value:'x'});
+ const file2=database();seedFilm(file2);addOwner(file2);
+ await write({DB:d1Standin(file2)},file2,[src('tmdb','Схватка',T1)]);
+ ownerCommit(file2,{value:'Жара 2'});
+ row=await parityOf(file2);
+ assert.deepEqual([row.class,row.reasons,row.expected.tier],['control',['owner_projection_stale'],'owner']);
+ assert.equal((await titleOf(file2)).value,'Жара 2');
+ // owner evidence UNAVAILABLE is never a proved revocation: unproved (control), and the reader without owner evidence keeps reading the marked row as before
+ const file3=database({owner:'r2'});seedFilm(file3);
+ reviewedRow(file3,{value:'Жара',authority:'owner',source:'owner'});
+ exec(file3,"UPDATE film_dimension SET provenance_json='{\"authority\":\"owner\",\"projection\":\"owner_review\"}' WHERE film_id="+q(FID)+" AND dimension='localization'");
+ row=await parityOf(file3);
+ assert.deepEqual([row.class,row.reasons,row.proof],['control',['owner_projection_unproved'],'unavailable']);
+ const bare=(await loadLocalizationInputs({DB:d1Standin(file3)},'film',[FID])).get(FID);
+ assert.deepEqual(bare.owner,{value:'Жара',at:T},'no owner evidence read: the marked row is still an owner input');
+ const read=(await loadLocalizationInputs({DB:d1Standin(file3)},'film',[FID],{ownerRead:true})).get(FID);
+ assert.equal(read.owner,null,'owner evidence read by the caller: the marked row is not an input');
+ // an UNMARKED legacy owner row keeps its control after the entry is gone: owner_applied, and the derived reader still resolves it as the owner
+ const file4=database();seedFilm(file4);reviewedRow(file4,{value:'Жара',authority:'owner',source:'owner'});
+ row=await parityOf(file4);
+ assert.deepEqual([row.class,row.reasons],['control',['owner_applied']]);
+ assert.deepEqual([(await titleOf(file4)).value,(await titleOf(file4)).tier],['Жара','owner']);
+}
+
+// ---- 5e. A legacy provisional candidate with NO source row is a resolver input: a write that replaces the row records it first, or holds ----
+{
+ const legacyRow=(f,{source='epg',value='Эфир',version='v1',at=T,provenance='NULL'}={})=>exec(f,"INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,next_action,updated_at) VALUES ("+q(FID)+",'localization','provisional',"+q(source)+","+q(version)+","+provenance+","+q(value)+",NULL,0,'none',"+q(at)+")");
+ // (a) an incoming higher-ranked source replaces the projection: the legacy candidate is recorded as a source row in the SAME batch, the resolver input unchanged
+ const file=database();seedFilm(file);legacyRow(file,{provenance:"'{\"sources\":[\"x\"]}'"});
+ const env={DB:d1Standin(file)};
+ const out=await write(env,file,[src('tmdb','Схватка',T1)]);
+ assert.deepEqual([out.written,out.changes],[true,['source:epg:preserved','source:tmdb','dimension:localization']]);
+ assert.deepEqual(rows(file,"SELECT source,value,source_version,provenance_json,observed_at FROM film_localization_source WHERE film_id="+q(FID)+" ORDER BY source"),[{source:'epg',value:'Эфир',source_version:'v1',provenance_json:'{"sources":["x"]}',observed_at:T},{source:'tmdb',value:'Схватка',source_version:'v1',provenance_json:'null',observed_at:T1}]);
+ assert.equal(locRow(file).source,'tmdb');
+ // (b) sequential: an owner decision materializes over the legacy row, is later revoked, and a LOWER-ranked observation arrives: the preserved legacy candidate is decisive, not lost
+ const file2=database();seedFilm(file2);legacyRow(file2);addOwner(file2);
+ const env2={DB:d1Standin(file2)};
+ const owned=await write(env2,file2,[src('discovery','Скаут',T1)]);
+ assert.deepEqual([owned.effective.tier,owned.changes],['owner',['source:epg:preserved','source:discovery','dimension:localization']]);
+ assert.equal(locRow(file2).authority,'owner');
+ ownerCommit(file2,{value:null});
+ const revoked=await write(env2,file2,[src('discovery','Скаут 2',T2)],{requestId:'req-2'});
+ assert.deepEqual([revoked.effective.value,revoked.effective.source,locRow(file2).source],['Эфир','epg','epg'],'epg outranks discovery: the legacy candidate decides, durable in its source row');
+ // (c) a candidate that cannot be recorded losslessly (no version, an unparseable clock) HOLDS: nothing is written, nothing is lost
+ for(const [label,over] of [['no version',{version:''}],['unparseable clock',{at:'yesterday'}]]){
+  const f=database();seedFilm(f);legacyRow(f,over);addOwner(f);
+  const e={DB:d1Standin(f)};
+  const held=await write(e,f,[src('tmdb','Схватка',T1)]).catch(error=>({error:error.code}));
+  assert.deepEqual([held.held,held.reason,sourceRows(f),locRow(f).source,e.DB.calls.batches],[true,'legacy_candidate_not_preservable',[],over.at?'epg':'epg',0],label);
+ }
+ // (d) the legacy candidate that WINS is not replaced (the row matches the resolver output): nothing to preserve, only the source is written
+ const file5=database();seedFilm(file5);legacyRow(file5,{source:'letterboxd',value:'Автор'});
+ const win=await write({DB:d1Standin(file5)},file5,[src('discovery','Скаут',T1)]);
+ assert.deepEqual([win.changes,locRow(file5).source],[['source:discovery'],'letterboxd']);
+}
+
 // ---- 6. C1-1 (ADR 0220): a ranked title write creates the minimal identity row as a titleSource CARRIER with the neutral status `unresolved`, under the same CAS; no verdict is computed ----
 {
  const file=database();seedFilm(file);

@@ -99,7 +99,7 @@ async function retiredIds(db,survivors){
 async function resolved(env,db,kind,list){
  if(!list.length)return new Map();
  const links=kind==='film'?await retiredIds(db,list):new Map(list.map(id=>[id,[id]]));
- const [inputs,entries]=await Promise.all([loadLocalizationInputs(env,kind,list),ownerEntries(db,kind,[...new Set([...links.values()].flat())])]);
+ const [inputs,entries]=await Promise.all([loadLocalizationInputs(env,kind,list,{ownerRead:true}),ownerEntries(db,kind,[...new Set([...links.values()].flat())])]);
  const candidates=ownerCandidatesFromEntries(entries);
  const out=new Map();
  for(const id of list){

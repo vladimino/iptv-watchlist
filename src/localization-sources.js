@@ -16,6 +16,14 @@ export const LOCALIZATION_READ_CHUNK=80;
 export const AUTOMATIC_SOURCE_ORDER=['letterboxd','tmdb','wikidata','epg','discovery'];
 const RESERVED=new Set(['owner','dictionary','reviewed']);
 const SOURCE=/^[a-z][a-z0-9_]{0,39}$/;
+// ADR 0218 D1 (AIR-662): the marker of an OWNER PROJECTION, the row the projection-aware Film writer materializes from a verified owner_review_entry. Such a row is a PROJECTION of
+// the current owner decision, not an independent owner authority: once that decision is revoked or changed the row is stale. The ONE definition every consumer shares (the writer, the
+// resolver input construction below and the offline parity reader). A row without the marker is a genuine legacy owner/reviewed row and keeps its control.
+export const OWNER_PROJECTION='owner_review';
+export function isOwnerProjection(row){
+ if(!row||row.status!=='reviewed'||row.authority!=='owner')return false;
+ try{return JSON.parse(row.provenance_json??'null')?.projection===OWNER_PROJECTION;}catch{return false;}
+}
 const TABLE={film:{table:'film_localization_source',column:'film_id',dimension:'film_dimension',entity:'film'},person:{table:'person_localization_source',column:'person_id',dimension:'person_dimension',entity:'person'}};
 
 const parse=value=>{if(value==null)return null;if(typeof value==='object')return value;try{return JSON.parse(value);}catch{return undefined;}};
@@ -87,7 +95,9 @@ export function ownerCandidatesFromEntries(entries){
 }
 // Read only. The stored inputs of resolveLocalization for entities of one kind: the owner/reviewed/provisional dimension row, the source rows.
 // An owner value comes from `ownerValues` (id -> {value,at}) when the caller read it from owner_review_entry, else from a dimension the owner wrote.
-export async function loadLocalizationInputs(env,kind,ids,{ownerValues=null}={}){
+// `ownerRead: true` (or `ownerValues`): the caller reads the owner evidence itself (owner_review_entry), so a marked owner projection row is NOT an input (the evidence decides: removed or
+// changed means the row is stale). Without owner evidence a marked row is read as before, as an owner input: missing or unreadable evidence is never a proved revocation.
+export async function loadLocalizationInputs(env,kind,ids,{ownerValues=null,ownerRead=false}={}){
  const spec=TABLE[kind];
  if(!spec)throw failed('localization_invalid');
  const db=database(env);
@@ -111,7 +121,8 @@ export async function loadLocalizationInputs(env,kind,ids,{ownerValues=null}={})
   }
   for(const row of dimensions){
    const input=out.get(row.id);
-   if(row.status==='reviewed'&&row.value){
+   if(isOwnerProjection(row)&&(ownerRead||ownerValues)){/* a projection of the owner decision the caller reads itself: not an input */}
+   else if(row.status==='reviewed'&&row.value){
     if(row.authority==='owner')input.owner={value:row.value,at:row.updated_at};
     else input.reviewed={value:row.value,source:row.source||'dictionary',at:row.updated_at};
    }else if(row.status==='provisional'&&row.value&&row.source&&!RESERVED.has(row.source)&&!bySource.has(row.id+'\u0000'+row.source)){

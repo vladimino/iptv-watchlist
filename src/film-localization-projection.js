@@ -4,7 +4,7 @@
 // the metadata_sync producer calls it (operation kind film_localization_projection). Nothing here reads R2, writes Person rows, owner rows or a reviewed row.
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
-import {AUTOMATIC_SOURCE_ORDER,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
+import {AUTOMATIC_SOURCE_ORDER,OWNER_PROJECTION,isOwnerProjection,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {canonicalJson,digestOf} from './canonical-receipts.js';
 import {LOCALIZATION_ROW,readFilmSnapshot} from './canonical-film-writers.js';
 
@@ -128,13 +128,26 @@ export async function readProjectionInputs(env,id,incoming){
  return projectionInputs(snapshot,token,incoming);
 }
 
-// An owner projection row: the row this writer materialized from a verified owner decision (provenance `projection:'owner_review'`). It is a PROJECTION of the current
-// owner_review_entry, not an independent owner authority: once the decision is revoked or changed the row is stale, is never protected by the strong() guard and never counts
-// as an owner input to the resolver, so a new automatic observation replaces it. A genuine legacy owner/reviewed row (no marker) keeps its control.
-export const OWNER_PROJECTION='owner_review';
-const isOwnerProjection=row=>!!row&&row.status==='reviewed'&&row.authority==='owner'&&parse(row.provenance_json)?.projection===OWNER_PROJECTION;
+// An owner projection row (see isOwnerProjection of localization-sources.js, the one definition shared with the resolver input construction and the parity reader): the row this
+// writer materialized from a verified owner decision. It is a PROJECTION of the current owner_review_entry, not an independent owner authority: once the decision is revoked or
+// changed the row is stale, is never protected by the strong() guard and never counts as an owner input to the resolver, so a new automatic observation replaces it. A genuine legacy
+// owner/reviewed row (no marker) keeps its control.
 // The upsert of a projection row: the guard of `writeFilmFacts` plus the replacement of an owner projection row (the only reviewed row this writer may replace by itself).
 const PROJECTION_UPSERT=ROW.upsert()+" OR (CASE WHEN json_valid(film_dimension.provenance_json) THEN json_extract(film_dimension.provenance_json,'$.projection') END)='"+OWNER_PROJECTION+"' AND film_dimension.authority='owner'";
+
+// A legacy provisional row of a source that has no source row is an actual resolver candidate (see projectionInputs `legacy`) and the SOLE durable record of that value. Replacing the
+// stored row would lose that input silently, so the same batch records it as a source row first (`ON CONFLICT DO NOTHING`, request id of this write, observed_at the row's own clock,
+// version and provenance unchanged): the resolver input is identical, now durable. A candidate that cannot be recorded losslessly (no version, an unparseable clock or provenance)
+// holds the write conservatively until a separately authorized repair; nothing is lost silently.
+function legacyCandidate(snapshot,names){
+ const row=snapshot.dimensions.localization;
+ if(!row||row.status!=='provisional'||!row.value||!row.source||RESERVED.has(row.source)||names.has(row.source)||snapshot.sources.some(item=>item.source===row.source))return null;
+ const observedAt=instant(row.updated_at),version=typeof row.source_version==='string'?row.source_version.trim():'';
+ let provenance=null;
+ try{provenance=JSON.stringify(JSON.parse(row.provenance_json??'null'));}catch{return {lossless:false,source:row.source};}
+ if(!observedAt||!version)return {lossless:false,source:row.source};
+ return {lossless:true,source:row.source,value:row.value.trim(),sourceVersion:version,provenance,observedAt};
+}
 
 // The projection decision. `match`: the stored row already is the resolver output (an owner or reviewed row equal in value, or an automatic row equal in every column but its clock).
 // `write`: the row is absent, not protected, or a stale owner projection, and differs. `held`: the resolver output cannot be produced under the strong() guard without replacing
@@ -187,6 +200,10 @@ export function planFilmLocalizationProjection(snapshot,token,input){
  if(stale.length||!write.length)return {...base,state:'superseded'};
  if(projection.kind==='held')return {...base,state:'held',held:{reason:projection.reason}};
  const statements=[],changes=[];
+ // A write over the stored row must not lose a legacy resolver candidate: record it in this batch, or hold when it cannot be recorded losslessly.
+ const legacy=projection.kind==='write'?legacyCandidate(snapshot,new Set(input.sources.map(item=>item.source))):null;
+ if(legacy&&!legacy.lossless)return {...base,state:'held',held:{reason:'legacy_candidate_not_preservable'}};
+ if(legacy){statements.push([ROW.legacySourceInsert,[id,legacy.source,legacy.value,legacy.sourceVersion,legacy.provenance,requestId,legacy.observedAt,at]]);changes.push('source:'+legacy.source+':preserved');}
  for(const item of write){statements.push([ROW.sourceUpsert,[id,item.source,item.value,item.sourceVersion,JSON.stringify(item.provenance??null),requestId,item.observedAt,at]]);changes.push('source:'+item.source);}
  if(projection.kind==='write'){statements.push([PROJECTION_UPSERT,projection.params]);changes.push('dimension:localization');}
  if(statements.length+ownerTokenStatements(token).length+6>MUTATION_STATEMENT_CAP)throw failed('film_person_bounded');

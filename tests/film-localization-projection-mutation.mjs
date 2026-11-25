@@ -37,6 +37,10 @@ const MUTANTS=[
  ['an older observation is written','if(row&&!(observedAt>row.observed_at)){skipped.push','if(false){skipped.push'],
  ['a nothing-to-write call opens a batch',"if(plan.state!=='write')return {id,revision:snapshot.revision,written:false,reason:plan.state==='exact'","if(false)return {id,revision:snapshot.revision,written:false,reason:plan.state==='exact'"],
  ['an absent Film reaches the batch',"if(!snapshot.film)throw failed('film_person_precondition');\n const token","const token"],
+ ['a legacy candidate is lost when its row is replaced',"if(legacy){statements.push([ROW.legacySourceInsert,[id,legacy.source,legacy.value,legacy.sourceVersion,legacy.provenance,requestId,legacy.observedAt,at]]);changes.push('source:'+legacy.source+':preserved');}","if(legacy){}"],
+ ['a legacy candidate that cannot be recorded is replaced anyway',"if(legacy&&!legacy.lossless)return {...base,state:'held',held:{reason:'legacy_candidate_not_preservable'}};",""],
+ ['a legacy candidate without a version is recorded',"if(!observedAt||!version)return {lossless:false,source:row.source};","if(!observedAt)return {lossless:false,source:row.source};"],
+ ['an owner projection is the only thing the writer replaces only when marked',"const projected=isOwnerProjection(stored);","const projected=false;"],
  ['a non-authoritative owner domain is trusted',"if(!marker||marker.mode!=='d1'||(marker.writes!=='open'&&marker.writes!=='held'))","if(!marker)"],
 ];
 for(const [name,from] of MUTANTS)assert.equal(source.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+SOURCE);

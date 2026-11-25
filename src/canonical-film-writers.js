@@ -77,7 +77,7 @@ const SYNC_UPSERT='INSERT INTO film_sync_state (film_id,metadata_at,synopsis_fet
 const SOURCE_UPSERT='INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(film_id,source) DO UPDATE SET value=excluded.value,source_version=excluded.source_version,provenance_json=excluded.provenance_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_localization_source.observed_at';
 // ADR 0218 decision 3 (D1): the localization-row pieces the projection writer (src/film-localization-projection.js) reuses, so the effective row, its guard and the
 // source upsert are ONE implementation: the same resolver inputs, the same strong() guard and SQL WHERE, the same row equality.
-export const LOCALIZATION_ROW=Object.freeze({effective:(snapshot,written)=>effectiveLocalization(snapshot,written),params:(id,state)=>dimensionParams(id,state),upsert:()=>dimensionUpsert(),same:(stored,params)=>sameDimension(stored,params),strong:row=>strong(row),sourceUpsert:SOURCE_UPSERT,sourceCap:FILM_FACTS_SOURCE_CAP});
+export const LOCALIZATION_ROW=Object.freeze({effective:(snapshot,written)=>effectiveLocalization(snapshot,written),params:(id,state)=>dimensionParams(id,state),upsert:()=>dimensionUpsert(),same:(stored,params)=>sameDimension(stored,params),strong:row=>strong(row),sourceUpsert:SOURCE_UPSERT,legacySourceInsert:SOURCE_UPSERT.replace(/ ON CONFLICT.*$/,' ON CONFLICT(film_id,source) DO NOTHING'),sourceCap:FILM_FACTS_SOURCE_CAP});
 
 
 // Reads the stored rows of ONE Film (read-only, no gate). The planner is pure over this snapshot.
