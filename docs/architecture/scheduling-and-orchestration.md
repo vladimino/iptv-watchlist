@@ -404,6 +404,8 @@ The Cloudflare Workflow that drove the daily Ratings run is retired: the hourly 
 
 A Discovery Workflow instance hands over to a successor at 20 chunks or when the D1 statements it has issued reach 6,000, whichever comes first, so no instance runs into the level at which two instances failed on 6 November 2026. The durable steps, the owner fence and the recovery are those of [ADR 0083](../adr/0083-inert-discovery-workflow.md); no diagram changes.
 
+**Chunk wall budget (AIR-682).** Each Workflow chunk runs under a 300 s wall budget, passed by the Workflow to `advanceDiscovery`; the 40 s default of the paged resolver (AIR-352) applies only to a caller that passes none. The lease TTL (90 s), its renewal at each long phase, the fence on a changed generation and the TMDB, subrequest and checkpoint limits are unchanged. The owner instruction is on [AIR-682](https://trello.com/c/UWYTPEDB), 25 November 2026.
+
 ## Controlled Discovery Workflow rollover ([ADR 0164](../adr/0164-controlled-discovery-workflow-rollover.md), Accepted)
 
 An instance keeps the Worker version it was created on until its own handover. The owner can move Discovery onto the deployed version earlier with the owner-only MCP tool `discovery_workflow_rollover` ([runbook](../runbooks/discovery-workflow-rollover.md)). It is never called by the cron, a Workflow schedule or a Scheduled Task. The only ownership change is one compare-and-swap of the executor record, admitted only while the owner sleeps durably; the old instance then fails its own owner gate when it wakes. A create that cannot be confirmed is recovered by the hourly reconcile under the same deterministic id.
