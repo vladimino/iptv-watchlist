@@ -16,7 +16,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 execFileSync(process.execPath,['build.mjs'],{stdio:'inherit'});
 const bundle=fs.readFileSync('dist/server/index.js','utf8');
 const start=bundle.indexOf('const OrchestrationPolicy=');
-const end=bundle.indexOf('const FilmPersonAuthority=');
+const end=bundle.indexOf('const LocalizationSources=');
 assert.ok(start>0&&end>start,'the built Worker contains the Discovery authority scope');
 const slice=bundle.slice(start,end);
 assert.match(slice,/slotScanConfirmation/);

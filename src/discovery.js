@@ -1104,7 +1104,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
      films[catalogKey]=recorded;indexFilm(recorded);
     }
     await heartbeat();
-    const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease}))));
+    const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next,check:reconfirmed.length>0}},{lease}))));
     if(!wrote)return 'changed';
     if(!wrote.written.includes(key))return 'skipped';
     decisions[key]=next;

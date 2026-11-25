@@ -1,6 +1,7 @@
 // AIR-637 / ADR 0215 (Accepted), card EC: the identity evidence writer control and the domain-path insert helper (migration 0042, a file only).
-// DORMANT: nothing in the Worker imports this module, it is not bundled, and no route, Workflow, cron or producer calls it. Cards E2a and E2c wire the Discovery writers to
-// `domainEvidenceStatements`; the owner-approved activation operation calls `changeWriter`. A writer with no control row is `off`, so until then nothing is written.
+// DORMANT: the only Worker code that imports this module is the Discovery decision write (card E2a, AIR-617: `src/discovery-authority.js` appends `domainEvidenceStatements` to its own batch);
+// card E2c wires the owner writer the same way. No route, Workflow, cron or producer calls `changeWriter`: only the owner-approved activation operation does. A writer with no control row
+// is `off`, so until then nothing is written.
 // Nothing here READS the ledger to decide anything (ADR 0213 decision 8).
 //
 // What it provides:
@@ -108,11 +109,14 @@ const COLUMNS='evidence_key,film_id,subject_kind,subject_value,relation,object_k
 // Unbound (film_id NULL: a domain row names no Film). The row is written only while its writer is `pending` or `on`; an existing key is a no-op.
 const INSERT='INSERT INTO film_identity_evidence ('+COLUMNS+') SELECT ?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN (\'pending\',\'on\')) ON CONFLICT(evidence_key) DO NOTHING';
 // Semantic identity (ADR 0215 decision 1): proposition, polarity, route, method, root (or its substitute), `source_scope`, `scope_evidence_key`, supersession and `source_order`.
-// `IS` so a NULL equals a NULL. The substitute of an unknown root is `reconstructed_from`; a live row has a root.
-const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND reconstructed_from IS ? AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
+// `IS` so a NULL equals a NULL. `reconstructed_from` is the substitute of an UNKNOWN root only (ADR 0215 decisions 1 and 7, as the import's own `SAME_IDENTITY`): with a known root it is provenance, not identity, so a
+// reconstructed row of the same rooted key does not collide with a later live check (the existing row is left as it is, and is never read as live proof).
+const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND (source_root IS NOT NULL OR reconstructed_from IS ?) AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
 // Commit-time schema guard of a batch prepared without the control tables.
 export const ABSENT="NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('identity_evidence_writer','identity_evidence_writer_change'))";
-const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";
+// The condition that a writer is recording (one `?`: the writer name); exported so a domain integration can assert on it without naming the control table.
+export const WRITER_ACTIVE_SQL="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";
+const ACTIVE=WRITER_ACTIVE_SQL;
 
 // The statements of one evidence row, for the caller to append INSIDE its own domain batch (ADR 0215 decision 1). On a schema WITHOUT the control tables they are ONE guard
 // statement, never nothing: it asserts at COMMIT time that the tables are still absent, so a batch prepared before migration 0042 was applied cannot commit after the
@@ -123,15 +127,20 @@ const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND 
 // It does not test `changes() = 1`: a valid duplicate changes nothing. The assertion passes when the writer is `off` or absent, or the row with the key has the planned
 // semantic identity, so it passes for a new row and a valid duplicate and fails for a missing row (the writer flipped to `on`... or the insert was skipped) and for a
 // mismatching row, including a matching owner row with another causal position.
-export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=fenced.assertSql}={}){
+// `when` (AIR-617, optional) is one caller condition `{sql,params}` over rows of this database: the row is inserted only while it holds, and the assertion then requires the row only
+// while it holds (the Discovery decision writer passes "no decision with this hash is stored yet", the very condition of its history row, so a write that records no new decision
+// claims no check). It is evaluated INSIDE the batch, before the caller's own statements change those rows, and is never request input.
+export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=fenced.assertSql,when=null}={}){
  if(!plan||!plain(plan.row)||!/^[0-9a-f]{64}$/.test(plan.evidenceKey||'')||!DOMAIN_WRITERS[plan.writer])throw failed('identity_evidence_out_of_slice');
  if(typeof requestId!=='string'||!REQUEST.test(requestId))throw invalid('request_id');
  const recorded=instant(at,'at');
+ if(when!==null&&(!plain(when)||typeof when.sql!=='string'||!when.sql||!Array.isArray(when.params)))throw invalid('when');
  if(await identityEvidenceControlStatus(env)==='absent')return [[assertSql(ABSENT),[]]];
  const r=plan.row;
- const insert=[INSERT,[plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
-  r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer]];
- const assertion=[assertSql('NOT '+ACTIVE+' OR EXISTS ('+SAME+')'),[plan.writer,plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,
+ const gate=when?' AND ('+when.sql+')':'',gateParams=when?when.params:[];
+ const insert=[when?INSERT.replace(' ON CONFLICT',' AND ('+when.sql+') ON CONFLICT'):INSERT,[plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
+  r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer,...gateParams]];
+ const assertion=[assertSql('NOT ('+ACTIVE+gate+') OR EXISTS ('+SAME+')'),[plan.writer,...gateParams,plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,
   r.sourceRoot,r.sourceRoot===null?r.reconstructedFrom:null,r.sourceScope,r.scopeEvidenceKey,r.supersedesKey,r.sourceOrder]];
  return [insert,assertion];
 }
