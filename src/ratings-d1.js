@@ -42,6 +42,12 @@ export function ratingsMutableKey(key){
  return false;
 }
 
+// ADR 0222: the Letterboxd import coordination documents (rated candidates, inferred chunk intent, receipt and candidates result) are D1 documents ONLY under an explicit `admission` option, which a caller passes
+// only after it read marker `d1` of `letterboxd_admission_authority` (and asserts that marker in the same batch). They are deliberately NOT in `ratingsMutableKey`, so no existing Ratings route changes.
+const ADMISSION_DOCUMENT=/^letterboxd\/imports\/(?:documents-manifest\.json|[0-9a-f]{64}\/(?:rated-candidates\.json|chunks\/[0-9]{1,6}\.(?:intent|receipt|candidates)\.json))$/;
+export const ADMISSION_DOCUMENT_BYTES=4000000;
+export function admissionDocumentKey(key){return typeof key==='string'&&key.length<240&&ADMISSION_DOCUMENT.test(key);}
+function ownsKey(key,admission){return admission===true?admissionDocumentKey(key):ratingsMutableKey(key);}
 function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
 function binding(db){return typeof db?.prepare==='function';}
 function database(env){return env&&typeof env.prepare==='function'?env:env?.DB;}
@@ -157,8 +163,8 @@ async function readParts(db,key){
  return {value,etag,text};
 }
 
-export async function readOwned(env,key){
- if(!ratingsMutableKey(key))return {owned:false};
+export async function readOwned(env,key,{admission=false}={}){
+ if(!ownsKey(key,admission))return {owned:false};
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
  // A held marker is not authority and is not a reason to read R2 (ADR 0162); an uninstalled domain is the local stand-in.
@@ -228,12 +234,13 @@ function epochFenceBase(env){
 // confuse a rollback with a write: `refused: true` when a fence or guard of the batch did not hold (the batch rolled back, nothing was written), `committed: true`
 // when the batch committed but the read-back found another etag (a later write replaced it; the write happened). A read-back that throws after a committed
 // batch is rethrown with `ratingsCommitted: true` on the error, so such a caller can tell it from a failure before or during the batch.
-export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
- if(!ratingsMutableKey(key))return {owned:false};
+export async function putOwned(env,key,previousEtag,value,{extra=[],admission=false}={}){
+ if(!ownsKey(key,admission))return {owned:false};
  const mode='d1';
  const gate=await requireOpen(env);
  if(!gate.open)return {owned:false};
  const text=JSON.stringify(value);
+ if(admission===true&&text.length>ADMISSION_DOCUMENT_BYTES)throw failed('admission_document_too_large');
  const etag=await digest(text);
  const now=new Date().toISOString();
  const statements=writeStatements(key,text,etag,now,previousEtag,mode);
@@ -251,8 +258,8 @@ export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
 }
 
 // AIR-599 (review of PR #1009): `extra` is a list of caller [sql, params] statements that ride in the SAME batch as the document write (and are rolled back with it), for a write that must be atomic with another D1 table.
-export async function casOwned(env,key,empty,apply,{extra:callerExtra=[]}={}){
- if(!ratingsMutableKey(key))return {owned:false};
+export async function casOwned(env,key,empty,apply,{extra:callerExtra=[],admission=false}={}){
+ if(!ownsKey(key,admission))return {owned:false};
  const gate=await requireOpen(env);
  if(!gate.open)return {owned:false};
  for(let attempt=0;attempt<5;attempt++){
@@ -261,7 +268,7 @@ export async function casOwned(env,key,empty,apply,{extra:callerExtra=[]}={}){
   const next=await apply(clone(base),current.etag);
   if(next==null)return {owned:true,result:{value:base,changed:false}};
   const extra=[...(key.startsWith('letterboxd/facts/films/')?await viewWrites(gate.db,[next]):[]),...callerExtra];
-  const saved=await putOwned(env,key,current.etag,next,{extra});
+  const saved=await putOwned(env,key,current.etag,next,{extra,admission});
   if(!saved.owned)throw failed('ratings_domain_not_authoritative');
   if(saved.saved)return {owned:true,result:{value:next,changed:true}};
  }
@@ -377,6 +384,15 @@ export async function viewItems(env,ids,base){
  return next;
 }
 
+// ADR 0222: the archives that have a candidate document, from D1, bounded (one SELECT of keys, no bodies). `truncated` is partial, never a complete listing.
+export async function listAdmissionArchives(env,limit){
+ const db=database(env);
+ const authority=await readRatingsAuthority(db,env);
+ if(!authority.tables||!authority.ready)throw failed('ratings_domain_not_authoritative');
+ const rows=await many(db,"SELECT key FROM ratings_document WHERE part=0 AND key LIKE 'letterboxd/imports/%/rated-candidates.json' ORDER BY key LIMIT ?",[limit+1]);
+ const shas=rows.map(row=>row.key).filter(admissionDocumentKey).map(key=>key.split('/')[2]);
+ return {shas:shas.slice(0,limit),truncated:shas.length>limit};
+}
 export async function listDocuments(env){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);

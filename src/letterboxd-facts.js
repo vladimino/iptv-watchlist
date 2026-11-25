@@ -124,6 +124,11 @@ function recordRatingChange(record,incoming,effective){
  // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
  // The stored object as it is, for the compare-and-swap writers (the view index is not one of them: AIR-558).
  async function readRawJSON(env,key){
+  // ADR 0222: the chunk intent / receipt / candidates documents are D1 Ratings documents at marker `d1` (no R2 read, no fallback); at r2 this falls through to the R2 path below unchanged.
+  if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+   const routed=await documentRouteOf(env,key);
+   if(routed.d1)return LetterboxdAdmissionDocuments.readDocument(env,key);
+  }
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
   const object=await env.BUCKET.get(key);let value=object?await object.json():null;
   return {value,etag:object?.etag??null};
@@ -134,7 +139,22 @@ function recordRatingChange(record,incoming,effective){
   if(key===FACTS_KEYS.viewIndex)return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
   return readRawJSON(env,key);
  }
+ // A `closed` marker and an unreadable one surface as the typed admission errors of this module (409 `admission_closed`, 503 `admission_unavailable`), never as the legacy path.
+ async function documentRouteOf(env,key){
+  try{return await LetterboxdAdmissionDocuments.documentRoute(env,key);}
+  catch(error){
+   if(error&&error.code==='letterboxd_admission_closed')throw new FactsError('admission_closed','Admissions are closed');
+   throw new FactsError('admission_unavailable','The admission authority cannot be read');
+  }
+ }
  async function casJSON(env,key,empty,apply,{extra=[]}={}){
+  if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+   const routed=await documentRouteOf(env,key);
+   if(routed.d1){
+    try{return await LetterboxdAdmissionDocuments.casDocument(env,key,empty,apply,{extra,authority:routed.authority});}
+    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
+   }
+  }
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
    try{const owned=await RatingsD1.casOwned(env,key,empty,apply,{extra});if(owned.owned)return owned.result;}
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
@@ -932,9 +952,10 @@ function recordRatingChange(record,incoming,effective){
   const entries=films.map(film=>film.conflict?film:{...film,observations:film.observations.map(({fact,observationId})=>({fact,observationId}))});
   // AIR-602 (review of PR #1018): every terminal verdict of this chunk (a conflict, another code on the Film, a refusal after the link) was computed against an operation history; the receipt records them, so the
   // history must still be the one observed. The receipt is an R2 document and cannot carry the assertion: it is checked immediately before the write, and a moved history stops the chunk before its receipt (re-send).
-  for(const guard of terminalGuards)if(!(await guard.holds()))throw new FactsError('admission_not_settled','The operation history of an admission moved: the chunk stops before its receipt');
+  // ADR 0222: at `d1` the receipt is a D1 document and carries every observed history assertion in the SAME batch (no separate re-check); a refused batch stops the chunk before its receipt.
   const next={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,committedAt:new Date().toISOString(),films:films.length,conflicts,outcomes:counts,entries,viewBefore:intent.viewBefore};
-  await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next);
+  const sealed=await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next,{extra:terminalGuards.map(guard=>guard.statement)});
+  if(sealed&&sealed.refused===true)throw new FactsError('admission_not_settled','The operation history of an admission moved: the chunk stops before its receipt');
   // After the receipt: a claim is never written for a chunk whose commit could still fail.
   await ensureChunkClaims(env,items,films);
   return {...next,replay:false};

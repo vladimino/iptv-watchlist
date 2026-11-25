@@ -10,6 +10,11 @@ const LetterboxdRatedCandidates = (() => {
 
   async function readDoc(env, key) {
     try {
+      // ADR 0222: at marker `d1` the candidate document is a D1 Ratings document: no R2 read, no fallback. A `closed` marker or an unreadable one throws here and is reported as unavailable storage.
+      if (typeof LetterboxdAdmissionDocuments !== 'undefined') {
+        const routed = await LetterboxdAdmissionDocuments.documentRoute(env, key);
+        if (routed.d1) return await LetterboxdAdmissionDocuments.readDocument(env, key);
+      }
       const object = await env.BUCKET.get(key);
       if (!object) return {value: null, etag: null};
       return {value: await object.json(), etag: object.etag ?? null};
@@ -36,7 +41,21 @@ const LetterboxdRatedCandidates = (() => {
       }
     } catch {/* derived and droppable: the primary write already succeeded */}
   }
-  async function casDoc(env, key, empty, apply) {
+  async function casDoc(env, key, empty, apply, {extra = []} = {}) {
+    // ADR 0222: at marker `d1` the write is one D1 batch (document compare-and-swap, the marker assertion and the caller's `extra`, e.g. the operation-history assertion of a terminal disposition); `refused` means
+    // that assertion did not hold and nothing was written. The mutation revision rises inside that batch as at R2. The derived registry projection is not written (no live R2 projection after the cutover).
+    if (typeof LetterboxdAdmissionDocuments !== 'undefined' && key !== ADMISSIONS) {
+      const routed = await LetterboxdAdmissionDocuments.documentRoute(env, key);
+      if (routed.d1) {
+        return LetterboxdAdmissionDocuments.casDocument(env, key, empty, async (draft, etag) => {
+          const next = await apply(draft);
+          if (next == null) return null;
+          if (typeof LetterboxdImportRegistry !== 'undefined' && LetterboxdImportRegistry.archiveOfCandidateKey(key)) next.revision = (Number.isInteger(draft?.revision) && draft.revision >= 0 ? draft.revision : 0) + 1;
+          return next;
+        }, {extra, authority: routed.authority});
+      }
+    }
+    if (extra.length) throw new Error('atomic_unavailable');
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = await readDoc(env, key);
       if (current.value === undefined) throw new Error('storage_unavailable');
@@ -267,7 +286,7 @@ const LetterboxdRatedCandidates = (() => {
       reasonKind: result.reasonKind || (reasons.length ? LetterboxdIdentity.reasonKind(reasons) : null),
     };
   }
-  async function markReview(env, key, code, reason, claim, extra) {
+  async function markReview(env, key, code, reason, claim, extra, {guard = null} = {}) {
     const payload = reviewReasons(reason, extra);
     const saved = await casDoc(env, key, null, current => {
       const row = current.candidates[code];
@@ -276,8 +295,8 @@ const LetterboxdRatedCandidates = (() => {
       current.candidates[code] = {...row, state: 'needs_review', reason: payload.reason, reasons: payload.reasons, reasonKind: payload.reasonKind, intendedTmdb: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
-    });
-    return {...payload, changed: saved.changed === true};
+    }, {extra: guard ? [guard.statement] : []});
+    return {...payload, changed: saved.changed === true, refused: saved.refused === true};
   }
   // AIR-602 (review of PR #1018), at `d1`: an `admitting` row whose source cannot be reacquired NOW stays `admitting` (retried); each such answer costs one attempt and the sixth makes the row `needs_review`
   // (ADR 0207 decision 3 table, rated step). Nothing is marked for review on a first transport-like answer, and nothing is admitted from the stored intent.
@@ -297,11 +316,11 @@ const LetterboxdRatedCandidates = (() => {
     }
     return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: attempts > 0};
   }
-  // A terminal review of an `admitting` row at `d1` is written only while the operation history still is the one the reconcile observed (`guard.holds()`, checked immediately before the write; the candidate
-  // document lives in R2, which cannot carry the assertion, so the window between that check and the write is this writer's documented limit). A moved history is not terminal: the row stays `admitting`.
+  // A terminal review of an `admitting` row at `d1` is ONE D1 batch with the operation-history assertion (ADR 0222): the document write and `guard.statement` commit together or not at all. A moved history refuses
+  // the batch, nothing is written, and the row stays `admitting` for the next step to replan from the reconciled state.
   async function reviewBehindGuard(env, key, code, reason, guard, claim) {
-    if (guard && !(await guard.holds())) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'in_flight', phase: 'identity', writes: false};
-    const review = await markReview(env, key, code, reason, claim);
+    const review = await markReview(env, key, code, reason, claim, undefined, {guard});
+    if (review.refused) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'in_flight', phase: 'identity', writes: false};
     return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity', writes: review.changed === true};
   }
   async function park(env, key, doc, stopped) {
@@ -334,13 +353,17 @@ const LetterboxdRatedCandidates = (() => {
     const at = new Date().toISOString();
     const out = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: intended ? {tmdb: intended} : null, receipt: {tmdb: film.tmdb, archiveSha256: sha, title: film.title, year: film.year, filmPath: film.filmPath || null},
       evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12), sourceScope: sha, observedAt: at},
-      // The row's state lives in an R2 document, which cannot carry the history assertion: the guard is re-checked immediately before the terminal write (the writer's documented limit).
-      finalize: async (result, guard) => ({refused: !(await guard.holds())}),
+      // ADR 0222: the terminal review is the row's own D1 document write, committed in ONE batch with the history assertion of this attempt (`guard.statement`); a refused batch writes nothing and the attempt replans.
+      finalize: async (result, guard) => {
+        const reason = result.outcome === 'other_code' ? 'duplicate_tmdb' : result.outcome === 'conflict' ? 'historical_alias_conflict' : 'source_changed';
+        const review = await markReview(env, CANDIDATES(sha), code, reason, {tmdb: String(film.tmdb), filmPath: film.filmPath || null}, undefined, {guard});
+        return review.refused ? {refused: true} : {reviewed: true, reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, changed: review.changed};
+      },
       now: () => new Date().toISOString()});
     if (out.outcome === 'admitted' || out.outcome === 'present') return {ok: true};
-    if (out.outcome === 'other_code') return {ok: false, reason: 'duplicate_tmdb'};
-    if (out.outcome === 'conflict') return {ok: false, reason: 'historical_alias_conflict'};
-    if (out.outcome === 'source_changed') return {ok: false, sourceChanged: true, reason: 'source_changed'};
+    if (out.outcome === 'other_code') return {ok: false, reason: 'duplicate_tmdb', reviewed: out.finalized?.reviewed === true};
+    if (out.outcome === 'conflict') return {ok: false, reason: 'historical_alias_conflict', reviewed: out.finalized?.reviewed === true};
+    if (out.outcome === 'source_changed') return {ok: false, sourceChanged: true, reason: 'source_changed', reviewed: out.finalized?.reviewed === true};
     if (out.outcome === 'deferred' && out.reason === 'evidence_unrecorded') return {ok: false, retry: true, reason: 'evidence_unrecorded', pendingEvidence: out.pendingEvidence};
     return {ok: false, retry: true, reason: out.outcome === 'held' || out.outcome === 'redirect' ? 'admission_held' : out.outcome === 'wait' ? 'in_flight' : 'deferred'};
   }
@@ -390,6 +413,8 @@ const LetterboxdRatedCandidates = (() => {
       if (admitted.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, admitted.film);
     }
     // A non-terminal answer of the coordinator keeps the row `admitting`: the same identity is repeated by a later step, nothing is marked for review.
+    // The terminal review of this attempt was already committed with its own history assertion (`finalize`): report it, never write it twice.
+    if (admitted.reviewed) return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: admitted.reason, phase: 'identity', writes: true};
     if (admitted.sourceChanged) return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
     if (admitted.retry) {
       // The pair is admitted but the evidence of THIS check is not proven recorded: the row stays `admitting` and keeps the evidence to record, so a retry records it without a fetch and only then finishes.

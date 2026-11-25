@@ -51,6 +51,16 @@ function lbaNote(env,key,token){const versions=lbaVersions.get(env);if(versions)
 // including when the document is absent. A held cutover or a broken marker is unavailable (ADR 0162). Only the local
 // stand-in without ratings tables reads R2.
 async function lbaRatingsRead(env,key){
+ // ADR 0222: the import chunk documents are D1 documents at marker `d1` (read-only here; an unreadable marker is unavailable, never an R2 read).
+ if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+  try{
+   const routed=await LetterboxdAdmissionDocuments.documentRoute(env,key);
+   if(!routed.d1)return null;
+   const document=await LetterboxdAdmissionDocuments.readDocument(env,key);
+   lbaNote(env,key,document.etag||'absent');
+   return {evidence:document.value==null?'object_missing':'observed',value:document.value,etag:document.etag,authority:'d1'};
+  }catch{lbaNote(env,key,'unavailable');return {evidence:'unavailable',value:null,etag:null,authority:'d1'};}
+ }
  if(typeof RatingsD1==='undefined'||!RatingsD1.ratingsMutableKey(key))return null;
  try{
   const owned=await RatingsD1.readOwned(env,key);
@@ -74,6 +84,12 @@ async function lbaRead(env,key){
 }
 // The version of a key now, without parsing it: a changed etag between the first read and this one is drift.
 async function lbaVersion(env,key){
+ if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+  try{
+   const routed=await LetterboxdAdmissionDocuments.documentRoute(env,key);
+   if(routed.d1)return (await LetterboxdAdmissionDocuments.readDocument(env,key)).etag||'absent';
+  }catch{return 'unavailable';}
+ }
  if(key===LBA_METADATA_KEY&&typeof CanonicalCatalogReader!=='undefined'){
   try{
    const gate=await CanonicalCatalogReader.catalogReaderGate(env);

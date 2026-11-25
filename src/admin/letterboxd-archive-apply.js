@@ -111,6 +111,13 @@ async function lbaChunkReceipt(env,sha,chunk){
  return lbaObject(env,lbaImportObject(sha,chunk,'candidates'));
 }
 async function lbaObject(env,key){
+ // ADR 0222: at marker `d1` the chunk intent / receipt / candidates documents are D1 Ratings documents (no R2 read, no fallback); an unreadable or closed marker is unavailable storage.
+ if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+  try{
+   const routed=await LetterboxdAdmissionDocuments.documentRoute(env,key);
+   if(routed.d1){const document=await LetterboxdAdmissionDocuments.readDocument(env,key);return {value:document.value,etag:document.etag};}
+  }catch{return {value:undefined,etag:null};}
+ }
  try{const object=await env.BUCKET.get(key);return object?{value:await object.json(),etag:object.etag??null}:{value:null,etag:null};}
  catch{return {value:undefined,etag:null};}
 }
@@ -468,7 +475,11 @@ async function lbaCommitCandidates(env,origin,chunk,plan){
  const registered=await LetterboxdRatedCandidates.registerCandidates(env,{sha:origin.sha256,generatedAt:origin.generatedAt,chunk,rows:plan.batch.rows});
  const added=new Set(registered.added);
  const body={schemaVersion:1,kind:'candidates',archiveSha256:origin.sha256,chunk,itemsHash:plan.planHash,origin,codes:plan.batch.rows.map(row=>row.code),registered:registered.added,kept:registered.kept,committedAt:new Date().toISOString()};
- const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ let saved;
+ const routed=typeof LetterboxdAdmissionDocuments!=='undefined'?await LetterboxdAdmissionDocuments.documentRoute(env,key).catch(()=>{throw new Error('storage_unavailable');}):{d1:false};
+ // At `d1` the write-once result is a D1 document written with the compare-and-swap of an absent document; an existing one answers null exactly as the R2 `etagDoesNotMatch` put does.
+ if(routed.d1){const written=await LetterboxdAdmissionDocuments.casDocument(env,key,null,current=>current?null:body,{authority:routed.authority});saved=written.changed===true?{}:null;}
+ else saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
  if(saved===null){
   const again=await lbaObject(env,key);
   if(again.value&&again.value.itemsHash===plan.planHash)return {replay:true,chunk,entries:lbaCandidateEntries(plan.batch.rows,null),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};

@@ -11,7 +11,17 @@ const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/impo
 function identityWorkPinOf(registryToken,limboPin){
  return ['I1',encodeURIComponent(registryToken),encodeURIComponent(limboPin??'')].join('|');
 }
+// ADR 0222: at marker `d1` the candidate documents are D1 documents and the R2 registry is a frozen historical projection that is neither written nor read. true = d1, false = R2 path (r2, absent migration, or closed: the
+// R2 objects are quiescent and still the record), null = the marker could not be read.
+async function identityWorkAtD1(env){
+ if(typeof LetterboxdAdmissionDocuments==='undefined')return false;
+ try{return (await LetterboxdAdmissionDocuments.documentRoute(env,LetterboxdAdmissionDocuments.MANIFEST_KEY)).d1;}
+ catch(error){return error&&error.code==='letterboxd_admission_closed'?false:null;}
+}
 async function identityWorkReadRegistry(env){
+ const atD1=await identityWorkAtD1(env);
+ if(atD1===true)return {state:'absent',registry:null,etag:null,token:'d1'};
+ if(atD1===null)return {state:'unreadable',registry:null,etag:null,token:'unreadable'};
  const key=LetterboxdImportRegistry.REGISTRY_KEY;
  try{
   const object=await env.BUCKET.get(key);
@@ -26,6 +36,12 @@ async function identityWorkReadRegistry(env){
 }
 // One delimiter LIST, no bodies. Truncated at the cap is partial, never a complete listing.
 async function identityWorkListArchives(env){
+ const atD1=await identityWorkAtD1(env);
+ if(atD1===null)return null;
+ if(atD1===true){
+  try{const listed=await LetterboxdAdmissionDocuments.listCandidateArchives(env,IdentityWorkInventory.IDENTITY_LIST_MAX);return {prefixes:[...new Set(listed.shas.filter(sha=>LetterboxdImportRegistry.isArchiveSha(sha)))].sort(),truncated:listed.truncated===true};}
+  catch{return null;}
+ }
  try{
   const listed=await env.BUCKET.list({prefix:LetterboxdImportRegistry.REGISTRY_PREFIX,delimiter:'/',limit:IdentityWorkInventory.IDENTITY_LIST_MAX});
   const prefixes=[];
@@ -39,6 +55,18 @@ async function identityWorkListArchives(env){
 // One candidate document of the page archive, capped. Oversized and unreadable are states, never rows.
 async function identityWorkReadDocument(env,sha){
  const key=LetterboxdImportRegistry.candidateDocumentKey(sha),cap=IdentityWorkInventory.IDENTITY_DOC_MAX_BYTES;
+ const atD1=await identityWorkAtD1(env);
+ if(atD1===null)return {state:'unreadable',doc:null,etag:null};
+ if(atD1===true){
+  try{
+   const read=await LetterboxdAdmissionDocuments.readDocument(env,key);
+   if(!read.value)return {state:'absent',doc:null,etag:null};
+   if(JSON.stringify(read.value).length>cap)return {state:'oversized',doc:null,etag:read.etag};
+   const doc=read.value;
+   if(!doc||typeof doc!=='object'||Array.isArray(doc)||doc.archiveSha256!==sha)return {state:'unreadable',doc:null,etag:read.etag};
+   return {state:'read_whole',doc,etag:read.etag};
+  }catch{return {state:'unreadable',doc:null,etag:null};}
+ }
  try{
   const head=await env.BUCKET.head(key);
   if(!head)return {state:'absent',doc:null,etag:null};
