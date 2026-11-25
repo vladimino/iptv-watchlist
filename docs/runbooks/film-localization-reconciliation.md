@@ -48,6 +48,57 @@ The write applies only while the Film is **still at exactly `postRevision`** and
 
 The reconciler writes only rows the previous code already reads with the same resolver. Applied rows and applied receipts stay valid after a code rollback. A receipt of this kind that is still `pending`, `failed` or `unknown` has no operation in the previous registry (`operation_unregistered`, left `waiting`): roll the code back only when `SELECT COUNT(*) FROM canonical_write_receipt WHERE operation='film_localization_reconcile' AND state NOT IN ('applied','abandoned')` is 0 (read only). A code rollback never repairs or removes a row.
 
+## Production operation plan (AIR-664, DRAFT: awaiting plan review; authorizes nothing)
+
+[AIR-664](https://trello.com/c/Og9XxXfy) is the Stage 4 **operation**. Everything below is a proposal for review. Each numbered gate needs its own owner decision; a green review of this plan is not an operation GO.
+
+### 0. Blockers found offline (no live read was made)
+
+1. **No entry point.** The module is dormant (asserted by the test): no Worker route, MCP tool, Workflow or script can call it. A production dry run therefore needs new code. Proposed shape, following the existing `letterboxd_claim_backfill` precedent in [MCP reference](../reference/api/mcp.md): an owner-only MCP tool with `mode` `dry_run` (default, read only) and `apply` (explicit `confirmGo`, run id, the two authority generations, `expectedCount` and `expectedDigest` copied from a dry run). No SQL, Film id list or key is accepted from the caller. This code is an **implementation GO**, proposed as its own card so that AIR-664 stays a pure operation.
+2. **No checkpoint storage.** `applyLocalizationReconcile` requires a durable `checkpoint` port and no store exists. A receipt carries no payload, so the intent is the only pre-image. Options (owner decision; ADR required, one at a time per the facilitation protocol):
+   - **R2 immutable object per intent** (recommended). Server-built key from the run id and Film id, `put` only if absent (equal digest is an idempotent success), a second object for the settlement, read back by `recover`. No migration, no schema change; the key family is fixed in code and never taken from an argument. Not atomic with the D1 batch, which the contract does not need (record BEFORE write, settle AFTER).
+   - **New D1 table.** Strongest queryability, but a migration with its own apply gate and contract-version change.
+   - **Operator-held (rejected).** `record` must resolve inside the Worker before the write; a chat or Trello copy cannot be that.
+
+### 1. Read-only preflight (L0, immediately before any dry run)
+
+Read live, never from this page: Film/Person marker `d1`/`open` and its generation; owner-review domain `d1` with writes `open` or `held`; schema version; feature flags and executor modes; no active Workflow chain or lease that would write Film rows; the receipt check from [Rollback of the code](#rollback-of-the-code) (`film_localization_reconcile` receipts not `applied` or `abandoned` must be 0). Any other value stops the operation.
+
+### 2. Dry run and cohort
+
+- The dry run scans every Film by keyset pages of at most 50 raw ids and reports `stale`, `held` (with reason), `noop`, `absent`, `unavailable`, `wouldWrite`. Total Films and the stale count are **unknown until this run**; nothing in this plan assumes them.
+- The cohort is exactly the `stale` Films of one dry run, pinned by `expectedCount` and a digest over the sorted `id:digest` lines of their intents. A different state at apply is a refusal with `writes: 0`.
+- Every `held` Film is listed with its reason and **left untouched**; resolving a hold is a separate owner decision (the reconciler never deletes a row or manufactures a review decision).
+- **Zero eligible is an explicit no-op:** the evidence records the dry run, the generations and `writes: 0`; no apply is requested.
+
+### 3. Cap and waves (provisional, reviewable)
+
+Code maxima stay as shipped (50 examined, 25 written per call). Proposed waves: **pilot 1 to 3 Films**, read back, then waves of at most 10, then at most 25, each read back before the next. Rationale: one wave must be small enough to verify by hand and restore exactly; the values are provisional tuning, not product constraints, and may change on review. No time window is needed for correctness (the revision CAS and the owner-review token fence concurrent writers); an operator may still choose a quiet period.
+
+### 4. Fences, receipts and stop conditions
+
+Fences are the shipped ones (revision CAS, owner-review token, pre-image row, marker open). Stop at the first of: `localization_checkpoint_failed`, `localization_checkpoint_settle_failed`, any `unknown` outcome (recover first, never retry blind), more `moved` than the owner accepted for the wave, a `held` reason not present in the approved dry run, a readback mismatch, or any collateral delta. A stopped pass reports `cursor` and `failedId`; resume only through `resumeLocalizationReconcile` with the recorded intent.
+
+### 5. Readback after each wave
+
+- Each written Film: the stored row equals the intent `postImage`, the revision is `postRevision`, and the applied receipt carries the intent request id and digest.
+- Effective value and owner precedence: a Film with an owner row keeps the owner value; no reviewed or owner row changed.
+- No collateral change: row counts and digests of every other `film_dimension` dimension, `owner_review_entry`, `film_localization_source` (only the preserved legacy rows named by the intents may appear), redirects and Person tables are unchanged; receipt count delta equals the writes.
+- Stale cases: the repeated dry run lists no previously written Film as `stale` (idempotence).
+- Unknown outcome: `recoverLocalizationReconcile` settles it read only before anything else happens.
+
+### 6. Rollback and restore
+
+The restore token is the recorded apply intent, valid only while the Film is still at exactly `postRevision` with the row equal to `postImage` (`localization_restore_moved` otherwise). Any later change is handled by a **separately approved forward correction** (another reconciler run), never a blind restore. A restore does not remove a preserved legacy source row. Code rollback follows [Rollback of the code](#rollback-of-the-code).
+
+### 7. Evidence and documentation impact
+
+Sanitized dated evidence under `docs/evidence/film-person/` at execution: Film ids and counts, digests, generations and outcomes; **no localization payloads and no intent bodies** (they stay in the checkpoint store). Affected documents once code exists: this runbook, [MCP reference](../reference/api/mcp.md), the persistence diagram if R2 is chosen, a new ADR for the checkpoint store, the [read side effects](../reference/api/read-side-effects.md) audit (the dry run must stay write free), the [deployment runbook](deployment.md). This offline step's evidence: [AIR-664 operation plan](../evidence/film-person/air-664-localization-reconcile-operation-plan-2026-11-25.md).
+
+### Proposed operation GO (text for the owner; not granted)
+
+L3 plan, one operation: run `film_localization_reconcile` (after its implementation is merged and deployed) against the cohort of one dry run, in the approved waves, with the approved checkpoint store, the stop conditions above and the exact-revision restore. Allowed side effects: the `film_dimension` localization row of the cohort Films, the legacy source rows named by their intents, the receipts of this kind and the checkpoint objects. Everything else (sync, model, TMDB, Discovery, flags, Tasks, Access, migrations, lease resets, retries outside the recorded intent) stays forbidden. Revocation: the owner says stop; the tool is not called again.
+
 ## Not authorized here
 
 Running the reconciler against production, choosing a cohort, a cap or a window, storing tokens, any manual sync, model, TMDB or Discovery call, flag, Scheduled Task, Access change, migration, R2/D1 write, retry or lease reset. [AIR-664](https://trello.com/c/Og9XxXfy) prepares the exact dry run, cohort, stop conditions and rollback plan and asks for the operation-specific GO.
