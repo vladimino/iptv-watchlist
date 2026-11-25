@@ -55,12 +55,15 @@ export const BASELINE_CAP=5000;
 // the list is empty, and adding an entry needs an independent review, a safety proof and an owner acceptance id recorded in the exception record. It is a legacy mechanism, never a default.
 export const APPROVED_EXCEPTIONS=Object.freeze([]);
 // The closed set of operation kinds the P2a/P2b writers and the P3 producers register under. The SQL column accepts any lowercase identifier; this list is the code-reviewed set.
-export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_facts','film_credits','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','film_external_ids','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement']);
+// `identity_evidence` (AIR-601, ADR 0213 decision 4): the evidence-only operation of the identity evidence ledger (src/identity-evidence.js, dormant), target the bound Film.
+export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_facts','film_credits','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','film_external_ids','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement','identity_evidence']);
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
 const REQUEST_ID=/^[A-Za-z0-9:._/=+@-]{1,200}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
 // Definite refusals that retrying the same content cannot fix: the receipt is abandoned at once (it needs a person or a repair, and says so).
-const PERMANENT=new Set(['film_person_invalid','film_person_redirect','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_reference','film_person_bounded']);
+// `identity_evidence_present` (ADR 0213): the evidence-only batch rolled back because ANOTHER request recorded the same evidence key; nothing of this receipt landed and a replay
+// could never land it, so the receipt is abandoned with that class, never applied.
+const PERMANENT=new Set(['film_person_invalid','film_person_redirect','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_reference','film_person_bounded','identity_evidence_present']);
 // Definite not-applied refusals that a re-read and a replay can fix (the batch rolled back whole).
 const RETRYABLE=new Set(['film_person_fence','film_person_revision_conflict','film_person_precondition','film_person_held','film_person_not_open']);
 

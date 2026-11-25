@@ -19,6 +19,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
 - [Prediction incident response: RCA, controlled diagnostic experiments and staged recovery](prediction-incident-response.md)
 - [Prediction auxiliary state in D1: checkpoint and outbox recovery, offline import and the AIR-554 handoff (D1 authority since 24 Nov 2026)](prediction-aux-state-cutover.md)
+- [TMDB retirement ledger movie index, migration 0040: prerequisites, window, readback and forward-only rollback (prepared, not applied; needs its own owner GO)](retirement-movie-index-0040-apply.md)
 - [Canonical Producer outcome outbox, migration 0038: operator, preflight, quiet window and readback (**applied to production 24 Nov 2026 13:33 UTC**, schema 37 to 38)](producer-outcome-0038-apply.md)
 - [Watchlist membership projection, migration 0037: operator, quiet window, readback and the read-only baseline preflight (prepared, not applied; needs 0036 and its own owner GO)](watchlist-membership-0037-apply.md)
 - [D1 lookup indexes, migration 0036: prerequisites, window, readback and forward-only rollback (prepared, not applied, needs its own owner GO)](d1-lookup-indexes-0036-apply.md)
@@ -59,6 +60,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Film/Person activation: owner decision pack for the production holdpoints](film-person-holdpoint-decision-pack.md) (AIR-374 H0 to H4: H0/H1 prepared future GOs, H2 to H4 blocked; design, not executed)
 - [EPG producer durable execution: owner decision pack for D-C](film-person-d-c-decision-pack.md) (AIR-374 D-C: slice size, `maxSlicesPerRun`, slice deadline, per-run ceiling and lag SLA options with arithmetic; a labelled recommendation; design, not executed)
 - [Film/Person H1: operator package for the P5 load of the three empty classes](film-person-h1-load-package.md) (AIR-374, prepared GO drafts and offline verifier, not executed; the snapshot reads and the load each need their own owner GO)
+- [Film dimension parity: offline classification of `film_dimension` rows](film-dimension-parity.md) (AIR-660, ADR 0218 stage 1; offline and read only, no production operation)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).

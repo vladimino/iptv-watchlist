@@ -9,7 +9,7 @@
 //   the reads so a result that straddles a marker move is refused (film_person_generation_moved).
 // - Person grouping stays derived (ADR 0058/0059/0062): a Person is the role-specific record person:<role>/<key>; nothing here merges people.
 import {database,failed,many,readAuthority,readSource} from './film-person-authority.js';
-import {loadLocalizationInputs,resolveLocalization} from './localization-sources.js';
+import {loadLocalizationInputs,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {catalogReaderGate} from './canonical-catalog-reader.js';
 
 export const CANONICAL_READ_MAX_IDS=200;
@@ -55,24 +55,8 @@ async function chunked(db,sql,list,extra=[]){
 const flag=value=>value===1||value===true;
 const group=(rows,key)=>{const out=new Map();for(const row of rows){const id=row[key];if(!out.has(id))out.set(id,[]);out.get(id).push(row);}return out;};
 
-// Owner values, read from owner_review_entry (verified links only; the owner-review store is never written here). A missing table or a read error
-// fails closed: without the owner domain the precedence cannot be proven. An entry counts when payload.localization is reviewed with provenance
-// authority owner. identity_link is a verified snapshot of a source-key mapping (ADR 0081) that a Film merge does not rewrite, so a Film's owner
-// values are those of every link in the redirect chain that ends at it, and several source keys may link one Film. The result per link is the
-// list of distinct candidates in a fixed order (value, then source key); the caller decides, never SQL row order.
-export function ownerCandidatesFromEntries(entries){
- const out=new Map();
- for(const entry of entries||[]){
-  if(entry.identity_state!=='verified'||!entry.identity_link)continue;
-  let payload;try{payload=typeof entry.payload_json==='string'?JSON.parse(entry.payload_json):entry.payload_json;}catch{continue;}
-  const localization=payload?.localization;
-  if(!(localization&&localization.status==='reviewed'&&localization.provenance?.authority==='owner'&&typeof localization.value==='string'&&localization.value.trim()))continue;
-  if(!out.has(entry.identity_link))out.set(entry.identity_link,[]);
-  out.get(entry.identity_link).push({value:localization.value.trim(),at:localization.updatedAt??null,sourceKey:entry.source_key??null,link:entry.identity_link});
- }
- for(const list of out.values())list.sort((x,y)=>x.value<y.value?-1:x.value>y.value?1:(x.sourceKey||'')<(y.sourceKey||'')?-1:(x.sourceKey||'')>(y.sourceKey||'')?1:0);
- return out;
-}
+// ownerCandidatesFromEntries lives in localization-sources.js (shared with the offline dimension parity reader) and is re-exported here unchanged.
+export {ownerCandidatesFromEntries};
 async function ownerEntries(db,kind,links){
  if(!links.length)return [];
  const out=[];
