@@ -56,7 +56,7 @@ export const BASELINE_CAP=5000;
 export const APPROVED_EXCEPTIONS=Object.freeze([]);
 // The closed set of operation kinds the P2a/P2b writers and the P3 producers register under. The SQL column accepts any lowercase identifier; this list is the code-reviewed set.
 // `identity_evidence` (AIR-601, ADR 0213 decision 4): the evidence-only operation of the identity evidence ledger (src/identity-evidence.js, dormant), target the bound Film.
-export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_facts','film_credits','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','film_external_ids','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement','identity_evidence','film_localization_projection']);
+export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_facts','film_credits','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','film_external_ids','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement','identity_evidence','film_localization_projection','film_localization_reconcile']);
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
 const REQUEST_ID=/^[A-Za-z0-9:._/=+@-]{1,200}$/;
 const DIGEST=/^[0-9a-f]{64}$/;

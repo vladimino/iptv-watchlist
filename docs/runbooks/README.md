@@ -62,6 +62,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [EPG producer durable execution: owner decision pack for D-C](film-person-d-c-decision-pack.md) (AIR-374 D-C: slice size, `maxSlicesPerRun`, slice deadline, per-run ceiling and lag SLA options with arithmetic; a labelled recommendation; design, not executed)
 - [Film/Person H1: operator package for the P5 load of the three empty classes](film-person-h1-load-package.md) (AIR-374, prepared GO drafts and offline verifier, not executed; the snapshot reads and the load each need their own owner GO)
 - [Film dimension parity: offline classification of `film_dimension` rows](film-dimension-parity.md) (AIR-660, ADR 0218 stage 1; offline and read only, no production operation)
+- [Film localization reconciliation: the bounded reconciler (code only) and its operation contract](film-localization-reconciliation.md) (AIR-663, ADR 0218 stage 4; dormant, no production invocation)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 - [Identity evidence writer activation and break recording](identity-evidence-writer-activation.md) (AIR-637, ADR 0215 decision 4; the operator contract for `off -> pending -> on`, drain evidence, `deactivate` and recorded breaks; dormant, no production operation without its own GO)
 
