@@ -3,7 +3,7 @@
 **Status:** Proposed | Accepted | Superseded | Rejected  
 **Original decision date:** YYYY-MM-DD or `unknown (retrospective)`  
 **Recorded at:** YYYY-MM-DD  
-**Approval source:** <direct URL, or `not documented`>  
+**Approval source:** <direct URL of the recorded decision: normally the Controller's PR comment relaying the owner's decision, or an owner-authored comment; or `not documented`>  
 **Related work:** <Trello card, GitHub PR/commit URLs>  
 **Supersedes:** None | ADR link  
 **Superseded by:** None | ADR link (maintain via index)
