@@ -104,17 +104,22 @@ function projectionSources(list,requestId,stored){
  return {write,skipped,replays,stale};
 }
 
-// The normalized resolver inputs of a projection write, other than the incoming sources themselves (decision 3: the digest covers the source content AND the resolver
-// inputs): the owner-review token digest (generation, redirect closure, every consumed owner row), the stored reviewed/owner localization row, every other stored automatic
-// source row and the legacy provisional candidate of a source that has no source row. PURE and deterministic; the same function binds the proof at plan time and checks it
-// again at write and readback time, so an input that moved changes the proof and never replays an old effect under the old identity.
+// The normalized resolver inputs of a projection write (decision 3: the digest covers the source content AND the resolver inputs): the owner-review token digest (generation,
+// redirect closure, every consumed owner row); the stored localization row when it is protected (reviewed/owner) or a projection of an owner decision, with its provenance;
+// the stored row of every INCOMING source (a newer same-source observation that arrives after the plan moves the proof: the incoming source is then superseded and nothing is
+// written under this identity); every other stored automatic source row; and the legacy provisional candidate with its version and provenance. PURE and deterministic; the
+// same function binds the proof at plan time and checks it again at write and readback time, so an input that moved changes the proof and never replays an old effect under
+// the old identity.
 export function projectionInputs(snapshot,token,incoming){
  const names=new Set((incoming||[]).map(item=>item?.source));
  const row=snapshot.dimensions.localization;
- const stored=ROW.strong(row)?{status:row.status,source:row.source??null,authority:row.authority??null,value:row.value??null}:null;
- const others=snapshot.sources.filter(item=>!names.has(item.source)).map(item=>({source:item.source,value:item.value,sourceVersion:item.source_version??null,provenance:item.provenance_json??null,observedAt:item.observed_at})).sort((a,b)=>a.source<b.source?-1:a.source>b.source?1:0);
- const legacy=row&&row.status==='provisional'&&row.value&&row.source&&!RESERVED.has(row.source)&&!snapshot.sources.some(item=>item.source===row.source)&&!names.has(row.source)?{source:row.source,value:row.value,observedAt:row.updated_at}:null;
- return {resolver:PROJECTION_RESOLVER,owner:token.digest,stored,others,legacy};
+ const sourceOf=item=>({source:item.source,value:item.value,sourceVersion:item.source_version??null,provenance:item.provenance_json??null,observedAt:item.observed_at,requestId:item.request_id??null});
+ const byName=(a,b)=>a.source<b.source?-1:a.source>b.source?1:0;
+ const stored=ROW.strong(row)?{status:row.status,source:row.source??null,sourceVersion:row.source_version??null,authority:row.authority??null,value:row.value??null,provenance:row.provenance_json??null}:null;
+ const same=snapshot.sources.filter(item=>names.has(item.source)).map(sourceOf).sort(byName);
+ const others=snapshot.sources.filter(item=>!names.has(item.source)).map(sourceOf).sort(byName);
+ const legacy=row&&row.status==='provisional'&&row.value&&row.source&&!RESERVED.has(row.source)&&!snapshot.sources.some(item=>item.source===row.source)&&!names.has(row.source)?{source:row.source,value:row.value,sourceVersion:row.source_version??null,provenance:row.provenance_json??null,observedAt:row.updated_at}:null;
+ return {resolver:PROJECTION_RESOLVER,owner:token.digest,stored,same,others,legacy};
 }
 // Read only. The proof of ONE Film for the sources a producer is about to hand over.
 export async function readProjectionInputs(env,id,incoming){
@@ -123,52 +128,69 @@ export async function readProjectionInputs(env,id,incoming){
  return projectionInputs(snapshot,token,incoming);
 }
 
+// An owner projection row: the row this writer materialized from a verified owner decision (provenance `projection:'owner_review'`). It is a PROJECTION of the current
+// owner_review_entry, not an independent owner authority: once the decision is revoked or changed the row is stale, is never protected by the strong() guard and never counts
+// as an owner input to the resolver, so a new automatic observation replaces it. A genuine legacy owner/reviewed row (no marker) keeps its control.
+export const OWNER_PROJECTION='owner_review';
+const isOwnerProjection=row=>!!row&&row.status==='reviewed'&&row.authority==='owner'&&parse(row.provenance_json)?.projection===OWNER_PROJECTION;
+// The upsert of a projection row: the guard of `writeFilmFacts` plus the replacement of an owner projection row (the only reviewed row this writer may replace by itself).
+const PROJECTION_UPSERT=ROW.upsert()+" OR (CASE WHEN json_valid(film_dimension.provenance_json) THEN json_extract(film_dimension.provenance_json,'$.projection') END)='"+OWNER_PROJECTION+"' AND film_dimension.authority='owner'";
+
 // The projection decision. `match`: the stored row already is the resolver output (an owner or reviewed row equal in value, or an automatic row equal in every column but its clock).
-// `write`: the row is absent or not protected and differs. `held`: the resolver output cannot be produced under the strong() guard without replacing a protected row that
-// differs (a conflicting owner input, a reviewed or owner row of another value, a reviewed row without a value): nothing is written, no review decision is manufactured.
+// `write`: the row is absent, not protected, or a stale owner projection, and differs. `held`: the resolver output cannot be produced under the strong() guard without replacing
+// a protected row that differs (a conflicting owner input, a reviewed or owner row of another value, a reviewed row without a value): nothing is written, no review decision is manufactured.
 function projectionOf(snapshot,token,write,at,id){
- const row=snapshot.dimensions.localization;
+ const stored=snapshot.dimensions.localization;
+ const projected=isOwnerProjection(stored);
+ // The stored owner projection is never an input and never protected: the resolver sees the row as absent.
+ const row=projected?null:stored;
+ const view=projected?{...snapshot,dimensions:{...snapshot.dimensions,localization:null}}:snapshot;
  const owners=[...new Set(token.values.map(item=>item.value))];
  if(owners.length>1)return {kind:'held',reason:'owner_conflict',effective:{value:null,tier:'owner_conflict',source:null}};
  const wanted=(state,effective)=>({kind:'write',effective,params:ROW.params(id,state)});
  if(owners.length){
   const value=owners[0],effective={value,tier:'owner',source:'owner'};
+  if(projected&&stored.value===value)return {kind:'match',effective};
   if(ROW.strong(row))return row.value===value?{kind:'match',effective}:{kind:'held',reason:'protected_row_differs',effective};
   const latest=token.values.map(item=>item.at).filter(Boolean).sort().at(-1)||at;
-  return wanted({dimension:'localization',status:'reviewed',source:'owner',sourceVersion:'owner_review',provenance:{authority:'owner'},value,updatedAt:latest,attempts:0,nextAction:'keep_reviewed'},effective);
+  const entries=token.rows.map(item=>item.sourceKey).sort();
+  return wanted({dimension:'localization',status:'reviewed',source:'owner',sourceVersion:'owner_review',provenance:{authority:'owner',projection:OWNER_PROJECTION,entries},value,updatedAt:latest,attempts:0,nextAction:'keep_reviewed'},effective);
  }
- const resolved=ROW.effective(snapshot,write),effective={value:resolved.value??null,tier:resolved.tier,source:resolved.source??null};
+ const resolved=ROW.effective(view,write),effective={value:resolved.value??null,tier:resolved.tier,source:resolved.source??null};
  if(resolved.tier==='owner'||resolved.tier==='reviewed')return {kind:'match',effective};
- if(resolved.tier==='none')return {kind:'match',effective};
+ if(resolved.tier==='none')return projected?{kind:'held',reason:'owner_projection_without_input',effective}:{kind:'match',effective};
  if(ROW.strong(row))return {kind:'held',reason:'protected_row_differs',effective};
  const state={dimension:'localization',status:'provisional',source:resolved.source,sourceVersion:resolved.sourceVersion??null,provenance:resolved.provenance??null,value:resolved.value,updatedAt:resolved.at||at,attempts:0,nextAction:'none'};
  const params=ROW.params(id,state);
- return ROW.same(row,params)?{kind:'match',effective}:{kind:'write',effective,params};
+ return !projected&&ROW.same(row,params)?{kind:'match',effective}:{kind:'write',effective,params};
 }
 
 // PURE. snapshot: readFilmSnapshot's result; token: readOwnerReviewToken's result; input: {id, at, requestId, sources:[{source,value,sourceVersion,provenance?,observedAt}], inputs}
 // (`inputs` is projectionInputs as the producer planned it). Returns {state, statements, changes, skipped, effective, held?}:
 //   exact  every incoming source is stored with THIS request id and the stored row equals the resolver output: the only positive readback proof;
 //   write  statements to run (source rows and/or the projection row);
-//   noop   nothing to write, but not this request's effect (a newer observation superseded a source): never a proof;
+//   superseded  a newer observation of an incoming source is stored, or nothing of this request is left to write: never a proof, never a projection-only repair;
 //   held   the projection cannot be produced under the guard (see projectionOf): nothing is written, never a proof;
 //   moved  a resolver input changed since the producer planned it and this request has not committed: the caller replans.
 export function planFilmLocalizationProjection(snapshot,token,input){
  const id=fenced.filmId(input?.id),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
  if(!plain(token)||!Array.isArray(token.values)||!plain(input.inputs))throw failed('film_person_invalid');
  if(snapshot.redirect)throw failed('film_person_redirect');
- const {write,skipped,replays}=projectionSources(input.sources,requestId,snapshot.sources);
+ const {write,skipped,replays,stale}=projectionSources(input.sources,requestId,snapshot.sources);
  const projection=projectionOf(snapshot,token,write,at,id);
  const base={id,changes:[],skipped,effective:projection.effective,statements:[]};
  const exact=replays.length===input.sources.length&&projection.kind==='match';
  if(exact)return {...base,state:'exact'};
  if(canonicalJson(projectionInputs(snapshot,token,input.sources))!==canonicalJson(input.inputs))return {...base,state:'moved'};
+ // A write always carries at least one source row of THIS request. A superseded source (a newer observation of the same source is stored) or a request with nothing of its own to
+ // write is never a license to repair a different projection under this identity: that is a projection-only operation with its own binding (AIR-663).
+ if(stale.length||!write.length)return {...base,state:'superseded'};
  if(projection.kind==='held')return {...base,state:'held',held:{reason:projection.reason}};
  const statements=[],changes=[];
  for(const item of write){statements.push([ROW.sourceUpsert,[id,item.source,item.value,item.sourceVersion,JSON.stringify(item.provenance??null),requestId,item.observedAt,at]]);changes.push('source:'+item.source);}
- if(projection.kind==='write'){statements.push([ROW.upsert(),projection.params]);changes.push('dimension:localization');}
+ if(projection.kind==='write'){statements.push([PROJECTION_UPSERT,projection.params]);changes.push('dimension:localization');}
  if(statements.length+ownerTokenStatements(token).length+6>MUTATION_STATEMENT_CAP)throw failed('film_person_bounded');
- return {...base,state:statements.length?'write':'noop',statements,changes};
+ return {...base,state:'write',statements,changes};
 }
 
 // The fenced projection write. Refuses before the database unless the Film/Person marker is open, the owner-review domain is D1-authoritative and the Film exists

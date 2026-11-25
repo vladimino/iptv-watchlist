@@ -299,7 +299,7 @@ export function filmLocalizationProjectionOperation({replan,now=()=>new Date().t
    if(proof.state==='exact')return {digest:receipt.contentDigest,revision:proof.revision};
    if(proof.state==='held')return {disposition:'abandon',errorClass:PROJECTION_HELD};
    if(proof.state==='moved')return {disposition:'abandon',errorClass:SOURCE_CHANGED};
-   if(proof.state==='noop')return {disposition:'abandon',errorClass:PROJECTION_SUPERSEDED};
+   if(proof.state==='superseded')return {disposition:'abandon',errorClass:PROJECTION_SUPERSEDED};
    return {digest:null,revision:proof.revision};
   },
   replay:async(env,receipt,ctx)=>{

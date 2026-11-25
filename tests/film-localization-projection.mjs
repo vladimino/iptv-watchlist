@@ -222,7 +222,8 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  const receipt={requestId:out.requestId,contentDigest:await MS.filmProjectionDigest(input),target:{kind:'film',id:FID}};
  assert.equal((await op.readback(env,receipt.target,receipt)).digest,receipt.contentDigest,'exact: this request wrote the source and the row equals the resolver output');
  exec(file,"DELETE FROM film_dimension WHERE film_id="+q(FID)+" AND dimension='localization'");
- assert.equal((await op.readback(env,receipt.target,receipt)).digest,null,'a source row alone is no proof of the projection');
+ const noProof=await op.readback(env,receipt.target,receipt);
+ assert.deepEqual([noProof.digest,noProof.disposition],[undefined,'abandon'],'a source row alone is no proof of the projection: never positive, and no projection-only repair under this identity');
  // the digest binds the resolver identity and the kind: the same content under the old kind is another request
  const oldDigest=await MS.localizationDigest(MS.LOCALIZATION_SOURCE_OPERATION,{kind:'film',id:FID,sources:input.sources});
  assert.notEqual(oldDigest,receipt.contentDigest);
@@ -237,6 +238,9 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
   otherSource:f=>exec(f,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ("+q(FID)+",'letterboxd','Другой','v1','null','other','"+T+"','"+T+"')"),
   reviewedRow:f=>reviewedRow(f),
   legacyProvisional:f=>exec(f,"INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,next_action,updated_at) VALUES ("+q(FID)+",'localization','provisional','epg','v1',NULL,'Эфир',NULL,0,'none','"+T+"')"),
+  legacyOtherVersion:f=>exec(f,"INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,next_action,updated_at) VALUES ("+q(FID)+",'localization','provisional','epg','v2',NULL,'Эфир',NULL,0,'none','"+T+"')"),
+  legacyOtherProvenance:f=>exec(f,"INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,next_action,updated_at) VALUES ("+q(FID)+",'localization','provisional','epg','v1','{\"sources\":[\"x\"]}','Эфир',NULL,0,'none','"+T+"')"),
+  sameSourceOlder:f=>exec(f,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ("+q(FID)+",'wikidata','Старое','v0','null','prior','2026-11-25T09:00:00.000Z','"+T+"')"),
  };
  const digests=[];let base=null;
  for(const [name,setup] of Object.entries(variants)){
@@ -247,7 +251,7 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
   digests.push(await MS.filmProjectionDigest(input));
   assert.equal(await MS.filmProjectionDigest(await unit(e,sources)),digests.at(-1),name+': the digest is deterministic over the same inputs');
  }
- assert.equal(new Set(digests).size,digests.length,'an owner entry, another source row, a reviewed row and a legacy provisional candidate each change the content digest of the same observation');
+ assert.equal(new Set(digests).size,digests.length,'an owner entry, another source row, a stored same-source row, a reviewed row and a legacy provisional candidate (its value, version and provenance) each change the content digest of the same observation');
  const file=database();seedFilm(file);
  const env={DB:d1Standin(file)};
  addOwner(file);ownerCommit(file,{value:null});
@@ -328,19 +332,25 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  const receipt3={requestId:'rb-3',contentDigest:await MS.filmProjectionDigest(input3),target:{kind:'film',id:FID}};
  assert.deepEqual(await op3.readback(env2,receipt3.target,receipt3),{disposition:'abandon',errorClass:'localization_projection_held'},'held: a reviewed row of another value than the owner entry is never proven');
  assert.equal(await op3.revalidate(env2,receipt3),'stale');
- // superseded: a newer observation of the same source from another request
+ // moved: a newer observation of the SAME source from another request arrives after the plan (the stored same-source row is part of the proof)
  const file4=database();seedFilm(file4);
  const env4={DB:d1Standin(file4)};
  const input4=await unit(env4,sources);
- exec(file4,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ("+q(FID)+",'wikidata','Новее','v1','null','other','"+T3+"','"+T3+"')");
+ const newer=()=>exec(file4,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ("+q(FID)+",'wikidata','Новее','v1','null','other','"+T3+"','"+T3+"')");
+ newer();
  const op4=MS.filmLocalizationProjectionOperation({replan:async()=>input4});
  const receipt4={requestId:'rb-4',contentDigest:await MS.filmProjectionDigest(input4),target:{kind:'film',id:FID}};
- // the incoming source is stale (another request's newer observation is stored): its own effect is never proven. The projection of the stored sources is still to be written, so the readback is non-positive (replay)...
- assert.equal((await op4.readback(env4,receipt4.target,receipt4)).digest,null);
- const repaired=await P.writeFilmLocalizationProjection(env4,{...input4,requestId:'rb-4',expectedRevision:revision(file4)});
- assert.deepEqual([repaired.written,repaired.changes,repaired.skipped],[true,['dimension:localization'],[{field:'source:wikidata',reason:'stale'}]]);
- // ...and once it is written nothing is left, yet that is NOT this request's effect: abandoned as superseded, never an exact proof
- assert.deepEqual(await op4.readback(env4,receipt4.target,receipt4),{disposition:'abandon',errorClass:'superseded_by_newer_observation'});
+ assert.deepEqual(await op4.readback(env4,receipt4.target,receipt4),{disposition:'abandon',errorClass:'producer_source_changed'});
+ await assert.rejects(()=>P.writeFilmLocalizationProjection(env4,{...input4,requestId:'rb-4',expectedRevision:revision(file4)}),code('localization_inputs_moved'));
+ assert.equal(locRow(file4),null,'no projection-only repair under the old identity');
+ // superseded: the source is ALREADY stale when planned (the newer row is in the proof): nothing is written, no projection-only repair, never a proof
+ const input5=await unit(env4,sources);
+ const op5=MS.filmLocalizationProjectionOperation({replan:async()=>input5});
+ const receipt5={requestId:'rb-5',contentDigest:await MS.filmProjectionDigest(input5),target:{kind:'film',id:FID}};
+ assert.deepEqual(await op5.readback(env4,receipt5.target,receipt5),{disposition:'abandon',errorClass:'superseded_by_newer_observation'});
+ assert.equal(await op5.revalidate(env4,receipt5),'superseded');
+ const direct=await P.writeFilmLocalizationProjection(env4,{...input5,requestId:'rb-5',expectedRevision:revision(file4)});
+ assert.deepEqual([direct.written,direct.reason,locRow(file4),env4.DB.calls.batches],[false,'superseded',null,0]);
 }
 {
  // a historical APPLIED source receipt stays terminal: returned as-is, never replayed as a projection write, skipped by reconciliation
@@ -371,6 +381,68 @@ const unit=async(env,sources,id=FID)=>({id,at:T,sources,inputs:await P.readProje
  await reconcileOwnOrigin(env,{origin:'metadata_sync',operations:MS.metadataSyncRegistry(env,{intent,now:later}),now:later});
  assert.deepEqual(rows(file,'SELECT operation,state FROM canonical_write_receipt'),[{operation:'localization_source',state:'applied'}],'settled under its own kind');
  assert.deepEqual([sourceRows(file).length,locRow(file)],[1,null],'old rules: the source row, no projection');
+}
+
+// ---- 5b. Receipted end to end: a newer same-source observation and a moved input never become a projection-only repair under the old identity ----
+{
+ const sources=[src('wikidata','Схватка',T1)];
+ const newerRow=f=>exec(f,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ("+q(FID)+",'wikidata','Новее','v1','null','other','"+T3+"','"+T3+"')");
+ // (a) the newer observation lands between the plan and the apply: a settled skip, no receipt, nothing written
+ const file=database();seedFilm(file);
+ const env={DB:d1Standin(file)};
+ const planned=await unit(env,sources);
+ newerRow(file);
+ const skipped=await MS.applyFilmLocalizationProjection(env,{origin:'metadata_sync',event:'s1',input:planned,now:()=>T});
+ assert.deepEqual([skipped.state,skipped.reason,one(file,'SELECT COUNT(*) FROM canonical_write_receipt'),locRow(file)],['skipped','localization_inputs_moved',0,null]);
+ // (b) it is already stored when planned: superseded, a noop outcome, no receipt, no projection-only repair
+ const stale=await MS.applyFilmLocalizationProjection(env,{origin:'metadata_sync',event:'s2',input:await unit(env,sources),now:()=>T});
+ assert.deepEqual([stale.state,one(file,'SELECT COUNT(*) FROM canonical_write_receipt'),locRow(file)],['noop',0,null]);
+ // (c) it lands between the reservation and the write: the writer refuses, the receipt is not applied and the next reconcile abandons it (the projection is never repaired under it)
+ const file2=database();seedFilm(file2);
+ let fire=true;
+ const env2={DB:d1Standin(file2,{onBatch:async statements=>{if(fire&&statements.some(item=>/INSERT INTO canonical_write_receipt/.test(item.text))){fire=false;newerRow(file2);}}})};
+ const input2=await unit(env2,sources);
+ const out=await MS.applyFilmLocalizationProjection(env2,{origin:'metadata_sync',event:'s3',input:input2,now:()=>T}).catch(error=>({state:'threw',code:error.code}));
+ assert.notEqual(out.state,'applied',JSON.stringify(out));
+ assert.deepEqual([sourceRows(file2).map(row=>row.value),locRow(file2)],[['Новее'],null],'only the other request\'s row exists; no projection was written under this receipt');
+ const pending=rows(file2,'SELECT request_id,state FROM canonical_write_receipt')[0];
+ assert.notEqual(pending.state,'applied');
+ const later=()=>new Date(Date.parse(T)+86400000).toISOString();
+ await reconcileOwnOrigin(env2,{origin:'metadata_sync',operations:MS.metadataSyncRegistry(env2,{intent:[{requestId:pending.request_id,operation:'film_localization_projection',origin:'metadata_sync',event:'s3',target:{kind:'film',id:FID},input:input2}],now:later}),now:later});
+ assert.deepEqual(rows(file2,'SELECT state,error_class FROM canonical_write_receipt'),[{state:'abandoned',error_class:'producer_source_changed'}]);
+ assert.equal(locRow(file2),null);
+}
+
+// ---- 5c. An owner projection is a PROJECTION of the current owner decision: after the decision is removed or changed it is stale, never self-authoritative ----
+{
+ const file=database();seedFilm(file);addOwner(file);
+ const env={DB:d1Standin(file)};
+ await write(env,file,[src('tmdb','Схватка',T1)]);
+ const row=dimRow(file,'localization');
+ assert.deepEqual([row.status,row.authority,row.source,JSON.parse(row.provenance_json)],['reviewed','owner','owner',{authority:'owner',projection:'owner_review',entries:['tmdb_1656']}],'the materialized row carries the projection marker and the decision it projects');
+ // the owner entry CHANGES: the new value replaces the stale projection (not held forever by the strong guard)
+ ownerCommit(file,{value:'Жара 2'});
+ const changed=await write(env,file,[src('letterboxd','Авто',T2)],{requestId:'req-2'});
+ assert.deepEqual([changed.effective.tier,changed.changes,locRow(file).value],['owner',['source:letterboxd','dimension:localization'],'Жара 2']);
+ // the owner entry is REMOVED: the projection is stale and not an owner input; a new automatic observation replaces it with the resolver output of the current inputs
+ ownerCommit(file,{value:null});
+ const removed=await write(env,file,[src('tmdb','Схватка 2',T3)],{requestId:'req-3'});
+ assert.deepEqual([removed.held,removed.effective.tier,locRow(file)],[undefined,'automatic',{status:'provisional',source:'letterboxd',value:'Авто',authority:null}]);
+ // a removed decision with NO new observation: nothing is written (the stale projection is a handoff to the separate reconciler, AIR-663), the old row is not proven
+ const file2=database();seedFilm(file2);addOwner(file2);
+ const env2={DB:d1Standin(file2)};
+ await write(env2,file2,[src('tmdb','Схватка',T1)]);
+ ownerCommit(file2,{value:null});
+ const stateOf=async()=>P.filmLocalizationProjectionState(env2,{id:FID,at:T,requestId:'req-1',sources:[src('tmdb','Схватка',T1)],inputs:await P.readProjectionInputs(env2,FID,[src('tmdb','Схватка',T1)])});
+ assert.equal((await stateOf()).state,'superseded','the stale projection is not an exact proof of the old request, and no projection-only repair is issued under it');
+ assert.equal(locRow(file2).authority,'owner','nothing repaired here: the stale row stays for AIR-663 (identifiable by provenance.projection)');
+ // a GENUINE legacy owner row (no marker) keeps its control after the entry is removed: it matches, it is not replaced
+ const file3=database();seedFilm(file3);reviewedRow(file3,{value:'Жара',authority:'owner',source:'owner'});
+ const kept=await write({DB:d1Standin(file3)},file3,[src('tmdb','Схватка',T1)]);
+ assert.deepEqual([kept.effective.tier,kept.changes,locRow(file3).value],['owner',['source:tmdb'],'Жара']);
+ // a guarded mismatch stays held, never a match: an independent owner row of another value than the current owner entry
+ const file4=database();seedFilm(file4);reviewedRow(file4,{value:'Чужое',authority:'owner',source:'owner'});addOwner(file4);
+ assert.equal((await write({DB:d1Standin(file4)},file4,[src('tmdb','x',T1)])).reason,'protected_row_differs');
 }
 
 // ---- 6. C1: a ranked title write creates the minimal identity row with titleSource, under the same CAS ----
