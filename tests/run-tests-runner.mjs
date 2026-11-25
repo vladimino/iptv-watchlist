@@ -265,6 +265,20 @@ fs.unlinkSync(me);`;
       const holders = [1, 2].map(index => planTests({directory: trap, serialOnly: new Set(['s1.mjs', 's2.mjs']), weights, shard: {index, count: 2}}).serial);
       assert.ok(holders.every(list => list.length === 1), `each shard of 2 carries exactly one serial-only file: ${JSON.stringify(holders)}`);
     }
+    {
+      // The pre-push hook isolates the non-functional measurement files: every non-mutation file of the nightly suite runs alone after the parallel phase,
+      // the mutant-kill files (split parts included) stay parallel, the default serial-only files stay serial, and the plan without the option is unchanged.
+      const plain = planTests({directory: 'tests', suite: 'non-functional'});
+      const isolated = planTests({directory: 'tests', suite: 'non-functional', isolateMeasurements: true});
+      const kill = file => /-mutation(-[a-z0-9]+)?\.mjs$/.test(file);
+      assert.equal(isolated.total, plain.total, 'isolation moves files, it does not drop any');
+      assert.ok(isolated.parallel.length > 0 && isolated.parallel.every(kill), `only mutant-kill files stay parallel: ${isolated.parallel.filter(file => !kill(file))}`);
+      assert.ok(isolated.serial.length > 0 && isolated.serial.every(file => !kill(file)), 'every measurement file runs alone');
+      for (const file of ['film-person-reader.mjs', 'discovery-chunk-budget.mjs']) assert.ok(isolated.serial.includes(file), `${file} runs alone in the hook`);
+      assert.ok(isolated.parallel.includes('canonical-producer-driver-mutation-b.mjs'), 'a split mutation part stays parallel');
+      assert.deepEqual(planTests({directory: 'tests', suite: 'core', isolateMeasurements: true}), planTests({directory: 'tests', suite: 'core'}), 'the core plan ignores the option');
+      assert.ok(!plain.serial.includes('film-person-reader.mjs'), 'without the option a measurement file stays in the parallel phase');
+    }
     const whole = planTests({directory: 'tests', suite: 'all'});
     const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
     const isMutation = file => /-mutation\.mjs$/.test(file);
