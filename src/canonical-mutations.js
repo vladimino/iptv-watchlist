@@ -91,6 +91,8 @@ export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,bindP
 // (the rated admission and the receipt transitions). Any other fence kind on the env is left alone there, so no other producer's batches change.
 function bindLetterboxdFence(env,gate){
  if(env&&env.producerFence&&env.producerFence.kind==='letterboxd')gate.producerFence=env.producerFence;
+ // AIR-599 (fifth review of PR #1009): the check reservation of a Letterboxd identity effect (see ratings-d1 effectGuardStatements) is asserted in the same batch.
+ if(env&&env.effectGuard)gate.effectGuard=env.effectGuard;
  return gate;
 }
 // After a failed CHECK: true when the batch carried the Letterboxd fence and the Sync epoch it asserted is no longer the running one.
@@ -102,6 +104,10 @@ async function letterboxdEpochMoved(db,gate){
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
  if(gate.producerFence)out.push(...fenceStatements(gate.producerFence));
+ if(gate.effectGuard){
+  if(typeof gate.effectGuard.key!=='string'||typeof gate.effectGuard.needle!=='string'||!gate.effectGuard.needle)throw failed('film_person_invalid');
+  out.push([assertSql('EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND instr(body,?)>0)'),[gate.effectGuard.key,gate.effectGuard.needle]]);
+ }
  for(const entity of entities)out.push([REVISION,[entity.kind,entity.id,entity.expected]]);
  return out;
 }

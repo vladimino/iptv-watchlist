@@ -72,6 +72,12 @@ const MUTANTS = [
   // Fourth review of PR #1009: the guard covers the backlog write too; one stale id never rolls back another; the reservation bounds every effect.
   ['the final write guards only the entries, not the backlog write', "extra:guardsOf(lids),", "extra:guardsOf(Object.keys(inSet)),"],
   ['a refused batch is not isolated per id', "if(error&&error.code==='write_contention'&&idsOf.length>1){", "if(false){"],
+  // Fifth review of PR #1009: the effects commit through their reservation; a local effect never starts late.
+  ['the trusted-bridge link commits without its reservation guard', "LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:bridge.tmdb})", "LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb})"],
+  ['the link completion commits without its reservation guard', "LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:String(prior.tmdb)})", "LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:String(prior.tmdb)})"],
+  ['the canonical admission commits without its reservation guard', "applyRatedAdmissionRetention(guarded(lid),", "applyRatedAdmissionRetention(env,"],
+  ['the final link commits without its reservation guard', "bridgeDiaryFilm(guarded(lid),{lid,tmdb:outcome.verdict.tmdb})", "bridgeDiaryFilm(env,{lid,tmdb:outcome.verdict.tmdb})"],
+  ['a trusted bridge links after the window', "if(late()||!guarded(lid))throw Object.assign(new Error('late'),{code:'late'});\n     const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:bridge.tmdb});", "const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:bridge.tmdb});"],
   ['the reservation does not bound the effects', "const remaining=()=>Math.min(callerRemaining(),now+RESERVATION_MS-15000-clock());", "const remaining=callerRemaining;"],
   ['a trusted-bridge link is not reserved', "if(!(await take(item,stored.films[lid]||null)))continue;\n    if(!(await intend(item,bridge.tmdb)))", "if(!(await intend(item,bridge.tmdb)))"],
   ['a link repair is not reserved', "if(!(await take(item,prior)))continue;\n    try{", "try{"],

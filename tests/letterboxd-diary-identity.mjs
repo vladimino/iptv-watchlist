@@ -627,4 +627,26 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
   assert.equal(out.counts.checked, 0);
 }
 
+// AIR-599 (fifth review of PR #1009): the LOCAL effects (a trusted-bridge link, a `link_failed` completion) never start once the reservation window is spent, whatever lease the caller has.
+{
+  reset(); await seed('LateB', 3); canonical.bridge.LateB = {state: 'ok', filmId: 'film:tmdb:900801', tmdb: '900801', lid: 'LateB'};
+  let ticks = 0;
+  const out = await Identity.resolve(env, items(['LateB', 'fixture-lateb-2002']), {clock: () => (ticks++ === 0 ? NOW : NOW + 4.9 * 60000), remaining: () => Infinity, fetchImpl: ctx.fetch});
+  assert.equal(out.counts.bridged, 0, 'no trusted-bridge link after the window');
+  assert.equal((await Facts.diaryLinks(env, ['LateB'])).get('LateB')?.tmdb ?? null, null, 'no TMDB link was written');
+  assert.equal(pending().LateB?.reservation, undefined, 'no reservation is left behind');
+}
+
+// the window can also run out BETWEEN the reservation, the intent and the link: the local effect re-checks right before it commits
+{
+  reset(); await seed('LateC', 3); canonical.bridge.LateC = {state: 'ok', filmId: 'film:tmdb:900802', tmdb: '900802', lid: 'LateC'};
+  let jumped = false, writes = 0; const original = Facts.updateDiaryIdentity;
+  Facts.updateDiaryIdentity = async (...args) => {const out = await original(...args); if (++writes === 2) jumped = true; return out;};
+  let out;
+  try {out = await Identity.resolve(env, items(['LateC', 'fixture-latec-2003']), {clock: () => (jumped ? NOW + 4.9 * 60000 : NOW), remaining: () => Infinity, fetchImpl: ctx.fetch});}
+  finally {Facts.updateDiaryIdentity = original;}
+  assert.equal(out.counts.bridged, 0, 'no trusted-bridge link after the window ran out between the intent and the link');
+  assert.equal((await Facts.diaryLinks(env, ['LateC'])).get('LateC')?.tmdb ?? null, null);
+}
+
 console.log('letterboxd-diary-identity: ok');

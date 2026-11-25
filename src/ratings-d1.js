@@ -193,7 +193,16 @@ function writeStatements(key,text,etag,now,previousEtag,mode){
 // AIR-347 / ADR 0089 decision 2a. An executor's env carries `ratingsFence: {key, etag}`: the document that holds the executor
 // mode and epoch, and the etag it had when the step was admitted. Every authoritative commit made through such an env asserts
 // in its own batch that this document is unchanged, so a commit from a stale epoch or mode is refused with the data.
-function epochFence(env){
+// AIR-599 (fifth review of PR #1009): an env may carry `effectGuard: {key, needle}`, the check reservation of a Letterboxd identity effect. Every Ratings commit made through it asserts in its own batch that the shared check
+// document STILL holds that reservation (its text contains the needle), so an effect whose reservation was released, taken over or voided by an owner action is refused at commit, not merely not started.
+function effectGuardStatements(env){
+ const guard=env?.effectGuard;
+ if(guard===undefined||guard===null)return [];
+ if(typeof guard.key!=='string'||!guard.key||typeof guard.needle!=='string'||!guard.needle)throw failed('ratings_domain_fence');
+ return [["UPDATE ratings_domain_cas SET ok=CASE WHEN EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND instr(body,?)>0) THEN 1 ELSE 0 END WHERE id=1",[guard.key,guard.needle]]];
+}
+function epochFence(env){return [...epochFenceBase(env),...effectGuardStatements(env)];}
+function epochFenceBase(env){
  const fence=env?.ratingsFence;
  if(!fence)return [];
  // AIR-570 / ADR 0186: the Letterboxd Sync fences its Diary writes with its own mode epoch: a caller-supplied guard statement (a [sql, params] pair that trips a CHECK when the epoch no longer holds) rides in the same batch.

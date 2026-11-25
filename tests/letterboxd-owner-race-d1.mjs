@@ -29,9 +29,10 @@ function open() {
 }
 const calls = [];
 const headersOf = map => ({get: key => map[String(key).toLowerCase()] ?? null});
+const bridgeState = {};
 const fetchMock = async url => {calls.push(String(url)); return {status: 404, ok: false, headers: headersOf({}), async text() {return '';}};};
 const ctx = vm.createContext({URL, Date, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, AbortSignal, crypto: webcrypto, structuredClone, console: {...console, log: () => {}}, RatingsD1, fetch: fetchMock,
-  CanonicalCatalogReader: {catalogReaderGate: async () => ({mode: 'd1', state: 'open', generation: 2}), catalogFilmIdentityBridge: async () => ({state: 'absent'}), catalogTitlesFromD1: async () => ({})},
+  CanonicalCatalogReader: {catalogReaderGate: async () => ({mode: 'd1', state: 'open', generation: 2}), catalogFilmIdentityBridge: async (e, lid) => bridgeState[lid] || {state: 'absent'}, catalogTitlesFromD1: async () => ({})},
   CanonicalRatedAdmission: {applyRatedAdmissionRetention: async () => ({state: 'complete', applied: 1, failed: 0, unknown: 0, preflightFailed: 0, deferred: 0, refused: 0, units: [{kind: 'film_admission', state: 'applied'}]})}});
 for (const file of ['src/domain/tmdb-tv-identity.js', 'src/sources.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), ctx);
 vm.runInContext(scoped('src/letterboxd-match.js', 'LetterboxdMatch') + '\n' + scopedReplacing('src/letterboxd-identity.js', 'LetterboxdIdentity', 'const normTitle=LetterboxdMatch.normTitle;\n') + '\n' + scoped('src/domain/letterboxd-rated-admission.js', 'LetterboxdRatedAdmission'), ctx);
@@ -43,10 +44,10 @@ const GUARD = ['INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLI
 const ledger = db => Object.fromEntries(db.sql('SELECT lid,state,attempts,last_reason,updated_at FROM watchlist_admission_pending').map(r => [r.lid, r]));
 const entryOf = lid => Facts.readDiaryIdentity({DB: currentDb}).then(doc => doc.films[lid]);
 let currentDb = null;
-async function ownerRequeue(env, lid) {
+async function ownerRequeue(env, lid, action = 'requeue', at = NOW) {
   const {version} = await Facts.readDiaryIdentityVersioned(env);
-  const plan = await WatchlistD1.ownerAdmissionPlan(env, {action: 'requeue', lids: [lid], now: NOW}); assert.equal(plan.ok, true);
-  const out = await Facts.ownerAction(env, {action: 'requeue', lids: [lid], expectedVersion: version, by: 'o', why: 'w', at: AT, extra: plan.statements}); assert.equal(out.state, 'applied', JSON.stringify(out)); return out;
+  const plan = await WatchlistD1.ownerAdmissionPlan(env, {action, lids: [lid], now: at}); assert.equal(plan.ok, true);
+  const out = await Facts.ownerAction(env, {action, lids: [lid], expectedVersion: version, by: 'o', why: 'w', at: new Date(at).toISOString(), extra: plan.statements}); assert.equal(out.state, 'applied', JSON.stringify(out)); return out;
 }
 async function scenario({withEntry, slugless = false, fullCap = false}) {
   const db = open(), env = {DB: db}; currentDb = db; calls.length = 0;
@@ -108,4 +109,24 @@ async function pair() {
   const ea = await entryOf(A); assert.ok(!ea || ea.attempts === 0, 'no stale budget on the stale id: ' + JSON.stringify(ea));
 }
 await pair(); ctx.fetch = fetchMock;
+// Fifth review: an effect PAUSED across the expiry of its reservation. The trusted bridge returns, the reservation is taken and the intent written; the step stalls past expiry; the owner dismisses the id (an expired
+// reservation is no longer in flight); the stalled step then resumes its link. The link is refused AT COMMIT (the batch asserts the reservation), so no alias is written for the dismissed id.
+async function paused(kind = 'bridge') {
+  const db = open(), env = {DB: db}; currentDb = db;
+  const lid = kind === 'bridge' ? 'Pz1' : 'Pz2', tmdb = kind === 'bridge' ? '900555' : '900556';
+  await Facts.applyDiaryEvidence(env, [{lid, watchedDate: '2026-11-17', rating: 3, ratingState: 'rated', sourceRef: 'diary:viewing:9'}]);
+  if (kind === 'bridge') bridgeState[lid] = {state: 'ok', tmdb, filmId: 'film:tmdb:' + tmdb, lid};
+  // a `link_failed` entry: a confirmed admission whose alias/record link did not commit; completed locally, under its own reservation
+  else await Facts.updateDiaryIdentity(env, {set: {[lid]: {reason: 'link_failed', class: 'intent', slug: 'film-z', tmdb, attempts: 0, streak: 0, queuedAt: AT, lastAttemptAt: AT, nextAttemptAt: AT, route: 'ratings_diary'}}});
+  const original = Facts.bridgeDiaryFilm; let dismissed = false;
+  Facts.bridgeDiaryFilm = async (e, args) => {if (!dismissed) {dismissed = true; await ownerRequeue(env, lid, 'dismiss', NOW + 6 * 60000);} return original(e, args);};
+  try {await Identity.resolve(env, kind === 'bridge' ? [{lid, slug: 'film-z'}] : [], {clock: () => NOW, remaining: () => 120000, route: 'ratings_diary'});}
+  finally {Facts.bridgeDiaryFilm = original; delete bridgeState[lid];}
+  assert.equal(dismissed, true, 'the link was attempted');
+  const links = (await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value || {};
+  assert.equal(links['tmdb:' + tmdb], undefined, 'no TMDB alias is written for the dismissed id: ' + JSON.stringify(links));
+  assert.equal((await entryOf(lid)).reason, 'owner_dismissed', 'the owner dismissal stands');
+}
+await paused();
+await paused('link_failed');
 console.log('letterboxd-owner-race-d1: ok');

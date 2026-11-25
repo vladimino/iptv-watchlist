@@ -658,5 +658,20 @@ async function putPayload(env,runId,report){
  assert.equal(other.admitted,true);
 }
 
+// AIR-599 (fifth review of PR #1009): an env carrying the check reservation of a Letterboxd identity effect (`effectGuard`) admits only while the shared check document still holds that reservation; an effect whose
+// reservation was released, taken over or voided by an owner action is refused AT COMMIT (no Film, no admission row).
+{
+ const file=database('open');
+ const key='letterboxd/facts/scans/diary-identity.json';
+ assert.equal(sqlite(file,"INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('"+key+"',0,'{\"films\":{\"Rx1\":{\"reservation\":{\"checkId\":\"c-live\",\"until\":\"x\"}}}}','e','"+T0+"')").status,0);
+ const gone={...envOf(file),effectGuard:{key,needle:'"reservation":{"checkId":"c-gone"'}};
+ await assert.rejects(()=>FA.admitRatedFilm(gone,{receiptKey:'tmdb_610',receipt:receipt(610),expectedRevision:0,at:T,requestId:'req-gone'}));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_rated_admission WHERE tmdb='610'"),0,'no admission without the reservation');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:610'"),0);
+ const live={...envOf(file),effectGuard:{key,needle:'"reservation":{"checkId":"c-live"'}};
+ const ok=await FA.admitRatedFilm(live,{receiptKey:'tmdb_610',receipt:receipt(610),expectedRevision:0,at:T,requestId:'req-live'});
+ assert.equal(ok.admitted,true,'the live reservation admits');
+}
+
 console.log('canonical-rated-admission-producer: ok');
 void applyFilmAdmission;void ratedAdmissionRegistry;void UNIT_CAP;void resolveExistingRetentionFilm;void RATED_ADMISSION_ORIGIN;void FILM_ADMISSION_OPERATION;void FILM_RETENTION_OPERATION;void ratedAdmissionRecord;void departedWatchlistLids;void watchlistRetentionWork;void assertRatedAdmissionAccepted;void ratedAdmissionSliceSettled;

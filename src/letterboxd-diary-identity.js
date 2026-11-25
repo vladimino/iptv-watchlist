@@ -181,6 +181,11 @@ const LetterboxdDiaryIdentity=(()=>{
   // The backlog records as this step read them, and the check reservations this step holds.
   const baseB=Object.fromEntries(Object.entries(backlogIds).map(([id,record])=>[id,JSON.stringify(record)]));
   const mine=new Map();
+  // AIR-599 (fifth review of PR #1009): the env an EFFECT commits through carries its reservation (`effectGuard`): every Ratings or canonical batch of the effect asserts that the shared check document still holds this check
+  // id, so an effect whose reservation was released, taken over or voided by an owner action (also after the reservation expired) is refused at commit. No reservation, no effect.
+  const guarded=lid=>mine.has(lid)?{...env,effectGuard:{key:LetterboxdFacts.DIARY_IDENTITY_KEY,needle:'"reservation":{"checkId":"'+mine.get(lid)+'"'}}:null;
+  // A local effect (a trusted-bridge link, a link repair) needs no lease budget, but never starts once the reservation window is spent.
+  const late=()=>clock()>=now+RESERVATION_MS-15000;
   // The ledger-row token guards of the items whose budget a write applies (each once): a seed read before an owner action is never installed after it.
   const guardsOf=lids=>{const seen={},out=[];for(const lid of lids){const guard=wanted.find(item=>item.lid===lid)?.guard;if(guard&&!seen[lid]){seen[lid]=true;out.push(guard);}}return out;};
   try{gate=await CanonicalCatalogReader.catalogReaderGate(env);}catch{gate=null;}
@@ -290,9 +295,11 @@ const LetterboxdDiaryIdentity=(()=>{
    // A bridge whose admission was confirmed but whose alias/record link did not commit (`link_failed` with its verified movie id) is completed locally:
    // no source request and no admission, whatever the source-attempt count. Only a confirmed admission ever writes this entry.
    if(prior&&prior.reason==='link_failed'&&TMDB.test(String(prior.tmdb||''))){
+    if(late()){defer(item,prior);continue;}
     if(!(await take(item,prior)))continue;
     try{
-     const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:String(prior.tmdb)});
+     if(late()||!guarded(lid))throw Object.assign(new Error('late'),{code:'late'});
+     const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:String(prior.tmdb)});
      if(linked.state==='linked'){counts.repaired++;settled.set(lid,'linked');handoff(lid,prior.tmdb);}
      else record(item,'link_conflict');
     }catch{counts.skipped++;}
@@ -321,10 +328,12 @@ const LetterboxdDiaryIdentity=(()=>{
    let bridge=null;
    try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){defer(item,prior);continue;}bridge=null;}
    if(bridge?.state==='ok'&&bridge.tmdb){
+    if(late()){defer(item,prior);continue;}
     if(!(await take(item,stored.films[lid]||null)))continue;
     if(!(await intend(item,bridge.tmdb))){release(item);counts.deferred++;continue;}
     try{
-     const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb});
+     if(late()||!guarded(lid))throw Object.assign(new Error('late'),{code:'late'});
+     const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:bridge.tmdb});
      if(linked.state==='linked'){counts.bridged++;settled.set(lid,'linked');handoff(lid,bridge.tmdb);const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
      record(item,'link_conflict');continue;
     }catch{defer(item,prior);continue;}
@@ -344,17 +353,17 @@ const LetterboxdDiaryIdentity=(()=>{
     try{
      if(remaining()<WRITE_RESERVE_MS)throw Object.assign(new Error('budget'),{code:'budget'});
      if(!(await intend(item,outcome.verdict.tmdb)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});
-     const admitted=await writeReceipt(env,item,outcome.verdict,clock);
+     const admitted=await writeReceipt(guarded(lid)||(()=>{throw Object.assign(new Error('late'),{code:'late'});})(),item,outcome.verdict,clock);
      if(admitted==='conflict'||admitted==='other_code')throw Object.assign(new Error('admission_conflict'),{code:'admission_conflict'});
      const receiptKey='tmdb_'+outcome.verdict.tmdb,{value:receipts}=await LetterboxdFacts.readAdmissionReceipts(env);
      const receipt=receipts?.films?.[receiptKey];
      if(!receipt)throw new Error('receipt_missing');
-     const admission=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{event:'diary:'+lid,admissions:[{receiptKey,receipt}]});
+     const admission=await CanonicalRatedAdmission.applyRatedAdmissionRetention(guarded(lid),{event:'diary:'+lid,admissions:[{receiptKey,receipt}]});
      confirmed=admissionConfirmed(admission);
      if(!confirmed)outcome={state:'pending',reason:admission?.state==='skipped'?'admission_skipped':'admission_not_confirmed'};
     }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||error?.code||(error?.message==='receipt_missing'?'receipt_missing':'admission_failed')};}
     if(confirmed){
-     const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
+     const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
      if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,outcome.verdict.tmdb);labels.set(lid,label(outcome.verdict));continue;}
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
