@@ -60,8 +60,29 @@ const Monitor=(()=>{
  const letterboxdFacts=(env,now)=>guarded(async()=>{
   if(typeof LetterboxdSync==='undefined'||!env?.DB)return null;
   const model=await LetterboxdSync.readModel(env,{now});
-  return model.mode==='external'?null:model;
+  return model.mode==='external'?null:{...model,identityCheck:await identityCheckFacts(env,now)};
  });
+ // AIR-599 / ADR 0207 decision 4b: ONE fact reader of the shared Letterboxd check (both callers), read only: the newest real check that got an answer, the due Diary entries, the backlog (any id in it was
+ // refused by a full document: `cap_refused`; at its bound: `backlog_full`), the due ledger rows and the ledger rows pending longer than 14 days. A missing `lastCheckAt` falls back to the newest charged
+ // check of the entries; with neither, the age is unknown and not reported as stale.
+ const identityCheckFacts=async(env,now)=>{
+  if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdDiaryIdentity==='undefined'||typeof LetterboxdFacts.readDiaryBacklog!=='function')return null;
+  try{
+   const [doc,backlog]=await Promise.all([LetterboxdFacts.readDiaryIdentity(env),LetterboxdFacts.readDiaryBacklog(env).then(read=>read.doc)]);
+   const D=LetterboxdDiaryIdentity,cap=D.MAX_ATTEMPTS;
+   const entries=Object.values(doc.films||{}).filter(Boolean).filter(entry=>entry.reason!=='owner_dismissed');
+   // Work still owed an answer: an entry below the cap that is due now, or retained after a transport or not-now outcome (its retry time may be in the future: it is waiting, not done).
+   const owed=entries.filter(entry=>(Number(entry.attempts)||0)<cap&&(!(Date.parse(entry.nextAttemptAt)>now)||['transport','not_now','intent'].includes(D.classify(entry.reason))));
+   const stamp=entry=>String(entry.queuedAt||entry.lastAttemptAt||'');
+   const charged=entries.filter(entry=>['gone','definite'].includes(D.classify(entry.reason))).map(entry=>String(entry.lastAttemptAt||'')).filter(Boolean).sort();
+   const ledger=typeof WatchlistD1!=='undefined'&&typeof WatchlistD1.admissionReport==='function'?await WatchlistD1.admissionReport(env,{now,overdueBefore:new Date(now-14*86400000).toISOString(),retainedReasons:[...D.TRANSPORT_REASONS]}):{ok:false};
+   const backlogEntries=Object.values(backlog.ids||{}).filter(Boolean);
+   const backlogCount=backlogEntries.length;
+   // The oldest place of any owed work: the baseline of "never answered" (every owed item has a durable queue time: its entry, its backlog record or its first-seen snapshot header).
+   const times=[...owed.map(stamp),...backlogEntries.map(item=>String(item.queuedAt||'')),ledger.ok&&ledger.oldestWorkAt?String(ledger.oldestWorkAt):''].filter(Boolean).sort();
+   return {lastCheckAt:typeof doc.lastCheckAt==='string'?doc.lastCheckAt:charged.at(-1)||null,work:owed.length+backlogCount+(ledger.ok?ledger.pendingDue:0),oldestWorkAt:times[0]||null,atCap:entries.filter(entry=>(Number(entry.attempts)||0)>=cap).length,backlog:backlogCount,backlogFull:backlogCount>=LetterboxdFacts.DIARY_BACKLOG_CAP,ledgerUnreadable:!ledger.ok,overdue:ledger.ok?ledger.overdue:null,overdueUnknown:ledger.ok?ledger.overdueUnknown:null};
+  }catch{return {error:'unreadable'};}
+ };
  // AIR-556. Prediction progress is confirmed work only, read through the same helpers as the Footer (enrichment.js: queue slices, retry budget, run
  // history, one 60-minute no-progress threshold). Progress is a productive batch or a drained run that proved an empty queue, taken from the run history,
  // the queue's own last batch and this document's stored clock (AIR-596, ADR 0210). A heartbeat, `already_running`, a noop wake-up, a queue recount, a moved

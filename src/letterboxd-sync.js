@@ -167,6 +167,9 @@ export function slotEventPayloads(slot, {ratings, watchlist, closedAt}) {
   };
 }
 
+// AIR-599 / ADR 0207 decision 4b: the slot record keeps the admission step's per-class counts (checked, transport-retained, not now, gone, definite, at the cap, `cap_refused`,
+// `backlog_full`, rows pending longer than the report age). The Event payload is unchanged.
+const admissionSummary = admission => admission && typeof admission === 'object' ? {resolved: admission.resolved ?? null, pending: admission.pending ?? null, terminal: admission.terminal ?? null, error: admission.error ? String(admission.error).slice(0, 60) : null, counts: admission.counts && typeof admission.counts === 'object' ? admission.counts : null} : null;
 // Close a slot: ONE batch (epoch fence, slot compare-and-swap to a terminal status, the two outbox rows). A closed slot has both Events
 // pending until delivered; no other write can close it again (the trigger and the CAS refuse). `skipped` slots use this path from `ensure`.
 async function closeSlot(env, slot, {status, ratings, watchlist, reconciliation = null, failureCode = null, epoch, guarded = true, now}) {
@@ -178,7 +181,7 @@ async function closeSlot(env, slot, {status, ratings, watchlist, reconciliation 
   const statements = [];
   if (guarded) statements.push(fenceGuard(env, epoch));
   statements.push(db.prepare("UPDATE letterboxd_slot SET status = ?, phase = 'done', ratings_outcome = ?, ratings_at = ?, watchlist_outcome = ?, watchlist_at = ?, watchlist_summary = ?, reconciliation_outcome = ?, failure_code = ?, closed_at = ?, updated_at = ?, revision = revision + 1, write_id = ? WHERE slot_key = ? AND revision = ? AND closed_at IS NULL")
-    .bind(status, ratings?.outcome || 'error', payloads.ratings.at, watchlist?.outcome || 'error', payloads.watchlist.at, JSON.stringify(bounded({snapshotVersion: watchlist?.snapshotVersion ?? null, lastSuccessAt: watchlist?.lastSuccessAt ?? null, addedCount: payloads.watchlist.payload.addedCount, removedCount: payloads.watchlist.payload.removedCount, total: watchlist?.total ?? null})), reconciliation, failureCode, closedAt, closedAt, writeId, slot.key, slot.revision));
+    .bind(status, ratings?.outcome || 'error', payloads.ratings.at, watchlist?.outcome || 'error', payloads.watchlist.at, JSON.stringify(bounded({snapshotVersion: watchlist?.snapshotVersion ?? null, lastSuccessAt: watchlist?.lastSuccessAt ?? null, addedCount: payloads.watchlist.payload.addedCount, removedCount: payloads.watchlist.payload.removedCount, total: watchlist?.total ?? null, admission: admissionSummary(watchlist?.admission)})), reconciliation, failureCode, closedAt, closedAt, writeId, slot.key, slot.revision));
   for (const type of ['ratings', 'watchlist']) {
     statements.push(db.prepare("INSERT INTO letterboxd_slot_event (slot_key, type, event_key, at, payload_json, status, attempts, next_retry_at, delivered_at) SELECT ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL WHERE EXISTS (SELECT 1 FROM letterboxd_slot WHERE slot_key = ? AND write_id = ?)")
       .bind(slot.key, type, slotEventKey(slot.key, type), payloads[type].at, JSON.stringify(payloads[type].payload), slot.key, writeId));
