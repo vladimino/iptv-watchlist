@@ -193,7 +193,18 @@ function writeStatements(key,text,etag,now,previousEtag,mode){
 // AIR-347 / ADR 0089 decision 2a. An executor's env carries `ratingsFence: {key, etag}`: the document that holds the executor
 // mode and epoch, and the etag it had when the step was admitted. Every authoritative commit made through such an env asserts
 // in its own batch that this document is unchanged, so a commit from a stale epoch or mode is refused with the data.
-function epochFence(env){
+// AIR-599 (fifth and sixth review of PR #1009): an env may carry `effectGuard: {sql, params}`, the check reservation of a Letterboxd identity effect (built by `LetterboxdFacts.reservationGuard`: a boolean over the
+// reconstructed check document, boundary-safe across its parts). Every Ratings commit made through it asserts that in its own batch, so an effect whose reservation was released, taken over or voided by an owner action
+// is refused at commit, not merely not started. Internal code only, never request input.
+const RESERVATION_SQL=/^\(EXISTS \(SELECT 1 FROM ratings_document WHERE key=\? AND instr\(body,\?\)>0\) OR EXISTS \(SELECT 1 FROM ratings_document a JOIN ratings_document b /;
+function effectGuardStatements(env){
+ const guard=env?.effectGuard;
+ if(guard===undefined||guard===null)return [];
+ if(typeof guard.sql!=='string'||!RESERVATION_SQL.test(guard.sql)||!Array.isArray(guard.params)||guard.params.length!==6)throw failed('ratings_domain_fence');
+ return [["UPDATE ratings_domain_cas SET ok=CASE WHEN "+guard.sql+" THEN 1 ELSE 0 END WHERE id=1",guard.params]];
+}
+function epochFence(env){return [...epochFenceBase(env),...effectGuardStatements(env)];}
+function epochFenceBase(env){
  const fence=env?.ratingsFence;
  if(!fence)return [];
  // AIR-570 / ADR 0186: the Letterboxd Sync fences its Diary writes with its own mode epoch: a caller-supplied guard statement (a [sql, params] pair that trips a CHECK when the epoch no longer holds) rides in the same batch.
@@ -239,7 +250,8 @@ export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
  return {owned:true,saved:{etag}};
 }
 
-export async function casOwned(env,key,empty,apply){
+// AIR-599 (review of PR #1009): `extra` is a list of caller [sql, params] statements that ride in the SAME batch as the document write (and are rolled back with it), for a write that must be atomic with another D1 table.
+export async function casOwned(env,key,empty,apply,{extra:callerExtra=[]}={}){
  if(!ratingsMutableKey(key))return {owned:false};
  const gate=await requireOpen(env);
  if(!gate.open)return {owned:false};
@@ -248,7 +260,7 @@ export async function casOwned(env,key,empty,apply){
   const base=current.value??clone(empty);
   const next=await apply(clone(base),current.etag);
   if(next==null)return {owned:true,result:{value:base,changed:false}};
-  const extra=key.startsWith('letterboxd/facts/films/')?await viewWrites(gate.db,[next]):[];
+  const extra=[...(key.startsWith('letterboxd/facts/films/')?await viewWrites(gate.db,[next]):[]),...callerExtra];
   const saved=await putOwned(env,key,current.etag,next,{extra});
   if(!saved.owned)throw failed('ratings_domain_not_authoritative');
   if(saved.saved)return {owned:true,result:{value:next,changed:true}};

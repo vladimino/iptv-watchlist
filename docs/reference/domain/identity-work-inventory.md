@@ -189,7 +189,7 @@ Measured production sizes are in the [dated measurement](../../evidence/letterbo
 
 | Ledger state | `disposition` |
 | --- | --- |
-| `terminal` (attempts or the 14-day age bound exhausted; the reason may be `age_exceeded`) | `needs_owner_review` |
+| `terminal` (the attempt cap of the shared check, or `owner_dismissed`; rows written before AIR-599 may carry `age_exceeded`) | `needs_owner_review` |
 | `pending` with a retry time in the future | `waiting` |
 | `pending`, due | `retryable` |
 | `resolved`, `superseded` | `resolved` (shown only with `include=resolved`) |
@@ -197,3 +197,19 @@ Measured production sizes are in the [dated measurement](../../evidence/letterbo
 **The filter is part of the SQL, before any page limit.** The requested `disposition` and `include` become one source filter (`owner_review`, `waiting`, `retryable`, `history`, `open` or `all`; `blocked` names no ledger state and yields no rows), so a work list is complete however many historical `resolved`/`superseded` rows (which have no cap) precede a row. The lane is paged by **keyset** over `(first-seen version, lid)`: the cursor carries the position of the last row read and the **Watchlist authority generation** of the page that minted it, and a cursor from another generation is `stale_cursor`. A page may hold fewer rows than the limit only because the title search (`q`) is applied to the page read; the cursor still continues, so nothing is skipped and nothing repeats while rows change between pages.
 
 The row never carries a `film` link: identity stays a Film fact. `coverage.watchlist_admission` is `complete` (this was the last page), `partial` with reason `more_pages` (another page exists; the answer carries `nextCursor`) or `unavailable` with a reason (tables absent or the repository unreadable), never an empty queue. The route writes nothing.
+
+Since AIR-599 ([ADR 0207 decision 4b](../../adr/0207-letterboxd-admissions-coordinated-in-d1-only.md)) each ledger row's `source` also carries `class` (the classifier of the shared check for a pending row's last reason, `needs_owner_review` for a terminal one), `streak` (the transport streak of the shared Diary entry, when one exists) and `revision` (`state`, `attempts`, `updatedAt`: the compare-and-swap token of the owner action).
+
+## The Diary identity lane (AIR-599)
+
+`diary_identity` lists the shared Letterboxd check document (`letterboxd/facts/scans/diary-identity.json`: the entries and its bounded backlog), read only, in queue order (oldest `queuedAt` first). It is an in-memory lane paged by index like `film`. Keys: `did:<lid>` for an entry, `dbl:<lid>` for a backlog id (an id with an entry is shown once). `source` carries `attempts`, `streak`, `nextRetryAt`, `class`, `slug`, `route`, `checkId`, `requeued` and `queuedAt`.
+
+| Entry | `disposition` |
+| --- | --- |
+| `owner_dismissed` | `resolved` (only with `include=resolved`) |
+| attempts at the cap (6) | `needs_owner_review` |
+| due (`nextAttemptAt` past or absent) | `retryable` |
+| backed off | `waiting` |
+| backlog id (reason `diary_cap`) | `waiting` |
+
+`coverage.diary_identity` is `{state: 'complete', version, backlogVersion, entries, backlog, cap, backlogCap}` (the backlog is part of the same document: both versions are its one stored version, the compare-and-swap token of the owner action) or `{state: 'unavailable', reason}`. The owner page shows each ledger and Diary row's class, attempts, transport streak and next check, and the lane's fill. The owner `requeue` and `dismiss` are the separate route [`POST /api/admin/identity-work/owner-action`](../api/admin.md#owner-requeue-and-dismiss-of-the-shared-letterboxd-check-post-apiadminidentity-workowner-action); this `GET` stays read-only.

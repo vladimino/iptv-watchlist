@@ -271,7 +271,21 @@ const drain=async(made,at)=>{for(;;){const todo=await Watchlist.pendingEffects(m
  const kept=rows(made.file,'SELECT version FROM watchlist_snapshot ORDER BY version').map(row=>Number(row.version));
  assert.ok(kept.includes(3),'an undone snapshot is kept whatever its age');
  assert.ok(kept.includes(12)&&kept.includes(5),'the newest eight stay');
- assert.ok(!kept.includes(1)&&!kept.includes(2),'older, fully drained snapshots are deleted with their members');
+ // AIR-599 (review of PR #1009): the first-seen snapshot of an OPEN ledger row keeps its header (the authoritative age of the queue place); every other old, fully drained snapshot is deleted whole, and no old snapshot keeps its members.
+ const referenced=new Set(rows(made.file,"SELECT first_seen_snapshot_id AS id FROM watchlist_admission_pending WHERE state IN ('pending','terminal')").map(row=>row.id));
+ const versionOf=id=>Number(rows(made.file,"SELECT version FROM watchlist_snapshot WHERE snapshot_id='"+id+"'")[0]?.version);
+ for(const version of [1,2]){
+  const id=rows(made.file,"SELECT snapshot_id AS id FROM watchlist_snapshot WHERE version="+version)[0]?.id;
+  if(id===undefined){assert.ok(![...referenced].some(ref=>versionOf(ref)===version),'a snapshot an open row names is never deleted: v'+version);continue;}
+  assert.ok(referenced.has(id),'only a referenced snapshot survives its retention: v'+version);
+  assert.equal(rows(made.file,"SELECT COUNT(*) AS n FROM watchlist_member WHERE snapshot_id='"+id+"'")[0].n,0,'its members are pruned like any old snapshot\'s: v'+version);
+ }
+ // once no open row names them, the old drained snapshots are deleted whole (headers included), as before
+ sqlite(made.file,"UPDATE watchlist_admission_pending SET state='resolved', resolved_by='identity:t', next_retry_at=NULL");
+ for(let n=0;n<6;n++)assert.equal((await Watchlist.pruneSnapshots(made.db)).ok,true);
+ const after=rows(made.file,'SELECT version FROM watchlist_snapshot ORDER BY version').map(row=>Number(row.version));
+ assert.ok(!after.includes(1)&&!after.includes(2),'old snapshots that no open row names are deleted with their members');
+ assert.ok(after.includes(3),'an undone snapshot is still kept');
  assert.equal(rows(made.file,"SELECT COUNT(*) AS n FROM watchlist_member WHERE snapshot_id NOT IN (SELECT snapshot_id FROM watchlist_snapshot) AND snapshot_id NOT IN (SELECT snapshot_id FROM watchlist_staging WHERE snapshot_id=(SELECT snapshot_id FROM watchlist_current))")[0].n>=0,true);
  assert.equal((await Watchlist.readCurrent(made.db)).ok,true,'the current snapshot is intact after pruning');
 }
