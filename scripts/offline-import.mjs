@@ -8,6 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
+import {verifyImportFence,withOfflineImportFence} from '../src/film-dimension-import-fence.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {actualUnit,classifyObject,isArchiveKey,readDiscoveryArchive,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal,supersededPayloads} from '../src/offline-importer.js';
@@ -198,8 +199,12 @@ async function main(){
  // Fail closed: an unknown key or a stored decision that disagrees with the derived evidence stops the run before the database is touched.
  const refused=refusal(batch);
  if(refused){console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,fingerprintVersions:batch.fingerprintVersions,...refused,note}));process.exit(3);}
- if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')).join('\n'));}
+ if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,withOfflineImportFence(['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')).join('\n')));}
+ // A file this command did not just create must already carry the offline import contract (ADR 0218 stage 2); importBatch refuses it otherwise.
  const db=openSqlite(databasePath);
+ // The supported target of this command: schema 3 (the file it creates) or 4, carrying the offline import contract. Read before any write.
+ const contract=await verifyImportFence(db,{schemaVersions:[3,4]});
+ if(!contract.ok){console.log(JSON.stringify({stopped:true,stopReasons:[contract.reason],detail:contract.missing?.slice(0,20)??contract.version??null,note}));process.exit(3);}
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
  const result=await importBatch(db,repositories,{...batch,importedAt:batch.finishedAt});
  console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,fingerprintVersions:batch.fingerprintVersions,...result,note}));

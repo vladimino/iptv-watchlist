@@ -49,4 +49,4 @@ Measured on the SQLite stand-in with one row per dimension per Film, 25 November
 
 ## Not done here
 
-No live census, no retirement (stage 6), no projection reconciliation (stage 4), no import change (stage 2, [AIR-661](https://trello.com/c/1Rv634jd)) and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)).
+No live census, no retirement (stage 6), no projection reconciliation (stage 4), and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)). The import change of stage 2 is delivered separately ([AIR-661](https://trello.com/c/1Rv634jd); [D1 schema contract](../reference/data/d1-schema.md)): it keeps every `control` and `unknown_legacy` row this reader reports and every `stale_copy` metadata, fingerprint and prediction row, so a parity run before and after an offline import sees the same classes for them.
