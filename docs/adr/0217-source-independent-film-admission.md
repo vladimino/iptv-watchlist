@@ -1,11 +1,11 @@
 # ADR 0217: A verified Letterboxd film with no TMDB movie may be admitted as a canonical Film through the D1 admission coordinator, with a proof rule that does not need TMDB
 
-**Status:** Proposed  
-**Original decision date:** not decided  
+**Status:** Accepted  
+**Original decision date:** 2026-11-25 ([owner disposition](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7170324458))  
 **Recorded at:** 2026-11-25, from `main` `7d8d4b3`. That commit includes the Accepted [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md), the Accepted [ADR 0218](0218-film-lifecycle-dimensions-revision.md), the dormant receipt operation key of AIR-600 (migration `0039`) and the dormant evidence ledger initial slice of AIR-601 (migration `0041`, in the repository and not applied). Revised the same day after the [first](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7162637094), [second](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7164448376), [third](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7164848093) and [fourth](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7165258173) independent reviews, and consolidated with the owner's selections below.  
-**Approval source:** owner selections only, not a disposition. The Product Owner selected H1, I1, J1, K2, L1 and M1 on 25 November 2026, 17:55 Europe/Madrid, as transcribed in the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7168734400), with a clarification requested for I1 (answered in decision 4) and a qualification for M1 (recorded in decision 9). This is **not** the final ADR disposition and not an implementation or production authorization. There is no `Accepted` record yet.  
+**Approval source:** [Product Owner disposition of 25 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7170324458), recorded verbatim by the Coordinator from the owner's conversation: «принимаю», accepting the consolidated design with the selections H1, I1, J1, K2, L1, M1 ([exact choices and qualifications](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7168734400)) as reviewed at `ec05176b` in the [fifth independent review](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7170273685). The I1 clarification (a stable Film entity key, not a current external identity) and the M1 qualification (near-term, standalone M2 planning of prediction support) are part of the accepted design. This revision only adds the fifth review's acceptance and gating obligations and the registry and contract notes. It is an architecture acceptance only: no implementation card, migration apply, production write, source recheck, scoring, flag or Task is authorized.  
 **Related work:** [AIR-643](https://trello.com/c/e1Q9H1bG), which is ADR 0216 choice A2 and delivery step 9. Builds on [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md), [ADR 0211](0211-catalog-enrichment-producer.md), [ADR 0213](0213-film-identity-evidence-ledger.md) and [ADR 0215](0215-identity-evidence-full-model.md). The production census is [AIR-627](https://trello.com/c/IOERZ9GI)'s and is not repeated here. Accepted [ADR 0218](0218-film-lifecycle-dimensions-revision.md) (lifecycle dimensions, AIR-644) is independent of this record: its recommended options keep the identity dimension row as the carrier of `titleSource` and owner identity authority, which is the `strong()` rule that decision 8b relies on. AIR-275 is unchanged and this record is not its prerequisite.  
-**Supersedes:** None. If accepted as selected, it **amends** [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) decisions 2, 3 and 4 (two more kinds of the coordinator, and one common operation key for every attempt whose lid is known), [ADR 0215](0215-identity-evidence-full-model.md) decision 3 (one more minting id), and **extends** [ADR 0154](0154-prediction-eligibility-independent-of-epg.md) decision 1 with one temporary exclusion (M1). K2 leaves ADR 0215 decision 2 alone. The enrichment scope of ADR 0211 and the AIR-387 permalink rules do not change. On acceptance, the registry rows of ADR 0207, 0215 and 0154 get an amendment note (delivery step 0).  
+**Supersedes:** None. As accepted, it **amends** [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) decisions 2, 3 and 4 (two more kinds of the coordinator, and one common operation key for every attempt whose lid is known), [ADR 0215](0215-identity-evidence-full-model.md) decision 3 (one more minting id), and **extends** [ADR 0154](0154-prediction-eligibility-independent-of-epg.md) decision 1 with one temporary exclusion (M1). K2 leaves ADR 0215 decision 2 alone. The enrichment scope of ADR 0211 and the AIR-387 permalink rules do not change. On acceptance, the registry rows of ADR 0207, 0215 and 0154 get an amendment note (delivery step 0).  
 **Superseded by:** None
 
 ## Context
@@ -64,9 +64,9 @@ Facts that shape the design:
 
 The AIR-627 census found **no** pure lid-only Film. Letterboxd lists films that TMDB does not hold, such as shorts, festival titles and regional releases. A Watchlist or Diary entry for such a film stays pending in its domain forever: no Film, permalink, metadata or prediction, and no place in a global catalog. This is a future capability, and every rule below keeps the TMDB-proved path byte-identical.
 
-## Decision (proposed, with the owner's selections)
+## Decision
 
-The owner selected H1, I1, J1, K2, L1 and M1 ([record](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7168734400)). This text states the selected design as normative **proposed** design. The other options stay in "Alternatives considered" only.
+The owner selected H1, I1, J1, K2, L1 and M1 ([record](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7168734400)). This text states the accepted design. The owner accepted it on 25 November 2026 ([disposition](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7170324458)). The other options stay in "Alternatives considered" only.
 
 | Choice | Selected | Owner qualification |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ The writer performs the proof at write time, and a caller never supplies it. The
 2. The film page answers `200`, with a **complete** body under the existing byte cap: no truncation, no abort, no timeout.
 3. The page is not a challenge page by the existing detector.
 4. The page's own shortlink equals the lid, and its canonical path equals the redirect target.
-5. The page's film type marker is present and readable, and the title is not empty.
+5. The page's film type marker is present, readable and **positively identifies an eligible film page type** (a member of an enumerated list of feature-film page types, fixed from the permitted captures of delivery step 8). A readable marker of any other or unknown type is not admitted: it is pending `page_type_ineligible` for review. The title is not empty.
 6. The block where Letterboxd carries external ids is present and parsed, and it holds **no** TMDB id of any type. A page whose block is missing or unreadable is `tmdb_unreadable`, never "no TMDB".
 
 **The proof digest** is defined in decision 7 and binds the outcome of every check above. **H1 is fail-closed:** it may be enabled only after a parseable absence marker is shown on permitted existing captures of real no-TMDB pages (delivery step 8).
@@ -193,9 +193,9 @@ The single key changes the key of the rated step and the inferred import for ite
   - a reconciliation pass that settles or bounds every unresolved receipt under the older keys;
   - a reconciling read before every lid-key reservation (below), so safety does not depend on prevention alone.
 - **Unknown reverse mapping: hold, never assume absence.** The lid-only reservation reads the older-key history of every code that maps to the lid. Where the mapping is not known (for example a candidate whose short code has not resolved, or an alias without a reverse entry), the attempt is **held**: non-terminal `deferred` with reason `older_key_unknown`. It never proceeds on an assumed absence.
-- **After the switch,** the older key is not reserved again for a lid-resolved item. A stale old version that does reserve one is found by the reconciling read of the lid key reservation and settled by the ADR 0207 protocol. The fixtures of test 5c cover it.
+- **After the switch,** the older key is not reserved again for a lid-resolved item. This rests on **proven drain and on the prevention of any old-version reservation**, not on the reconciling read alone. A late old-key reservation by a stale version is a **stop and reconciliation condition** (the activation stops until it is settled), never a safe concurrent path. The reconciling read of the lid key reservation is a second line of defence, and the fixtures of test 5c cover it. The bounds of the receipt protocol hold unchanged: the per-key history cap (`OPERATION_KEY_HISTORY_CAP`, 100 receipts, refused beyond it as `operation_key_history_exhausted`), the expiry of a `pending` receipt and the owned-attempt predicates.
 - **Terminal receipts and request ids.** Receipts are append-only and terminal receipts are preserved. The `operation_key` of a receipt is immutable, so a retry whose resolved lid changes the key gets a **new** `request_id` (the key is part of the id derivation for keyed kinds, a requirement on the producer request id), and the old receipt is settled by the older-key reconciliation. A `request_id` is never reused with a different key.
-- **Rollback.** Disabling the kinds does not revert receipts. A lid-key receipt stays readable under the same key whichever code runs next, and the older-key reconciliation stays in the reservation path.
+- **Rollback.** Disabling the kinds does not revert receipts. Rollback **keeps compatible common-key coordination** (every remaining lid-knowing writer keeps the lid key and the reconciling read) **or closes admission first** (the ADR 0207 `closed` state, so no writer reserves anything). **Old keyed writers are never reopened.** A lid-key receipt stays readable under the same key whichever code runs next.
 
 #### 5b. Symmetric predicates in every canonical batch that touches a lid
 
@@ -361,6 +361,7 @@ The same page checked by the Diary, the Watchlist or the owner route gives **the
 - **`proof_version` is route-independent.** It names the check rules and the normalization below, never a route.
 - **`source` in the root is the normalized final film page URL**, never a route name: `https`, lowercase host, no query and no fragment, one trailing slash. The route stays in the observation metadata (decision 7).
 - **The agreement inputs** (TMDB id, title, year) are hashed in the normalized form that the accepted agreement check already compares, with no new normalization rule.
+- **One common root generator** serves every real page-check route (the Diary, the Watchlist step, the rated step and the owner re-check), so all of them produce the same normalized root for one source. Where an existing route's digest (ADR 0207 decision 3) uses another encoding, its **legacy digest is kept as route provenance**, never rewritten. Old and new encodings of the same source are **never counted as independent proof** (ADR 0213: independence counts distinct roots).
 - Every input is stored on the intent row, so the root can be recomputed. No raw HTML is archived. Nothing is fabricated: a failed agreement check writes no root.
 
 **The receipt content digest** is `{kind: lid_tmdb_attach, lid, tmdb, attach_root}`.
@@ -390,10 +391,14 @@ The same page checked by the Diary, the Watchlist or the owner route gives **the
 #### 8c. Ratings settlement after the attach
 
 - **The attach does not create the Ratings link.** A trusted claim is not a Ratings fact alias. The intent owes the link (`link_state = owed`).
-- **Before the link,** the link step re-reads current state:
-  - the trusted `letterboxd` claim of the lid and the trusted `tmdb` claim of the movie are on the same survivor;
+- **Before the link,** the link step re-reads current state with the **complete, non-conflicting ownership predicates of 5b and 8b, for both claims**:
+  - the trusted `letterboxd` claim of the lid and the trusted `tmdb` claim of the movie are on the same survivor, with no other row of either value, of any trust, on any Film;
+  - the survivor is bound to its `film_lid_admission` row;
   - no redirect;
-  - no retirement of the movie.
+  - no retirement of the movie;
+  - the relevant markers and epochs.
+
+  **It fails closed outside the ratings domain `d1` and `open`** (and under any other Film/Person or admission marker state): nothing is written and the intent stays `owed`.
 
   It then runs the **existing** Ratings alias protocol (the ADR 0166 link step, `linkOrNote`).
 - **The link batch** asserts:
@@ -403,10 +408,11 @@ The same page checked by the Diary, the Watchlist or the owner route gives **the
   - the intent `open` with `link_state = owed` and the `revision` read.
 - **Atomic settlement.**
   - **Primary.** Where the ratings domain is `d1` and `open`, the link write is a D1 batch. It carries the intent update (`link_state = linked`, `revision + 1`) **in the same batch**, so the alias and the intent cannot disagree. The card verifies that the ratings writer can carry one extra statement.
-  - **Fallback, exact lost-response reconciliation.** If the writer cannot carry it, a repeat of the same `requestId` with `link_state = owed` first reads `links.json`. When `letterboxd:<lid>` and `tmdb:<n>` already map to one fact key and the canonical facts still hold, it sets `linked` in a guarded update (the intent matches `owed` and its `revision`). Otherwise it retries the link step.
+  - **Fallback, exact lost-response reconciliation.** If the writer cannot carry it, a repeat of the same `requestId` with `link_state = owed` first reads `links.json`. When `letterboxd:<lid>` and `tmdb:<n>` already map to one fact key and the canonical facts still hold, it sets `linked` in a guarded update. **That update's own statement asserts** the actual `links.json` document version (each part's `etag`) and part count **and** the matching alias mapping, together with the ownership predicates above, the intent matching `owed` and its `revision`. It never relies on an earlier read. Otherwise it retries the link step.
 - **Transient is retryable; only a proved conflict or correction is terminal.**
   - A transport failure, a moved epoch or a changed `etag` leaves `link_state = owed`. The same `requestId` retries.
   - A **proved** `alias_conflict` (the lid or the movie is linked to another fact key) or a **proved** correction (the claim was reassigned, a redirect or a retirement now applies) becomes `link_blocked`, for owner review.
+  - **The intent is marked settled for every terminal link outcome** (`linked`, `alias_conflict`, `link_blocked`). A transient failure keeps it `open` with `link_state = owed`.
 - **An applied attach receipt alone never authorizes the alias.** After a correction or merge, the current-state predicates block a stale link.
 - **Retry.** The same `requestId` resumes the link step only, and never re-attaches. The outcomes are `linked`, `alias_conflict` and `link_blocked`. The `lb-<lid>` fact key gains the movie alias as a Diary-first link does, and no key is renamed.
 - **No `film_rated_admission` row.** The Film stays outside the ADR 0211 enrichment scope until that scope is amended. A replay can neither grant nor lose eligibility.
@@ -586,8 +592,8 @@ This record authorizes no migration, flag, Task, Letterboxd or TMDB production c
 | Dormant code | review, CI; deployed with the admission marker at `r2` or `closed`, or the kind not enabled | ordinary code revert |
 | Schema apply: `film_lid_admission` | its own owner approval | additive table; dropping it is possible only while it is empty |
 | Schema apply: `lid_recheck_intent` | its own owner approval, **before the attach activation**; it is not needed for admission | additive table; dropping it is possible only while it is empty |
-| Old-key cutover (decision 5a-2) | drain evidence for any version that reserves an older key, a reconciliation pass over older-key receipts, the reconciling read in the reservation path; a no-op when no older key was ever delivered | the older-key reconciliation stays in the reservation path; receipts are terminal and never rewritten |
-| H1 enablement precondition | the absence marker is shown parseable on **permitted existing captures** of real no-TMDB pages (synthetic fixtures alone do not establish upstream markup), with no new production fetch | — |
+| Old-key cutover (decision 5a-2) | **proven drain** of every version that reserves an older key and prevention of old-version reservation; a reconciliation pass over older-key receipts; the reconciling read as a second line; a late old-key reservation stops the activation; a no-op when no older key was ever delivered | keep compatible common-key coordination, or close admission first; old keyed writers are never reopened; receipts are terminal and never rewritten |
+| H1 enablement precondition (**a hard pre-activation holdpoint**) | the absence marker **and** the eligible film page types are shown on **permitted existing captures** of real no-TMDB pages (synthetic fixtures alone do not establish upstream markup), with no new production fetch. The real markup is **unverified** at acceptance | — |
 | Admission activation | ADR 0207 at `d1`; schema applied; every decision 9 consumer delivered; drain evidence that no older version serves traffic; owner L3 GO and rollback plan | disable the kind (refused before the first effect); existing lid-only Films stay, and readers must keep accepting `film:lb:` |
 | Attach activation | the ledger table (`0041`) applied; the ADR 0215 writer control delivered and `lid_tmdb_attach` `on`; `lid_recheck_intent` applied; the `writeFilmFacts` change deployed and drained (decision 8d); owner L3 GO | disable the route; applied attaches stay; the writer break is recorded (ADR 0215 decision 4) |
 
@@ -595,7 +601,7 @@ This record authorizes no migration, flag, Task, Letterboxd or TMDB production c
 
 ## Delivery graph (no card is created by this record)
 
-Steps 1 to 6 are dormant code under ordinary review; steps 7 and 10 to 13 are separate, owner-gated operations. No step is authorized by this record, which is Proposed.
+Steps 1 to 6 are dormant code under ordinary review; steps 7a, 7b and 9 to 13 are separate, owner-gated steps. **Prerequisites are named as implementations**: the unified reader of ADR 0216 and the ADR 0215 writer control are Accepted designs, not runtime delivery, so the cards that deliver them are real prerequisites (steps 4 and 11). AIR-275 is unchanged, and this record is neither added to it nor to AIR-603. No step is authorized by this record: it is an architecture acceptance only.
 
 | Step | Kind | Content | Schema / API impact | Depends on | Gate |
 | --- | --- | --- | --- | --- | --- |
@@ -606,16 +612,24 @@ Steps 1 to 6 are dormant code under ordinary review; steps 7 and 10 to 13 are se
 | 4 | offline code | Settlement of the three entry points; projection and permalink acceptance of `film:lb:`; the inventory of readers that derive a claim from an id spelling; M1 exclusion in queue, manifest and `submit`; separate `eligibility` field (tests 14–15) | ledger `resolvedBy`; [film-person reference](../reference/domain/film-person.md), [catalog API](../reference/api/catalog.md), [film history and aggregate contract](../reference/api/film-history.md) | 3; ADR 0216 step 3 | review, CI |
 | 5 | offline code | `mergeFilms` moves `film_lid_admission` (test 12) | none | 3 | review, CI |
 | 6 | offline code and schema | Owner re-check route, the migration file of `lid_recheck_intent`, intent CAS, `lid_tmdb_attach`, the fenced Ratings link handoff (tests 9–11) | second new table; new owner admin route; admin API reference | 2, 3; the ADR 0215 writer control | review, CI, dormant |
-| 7a | separate apply | Apply the `film_lid_admission` migration | D1 schema version | 3 | owner-approved apply |
-| 7b | separate apply | Apply the `lid_recheck_intent` migration | D1 schema version | 6 | owner-approved apply |
+| 7a | schema prerequisite | The `film_lid_admission` migration file is a prerequisite of activation. **It is not an authorization to apply early.** Its apply follows the owner's already recorded coordinated pending-migration window (AIR-648), the exact schema chain and a separately approved apply | D1 schema version | 3 | separately approved apply |
+| 7b | schema prerequisite | The `lid_recheck_intent` migration file, a prerequisite of the attach activation only; same rule as 7a | D1 schema version | 6 | separately approved apply |
 | 8 | separate check | H1 markup on permitted existing captures | evidence document | 3 | read-only; no new production fetch |
 | 9 | separate activation | Lid-only admission | — | 4, 5, 7a, 8; ADR 0207 `d1`; the old-key gates when an older key exists; drain | owner L3 GO |
-| 10 | separate apply | Apply the ledger migration `0041` (card M1 of ADR 0207) | D1 schema version | — | owner-approved apply |
-| 11 | separate activation | Attach | — | 6, 7b, 9, 10; the writer control `on`; drain of step 2 | owner L3 GO |
-| 12 | planning | **M2 planning item:** the prediction support design for lid-only Films (decision 9) | design only | accepted ADR; **not** a prerequisite of steps 1–11 | owner decision; its own activation |
-| 13 | future decisions | Enrichment scope for `film_lid_admission`, automatic re-check, TV Films, a merge writer, lid retirement | — | — | owner decisions |
+| 10 | existing card | The ledger migration `0041` apply is the **existing** card M1 of ADR 0207, [AIR-603](https://trello.com/c/wc7pHJTB), not a new apply card. This record neither duplicates it nor widens its scope; it respects its coordinated window with AIR-648 | D1 schema version | — | its own owner-approved apply |
+| 11 | separate activation | Attach | — | 6, 7b, 9, 10; the **delivered** ADR 0215 writer control (its implementation card, not the Accepted ADR) with `lid_tmdb_attach` `on`; drain of step 2 | owner L3 GO |
+| 12 | planning | **M2 planning item, a standalone near-term planning card:** the prediction support design for lid-only Films (decision 9). It is not a blocker of admission and not a scoring authorization | design only | accepted ADR; **not** a prerequisite of steps 1–11 | owner decision; its own activation |
+| 13 | future decisions | Enrichment scope for `film_lid_admission`, coordinated with [AIR-615](https://trello.com/c/fCXSmk7K) and kept apart from both the current ADR 0211 initial scope and its future C3b step (no implicit expansion); automatic re-check; TV Films; a merge writer; lid retirement | — | — | owner decisions |
 
-### Affected contracts (to update with the cards that deliver them, not now)
+### Amendments to Accepted ADRs
+
+These amendments take effect as architecture on this acceptance. The Accepted texts of the amended ADRs are not rewritten. Their registry rows carry a pointer to this record, and delivery step 0 keeps those pointers current.
+
+- **[ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md)** (decisions 2, 3 and 4): adds the coordinator kinds `lid_only` and `lid_tmdb_attach`, and **one common operation key `admission:lid:<lid>`** for every attempt whose lid is known (the rated step and the inferred import for a lid-resolved item no longer reserve `admission:short_code:<code>` or `admission:inferred_import:<code>`). The activation sequence, the marker and the receipt protocol of ADR 0207 are otherwise unchanged.
+- **[ADR 0215](0215-identity-evidence-full-model.md)** (decision 3): adds the minting id `film:lb:<lid>`, which carries no evidence row. Decision 2 is untouched (K2 writes no `exists` row).
+- **[ADR 0154](0154-prediction-eligibility-independent-of-epg.md)** (decision 1): extended by one **temporary** exclusion (M1, decision 9), which ends with the separately accepted M2 design or after a TMDB attach.
+
+### Affected contracts (accepted target, not live behavior; updated by the cards that deliver them)
 
 - [Film/Person lifecycle](../architecture/film-person-lifecycle.md): one Mermaid diagram of the selected design, with rendered QA, with step 3.
 - [Film/Person domain reference](../reference/domain/film-person.md): the `film:lb:` minting id and the rule that a minting id is not a current claim.
@@ -623,17 +637,19 @@ Steps 1 to 6 are dormant code under ordinary review; steps 7 and 10 to 13 are se
 - Receipt and admission contract of ADR 0207 (and the receipt reference): the common lid key and the new kinds.
 - [Catalog API](../reference/api/catalog.md), [film history](../reference/api/film-history.md) and the admin API reference: the aggregate by `film:lb:<lid>`, the `eligibility` field and the owner re-check route.
 - The Ratings and prediction references: the lid-only settlement and the M1 exclusion.
-- ADR 0207, 0215 and 0154: amendment notes in the registry.
+- ADR 0207, 0215 and 0154: amendment pointers in the registry (this acceptance).
+
+Until those cards are delivered, **the live behavior is unchanged**: every Film is still admitted only with a TMDB movie, and no lid-only Film, `lid_recheck_intent` table, `film_lid_admission` table or common lid key exists in the runtime. The pointers added with this acceptance to the lifecycle page, the domain reference, the D1 schema contract and the catalog API say exactly that.
 
 ## Evidence
 
-- **Owner selections:** H1, I1, J1, K2, L1 and M1, 25 November 2026, 17:55 Europe/Madrid, in the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7168734400), with the I1 clarification and the M1 qualification recorded above. **Not** the final disposition: this record is Proposed.
-- **Implementation:** none.
-- **Dated verification:** code reading at `main` `961c045` on 2026-11-25, refreshed against `main` `7d8d4b3` for the ledger migration `0041` and the Accepted ADR 0218. No production read.
+- **Original decision:** the [owner's final disposition](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7170324458) of 25 November 2026, «принимаю», after the [fifth independent review](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7170273685). Selections H1, I1, J1, K2, L1 and M1 in the [consolidated owner-choice handoff](https://github.com/vladimino/iptv-watchlist/pull/996#issuecomment-7168734400), with the I1 clarification and the M1 qualification recorded above.
+- **Implementation:** none. Architecture acceptance only.
+- **Dated verification:** code reading at `main` `961c045` on 2026-11-25, refreshed against `main` `7d8d4b3` and again at finalization for the ledger migration `0041` and the Accepted ADR 0218. No production read.
 - **Uncertainty:**
   - The number of pending Watchlist or Diary items in state `tmdb_none` is not measured here; that is AIR-627's census.
   - Whether Letterboxd pages without TMDB keep a stable, parseable external-id block is not established. It must be shown on permitted existing captures of real pages (delivery step 8) before H1 is enabled; synthetic fixtures cannot establish it.
 
 ## Follow-ups
 
-The next steps, in order: independent review of this consolidated revision; then the owner's final disposition (`Accepted` or `Rejected`) with a direct approval link in this record and the registry, under the ADR merge gate; then the post-acceptance breakdown into cards (including the M2 planning item) and only then implementation work, each with its own gate.
+Next, in order: Controller verification of the finalized HEAD and of the owner decision (ADR merge gate), merge and post-merge delivery; then the post-acceptance breakdown into cards (including the standalone M2 planning item), each with its own gate. Nothing here authorizes an implementation card, migration apply, production write, source recheck, scoring, flag or Task.
