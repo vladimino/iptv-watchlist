@@ -67,6 +67,24 @@ export function resolveLocalization({owner=null,reviewed=null,automatic=[]}={}){
  return {...effective,held,rejected};
 }
 
+// Owner values, read from owner_review_entry (verified links only; the owner-review store is never written here). A missing table or a read error
+// fails closed: without the owner domain the precedence cannot be proven. An entry counts when payload.localization is reviewed with provenance
+// authority owner. identity_link is a verified snapshot of a source-key mapping (ADR 0081) that a Film merge does not rewrite, so a Film's owner
+// values are those of every link in the redirect chain that ends at it, and several source keys may link one Film. The result per link is the
+// list of distinct candidates in a fixed order (value, then source key); the caller decides, never SQL row order.
+export function ownerCandidatesFromEntries(entries){
+ const out=new Map();
+ for(const entry of entries||[]){
+  if(entry.identity_state!=='verified'||!entry.identity_link)continue;
+  let payload;try{payload=typeof entry.payload_json==='string'?JSON.parse(entry.payload_json):entry.payload_json;}catch{continue;}
+  const localization=payload?.localization;
+  if(!(localization&&localization.status==='reviewed'&&localization.provenance?.authority==='owner'&&typeof localization.value==='string'&&localization.value.trim()))continue;
+  if(!out.has(entry.identity_link))out.set(entry.identity_link,[]);
+  out.get(entry.identity_link).push({value:localization.value.trim(),at:localization.updatedAt??null,sourceKey:entry.source_key??null,link:entry.identity_link});
+ }
+ for(const list of out.values())list.sort((x,y)=>x.value<y.value?-1:x.value>y.value?1:(x.sourceKey||'')<(y.sourceKey||'')?-1:(x.sourceKey||'')>(y.sourceKey||'')?1:0);
+ return out;
+}
 // Read only. The stored inputs of resolveLocalization for entities of one kind: the owner/reviewed/provisional dimension row, the source rows.
 // An owner value comes from `ownerValues` (id -> {value,at}) when the caller read it from owner_review_entry, else from a dimension the owner wrote.
 export async function loadLocalizationInputs(env,kind,ids,{ownerValues=null}={}){
