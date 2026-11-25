@@ -56,7 +56,7 @@ const writerTo=async target=>{
 let lease=(await Authority.acquireLease(env,{programmeRunId:null,role:'epg'})).lease;
 assert.ok(lease);
 env.discoveryLease=lease;
-const OBS=['obs-a','obs-b','obs-c','obs-d','obs-e','obs-f','obs-g','obs-h','obs-i','obs-j'];
+const OBS=['obs-a','obs-b','obs-c','obs-d','obs-e','obs-f','obs-g','obs-h','obs-i','obs-j','obs-k','obs-l','obs-m','obs-n','obs-o','obs-p'];
 const item=key=>({key,title:'T '+key,normalizedTitle:'t '+key,year:1999,durations:[100],shows:[{channelId:'news',channel:'News',start:5,end:9}],seenInLatestSnapshot:true,lastAiring:5});
 await Authority.replaceLedger(env,{programmeRunId:RUN,items:OBS.map(item)});
 const base=key=>({status:'needs_verification',attempts:1,evidenceKey:Authority.evidenceKey(item(key)),terminalReason:'awaiting_confirmation',retryAt:null,scoring:{status:'accepted',acceptedTmdbId:'41'}});
@@ -248,21 +248,89 @@ await writerTo('on');
  assert.equal(byRoot(sibling.requestId).length,1);
 }
 
-// ===== 7. chronology: source_order is the history revision, never seq =====
+// ===== 7. chronology: source_order is the history revision, never seq; history imported before and after live actions (ADR 0215 decision 6) =====
+// The historical rows are RECONSTRUCTED rows: real deterministic keys (`ownerRowKey`), origin `reconstruction`, run and source provenance, the causal revision of their own history.
+// They are inserted straight into the ledger (the delivered ER path has its own tests); what is asserted here are the ORDERING INPUTS and the WITHDRAWAL IDENTITY, not a reader:
+// `effective` below is a test-only fold of ADR 0215 decision 6 (the latest unwithdrawn owner row of one observation by source_order, never seq).
+const COLUMNS='evidence_key,film_id,subject_kind,subject_value,relation,object_kind,object_value,polarity,route,method,source_root,source_ref,source_scope,scope_evidence_key,supersedes_key,observed_at,origin,reconstruction_run,reconstructed_from,request_id,recorded_at,source_order'.split(',');
+const lit=value=>value===null||value===undefined?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";
+async function importHistorical({key,effect,tmdbId,requestId,order,scope=null,at='2026-11-01T00:00:00.000Z'}){
+ const evidence_key=scope===null?await rowOf(key,effect,tmdbId,requestId):null;
+ // A scoped historical withdrawal is not needed here; only assign/reject rows are reconstructed.
+ const row={evidence_key,film_id:null,subject_kind:'discovery_observation',subject_value:key,relation:'candidate_for',object_kind:'tmdb_movie',object_value:String(tmdbId),polarity:effect==='assign'?'asserts':'refutes',route:'owner_action',method:'owner_statement',
+  source_root:requestId,source_ref:null,source_scope:null,scope_evidence_key:null,supersedes_key:null,observed_at:at,origin:'reconstruction',reconstruction_run:'run-hist-1',reconstructed_from:'rec-'+requestId,request_id:'import-run-hist-1',recorded_at:'2026-11-25T11:00:00.000Z',source_order:order};
+ db.sql('INSERT INTO film_identity_evidence ('+COLUMNS.join(',')+') VALUES ('+COLUMNS.map(name=>lit(row[name])).join(',')+')');
+ return evidence_key;
+}
+const effective=key=>{
+ const rows=ledger().filter(row=>row.subject_value===key);
+ const withdrawn=new Set(rows.filter(row=>row.scope_evidence_key).map(row=>row.scope_evidence_key));
+ const standing=rows.filter(row=>!row.scope_evidence_key&&!withdrawn.has(row.evidence_key)).sort((x,y)=>x.source_order-y.source_order);
+ const latest=standing.at(-1);
+ return latest?{polarity:latest.polarity,object:latest.object_value,live:latest.origin==='live'}:null;
+};
+const nextRevision=key=>count("SELECT COALESCE(MAX(revision),0)+1 AS n FROM discovery_decision_history WHERE observation_key='"+key+"'");
 {
- const rows=ledger().filter(row=>row.subject_value==='obs-h');
- const orders=rows.map(row=>row.source_order);
- assert.ok(orders.every(Number.isInteger));
- const revisions=history('obs-h').map(row=>row.revision);
- assert.ok(orders.every(order=>revisions.includes(order)),'every source_order is a revision of the observation');
- assert.deepEqual([...new Set(orders)].sort((x,y)=>x-y),[...new Set(orders)],'rows are inserted in causal order here');
- // A row of another observation and the same revision number are not comparable: the scope is the observation (the key says which).
- assert.ok(ledger().some(row=>row.subject_value!=='obs-h'&&orders.includes(row.source_order)),'the same raw number occurs in other observations');
- // An imported historical row gets a higher seq than a later live action: seq must not decide. A reconstructed historical reject with a LOWER source_order than a live assign.
- const live=ledger().find(row=>row.subject_value==='obs-c');
- db.sql("INSERT INTO film_identity_evidence (evidence_key,film_id,subject_kind,subject_value,relation,object_kind,object_value,polarity,route,method,source_root,source_ref,source_scope,scope_evidence_key,supersedes_key,observed_at,origin,reconstruction_run,reconstructed_from,request_id,recorded_at,source_order) VALUES ('"+'a'.repeat(64)+"',NULL,'discovery_observation','obs-c','candidate_for','tmdb_movie','41','refutes','owner_action','owner_statement','hist-1',NULL,NULL,NULL,NULL,'2026-11-01T00:00:00.000Z','live',NULL,NULL,'hist','2026-11-25T11:00:00.000Z',"+Math.max(1,live.source_order-1)+")");
- const imported=ledger().find(row=>row.source_root==='hist-1');
- assert.ok(imported.seq>live.seq&&imported.source_order<=live.source_order,'historical after live: higher seq, earlier source order');
+ // (a) a historical reject OLDER than a live assign: both insertion orders give the same effective row, and seq does not decide.
+ // Order A: live first, history imported after (higher seq, lower source_order).
+ const live1=await doAssign('obs-k','41');
+ assert.equal(live1.result.outcome,'written');
+ await importHistorical({key:'obs-k',effect:'reject',tmdbId:'41',requestId:'hist-reject-k0000001',order:1});
+ const rowsK=ledger().filter(row=>row.subject_value==='obs-k');
+ assert.ok(rowsK.find(row=>row.origin==='reconstruction').seq>rowsK.find(row=>row.origin==='live').seq,'historical after live: the higher seq');
+ // Order B: history first (lower seq), live after.
+ await importHistorical({key:'obs-l',effect:'reject',tmdbId:'41',requestId:'hist-reject-l0000001',order:1});
+ const live2=await doAssign('obs-l','41');
+ assert.equal(live2.result.outcome,'written');
+ const rowsL=ledger().filter(row=>row.subject_value==='obs-l');
+ assert.ok(rowsL.find(row=>row.origin==='reconstruction').seq<rowsL.find(row=>row.origin==='live').seq,'historical before live: the lower seq');
+ assert.deepEqual(effective('obs-k'),{polarity:'asserts',object:'41',live:true});
+ assert.deepEqual(effective('obs-k'),effective('obs-l'),'the same effective row in both insertion orders');
+ // the order inputs are the causal revisions: the historical reject precedes the live assign in both observations
+ for(const key of ['obs-k','obs-l']){
+  const rows=ledger().filter(row=>row.subject_value===key);
+  assert.ok(rows.find(row=>row.origin==='reconstruction').source_order<rows.find(row=>row.origin==='live').source_order,key);
+ }
+
+ // (b) forward withdrawal: the live revoke names a target that is imported AFTER it (A) or BEFORE it (B); the withdrawal identity is the same and the effective set is empty in both.
+ await writerTo('off');
+ const hold=await doAssign('obs-m','41');           // while off: no live row; its row will come from the reconstruction
+ await writerTo('on');
+ const revokeM=await doRevoke('obs-m',hold.requestId);
+ assert.equal(revokeM.result.outcome,'written');
+ const targetKey=await rowOf('obs-m','assign','41',hold.requestId);
+ const orderOfHold=history('obs-m').find(row=>row.writer==='discovery_identity_correct').revision;
+ assert.equal(ledger().filter(row=>row.subject_value==='obs-m'&&row.scope_evidence_key===targetKey).length,1,'the withdrawal names the key before the target exists');
+ await importHistorical({key:'obs-m',effect:'assign',tmdbId:'41',requestId:hold.requestId,order:orderOfHold});
+ assert.equal(effective('obs-m'),null,'target arriving after its withdrawal: withdrawn');
+ await writerTo('off');
+ const holdN=await doAssign('obs-n','41');
+ await writerTo('on');
+ const orderOfHoldN=history('obs-n').find(row=>row.writer==='discovery_identity_correct').revision;
+ await importHistorical({key:'obs-n',effect:'assign',tmdbId:'41',requestId:holdN.requestId,order:orderOfHoldN});
+ const revokeN=await doRevoke('obs-n',holdN.requestId);
+ assert.equal(revokeN.result.outcome,'written');
+ assert.equal(effective('obs-n'),null,'target present before its withdrawal: withdrawn');
+ assert.equal(effective('obs-m'),effective('obs-n'));
+ // a withdrawal of another proposition than the target's is refused by the ledger when the target arrives
+ await assert.rejects(async()=>db.sql("INSERT INTO film_identity_evidence ("+COLUMNS.join(',')+") VALUES ("+COLUMNS.map(name=>lit({evidence_key:targetKey,film_id:null,subject_kind:'discovery_observation',subject_value:'obs-other',relation:'candidate_for',object_kind:'tmdb_movie',object_value:'41',polarity:'asserts',route:'owner_action',method:'owner_statement',source_root:'x-other',source_ref:null,source_scope:null,scope_evidence_key:null,supersedes_key:null,observed_at:AT,origin:'reconstruction',reconstruction_run:'r',reconstructed_from:'x',request_id:'i',recorded_at:AT,source_order:1}[name])).join(',')+")"),/./,'a target of another proposition under a named key is refused');
+
+ // (c) known-root equivalence and collision on the live write: the reconstruction already stored the row of an intent made with a known root.
+ const equalId='req-known-equal-0001';
+ const equalOrder=nextRevision('obs-o');
+ await importHistorical({key:'obs-o',effect:'assign',tmdbId:'41',requestId:equalId,order:equalOrder});
+ const equal=await doAssign('obs-o','41',{requestId:equalId});
+ assert.equal(equal.result.outcome,'written','an equal known-root row is a valid duplicate, not a collision');
+ const rowsO=ledger().filter(row=>row.subject_value==='obs-o');
+ assert.equal(rowsO.length,1,'no second row');
+ assert.equal(rowsO[0].source_order,equalOrder);
+ assert.equal(db.sql("SELECT origin FROM film_identity_evidence WHERE subject_value='obs-o'")[0].origin,'reconstruction','the first row is immutable: not promoted to live');
+ const clashId='req-known-clash-0001';
+ await importHistorical({key:'obs-p',effect:'assign',tmdbId:'41',requestId:clashId,order:nextRevision('obs-p')+5});
+ const hashP=await hash(await read('obs-p'));
+ const clash=await doAssign('obs-p','41',{requestId:clashId});
+ assert.equal(clash.result.outcome,'unknown','a known-root row at another causal position is a collision: the batch rolls back');
+ assert.equal(await hash(await read('obs-p')),hashP);
 }
 
 // ===== 8. replay: no duplicate row =====

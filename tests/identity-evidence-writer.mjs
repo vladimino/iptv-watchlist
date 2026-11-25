@@ -511,6 +511,23 @@ const setWriter=async(env,writer,target)=>{
    assert.deepEqual(probe(other),[],column+': rolled back');
   }
  }
+ // AIR-619 review: a stored row of the same key whose provenance is a RECONSTRUCTION (known root, non-null reconstructed_from) is semantically equivalent to a live plan with that
+ // root, not a collision, when the causal position is equal; a different source_order still collides. The first row stays immutable (never promoted to live).
+ {
+  const file=withProbe(copy(template));const env=envOf(file);
+  await setWriter(env,'discovery_owner','on');
+  const real=await planDomainEvidence('discovery_owner',owner({sourceOrder:4}));
+  const stored={evidence_key:real.evidenceKey,film_id:null,subject_kind:'discovery_observation',subject_value:OBS,relation:'candidate_for',object_kind:'tmdb_movie',object_value:'603',polarity:'asserts',route:'owner_action',method:'owner_statement',
+   source_root:'intent-1',source_ref:null,source_scope:null,scope_evidence_key:null,supersedes_key:null,observed_at:AT,origin:'reconstruction',reconstruction_run:'run-1',reconstructed_from:'rec-1',request_id:'import',recorded_at:AT,source_order:4};
+  ok(file,'INSERT INTO film_identity_evidence ('+COLUMNS.join(',')+') VALUES ('+COLUMNS.map(name=>lit(stored[name])).join(',')+')');
+  await domainBatch(env,file,real,{requestId:'live-1',mark:'equal'});
+  assert.deepEqual(probe(file),['equal'],'equal source order: a valid duplicate, the domain step commits');
+  assert.equal(ledgerRows(file).length,1,'no second row');
+  assert.equal(one(file,'SELECT origin FROM film_identity_evidence'),'reconstruction','the first matching row is never promoted to live');
+  const unequal=await planDomainEvidence('discovery_owner',owner({sourceOrder:5}));
+  await assert.rejects(()=>domainBatch(env,file,unequal,{requestId:'live-2',mark:'unequal'}),/CHECK constraint failed/);
+  assert.deepEqual(probe(file),['equal'],'unequal source order: a collision, the batch rolled back');
+  }
  // A key first inserted before an interval and committed again inside it gets no new row (coverage is per key, not per occurrence).
  {
   const file=withProbe(copy(template));const env=envOf(file);

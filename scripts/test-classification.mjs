@@ -521,6 +521,9 @@ export const FILES={
  "discovery-owner-evidence.mjs": {
   "suite": "core"
  },
+ "discovery-owner-evidence-schema.mjs": {
+  "suite": "core"
+ },
  "discovery-intent-migration-0027.mjs": {
   "suite": "core"
  },

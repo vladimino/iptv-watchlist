@@ -109,8 +109,10 @@ const COLUMNS='evidence_key,film_id,subject_kind,subject_value,relation,object_k
 // Unbound (film_id NULL: a domain row names no Film). The row is written only while its writer is `pending` or `on`; an existing key is a no-op.
 const INSERT='INSERT INTO film_identity_evidence ('+COLUMNS+') SELECT ?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN (\'pending\',\'on\')) ON CONFLICT(evidence_key) DO NOTHING';
 // Semantic identity (ADR 0215 decision 1): proposition, polarity, route, method, root (or its substitute), `source_scope`, `scope_evidence_key`, supersession and `source_order`.
-// `IS` so a NULL equals a NULL. The substitute of an unknown root is `reconstructed_from`; a live row has a root.
-const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND reconstructed_from IS ? AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
+// `IS` so a NULL equals a NULL. The substitute of an unknown root is `reconstructed_from`: it is compared ONLY when the planned root is unknown. With a known root the key already
+// fixes the root, so a stored row of the same key whose provenance is a reconstruction (non-null `reconstructed_from`) is semantically equivalent, not a collision (ADR 0215
+// decisions 1, 4 and 7); the first matching row stays immutable and is never promoted.
+const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND (? IS NOT NULL OR reconstructed_from IS ?) AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
 // Commit-time schema guard of a batch prepared without the control tables.
 export const ABSENT="NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('identity_evidence_writer','identity_evidence_writer_change'))";
 const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";
@@ -133,7 +135,7 @@ export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=
  const insert=[INSERT,[plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
   r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer]];
  const assertion=[assertSql('NOT '+ACTIVE+' OR EXISTS ('+SAME+')'),[plan.writer,plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,
-  r.sourceRoot,r.sourceRoot===null?r.reconstructedFrom:null,r.sourceScope,r.scopeEvidenceKey,r.supersedesKey,r.sourceOrder]];
+  r.sourceRoot,r.sourceRoot,r.sourceRoot===null?r.reconstructedFrom:null,r.sourceScope,r.scopeEvidenceKey,r.supersedesKey,r.sourceOrder]];
  return [insert,assertion];
 }
 
