@@ -242,6 +242,9 @@ export const FILES={
  "canonical-letterboxd-claim.mjs": {
   "suite": "core"
  },
+ "prediction-alias-bridge-cohort.mjs": {
+  "suite": "core"
+ },
  "canonical-film-writers-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
