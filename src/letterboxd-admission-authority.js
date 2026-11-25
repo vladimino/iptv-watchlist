@@ -1,12 +1,12 @@
-// AIR-602 (card A1) / ADR 0207 decision 1 (Accepted). The Letterboxd admission authority marker `letterboxd_admission_authority` (migration 0044, schema 44): who coordinates the admission of a
+// AIR-602 (card A1) / ADR 0207 decision 1 (Accepted). The Letterboxd admission authority marker `letterboxd_admission_authority` (migration 0045, schema 45): who coordinates the admission of a
 // verified Letterboxd Film. DORMANT until an owner-approved activation (cards M1 and A2): the migration is a file, the marker is inserted as `r2`, and at `r2` (and while the migration is absent)
 // every writer behaves exactly as before this card.
 //
 // Three modes: `r2` (the legacy R2 coordination step, byte-identical to the delivered code), `closed` (every admission writer refuses BEFORE its first effect; reads are unchanged) and `d1` (the
-// new path, terminal). The chain is `r2 -> closed -> d1` and `closed -> r2`, enforced by the triggers of migration 0044, not by this module.
+// new path, terminal). The chain is `r2 -> closed -> d1` and `closed -> r2`, enforced by the triggers of migration 0045, not by this module.
 //
 // Safety invariants (ADR 0207 decision 1, adopted from ADR 0196):
-// - LEGACY ROUTING NEEDS POSITIVE PROOF. A writer may take the legacy path only when (a) a FRESH read proves the marker migration is not installed (schema version below 44 AND the table absent), or
+// - LEGACY ROUTING NEEDS POSITIVE PROOF. A writer may take the legacy path only when (a) a FRESH read proves the marker migration is not installed (schema version below 45 AND the table absent), or
 //   (b) the installed marker row proves `r2`. An unavailable D1, a partial schema, a missing row at or above the migration's version or an invalid mode is `letterboxd_admission_unavailable`:
 //   it never defaults to `r2`. (A request without ANY D1 binding is not a database at all, so it has no marker to read and is the legacy `not_installed` state, as the other markers of this
 //   Worker treat it: production always has the binding, and a binding that fails to answer is `unavailable`.)
@@ -17,7 +17,7 @@
 //   migration was applied cannot commit after it (the statement never names the missing table, which would fail at prepare time).
 import {database,failed,one} from './film-person-authority.js';
 
-export const ADMISSION_AUTHORITY_SCHEMA=44;
+export const ADMISSION_AUTHORITY_SCHEMA=45;
 export const ADMISSION_MODES=Object.freeze(['r2','closed','d1']);
 const TABLE='letterboxd_admission_authority';
 
@@ -25,7 +25,7 @@ const unavailable=(cause,reason)=>{const error=failed('letterboxd_admission_unav
 const closedError=mode=>{const error=failed('letterboxd_admission_closed');error.mode=mode;return error;};
 
 // A FRESH read. -> {mode, proof, generation, installed, version}
-//   proof 'not_installed' (no binding, or schema below 44 and no table): legacy.     proof 'explicit_r2' (the row says r2): legacy.
+//   proof 'not_installed' (no binding, or schema below 45 and no table): legacy.     proof 'explicit_r2' (the row says r2): legacy.
 //   proof 'closed' | 'd1': the row says so.
 // Anything that is not one of these four answers throws `letterboxd_admission_unavailable`.
 export async function readAdmissionAuthority(env){

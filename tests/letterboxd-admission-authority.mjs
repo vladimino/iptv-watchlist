@@ -1,6 +1,6 @@
-// AIR-602 (card A1) / ADR 0207 decision 1 (Accepted): migration 0044 and the Letterboxd admission authority marker, on the sqlite3-CLI D1 stand-in. No Worker, R2, network or production.
+// AIR-602 (card A1) / ADR 0207 decision 1 (Accepted): migration 0045 and the Letterboxd admission authority marker, on the sqlite3-CLI D1 stand-in. No Worker, R2, network or production.
 // Covered: the migration's refusal, replay and what it writes; the chain r2 -> closed -> d1 and closed -> r2 enforced by triggers (every illegal transition, generation rules, the kept row);
-// the fresh positive-proof read (absent below 44, r2, closed, d1) and every case that must never read as r2 (unreadable D1, missing row at 44, missing table at 44, invalid mode); the gate before
+// the fresh positive-proof read (absent below 45, r2, closed, d1) and every case that must never read as r2 (unreadable D1, missing row at 45, missing table at 45, invalid mode); the gate before
 // an R2 write; the batch conditions (legacy at r2 and at "migration absent", d1) including a batch planned before a close or before the migration was applied.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,11 +10,11 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {ADMISSION_AUTHORITY_SCHEMA,admissionRoute,admissionRouteNow,d1BatchCondition,guardLegacyWrite,legacyBatchCondition,readAdmissionAuthority} from '../src/letterboxd-admission-authority.js';
 
-const NEW='0044_letterboxd_admission_authority.sql',PREVIOUS='0043_film_redirect_by_target.sql';
+const NEW='0045_letterboxd_admission_authority.sql',PREVIOUS='0044_identity_evidence_reconstruction_import.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
-assert.ok(files.includes(NEW),'0044 exists');
-assert.equal(files[files.indexOf(NEW)-1],PREVIOUS,'0044 follows 0043');
-assert.equal(ADMISSION_AUTHORITY_SCHEMA,44);
+assert.ok(files.includes(NEW),'0045 exists');
+assert.equal(files[files.indexOf(NEW)-1],PREVIOUS,'0045 follows 0044');
+assert.equal(ADMISSION_AUTHORITY_SCHEMA,45);
 const chain=files.slice(0,files.indexOf(NEW));
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-admission-authority-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -26,7 +26,7 @@ const ok=(file,text)=>{const r=sqlite(file,text);assert.equal(r.status,0,r.stder
 const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.status,0,'expected a refusal: '+text);if(pattern)assert.match(r.stderr,pattern,text);};
 const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stack||error));return true;};
 
-const template43=path.join(root,'t43.sqlite'),template=path.join(root,'t44.sqlite');
+const template43=path.join(root,'t43.sqlite'),template=path.join(root,'t45.sqlite');
 ok(template43,chain.map(read).join('\n'));
 fs.copyFileSync(template43,template);
 ok(template,read(NEW));
@@ -41,13 +41,13 @@ const marker=file=>rows(file,'SELECT mode,generation,activated_at AS at FROM let
  const objects=file=>one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','trigger','index')");
  const before=objects(template43);
  const stale=copy(template43);
- // a version 42 (one step short) is refused and creates nothing
+ // a version 43 (one step short) is refused and creates nothing
  const t42=path.join(root,'t42.sqlite');ok(t42,chain.slice(0,-1).map(read).join('\n'));
  const before42=objects(t42);
  refused(t42,read(NEW));
  assert.equal(objects(t42),before42,'a refused file creates nothing');
- assert.equal(one(t42,'SELECT version FROM schema_contract WHERE id=1'),42);
- // a version 43 whose receipt table lost the 0039 column, or whose redirect index is missing, is not a complete 43
+ assert.equal(one(t42,'SELECT version FROM schema_contract WHERE id=1'),43);
+ // a version 44 whose receipt table lost the 0039 column, or whose redirect index is missing, is not a complete 44
  const noIndex=copy(template43);ok(noIndex,'DROP INDEX film_redirect_by_target');
  refused(noIndex,read(NEW));assert.equal(objects(noIndex),before-1);
  const noTrigger=copy(template43);ok(noTrigger,'DROP TRIGGER schema_contract_no_downgrade');
@@ -58,16 +58,16 @@ const marker=file=>rows(file,'SELECT mode,generation,activated_at AS at FROM let
  // the accepted file: the marker is r2, generation 0, and nothing else of the data changes
  ok(stale,read(NEW));
  assert.deepEqual({...marker(stale)},{mode:'r2',generation:0,at:null},'the inserted marker is r2, generation 0');
- assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),44);
+ assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),45);
  assert.equal(one(stale,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'letterboxd_admission_authority%'"),4,'one table and three triggers');
  assert.equal(one(stale,'SELECT COUNT(*) FROM film_rated_admission'),0);
- // a second apply is refused (the version is 44 now) and changes nothing
+ // a second apply is refused (the version is 45 now) and changes nothing
  const after=objects(stale);
  refused(stale,read(NEW));
  assert.equal(objects(stale),after);
  assert.equal(one(stale,'SELECT COUNT(*) FROM letterboxd_admission_authority'),1);
  // the version never goes down
- refused(stale,'UPDATE schema_contract SET version=43 WHERE id=1',/schema_contract_downgrade/);
+ refused(stale,'UPDATE schema_contract SET version=44 WHERE id=1',/schema_contract_downgrade/);
 }
 
 // ===== 2. the chain: r2 -> closed -> d1, closed -> r2 before an activation, nothing out of d1; every change of mode raises the generation =====
@@ -99,22 +99,22 @@ const marker=file=>rows(file,'SELECT mode,generation,activated_at AS at FROM let
 
 // ===== 3. the fresh read: positive proof of legacy routing; nothing unreadable is r2 =====
 {
- // below 44 and no table: legacy, not installed (the deployment of this card runs before the migration exists)
+ // below 45 and no table: legacy, not installed (the deployment of this card runs before the migration exists)
  const old=path.join(root,'t43-read.sqlite');fs.copyFileSync(template43,old);
- assert.deepEqual({...await readAdmissionAuthority(envOf(old))},{mode:'r2',proof:'not_installed',generation:0,installed:false,version:43});
+ assert.deepEqual({...await readAdmissionAuthority(envOf(old))},{mode:'r2',proof:'not_installed',generation:0,installed:false,version:44});
  assert.equal(admissionRoute(await readAdmissionAuthority(envOf(old))),'legacy');
  // no binding at all is not a database: legacy not_installed
  assert.equal((await readAdmissionAuthority({})).proof,'not_installed');
  // installed r2 / closed / d1
  const file=copy(template);
- assert.deepEqual({...await readAdmissionAuthority(envOf(file))},{mode:'r2',proof:'explicit_r2',generation:0,installed:true,version:44});
+ assert.deepEqual({...await readAdmissionAuthority(envOf(file))},{mode:'r2',proof:'explicit_r2',generation:0,installed:true,version:45});
  ok(file,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1");
- assert.deepEqual({...await readAdmissionAuthority(envOf(file))},{mode:'closed',proof:'closed',generation:1,installed:true,version:44});
+ assert.deepEqual({...await readAdmissionAuthority(envOf(file))},{mode:'closed',proof:'closed',generation:1,installed:true,version:45});
  assert.equal(admissionRoute(await readAdmissionAuthority(envOf(file))),'closed');
  ok(file,"UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'");
- assert.deepEqual({...await readAdmissionAuthority(envOf(file))},{mode:'d1',proof:'d1',generation:2,installed:true,version:44});
+ assert.deepEqual({...await readAdmissionAuthority(envOf(file))},{mode:'d1',proof:'d1',generation:2,installed:true,version:45});
  assert.equal(admissionRoute(await readAdmissionAuthority(envOf(file))),'d1');
- // never r2: an unreadable D1, a missing table at 44, a missing row, an invalid mode (the CHECK is dropped to make one), a table beside a version below 44
+ // never r2: an unreadable D1, a missing table at 45, a missing row, an invalid mode (the CHECK is dropped to make one), a table beside a version below 45
  await assert.rejects(()=>readAdmissionAuthority({DB:{prepare(){throw new Error('down');}}}),code('letterboxd_admission_unavailable'));
  const noTable=copy(template);ok(noTable,'DROP TRIGGER letterboxd_admission_authority_keep;DROP TRIGGER letterboxd_admission_authority_one_way;DROP TRIGGER letterboxd_admission_authority_chain;DROP TABLE letterboxd_admission_authority');
  await assert.rejects(()=>readAdmissionAuthority(envOf(noTable)),error=>error.code==='letterboxd_admission_unavailable'&&error.reason==='table_missing');
@@ -184,4 +184,4 @@ const marker=file=>rows(file,'SELECT mode,generation,activated_at AS at FROM let
  assert.equal(await run(copy(template),d1BatchCondition({...d1})),false,'a new-path batch is refused while the marker is not d1');
 }
 
-console.log('Letterboxd admission authority (AIR-602, migration 0044) passed.');
+console.log('Letterboxd admission authority (AIR-602, migration 0045) passed.');

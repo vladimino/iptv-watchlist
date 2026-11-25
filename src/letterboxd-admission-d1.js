@@ -1,4 +1,4 @@
-// AIR-602 (card A1) / ADR 0207 decisions 2, 3 and 4 and ADR 0217 (Accepted): the D1 admission COORDINATOR, the only admission path at the marker mode `d1`. DORMANT: at `r2` and `closed` (and while migration 0044
+// AIR-602 (card A1) / ADR 0207 decisions 2, 3 and 4 and ADR 0217 (Accepted): the D1 admission COORDINATOR, the only admission path at the marker mode `d1`. DORMANT: at `r2` and `closed` (and while migration 0045
 // is not applied) nothing calls it, and a call refuses (`letterboxd_admission_closed`) before its first effect. It is the part of card A1 that every admission writer shares:
 // the rated-archive step, the Diary and Watchlist check and the inferred import call `admitVerifiedFilm` and map its typed outcome onto their own writer state.
 //

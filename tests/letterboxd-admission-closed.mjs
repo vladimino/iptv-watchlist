@@ -23,7 +23,7 @@ const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA fore
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const read=name=>fs.readFileSync('migrations/'+name,'utf8');
-const MARKER=files.indexOf('0044_letterboxd_admission_authority.sql');
+const MARKER=files.indexOf('0045_letterboxd_admission_authority.sql');
 assert.ok(MARKER>0);
 const withMarker=path.join(root,'with.sqlite'),without=path.join(root,'without.sqlite');
 sqlite(withMarker,files.map(read).join('\n'));
@@ -86,7 +86,7 @@ const receiptRows=file=>rows(file,'SELECT COUNT(*) AS n FROM canonical_write_rec
  assert.equal((await admitRatedFilm({DB:d1Standin(a)},{receiptKey:'tmdb_15',receipt:receipt('15','sc15'),expectedRevision:0,at:AT,requestId:'r-15'})).admitted,true,'absent: the legacy batch lands');
  const b=fresh(without);
  let applied=false;
- const late={DB:d1Standin(b,{onBatch:async()=>{if(!applied){applied=true;sqlite(b,read('0044_letterboxd_admission_authority.sql'));}}})};
+ const late={DB:d1Standin(b,{onBatch:async()=>{if(!applied){applied=true;sqlite(b,read('0045_letterboxd_admission_authority.sql'));}}})};
  await assert.rejects(()=>admitRatedFilm(late,{receiptKey:'tmdb_16',receipt:receipt('16','sc16'),expectedRevision:0,at:AT,requestId:'r-16'}),error=>error.code==='film_person_precondition','the migration applied between the read and the commit refuses the legacy batch');
  assert.equal(admissionRows(b),0);
  // an unreadable marker is never r2

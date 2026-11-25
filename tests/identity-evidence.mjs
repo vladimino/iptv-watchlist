@@ -529,9 +529,9 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
 {
  const sources=fs.readdirSync('src',{recursive:true}).filter(name=>String(name).endsWith('.js')).map(name=>path.join('src',String(name)));
  const mentions=sources.filter(name=>fs.readFileSync(name,'utf8').includes('film_identity_evidence'));
- assert.deepEqual(mentions,['src/identity-evidence-writer.js','src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader)');
+ assert.deepEqual(mentions,['src/identity-evidence-import.js','src/identity-evidence-writer.js','src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader); the dormant import path of card ER (AIR-639) is the third');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,['src/film-admission.js','src/identity-evidence-writer.js','src/letterboxd-admission-d1.js'],'only the dormant writer-control module (card EC) and the d1 admission path of card A1 (AIR-602: the admission writer appends the row to its own batch, the coordinator records the evidence-only row) import the writer: no route, Workflow, cron or other producer calls it');
+ assert.deepEqual(importers,['src/film-admission.js','src/identity-evidence-import.js','src/identity-evidence-writer.js','src/letterboxd-admission-d1.js'],'only the dormant writer-control (card EC) and import (card ER) modules and the d1 admission path of card A1 (AIR-602: the admission writer appends the row to its own batch, the coordinator records the evidence-only row) import the writer: no route, Workflow, cron or other producer calls it');
  // AIR-602: card A1 bundles the module for the d1 admission path. It stays dormant: that path runs only at the marker mode `d1` (a separate owner activation), and the Worker itself never names it.
  assert.ok(/scopedImports\('src\/identity-evidence\.js','IdentityEvidence'/.test(fs.readFileSync('build.mjs','utf8')),'the Worker bundle scopes it for the d1 admission path');
  assert.ok(!/IdentityEvidence/.test(fs.readFileSync('src/worker.js','utf8')),'no Worker route, cron or Workflow names it');
