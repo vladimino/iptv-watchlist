@@ -4,9 +4,9 @@
 // rules are unchanged; this is a separate function.
 //
 // Coherent capture (ADR 0216 decision 3), the chosen form: BOUNDED ROUNDS WITH FULL KEYED REVALIDATION, where every round is ONE SQL statement.
-// - The read-set is a key set {films, pairs, movies}: the Film ids met (their film row, redirect row, canonical_revision, every external claim they hold and their
-//   tmdb_retirement_decision rows), the typed (scheme, value) pairs queried (every film_external_id row of the pair, of any trust and any Film) and the requested
-//   TMDB movie ids read in the owner's retirement ledger. IDENTITY_SNAPSHOT_SQL reads ALL of it, and the Film/Person marker, in one statement, so the rows of one
+// - The read-set is a key set {films, pairs, movies}: the Film ids met (their film row, redirect row, canonical_revision and every external claim they hold), the typed
+//   (scheme, value) pairs queried (every film_external_id row of the pair, of any trust and any Film) and every requested or claimed TMDB movie id, read in the
+//   owner's retirement ledger (which retires a movie id whatever Film it names). IDENTITY_SNAPSHOT_SQL reads ALL of it, and the Film/Person marker, in one statement, so the rows of one
 //   round are one consistent SQLite snapshot (a D1 batch could not do this: its statements are bound before it runs).
 // - A round evaluates its snapshot with the pure function `evaluate`. When the evaluation needs a key the snapshot did not read (the owner, the next redirect
 //   hop, the survivor's claims, the competing rows of those values), the keys are added and the next round re-reads the WHOLE grown key set. Rounds only discover.
@@ -65,27 +65,34 @@ export function createStatementBudget(limit=REQUEST_STATEMENT_BUDGET){
 }
 
 // One statement: the marker and every row of the key set. Each column is one JSON array, so the statement always returns exactly one row.
-// Index use: film(id) PK, film_redirect(from_id) PK, canonical_revision(kind,id) PK, film_external_id PK (film_id,...) and film_external_id_by_scheme_value,
-// tmdb_retirement_decision_film (film_id,seq). The movie-id read of the retirement ledger is the existing RETIREMENT_SQL lookup of the film route and POST /api/started
-// (canonical-catalog-reader.js): movie_id has no index, the table is the owner's append-only decision ledger (a handful of rows), and it is read only for the
-// requested TMDB movie id (empty list otherwise).
+// Materialization is bounded in SQL: the key lists are capped before a round runs (at most IDENTITY_MAX_FILMS Films, the claim pairs and movie ids of at most
+// IDENTITY_MAX_CLAIM_ROWS claim rows), and every row column reads at most its cap + 1 rows (LIMIT), so an overflow is detected from the extra row and no
+// column ever aggregates an unbounded set.
+// Index use: film(id) PK, film_redirect(from_id) PK, canonical_revision(kind,id) PK, film_external_id PK (film_id,...), film_external_id_by_scheme_value,
+// no index for the ledger. OPEN OWNER DECISION (ADR 0216 decision 7, review of PR #1000): the read of the retirement ledger BY MOVIE ID has no
+// index (movie_id is unindexed; the ledger has no Film foreign key and retires a movie id whatever Film row exists, as RETIREMENT_SQL in canonical-catalog-reader.js
+// reads it), so it is a scan of the owner's append-only ledger. It is not an accepted exception: an index (a schema migration) or an explicit bounded exception
+// needs the owner's decision; this dormant module adds neither.
 const LIST='(SELECT value FROM json_each(?))';
+const capped=(columns,from,inner=columns)=>'(SELECT json_group_array(json_array('+columns+')) FROM (SELECT '+inner+' FROM '+from+' LIMIT ?))';
+const DECISION='seq,film_id,kind,movie_id,tv_id,supersedes_seq';
 export const IDENTITY_SNAPSHOT_SQL='SELECT '
  +"(SELECT json_object('rows',COUNT(*),'mode',MAX(mode),'cutover',MAX(cutover),'generation',MAX(generation)) FROM film_person_authority WHERE id=1) AS marker,"
  +'(SELECT json_group_array(id) FROM film WHERE id IN '+LIST+') AS films,'
  +'(SELECT json_group_array(json_array(from_id,to_film_id)) FROM film_redirect WHERE from_id IN '+LIST+') AS redirects,'
  +"(SELECT json_group_array(json_array(id,revision)) FROM canonical_revision WHERE kind='film' AND id IN "+LIST+') AS revisions,'
- +'(SELECT json_group_array(json_array(film_id,scheme,value,trusted,conflicting)) FROM film_external_id WHERE film_id IN '+LIST+') AS owned,'
- +"(SELECT json_group_array(json_array(e.film_id,e.scheme,e.value,e.trusted,e.conflicting)) FROM json_each(?) j INNER JOIN film_external_id e ON e.scheme=json_extract(j.value,'$[0]') AND e.value=json_extract(j.value,'$[1]')) AS claimed,"
- +'(SELECT json_group_array(json_array(seq,film_id,kind,movie_id,tv_id,supersedes_seq)) FROM tmdb_retirement_decision WHERE film_id IN '+LIST+') AS decisions_by_film,'
- +'(SELECT json_group_array(json_array(seq,film_id,kind,movie_id,tv_id,supersedes_seq)) FROM tmdb_retirement_decision WHERE movie_id IN '+LIST+') AS decisions_by_movie';
+ +capped('film_id,scheme,value,trusted,conflicting','film_external_id WHERE film_id IN '+LIST)+' AS owned,'
+ +capped('film_id,scheme,value,trusted,conflicting',"json_each(?) j INNER JOIN film_external_id e ON e.scheme=json_extract(j.value,'$[0]') AND e.value=json_extract(j.value,'$[1]')","e.film_id AS film_id,e.scheme AS scheme,e.value AS value,e.trusted AS trusted,e.conflicting AS conflicting")+' AS claimed,'
+ +capped(DECISION,'tmdb_retirement_decision WHERE movie_id IN '+LIST)+' AS decisions_by_movie';
+// The rows each capped column may return: its cap + 1, so one extra row proves an overflow.
+const ROW_LIMIT=IDENTITY_MAX_CLAIM_ROWS+1;
 
 const emptyKeys=()=>({films:new Set(),pairs:new Set(),movies:new Set()});
 const pairKey=(scheme,value)=>JSON.stringify([String(scheme),String(value)]);
 const sorted=set=>[...set].sort();
 function snapshotParams(keys){
  const films=JSON.stringify(sorted(keys.films)),pairs='['+sorted(keys.pairs).join(',')+']',movies=JSON.stringify(sorted(keys.movies));
- return [films,films,films,films,pairs,films,movies];
+ return [films,films,films,films,ROW_LIMIT,pairs,ROW_LIMIT,movies,ROW_LIMIT];
 }
 class ReadFailed extends Error{constructor(cause){super('canonical_read_unavailable');this.code='canonical_read_unavailable';this.cause=cause;}}
 function parseColumn(text){
@@ -108,14 +115,19 @@ async function readSnapshot(db,keys){
   const decision=r=>({seq:Number(r[0]),film:String(r[1]),kind:String(r[2]),movie:String(r[3]),tv:String(r[4]),supersedes:r[5]==null?null:Number(r[5])});
   const byText=(a,b)=>JSON.stringify(a)<JSON.stringify(b)?-1:JSON.stringify(a)>JSON.stringify(b)?1:0;
   const decisions=new Map();
-  for(const d of [...parseColumn(row.decisions_by_film),...parseColumn(row.decisions_by_movie)].map(decision))decisions.set(d.seq,d);
+  const ownedRows=parseColumn(row.owned),claimedRows=parseColumn(row.claimed),decisionRows=parseColumn(row.decisions_by_movie);
+  for(const d of decisionRows.map(decision))decisions.set(d.seq,d);
+  // One extra row in any capped column proves an overflow; the physical claim rows are counted once (a row read both by Film and by pair is one row).
+  const physical=new Set([...ownedRows,...claimedRows].map(r=>JSON.stringify([String(r[0]),String(r[1]),String(r[2])])));
+  const overflow=ownedRows.length>=ROW_LIMIT||claimedRows.length>=ROW_LIMIT||decisionRows.length>=ROW_LIMIT||physical.size>IDENTITY_MAX_CLAIM_ROWS;
   return {
    marker:{rows:Number(marker?.rows),mode:marker?.mode??null,cutover:marker?.cutover??null,generation:marker?.generation==null?null:Number(marker.generation)},
    films:parseColumn(row.films).map(String).sort(),
    redirects:parseColumn(row.redirects).map(r=>({from:String(r[0]),to:String(r[1])})).sort(byText),
    revisions:parseColumn(row.revisions).map(r=>({film:String(r[0]),revision:Number(r[1])})).sort(byText),
-   owned:parseColumn(row.owned).map(claimRow).sort(byText),
-   claimed:parseColumn(row.claimed).map(claimRow).sort(byText),
+   overflow,
+   owned:ownedRows.map(claimRow).sort(byText),
+   claimed:claimedRows.map(claimRow).sort(byText),
    decisions:[...decisions.values()].sort((a,b)=>a.seq-b.seq),
   };
  }catch(error){throw error instanceof ReadFailed?error:new ReadFailed(error);}
@@ -151,7 +163,8 @@ export function evaluate(request,keys,snapshot,generation){
  if(m.rows!==1||m.mode!=='d1')return fail('unavailable','film_person_unavailable');
  if(m.cutover!=='open')return fail('unavailable','film_person_held');
  if(m.generation!==generation)return fail('unavailable','identity_moved');
- if(keys.films.size>IDENTITY_MAX_FILMS)return fail('conflict','identity_fanout');
+ // Fan-out (decision 7) is decided before any verdict, from the bounded snapshot: an extra row in a capped column or more distinct claim rows than the cap.
+ if(snapshot.overflow||keys.films.size>IDENTITY_MAX_FILMS)return fail('conflict','identity_fanout');
  const redirectOf=id=>snapshot.redirects.find(r=>r.from===id)?.to??null;
  const retired=activeRetirements(snapshot.decisions);
  let start;
@@ -193,13 +206,13 @@ export function evaluate(request,keys,snapshot,generation){
  if(need.pairs.size)return missing();
  // Step 5: every Film met on the way is part of the read-set (its revision is fenced).
  for(const row of snapshot.claimed)if(!keys.films.has(row.film))need.films.add(row.film);
- if(need.films.size)return missing();
- if(keys.films.size>IDENTITY_MAX_FILMS)return fail('conflict','identity_fanout');
- if(snapshot.claimed.length+own.length>IDENTITY_MAX_CLAIM_ROWS)return fail('conflict','identity_fanout');
+ // Step 4: the retirement ledger of every claimed movie id of the survivor (the ledger retires a movie id whatever Film row holds it).
+ for(const row of own)if(row.scheme==='tmdb'&&!keys.movies.has(row.value))need.movies.add(row.value);
+ if(need.films.size||need.movies.size)return missing();
  // Every Film read has a revision (canonical writers create it with the Film); a missing one is an inconsistent store.
  for(const id of keys.films)if(snapshot.films.includes(id)&&!snapshot.revisions.some(r=>r.film===id))return fail('unavailable','canonical_read_unavailable');
- // Step 4: a movie claim of the survivor retired by its non-superseded owner decision is historical evidence: out of every alias set before conflict evaluation.
- const retiredMovies=new Set(retired.filter(d=>d.film===survivor).map(d=>d.movie));
+ // A movie claim retired by a non-superseded owner decision (of any Film) is historical evidence: out of every alias set before conflict evaluation.
+ const retiredMovies=new Set(retired.map(d=>d.movie));
  const claims=[],authorized={tmdb_movie:[],tmdb_tv:[],letterboxd_lid:[]};
  for(const row of own){
   const isRetired=row.scheme==='tmdb'&&retiredMovies.has(row.value);
@@ -228,6 +241,10 @@ function requestKeys(request){
  return keys;
 }
 const merge=(keys,need)=>{for(const k of ['films','pairs','movies'])for(const v of need[k])keys[k].add(v);};
+// The key set may not grow past the caps: an overflow is decided before the next round queries the excess keys.
+const keysOverflow=keys=>keys.films.size>IDENTITY_MAX_FILMS||keys.pairs.size>IDENTITY_MAX_CLAIM_ROWS+1||keys.movies.size>IDENTITY_MAX_CLAIM_ROWS+1;
+// readAuthority (film-person-authority.js) runs three statements: the table inventory, schema_contract and the marker/fence/baseline row.
+export const IDENTITY_GATE_STATEMENTS=3;
 
 // Resolves one typed id to its survivor with the coherent identity read-set (decision 3). Spends one statement of `budget` per round; the caller reserves the
 // fence first. {verdict, reason, http, requested, ...found fields, fence:{keys, digest, generation}}. Never throws for a typed failure.
@@ -236,6 +253,8 @@ export async function resolveFilmIdentity(env,input,{budget=createStatementBudge
  try{request=parseTypedFilmId(input);}catch{return {verdict:'invalid',reason:'not_a_typed_id',http:400,requested:null};}
  const requested={scheme:request.scheme,value:request.value};
  const failure=(verdict,reason)=>({verdict,reason,http:HTTP[verdict],requested});
+ // The gate's statements are charged before they run, so a budget never overspends.
+ if(!budget.take(IDENTITY_GATE_STATEMENTS))return failure('unavailable','budget_exceeded');
  let gate;
  try{gate=await readAuthority(env);}catch(error){return failure('unavailable',error?.code==='film_person_held'?'film_person_held':'film_person_unavailable');}
  if(gate.state==='held')return failure('unavailable','film_person_held');
@@ -246,7 +265,7 @@ export async function resolveFilmIdentity(env,input,{budget=createStatementBudge
   let snapshot;
   try{snapshot=await readSnapshot(db,keys);}catch{return failure('unavailable','canonical_read_unavailable');}
   const step=evaluate(request,keys,snapshot,gate.generation);
-  if(step.need){merge(keys,step.need);continue;}
+  if(step.need){merge(keys,step.need);if(keysOverflow(keys))return failure('conflict','identity_fanout');continue;}
   const {result}=step;
   if(result.verdict!=='found'&&result.verdict!=='redirected')return failure(result.verdict,result.reason);
   const digest=identityDigest(keys,snapshot);
@@ -264,25 +283,34 @@ export async function fenceFilmIdentity(env,resolution,budget){
  let snapshot;
  try{snapshot=await readSnapshot(database(env),keys);}catch{return {ok:false,reason:'canonical_read_unavailable'};}
  const m=snapshot.marker;
- if(m.rows!==1||m.mode!=='d1'||m.cutover!=='open'||m.generation!==resolution.fence.generation)return {ok:false,reason:'identity_moved'};
+ if(snapshot.overflow||m.rows!==1||m.mode!=='d1'||m.cutover!=='open'||m.generation!==resolution.fence.generation)return {ok:false,reason:'identity_moved'};
  return identityDigest(keys,snapshot)===resolution.fence.digest?{ok:true}:{ok:false,reason:'identity_moved'};
 }
 
 // The aggregate envelope of steps 2-3: resolve, reserve the fence, run the section readers, fence, and answer. `sections(resolution, budget)` returns an
-// object of sections (step 3 supplies them; the default is none). A non-found identity returns no section; a fence that moved or could not run returns
-// 503 with no section. A throwing section reader is the reader's own degradation (step 3); here it can only lose its sections, never the fence.
+// object of sections (step 3 supplies them; the default is none). A non-found identity returns no section. The fence runs on every found path, also when
+// the section reader throws (decision 4: independent of any optional read failure); a fence that moved or could not run returns 503 with no section.
+// A section reader that throws loses all its sections: the answer carries `sectionsUnavailable: {reason:'section_read_failed'}` and no section value
+// (never a manufactured section). The envelope fields `contract` and `identity` cannot be overwritten by a section.
+const RESERVED_FIELDS=new Set(['contract','identity','sectionsUnavailable']);
 export async function readFilmAggregateIdentity(env,input,{sections=null,budgetLimit=REQUEST_STATEMENT_BUDGET}={}){
  const budget=createStatementBudget(budgetLimit);
  const identityOnly=(r)=>({http:r.http,body:{contract:FILM_AGGREGATE_CONTRACT,identity:publicIdentity(r)}});
  // The final capture is reserved from the request budget before any read.
- if(!budget.reserve(IDENTITY_FENCE_STATEMENTS))return identityOnly({verdict:'unavailable',reason:'canonical_read_unavailable',http:503,requested:null});
+ if(!budget.reserve(IDENTITY_FENCE_STATEMENTS))return identityOnly({verdict:'unavailable',reason:'budget_exceeded',http:503,requested:null});
  const resolution=await resolveFilmIdentity(env,input,{budget});
  if(resolution.http!==200)return identityOnly(resolution);
- let read={};
- if(typeof sections==='function')read=(await sections(resolution,budget))||{};
+ let read={},sectionFailure=false;
+ if(typeof sections==='function'){
+  try{read=(await sections(resolution,budget))||{};}
+  catch{read={};sectionFailure=true;}
+ }
  const fence=await fenceFilmIdentity(env,resolution,budget);
  if(!fence.ok)return identityOnly({verdict:'unavailable',reason:fence.reason,http:503,requested:resolution.requested});
- return {http:200,body:{contract:FILM_AGGREGATE_CONTRACT,identity:publicIdentity(resolution),...read}};
+ const body={contract:FILM_AGGREGATE_CONTRACT,identity:publicIdentity(resolution)};
+ if(sectionFailure)body.sectionsUnavailable={reason:'section_read_failed'};
+ else for(const [name,value] of Object.entries(read))if(!RESERVED_FIELDS.has(name))body[name]=value;
+ return {http:200,body};
 }
 
 function publicIdentity(r){

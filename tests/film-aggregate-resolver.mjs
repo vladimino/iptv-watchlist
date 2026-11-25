@@ -100,7 +100,8 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
   assert.deepEqual(r.authorized.letterboxd_lid,[lid]);
   assert.ok(r.claims.some(c=>c.scheme==='tmdb'&&c.retired===true),id+': reported as retired evidence');
   assert.equal(r.permalink,'/film/'+lid,'no tmdb_<n> permalink for a retired movie claim');
-  assert.ok(!r.fence.keys.movies.length,id+': the movie ledger is not read for a TV or lid request');
+  // The ledger is read by every claimed movie id of the survivor (here its retired movie claim), never by a TV number.
+  assert.deepEqual(r.fence.keys.movies,[survivor.slice('film:tmdb:'.length)],id+': the ledger is read by the claimed movie id only');
  }
  assert.deepEqual((await resolve(file,'tmdb_tv:123')).authorized.tmdb_tv,['123']);
  assert.deepEqual(await verdict(file,'tmdb_123'),['retired','tmdb_retired',410]);
@@ -175,11 +176,35 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
  assert.equal(r.verdict,'found');assert.deepEqual(r.aliasOverflow,['letterboxd_lid']);assert.equal(r.authorized.letterboxd_lid.length,AUTHORIZED_ALIASES_PER_SCHEME);
  const wide=database();
  film(wide,'film:w:0',Array.from({length:IDENTITY_MAX_CLAIM_ROWS},(_,i)=>['note','v'+i,0]).concat([['letterboxd','w0']]));
- assert.deepEqual(await verdict(wide,'w0'),['conflict','identity_fanout',409],'more than 64 claim rows');
+ assert.deepEqual(await verdict(wide,'w0'),['conflict','identity_fanout',409],'65 distinct claim rows');
+ // Exactly 64 distinct claim rows pass: a survivor row read both by Film and by pair counts once.
+ const exact=database();
+ film(exact,'film:x:0',Array.from({length:IDENTITY_MAX_CLAIM_ROWS-1},(_,i)=>['note','v'+i,0]).concat([['letterboxd','x0']]));
+ assert.equal((await resolve(exact,'x0')).verdict,'found','64 distinct claim rows');
+ const half=database();
+ film(half,'film:y:0',Array.from({length:33},(_,i)=>['letterboxd','y'+i]));
+ assert.equal((await resolve(half,'y0')).verdict,'found','33 claims are 33 rows, not 66');
+ // A wide redirect ancestor: its claims are read and digested, so they count.
+ const ancestor=database();
+ film(ancestor,'film:z:1',[['letterboxd','z1']]);film(ancestor,'film:z:old',Array.from({length:IDENTITY_MAX_CLAIM_ROWS+10},(_,i)=>['note','a'+i,0]));
+ redirect(ancestor,'film:z:old','film:z:1');
+ assert.deepEqual(await verdict(ancestor,'film:z:old'),['conflict','identity_fanout',409],'a wide ancestor');
+ // Many untrusted rows on the requested key: fan-out, decided before the unverified verdict, from a bounded read.
+ const untrusted=database();
+ for(let i=0;i<IDENTITY_MAX_CLAIM_ROWS+5;i++)sqlite(untrusted,`INSERT INTO film (id,contract_version,updated_at) VALUES ('film:u:${i}',1,'${AT}');INSERT INTO canonical_revision VALUES ('film','film:u:${i}',1,'${AT}');INSERT INTO film_external_id VALUES ('film:u:${i}','letterboxd','crowd',0,0,NULL)`);
+ const seen=[];
+ const u=await resolveFilmIdentity(env(untrusted,{onQuery:text=>{seen.push(text);}}),'crowd');
+ assert.deepEqual([u.verdict,u.reason],['conflict','identity_fanout']);
+ assert.ok(seen.filter(t=>t.includes('json_group_array')).length===1,'decided in the first round');
+ assert.ok(seen.every(t=>!t.includes('film:u:')),'the excess Films are never queried');
  const crowd=database();
  film(crowd,'film:k:0',[['letterboxd','k0'],['note','shared',0]]);
  for(let i=1;i<=IDENTITY_MAX_FILMS;i++)film(crowd,'film:k:'+i,[['note','shared',0]]);
  assert.deepEqual(await verdict(crowd,'k0'),['conflict','identity_fanout',409],'more than 16 Films met');
+ // The key set never grows past the cap into a query: the 17 Films met are refused before a round reads them.
+ const texts=[];
+ await resolveFilmIdentity(env(crowd,{onQuery:text=>{texts.push(text);}}),'k0');
+ assert.ok(texts.every(t=>!t.includes('film:k:1"')),'the excess Films are never queried');
 }
 
 // The marker gate and failures: held, unopened and unreadable stores are 503 before any identity read; a broken read is 503, never absent.
@@ -221,18 +246,18 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
  assert.deepEqual([moved.verdict,moved.reason],['conflict','competing_owner'],'the closed round sees both rows of the pair');
 }
 
-// EXPLAIN QUERY PLAN of the snapshot statement: every lookup uses an index, except the movie-id read of the owner's retirement ledger (the existing
-// RETIREMENT_SQL lookup, read only for a requested TMDB movie id).
+// EXPLAIN QUERY PLAN of the snapshot statement: every lookup uses an index, except the movie-id read of the owner's retirement ledger. That scan is an
+// OPEN OWNER DECISION (ADR 0216 decision 7; index migration or explicit bounded exception), pinned here so it cannot spread unnoticed, not accepted.
 {
  const file=database();
- const params=[ '["film:x"]','["film:x"]','["film:x"]','["film:x"]','[["tmdb","1"]]','["film:x"]','["1"]'];
- let i=0;const text=IDENTITY_SNAPSHOT_SQL.replace(/\?/g,()=>q(params[i++]));
+ const params=['["film:x"]','["film:x"]','["film:x"]','["film:x"]','65','[["tmdb","1"]]','65','["1"]','65'];
+ let i=0;const text=IDENTITY_SNAPSHOT_SQL.replace(/\?/g,()=>{const v=params[i++];return /^\d+$/.test(v)?v:q(v);});
  const out=sqliteSync([file],{input:'EXPLAIN QUERY PLAN '+text+';',encoding:'utf8'});
  assert.equal(out.status,0,out.stderr);
  const plan=out.stdout.split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
- const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW/.test(d));
+ const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$/.test(d));
  assert.deepEqual(scans,['SCAN tmdb_retirement_decision'],plan.join('\n'));
- for(const index of ['film_external_id_by_scheme_value','tmdb_retirement_decision_film'])assert.ok(plan.some(d=>d.includes(index)),index+'\n'+plan.join('\n'));
+ for(const index of ['film_external_id_by_scheme_value'])assert.ok(plan.some(d=>d.includes(index)),index+'\n'+plan.join('\n'));
 }
 
 // Test 8: a concurrent reassignment, merge, retirement, revision move, new competing claim, vanished row or marker move between resolution and the last
@@ -301,6 +326,16 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
  assert.deepEqual([tiny.http,tiny.body.identity.reason],[503,'budget_exceeded']);
  const none=await readFilmAggregateIdentity(env(file),'tmdb_40',{budgetLimit:0});
  assert.equal(none.http,503);
+ // Actual D1 statements, the authority gate included, never exceed the budget, also for tiny budgets.
+ for(const limit of [0,1,2,3,4,5,6,REQUEST_STATEMENT_BUDGET]){
+  const e=env(file);
+  const out=await readFilmAggregateIdentity(e,'tmdb_40',{budgetLimit:limit,sections:async(resolution,budget)=>{
+   let rowsRead=0;while(budget.take(1)){await e.DB.prepare("SELECT film_id FROM film_external_id WHERE film_id=?").bind(resolution.filmId).all();rowsRead++;}
+   return {display:{status:'partial',reads:rowsRead}};
+  }});
+  assert.ok(e.calls.queries<=limit,limit+': '+e.calls.queries+' statements');
+  if(limit===REQUEST_STATEMENT_BUDGET){assert.equal(out.http,200);assert.equal(e.calls.queries,REQUEST_STATEMENT_BUDGET,'sections spend the rest, the fence its reservation');}
+ }
  assert.equal(REQUEST_STATEMENT_BUDGET,40);
 }
 
@@ -316,6 +351,58 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
  for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate-resolver.js'))
   assert.ok(!fs.readFileSync('src/'+name,'utf8').includes('film-aggregate-resolver'),name+' must not import the dormant resolver');
  assert.ok(!fs.readFileSync('src/film-aggregate-resolver.js','utf8').match(/\b(INSERT|UPDATE|DELETE|REPLACE)\s/),'only SELECTs');
+}
+
+// Review of PR #1000: retirement by claimed movie id, whatever Film the ledger names, with restore semantics and fenced.
+{
+ const file=database();
+ // The ledger retires movie 70 under a historical Film id that no longer holds the claim; the current owner holds trusted tmdb 70.
+ film(file,'film:cur:70',[['tmdb','70'],['letterboxd','l70']]);retire(file,'film:hist:70','70','7070','l70');
+ const r=await resolve(file,'l70');
+ assert.deepEqual([r.verdict,r.authorized.tmdb_movie,r.permalink],['found',[],'/film/l70'],'a retired movie id is never authorized, whatever Film the ledger names');
+ assert.ok(r.claims.some(c=>c.scheme==='tmdb'&&c.value==='70'&&c.retired));
+ assert.deepEqual(await verdict(file,'tmdb_70'),['retired','tmdb_retired',410]);
+ assert.equal((await resolve(file,'film:cur:70')).authorized.tmdb_movie.length,0);
+ // A TV number equal to a movie number is never looked up in the ledger.
+ const tv=database();
+ film(tv,'film:tv:1',[['tmdb_tv','88'],['letterboxd','tv88']]);
+ assert.deepEqual((await resolve(tv,'tv88')).fence.keys.movies,[]);
+ // Concurrent retirement during the section reads, under another Film id: identity_moved.
+ const c1=database();film(c1,'film:c:80',[['tmdb','80'],['letterboxd','l80']]);
+ const moved=await readFilmAggregateIdentity(env(c1),'l80',{sections:async()=>{retire(c1,'film:other:80','80','8080','l80');return {display:{}};}});
+ assert.deepEqual([moved.http,moved.body.identity.reason],[503,'identity_moved']);
+ // Concurrent restore during the section reads: identity_moved.
+ const c2=database();film(c2,'film:c:81',[['tmdb','81'],['letterboxd','l81']]);retire(c2,'film:old:81','81','8181','l81');
+ const seq=rows(c2,"SELECT seq FROM tmdb_retirement_decision WHERE movie_id='81'")[0].seq;
+ const restoredMid=await readFilmAggregateIdentity(env(c2),'l81',{sections:async()=>{restore(c2,'film:old:81','81','8181',seq,'l81');return {display:{}};}});
+ assert.deepEqual([restoredMid.http,restoredMid.body.identity.reason],[503,'identity_moved']);
+ assert.deepEqual((await resolve(c2,'l81')).authorized.tmdb_movie,['81'],'after the restore the movie claim is authorized again');
+}
+
+// Review of PR #1000: growth of the read-set past the caps during the sections fails the fence closed with 503.
+{
+ const file=database();film(file,'film:g:1',[['letterboxd','g1']]);
+ const out=await readFilmAggregateIdentity(env(file),'g1',{sections:async()=>{
+  sqlite(file,Array.from({length:IDENTITY_MAX_CLAIM_ROWS+5},(_,i)=>`INSERT INTO film_external_id VALUES ('film:g:1','note','n${i}',0,0,NULL);`).join(''));
+  return {display:{}};
+ }});
+ assert.deepEqual([out.http,out.body.identity.reason,Object.keys(out.body)],[503,'identity_moved',['contract','identity']]);
+}
+
+// Review of PR #1000: a throwing section reader never bypasses the fence; its sections are typed unavailable; envelope fields are protected.
+{
+ const file=database();film(file,'film:t:1',[['tmdb','91'],['letterboxd','t1']]);film(file,'film:t:2');
+ let fenced=0;
+ const e=env(file,{onQuery:text=>{if(text.includes('json_group_array'))fenced++;}});
+ const quiet=await readFilmAggregateIdentity(e,'t1',{sections:async()=>{fenced=0;throw new Error('section failed');}});
+ assert.equal(fenced,1,'the fence ran after the throwing section');
+ assert.deepEqual([quiet.http,quiet.body.sectionsUnavailable,Object.keys(quiet.body)],[200,{reason:'section_read_failed'},['contract','identity','sectionsUnavailable']]);
+ const moved=await readFilmAggregateIdentity(env(file),'t1',{sections:async()=>{sqlite(file,"UPDATE film_external_id SET film_id='film:t:2' WHERE value='t1'");throw new Error('section failed');}});
+ assert.deepEqual([moved.http,moved.body.identity.reason,Object.keys(moved.body)],[503,'identity_moved',['contract','identity']]);
+ const other=database();film(other,'film:t:3',[['letterboxd','t3']]);
+ const guarded=await readFilmAggregateIdentity(env(other),'t3',{sections:async()=>({contract:'forged',identity:{verdict:'found',filmId:'film:evil'},sectionsUnavailable:{reason:'x'},display:{status:'present'}})});
+ assert.equal(guarded.body.contract,'film-aggregate/v1');assert.equal(guarded.body.identity.filmId,'film:t:3');
+ assert.ok(!('sectionsUnavailable' in guarded.body));assert.deepEqual(guarded.body.display,{status:'present'});
 }
 
 fs.rmSync(root,{recursive:true,force:true});
