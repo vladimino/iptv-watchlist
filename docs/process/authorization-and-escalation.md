@@ -15,6 +15,27 @@ This is the central delivery authorization policy for IPTV Watchlist. It supplem
 
 Roles are portable and not bound to ChatGPT. A chat cannot by itself poll an arbitrary agent forever, consume webhooks or invoke a disconnected executor. Record missing runtime capabilities in the work item rather than treating owner relay as automatic.
 
+### Product intent and engineering autonomy
+
+Classify decisions by their consequences, not by whether a parameter looks technical. Use these boundaries in planning, implementation and independent review:
+
+| Decision class | Responsibility | Examples |
+| --- | --- | --- |
+| Product outcome or material trade-off | Product Owner | Coverage, freshness, acceptable backlog or latency, priorities, cost envelope, degraded behavior and changed acceptance |
+| Material architecture or risk | Product Owner, advised by Coordinator and Reviewer | New component or persistent authority, meaningful infrastructure dependency, trust boundary, materially different operational or recovery model |
+| Reversible engineering detail within approved intent and risk envelope | Engineering (Executor/Coordinator; independent Reviewer verifies) | Batch size, indexes, algorithms, timeout, concurrency, continuation and internal scheduling strategy |
+| External or demonstrated technical constraint | Engineering verifies and documents; owner decides any material resulting trade-off | Provider/account limits, API rate limits, memory, runtime and correctness constraints |
+
+- **Product intent first.** Start with the desired outcome and end-to-end workload, not an incidental implementation limit. A technical choice becomes material when its consequences substantially change coverage, timeliness, priorities, cost, safety or maintainability. Escalate the consequence and the available alternatives, not an isolated tuning number. If a material outcome is unspecified, ask for that outcome rather than silently choosing it.
+- **Unification and simplicity by default.** Prefer reuse of an existing component or shared mechanism for the same business responsibility. Compare whole-system complexity, coordination, delivery, maintenance, runtime and recovery cost. Introduce isolation or another subsystem only for a concrete benefit or constraint that warrants its lifecycle cost. Do not conflate unification with removing domain authority or safety boundaries.
+- **No artificial constraints or gates.** Quantitative limits, quotas, delays, mandatory experiments and extra approval gates must have a proportionate rationale tied to actual provider limits, approved cost/risk envelopes, measured behavior or a concrete correctness/resource risk. State assumptions and impact; label provisional defaults as tuning values, not product policy. Do not require empirical proof of every ordinary conservative bound when a documented technical constraint or sound safety argument suffices. For queue-driven work, prefer safe progress while eligible work and resources remain, with bounded units, durable continuation and real stop conditions, over fixed throughput ceilings without a justified purpose.
+- **Engineering autonomy.** Select, test and adjust reversible details inside the agreed scope without repeated owner questions or invented approval gates. If a design cannot meet the approved outcome within verified constraints, return a decision brief with consequences, options and a recommendation. Do not change accepted scope or weaken safeguards to achieve throughput.
+- **No silent trade-offs.** Record material effects and obtain explicit owner decisions before implementation; neither a general ADR acceptance nor approval of implementation should be used to conceal an undisclosed product compromise. Reuse decisions that were explicitly made; do not reopen routine details. Reviewers return ordinary defects and unjustified constraints to engineering, not to the owner.
+
+Examples: choosing an indexed batch size is delegated; accepting a multi-week backlog caused by that size is material. A runtime deadline protecting a documented platform limit is legitimate; a two-items-per-hour ceiling without evidence or approved product intent is not. Choosing a continuation mechanism is delegated only within existing authorization; creating or editing an actual production schedule, Task, flag, migration, writer or trust boundary still follows the applicable explicit gate.
+
+This boundary is not new production authorization. Existing accepted ADRs, domain authority, security, resource safety, named owner holdpoints and L0-L3 rules remain binding. Where a current accepted contract conflicts with a proposed improvement, explicitly supersede or amend it through the established ADR process before implementation; do not waive it by relabeling the decision as engineering.
+
 ## Authorization levels
 
 Classify by **effect and reversibility**, not API method, record count, apparent task size or tool name.

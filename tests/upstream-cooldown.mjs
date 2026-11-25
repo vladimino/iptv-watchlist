@@ -1,4 +1,4 @@
-// AIR-604 (UC1): the shared upstream cooldown core: migration 0044, the policy and the coordinator. Offline: scratch sqlite (D1 stand-in), injected fetch, no network.
+// AIR-604 (UC1): the shared upstream cooldown core: migration 0045, the policy and the coordinator. Offline: scratch sqlite (D1 stand-in), injected fetch, no network.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {migrated, sql} from './prediction-d1-flow-lib.mjs';
@@ -43,20 +43,20 @@ for (const status of [200, 204, 301, 404, 410, 500, 502, 503, 504]) assert.equal
 for (const status of [200, 403, 404, 429, 500, 503]) for (const headers of [H(), H({'cf-mitigated': 'challenge'}), H({'cf-mitigated': 'other'})]) for (const html of ['', '<title>Just a moment...</title>', 'cf-chl-opt', 'captcha', '/cdn-cgi/challenge-platform/h/b', '<html>ok</html>'])
   assert.equal(U.isChallenge(status, headers, html), identityChallenge(status, headers, html), `${status} ${html}`);
 
-// ---- 2. migration 0044 --------------------------------------------------------------------------------------------------------------------------
+// ---- 2. migration 0045 --------------------------------------------------------------------------------------------------------------------------
 {
-  const file = migrated(43);
-  assert.equal(sql(file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 43);
+  const file = migrated(44);
+  assert.equal(sql(file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 44);
   const w = world(null);
-  assert.equal(sql(w.file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 44);
+  assert.equal(sql(w.file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 45);
   assert.equal(sql(w.file, 'SELECT COUNT(*) n FROM upstream_cooldown')[0].n, 0, 'created empty');
   assert.equal(sql(w.file, 'SELECT COUNT(*) n FROM upstream_coordination')[0].n, 0, 'no mode row: off by absence');
   // a second apply and a wrong predecessor are refused before any object is created
-  const again = sqliteSync(['-bail', w.file], {input: readText('migrations/0044_upstream_cooldown.sql'), encoding: 'utf8'});
+  const again = sqliteSync(['-bail', w.file], {input: readText('migrations/0045_upstream_cooldown.sql'), encoding: 'utf8'});
   assert.notEqual(again.status, 0, 'a second apply is refused');
-  const old = migrated(42);
-  const refused = sqliteSync(['-bail', old], {input: readText('migrations/0044_upstream_cooldown.sql'), encoding: 'utf8'});
-  assert.notEqual(refused.status, 0, 'version 42 is refused');
+  const old = migrated(43);
+  const refused = sqliteSync(['-bail', old], {input: readText('migrations/0045_upstream_cooldown.sql'), encoding: 'utf8'});
+  assert.notEqual(refused.status, 0, 'version 43 is refused');
   assert.equal(sql(old, "SELECT COUNT(*) n FROM sqlite_master WHERE name IN ('upstream_cooldown','upstream_coordination')")[0].n, 0, 'nothing created on refusal');
   // shape: closed scope, reason and mode sets, a singleton mode row
   const bad = text => sqliteSync(['-bail', w.file], {input: text, encoding: 'utf8'}).status !== 0;
@@ -72,7 +72,7 @@ assert.equal(await U.readMode(world(null).env), 'off', 'absent row');
 assert.equal(await U.readMode(world('observe').env), 'observe');
 assert.equal(await U.readMode(world('enforce').env), 'enforce');
 {
-  const old = migrated(43); // absent tables
+  const old = migrated(44); // absent tables
   const env = {DB: d1Standin(old)};
   assert.equal(await U.readMode(env), 'off', 'absent table is off');
   assert.equal(await U.readCooldown(env, 'tmdb', NOW), null, 'absent table: no cooldown');

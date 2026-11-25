@@ -1,6 +1,6 @@
 # Shared upstream cooldown (AIR-604, UC1)
 
-Contract of the shared, durable cooldown per upstream scope ([ADR 0211](../../adr/0211-catalog-enrichment-producer.md) decision 5, Accepted; card UC1 of [ADR 0207](../../adr/0207-letterboxd-admissions-coordinated-in-d1-only.md) decision 7). It is **delivered dormant**: the mode row is absent or `off`, and the schema ([migration 0044](../../../migrations/0044_upstream_cooldown.sql)) is in the repository and **not applied to any database**. Applying it and every mode change are separate owner production operations; this document describes the delivered code, not the present production state (read that live).
+Contract of the shared, durable cooldown per upstream scope ([ADR 0211](../../adr/0211-catalog-enrichment-producer.md) decision 5, Accepted; card UC1 of [ADR 0207](../../adr/0207-letterboxd-admissions-coordinated-in-d1-only.md) decision 7). It is **delivered dormant**: the mode row is absent or `off`, and the schema ([migration 0045](../../../migrations/0045_upstream_cooldown.sql)) is in the repository and **not applied to any database**. Applying it and every mode change are separate owner production operations; this document describes the delivered code, not the present production state (read that live).
 
 ## What it is, and is not
 

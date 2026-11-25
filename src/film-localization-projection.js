@@ -133,13 +133,13 @@ export async function readProjectionInputs(env,id,incoming){
 // changed the row is stale, is never protected by the strong() guard and never counts as an owner input to the resolver, so a new automatic observation replaces it. A genuine legacy
 // owner/reviewed row (no marker) keeps its control.
 // The upsert of a projection row: the guard of `writeFilmFacts` plus the replacement of an owner projection row (the only reviewed row this writer may replace by itself).
-const PROJECTION_UPSERT=ROW.upsert()+" OR (CASE WHEN json_valid(film_dimension.provenance_json) THEN json_extract(film_dimension.provenance_json,'$.projection') END)='"+OWNER_PROJECTION+"' AND film_dimension.authority='owner'";
+export const PROJECTION_UPSERT=ROW.upsert()+" OR (CASE WHEN json_valid(film_dimension.provenance_json) THEN json_extract(film_dimension.provenance_json,'$.projection') END)='"+OWNER_PROJECTION+"' AND film_dimension.authority='owner'";
 
 // A legacy provisional row of a source that has no source row is an actual resolver candidate (see projectionInputs `legacy`) and the SOLE durable record of that value. Replacing the
 // stored row would lose that input silently, so the same batch records it as a source row first (`ON CONFLICT DO NOTHING`, request id of this write, observed_at the row's own clock,
 // version and provenance unchanged): the resolver input is identical, now durable. A candidate that cannot be recorded losslessly (no version, an unparseable clock or provenance)
 // holds the write conservatively until a separately authorized repair; nothing is lost silently.
-function legacyCandidate(snapshot,names){
+export function legacyCandidate(snapshot,names){
  const row=snapshot.dimensions.localization;
  if(!row||row.status!=='provisional'||!row.value||!row.source||RESERVED.has(row.source)||names.has(row.source)||snapshot.sources.some(item=>item.source===row.source))return null;
  const observedAt=instant(row.updated_at),version=typeof row.source_version==='string'?row.source_version.trim():'';
@@ -152,7 +152,7 @@ function legacyCandidate(snapshot,names){
 // The projection decision. `match`: the stored row already is the resolver output (an owner or reviewed row equal in value, or an automatic row equal in every column but its clock).
 // `write`: the row is absent, not protected, or a stale owner projection, and differs. `held`: the resolver output cannot be produced under the strong() guard without replacing
 // a protected row that differs (a conflicting owner input, a reviewed or owner row of another value, a reviewed row without a value): nothing is written, no review decision is manufactured.
-function projectionOf(snapshot,token,write,at,id){
+export function projectionOf(snapshot,token,write,at,id){
  const stored=snapshot.dimensions.localization;
  const projected=isOwnerProjection(stored);
  // The stored owner projection is never an input and never protected: the resolver sees the row as absent.

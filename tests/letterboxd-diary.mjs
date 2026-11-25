@@ -282,7 +282,7 @@ assert.equal(records.get('sync.json').ratingAttempt,undefined);
  out=await D.syncHistory(w.env);
  assert.equal(diaryRequests().length,1);assert.equal(out.lastOutcome,'rate_limited');assert.deepEqual(plain(cool(w.file)),[{scope:'letterboxd',reason:'rate_limited',set_by:'letterboxd-diary'}]);
  // a 404-free success writes nothing; off and an absent schema read the page
- for(const [label,build] of [['off',()=>world('off',600)],['absent row',()=>world(null)],['absent schema',()=>({file:null,env:{...env,DB:d1Standin(migrated(43))}})]]){
+ for(const [label,build] of [['off',()=>world('off',600)],['absent row',()=>world(null)],['absent schema',()=>({file:null,env:{...env,DB:d1Standin(migrated(44))}})]]){
   const x=build();records.clear();etags.clear();requests.length=0;publish([{lid:'C1',slug:'c-1',date:day(0),stars:5}]);
   out=await D.syncHistory(x.env);
   assert.equal(diaryRequests().length,1,label+': the page is read as today');assert.notEqual(out.lastOutcome,'rate_limited',label);

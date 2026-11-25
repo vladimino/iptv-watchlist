@@ -65,7 +65,7 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   await run("tmdbRequest(env,'movie/4').catch(()=>null)"); await run("tmdbRequest(env,'movie/5').catch(()=>null)");
   assert.equal(sent.length, 2, 'observe skips nothing'); assert.equal(rows(o)[0].scope, 'tmdb');
   // off and an absent schema: today's behaviour, nothing written, nothing read but the mode
-  for (const [label, f] of [['off', dbWith('off')], ['absent row', dbWith(null)], ['absent schema', migrated(43)]]) {
+  for (const [label, f] of [['off', dbWith('off')], ['absent row', dbWith(null)], ['absent schema', migrated(44)]]) {
     context.env = {...env, DB: d1Standin(f)}; reset(); answer = () => new Response('{}', headers429(60));
     const res = await run("tmdbRequest(env,'movie/6').then(()=>null,e=>e.message)");
     assert.equal(res, 'TMDB HTTP 429', label); assert.equal(sent.length, 1, label);
@@ -184,7 +184,7 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
     if (expectCooldown) assert.equal(rows(file)[0].scope, 'letterboxd', label);
   }
   // off, an absent schema and no guard: today's request
-  for (const [label, file] of [['off', world('off')], ['absent schema', migrated(43)]]) {
+  for (const [label, file] of [['off', world('off')], ['absent schema', migrated(44)]]) {
     reset(); answer = () => new Response('', headers429(60)); context.net = guarded(file);
     assert.deepEqual(plain(await run("LetterboxdRatedCandidates.follow(net,'abc')")), {stop: 'rate_limited'}, label); assert.equal(sent.length, 1, label);
   }

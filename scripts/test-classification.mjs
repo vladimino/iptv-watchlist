@@ -242,6 +242,9 @@ export const FILES={
  "canonical-letterboxd-claim.mjs": {
   "suite": "core"
  },
+ "prediction-alias-bridge-cohort.mjs": {
+  "suite": "core"
+ },
  "canonical-film-writers-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
@@ -359,6 +362,9 @@ export const FILES={
   "suite": "core"
  },
  "film-aggregate-resolver.mjs": {
+  "suite": "core"
+ },
+ "film-history-aggregate.mjs": {
   "suite": "core"
  },
  "canonical-readiness-classes.mjs": {
@@ -941,6 +947,9 @@ export const FILES={
  "film-localization-projection.mjs": {
   "suite": "core"
  },
+ "film-localization-reconciler.mjs": {
+  "suite": "core"
+ },
  "film-person-backfill.mjs": {
   "suite": "core"
  },
@@ -1077,6 +1086,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-import.mjs": {
   "suite": "core"
  },
  "identity-evidence-writer.mjs": {
