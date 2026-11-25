@@ -87,33 +87,42 @@ Readiness before the handoff (AIR-374 P6, offline, dormant): `handoffReadiness` 
 
 ## Proposed: unified Film read contract ([ADR 0216](../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md), Proposed, not implemented)
 
-A canonical Film exists independently of its facts. The proposed `FilmAggregateV1` is a read-only composition per request over the existing domain readers. It adds no table, writer or authority. Identity is the only fatal section; every other section reports its own status and freshness token. Nothing below is deployed.
+A canonical Film exists independently of its facts. The proposed `FilmAggregateV1` is a read-only composition per request over the existing domain readers. It adds no table, writer or authority. The resolver captures an identity read-set (marker generation, per-Film revisions, claim rows, redirects, retirement decisions) and re-reads it after every section; any movement fails the whole answer. Other sections report their own status and tokens. Nothing below is deployed.
 
 ```mermaid
 flowchart TB
-    req["GET one typed id<br/>tmdb_n, lid or film:id"]
-    resolve["Bounded identity resolver<br/>redirects, conflict, retirement"]
+    req["GET one typed id<br/>film:id, tmdb_n, tmdb_tv:n or lid"]
+    resolve["Typed resolver<br/>claims, redirects, retirements"]
     fatal["404 absent, 409 conflict,<br/>410 retired, 503 unavailable"]
-    ids["Survivor Film and its<br/>verified storage ids"]
-    display["display<br/>film_metadata, localization"]
-    watch["watchlist<br/>ADR 0203 authority version"]
+    readset["Identity read-set<br/>generation, revisions, claims"]
+    ids["Survivor Film and<br/>verified alias set per domain"]
+    display["display<br/>metadata, owner review"]
+    watch["watchlist<br/>source and projection"]
     avail["availability<br/>published EPG generation"]
     personal["personal<br/>ratings domain D1"]
-    pred["predictions<br/>prediction_pointer, lineage"]
-    agg["FilmAggregateV1<br/>per-section status and version"]
+    pred["predictions<br/>prediction_pointer"]
+    history["history<br/>link to existing paged route"]
+    fence{"Re-read identity read-set"}
+    moved["503 identity_moved<br/>no section returned"]
+    agg["FilmAggregateV1<br/>per-section status and tokens"]
     req --> resolve
     resolve -->|not found| fatal
-    resolve -->|found| ids
+    resolve -->|found| readset
+    readset --> ids
     ids --> display
     ids --> watch
     ids --> avail
     ids --> personal
     ids --> pred
-    display --> agg
-    watch --> agg
-    avail --> agg
-    personal --> agg
-    pred --> agg
+    ids --> history
+    display --> fence
+    watch --> fence
+    avail --> fence
+    personal --> fence
+    pred --> fence
+    history --> fence
+    fence -->|changed| moved
+    fence -->|unchanged| agg
 ```
 
 ### Identity consumer: prediction recovery intent

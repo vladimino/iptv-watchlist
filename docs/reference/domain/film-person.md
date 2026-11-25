@@ -292,4 +292,9 @@ Any refusal fails the **whole snapshot closed** by name before any plan or write
 
 ## Proposed unified Film read contract (ADR 0216)
 
-[ADR 0216](../../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) is **Proposed** and not implemented. It defines `FilmAggregateV1`, a read-only composition of one Film's identity, display, Watchlist membership, availability, personal facts and predictions. Until it is accepted and delivered, no route answers that shape. `GET /api/d1/films/<id>` reads schema v1 `actual_rating` and `prediction_current`; it is not the authoritative personal or prediction view of a Film.
+[ADR 0216](../../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) is **Proposed** and not implemented. It defines `FilmAggregateV1`, a read-only composition of one Film's identity, display, Watchlist membership, availability, personal facts, predictions and a link to history. Its typed input takes `film:<id>`, `tmdb_<n>`, `tmdb_tv:<n>` or a lid, and an identity read-set fence covers the whole answer. Until it is accepted and delivered, no route answers that shape.
+
+Current limits that stay true meanwhile:
+
+- [`GET /api/d1/films/<id>`](../api/d1-catalog.md) reads schema v1 `actual_rating` and `prediction_current`. It is not the authoritative personal or prediction view of a Film.
+- [`GET /api/enrichment/history?filmId=`](../api/film-history.md) bridges at most one trusted lid per Film.
