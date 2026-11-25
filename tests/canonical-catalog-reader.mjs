@@ -235,7 +235,7 @@ if(!ONLY){
  assert.ok(build.includes("scopedImports('src/film-admission.js','CanonicalFilmAdmission'"),'AIR-499 bundles film-admission for rated_admission_retention');
  const importers=needle=>{const out=[];const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes(needle))out.push(full);}};walk('src');return out.sort();};
  assert.deepEqual(importers("from './canonical-catalog-reader.js'"),['src/canonical-producers.js','src/canonical-read-model.js','src/film-admission.js','src/letterboxd-claim-backfill.js'],'the explicit allowlist of the reader\'s importers (the owner-only claim backfill operator imports only the read-only `catalogStartedFilm` for its readback)');
- assert.deepEqual(importers('canonical-read-model'),[],'nothing in src imports the bulk read model, which is not bundled');
+ assert.deepEqual(importers('canonical-read-model'),['src/film-aggregate.js'],'only the dormant FilmAggregateV1 (AIR-647, itself not bundled) imports the bulk read model, which is not bundled');
  const text=fs.readFileSync(READER_FILE,'utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s+(INTO|FROM)?\s*\w/.test(text)&&!/R2|BUCKET|fetch\(/.test(text),'the reader has no write statement and no R2 or network access');
  if(!MODULE)assert.deepEqual([...text.matchAll(/^import\s.*from\s+'([^']+)'/gm)].map(match=>match[1]),['./film-person-authority.js'],'it imports only the marker reader');

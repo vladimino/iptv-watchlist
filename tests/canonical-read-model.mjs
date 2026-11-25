@@ -314,7 +314,8 @@ const run=(file,sql)=>sqlite(file,sql);
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-read-model'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'no source file imports or names the read model');
+ // AIR-647: the dormant FilmAggregateV1 reuses ownerCandidatesFromEntries; it is not bundled either (tests/film-aggregate.mjs proves it).
+ assert.deepEqual(importers,['src/film-aggregate.js'],'only the dormant aggregate imports the read model');
  for(const file of ['build.mjs','package.json','wrangler.jsonc','wrangler.toml'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-read-model'),file+' does not bundle it');
  const module=fs.readFileSync('src/canonical-read-model.js','utf8');
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(module.replace(/\/\/.*$/gm,'')),'the read model contains no write statement');
