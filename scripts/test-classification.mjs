@@ -1042,6 +1042,9 @@ export const FILES={
  "heavy-read-turns.mjs": {
   "suite": "core"
  },
+ "identity-evidence.mjs": {
+  "suite": "core"
+ },
  "identity-work-inventory.mjs": {
   "suite": "core"
  },
@@ -1759,6 +1762,9 @@ export const FILES={
  "synopsis.mjs": {
   "suite": "fixture",
   "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "test-pass-record.mjs": {
+  "suite": "core"
  },
  "test-classification.mjs": {
   "suite": "core"
