@@ -55,8 +55,12 @@ export function scopedImports(file,name,preamble){
 export function scopedEpgPriority(){
  return scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scopedReplacing('src/domain/epg-priority-pause.js','EpgPriorityPause','const {EPG_SCHEDULE,madridDayKey,madridInstant}=OrchestrationPolicy;\n');
 }
+// AIR-619 (ADR 0215, E2c): the owner write of the authority reaches the `discovery_owner` evidence writer. Its scopes (IdentityEvidence, IdentityEvidenceWriter, DiscoveryOwnerEvidence) are
+// bundled AFTER the Film/Person and canonical receipt scopes they import, so they do not exist yet when the authority's scope is evaluated. The authority therefore reaches them through
+// call-time wrappers, never a destructuring at load: a call before they exist is a ReferenceError at the call, and only an owner write calls them.
+const OWNER_EVIDENCE_PREAMBLE="const OWNER_WRITER='discovery_owner';\nconst planOwnerEvidence=(...args)=>DiscoveryOwnerEvidence.planOwnerEvidence(...args);\nconst ownerEvidenceStatements=(...args)=>DiscoveryOwnerEvidence.ownerEvidenceStatements(...args);\nconst readWriter=(...args)=>IdentityEvidenceWriter.readWriter(...args);";
 // ADR 0142: the per-slot evidence rule is a pure module scoped in front of the authority, which assigns slots with it.
 // ADR 0178: the identity review module is scoped here too, because the owner write checks a revoke command with it.
 export function scopedDiscoveryAuthority(){
- return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {revokeWriteMatches,originalStillEffective}=DiscoveryIdentity;\nconst {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
+ return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {revokeWriteMatches,originalStillEffective}=DiscoveryIdentity;\nconst {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;\n'+OWNER_EVIDENCE_PREAMBLE);
 }

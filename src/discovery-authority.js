@@ -8,6 +8,8 @@
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
 import {revokeWriteMatches,originalStillEffective} from './domain/discovery-identity-review.js';
+import {planOwnerEvidence,ownerEvidenceStatements,OWNER_WRITER} from './discovery-owner-evidence.js';
+import {readWriter} from './identity-evidence-writer.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
@@ -2360,6 +2362,7 @@ export async function ownerDecision(env,spec){
  if(spec.key&&spec.key!==key)return {outcome:'conflict'};
  if(existing.intent.expectedHash&&spec.expectedHash&&spec.expectedHash!==existing.intent.expectedHash)return {outcome:'conflict'};
  const expectedHash=existing.intent.expectedHash||spec.expectedHash;
+ let superseded=null;
  if(existing.intent.command&&spec.next){
   const command=existing.intent.command;
   if(command.effect==='assign'&&(String(spec.next.tmdbId)!==String(command.tmdbId)||spec.next.status!=='verified'))return {outcome:'conflict'};
@@ -2375,6 +2378,7 @@ export async function ownerDecision(env,spec){
    if(existing.intent.kind==='identity_revoke'||!sup||typeof sup.requestId!=='string'||typeof sup.decisionHash!=='string'||sup.decisionHash!==expectedHash)return {outcome:'conflict'};
    const original=await readIntent(env,sup.requestId);
    if(!original.intent||original.intent.observationKey!==key||original.intent.state!=='receipt'||!original.intent.receipt||!['identity_assign','identity_reject'].includes(original.intent.kind))return {outcome:'conflict'};
+   superseded=original.intent;
   }
  }
  if(existing.intent.kind==='identity_revoke'&&existing.intent.command?.effect!=='revoke')return {outcome:'conflict'};
@@ -2389,6 +2393,12 @@ export async function ownerDecision(env,spec){
  }
  const lease=spec.lease||leaseOf(env);
  if(!lease)return {outcome:'lease'};
+ // ADR 0215 decision 6 (E2c): the evidence statements of this owner step are prepared BEFORE the intent turns `running`, so a failure here leaves the intent approved.
+ let evidence;
+ try{evidence=await ownerEvidence(env,{intent:existing.intent,superseded,key,next:spec.next});}
+ catch(error){throw failed('discovery_unavailable',error);}
+ if(evidence.refused)return {outcome:'conflict'};
+ bound.evidence=evidence;
  try{await markIntentRunning(env,{idempotencyKey:spec.idempotencyKey,before:previous,lease});}
  catch{return {outcome:'unknown'};}
  try{await commitOwnerWrite(env,bound,previous);}
@@ -2473,6 +2483,18 @@ export async function ownerPolicyExclude(env,spec={}){
  if(after?.state!=='superseded')return {outcome:'unknown'};
  return {outcome:'written',filmId,policy:plan.policy,observations:prepared.map(item=>item.key),receipt:spec.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy:plan.policy,observations:prepared.map(item=>item.key)}};
 }
+// The `discovery_owner` evidence of one owner step (src/discovery-owner-evidence.js): the history revision the batch will write, the planned rows and the statements to splice
+// into the batch. `refused` is an eligible step that cannot yield a valid row while the writer is active: it is refused before anything is written. When the writer is `off`
+// or absent the statements insert nothing and the step commits exactly as before.
+async function ownerEvidence(env,{intent,superseded,key,next}){
+ const row=await one(database(env),'SELECT COALESCE(MAX(revision),0)+1 AS revision FROM discovery_decision_history WHERE observation_key=?',[key]);
+ const revision=Number(row?.revision);
+ if(!Number.isSafeInteger(revision)||revision<1)throw failed('discovery_unavailable');
+ const plan=await planOwnerEvidence({intent,superseded,key,next,revision});
+ if(plan.eligible&&plan.plans===null&&(await readWriter(env,OWNER_WRITER)).state!=='off')return {refused:true,statements:[]};
+ const statements=await ownerEvidenceStatements(env,{plan,key,requestId:intent.idempotencyKey,at:new Date().toISOString(),revision});
+ return {refused:false,statements};
+}
 async function commitOwnerWrite(env,spec,previous){
  const gate=await readAuthority(env);
  const lease=spec.lease||leaseOf(env);
@@ -2485,6 +2507,7 @@ async function commitOwnerWrite(env,spec,previous){
   ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[spec.key,spec.key,gate.generation,new Date().toISOString(),spec.writer||'owner',JSON.stringify(spec.next),spec.key,spec.expectedHash]],
   ['UPDATE discovery_decision SET programme_run_id=?, generation=?, status=?, attempts=?, evidence_key=?, terminal_reason=?, retry_at=?, tmdb_id=?, media_kind=?, film_id=?, decision_hash=?, payload_json=? WHERE observation_key=? AND decision_hash=?',[gate.programmeRunId,gate.generation+1,spec.next.status??null,Number.isInteger(spec.next.attempts)?spec.next.attempts:null,spec.next.evidenceKey??null,spec.next.terminalReason??null,spec.next.retryAt??null,spec.next.tmdbId==null?null:String(spec.next.tmdbId),spec.next.tmdbId==null?null:kind,spec.next.filmId??null,nextHash,JSON.stringify(spec.next),spec.key,spec.expectedHash]],
   [FENCE_SQL,[]],
+  ...(spec.evidence?.statements||[]),
   ...assignedRowsDelete(spec.key,previous,spec.next),
   ['UPDATE discovery_intent SET state=\'receipt\', receipt_json=?, generation=? WHERE idempotency_key=? AND state=\'running\'',[JSON.stringify(receipt),gate.generation+1,spec.idempotencyKey]],
   [FENCE_SQL,[]],

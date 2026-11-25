@@ -1,6 +1,7 @@
 // AIR-637 / ADR 0215 (Accepted), card EC: the identity evidence writer control and the domain-path insert helper (migration 0042, a file only).
-// DORMANT: nothing in the Worker imports this module, it is not bundled, and no route, Workflow, cron or producer calls it. Cards E2a and E2c wire the Discovery writers to
-// `domainEvidenceStatements`; the owner-approved activation operation calls `changeWriter`. A writer with no control row is `off`, so until then nothing is written.
+// DORMANT by control: since card E2c (AIR-619) the Worker bundle carries this module, but only `src/discovery-owner-evidence.js` (the Discovery owner write) calls `domainEvidenceStatements`
+// and `src/discovery-authority.js` calls `readWriter`; `changeWriter` is reachable from no Worker module. A writer with no control row is `off`, so until the owner-approved activation
+// operation (`changeWriter`, outside the Worker) flips it nothing is written. Card E2a wires the Discovery decision writer the same way.
 // Nothing here READS the ledger to decide anything (ADR 0213 decision 8).
 //
 // What it provides:

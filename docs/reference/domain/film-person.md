@@ -309,6 +309,20 @@ Any refusal fails the **whole snapshot closed** by name before any plan or write
 
 `watchlist_film` (membership of a Film in the current Watchlist) has two phases. **Marker `producer` (today, also while the table is absent):** the EPG Producer writes it through `writeFilmFacts`. **Marker `sync`:** only `setFilmMembership` (Letterboxd Sync `membership` effect, reconcile step and the one-time baseline) writes it. `setFilmMembership({id, member, version, at, guards?, baseline?})` never creates a Film, refuses a redirected or missing Film (`film_person_redirect`, `film_person_precondition`) and asserts, inside one fenced batch, the Film/Person marker, the membership marker and generation, the resolver's identity proofs and `NOT EXISTS watchlist_film_fence WHERE version > ?`. It upserts `watchlist_film_fence` (a tombstone `member = 0` after a removal) and then inserts or deletes the membership row. Results: `written`, `unchanged` (same version and state) or `stale` (a newer version is stored). `baseline: true` is the only way to write while the marker is `producer`. Whole-list identity resolution (needed to decide whether a Film is still listed by another lid) runs in chunks of at most 1000 lids; the Watchlist contract allows 5000. Identity merge still moves membership with a Film. Tables: `watchlist_membership_authority`, `watchlist_film_fence`, `watchlist_membership_handoff` (schema 37, [migration](../../../migrations/0037_watchlist_membership_projection.sql)).
 
+## Discovery owner evidence rows (ADR 0215 decision 6, E2c; dormant)
+
+Contract of the rows the `discovery_owner` writer writes into `film_identity_evidence` when it is `pending` or `on` (nothing writes them while it is absent or `off`; no reader uses them yet). All are unbound (`film_id` NULL), route `owner_action`, method `owner_statement`, proposition `candidate_for(discovery_observation:<observation key>, tmdb_movie:<id>)`, with `source_order` = the observation's `discovery_decision_history.revision` of the writing batch (comparable only within one observation; `seq` never decides precedence).
+
+| Owner intent | Row | Root | Observed at |
+| --- | --- | --- | --- |
+| `identity_assign` (confirm, correct, each group child) | `asserts` | the intent's idempotency key (`ownerIdentity.requestId`) | `ownerIdentity.at` |
+| `identity_reject` | `refutes` | the intent key | the intent's `confirmedAt` |
+| `identity_revoke` | `refutes`, `scope_evidence_key` = the key of the revoked intent's row (a forward reference is allowed) | the revoke's intent key | the revoke intent's `confirmedAt` |
+| assign or reject with `supersedes` | its own row plus one scoped `refutes` of the superseded intent's row, same batch | the new intent key | as its own row |
+| reconsider | no row | n/a | n/a |
+
+A reinstatement is a new intent with a new `asserts` row. A partial group is a set of independent rows. A revoke changes the Discovery decision and its assigned rows, never `film_external_id`; the canonical claim is unchanged. Code: `src/discovery-owner-evidence.js`; proof: `tests/discovery-owner-evidence.mjs`.
+
 ## Unified Film read contract (ADR 0216, Accepted, resolver and sections delivered dormant)
 
 [ADR 0216](../../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) is **Accepted**. It defines `FilmAggregateV1`, a read-only composition of one Film's identity, display, Watchlist membership, availability, personal facts, predictions and a link to history. Its typed input takes `film:<id>`, `tmdb_<n>`, `tmdb_tv:<n>` or a lid, and an identity read-set fence covers the whole answer. No deployed route answers that shape yet: the resolver and the sections are delivered dormant (not bundled); activation is [AIR-648](https://trello.com/c/zh0cfDWK).

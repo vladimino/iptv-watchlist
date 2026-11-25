@@ -3,7 +3,7 @@
 // Covered: the migration's refusal and replay; the control tables (absent = off, compare-and-swap, valid transitions, append-only change log, drain evidence, recorded
 // breaks); `source_order` and `known_alias`; the domain path (unbound candidate rows only, fenced by the writer's batch, not by the Film/Person marker); the key and strength
 // helpers; absent/off/pending/on, a valid duplicate, a mismatching row and a different causal position (all rolling the domain batch back), statement counts, and the
-// dormant wiring (no Worker import).
+// the dormant wiring (only the E2c owner writer imports the control; no Worker module can change it).
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -564,14 +564,17 @@ const setWriter=async(env,writer,target)=>{
  }
 }
 
-// ===== 7. dormant: nothing in the Worker imports the writer control, nothing reads the ledger or the control =====
+// ===== 7. dormant: the Worker reads the control only through the E2c owner writer; nothing in it can change the control or read the ledger =====
+// AIR-619 (E2c) is the first card that wires a writer: `src/discovery-owner-evidence.js` builds the statements and `src/discovery-authority.js` reads the control row of
+// `discovery_owner` to refuse an unplannable step while that writer is active. The operator (`changeWriter`) stays unreachable from every Worker module.
 {
  const sources=fs.readdirSync('src',{recursive:true}).filter(name=>String(name).endsWith('.js')).map(name=>path.join('src',String(name)));
  const mentions=sources.filter(name=>/identity_evidence_writer/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(mentions,['src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
+ assert.deepEqual(mentions,['src/discovery-owner-evidence.js','src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,[],'nothing imports the writer control: no route, Workflow, cron or producer calls it');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence'),'the Worker bundle does not include it');
+ assert.deepEqual(importers,['src/discovery-authority.js','src/discovery-owner-evidence.js'],'only the Discovery owner writer imports the writer control module');
+ const operator=sources.filter(name=>/\bchangeWriter\b/.test(fs.readFileSync(name,'utf8')));
+ assert.deepEqual(operator,['src/identity-evidence-writer.js'],'no Worker module can change a writer: only the owner-approved operator does');
  // The migration is a file only: no code applies it, and the deploy workflow never applies a migration.
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0042_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0042');
