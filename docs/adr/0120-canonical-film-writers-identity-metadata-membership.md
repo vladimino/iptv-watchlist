@@ -8,7 +8,7 @@
 **Approval source:** Owner approval in the comment of 11 Nov 2026 on [PR #529](https://github.com/vladimino/iptv-watchlist/pull/529) (comment 6800009753), card [AIR-374](https://trello.com/c/ha7ais3w); earlier owner decisions 1 to 5 in [ADR 0117](0117-film-person-d1-handoff-owner-decisions.md) and [ADR 0116](0116-projector-marker-and-generation-fence-on-every-batch.md)  
 **Related work:** [AIR-374](https://trello.com/c/ha7ais3w) (P2a), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0117](0117-film-person-d1-handoff-owner-decisions.md), [ADR 0119](0119-durable-canonical-write-receipts.md) (proposed receipts, PR #530)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** In part by [ADR 0214](0214-film-metadata-per-field-provenance.md) (Accepted 2026-11-25): it settles rule R5 (metadata part) and rule R1 for the six `core` fields of `film_metadata`.
 
 ## Context
 
