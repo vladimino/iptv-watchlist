@@ -493,16 +493,23 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
 // P3: a resolve that read an entry before slow source I/O never overwrites what an owner action (or another caller's check) wrote meanwhile.
 {
  const slowTo = async (lid, work) => {const handler = net.handler; net.handler = async (url, init) => {if (url.includes('boxd.it/' + lid)) {net.handler = handler; await work(); return http(404, '');} return handler(url, init);};};
- // (a) an owner requeue lands during an in-flight 404 of an entry at attempts = 5: the 404 charges nothing, the requeue stays.
- reset(); await seed('Rac1', 3); putDoc({Rac1: {reason: 'not_found', class: 'gone', slug: 'rac', attempts: 5, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
- await slowTo('Rac1', async () => {const {version} = await Facts.readDiaryIdentityVersioned(env); const r = await Facts.ownerAction(env, {action: 'requeue', lids: ['Rac1'], expectedVersion: version, by: 'o', why: 'w', at: '2026-11-17T16:00:30.000Z'}); assert.equal(r.state, 'applied');});
+ const entryOf = (attempts, extra = {}) => ({reason: 'not_found', class: 'gone', slug: 'rac', attempts, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z', ...extra});
+ const ownerAct = async (action, lid) => {const {version} = await Facts.readDiaryIdentityVersioned(env); return Facts.ownerAction(env, {action, lids: [lid], expectedVersion: version, by: 'o', why: 'w', at: new Date(NOW + 30000).toISOString()});};
+ // (a) an owner `requeue` during an in-flight check is REFUSED whole (the id has a live reservation: an effect can still land), nothing is written; the holder charges its check once; the owner acts after it.
+ reset(); await seed('Rac1', 3); putDoc({Rac1: entryOf(5)}); let refusedA = null;
+ await slowTo('Rac1', async () => {refusedA = await ownerAct('requeue', 'Rac1');});
  out = await Identity.resolve(env, [], opts());
- assert.deepEqual([pending().Rac1.reason, pending().Rac1.attempts, pending().Rac1.requeued.by], ['owner_requeued', 0, 'o'], 'the owner requeue survives the stale 404');
- assert.deepEqual([out.outcomes.get('Rac1').class, out.outcomes.get('Rac1').reason, out.outcomes.get('Rac1').attempts], ['not_now', 'entry_changed', null], 'the step reports the lost race and charges nothing'); assert.equal(out.counts.entryChanged, 1);
- // (b) an owner dismiss during the check: the dismissed entry is not resurrected.
- reset(); await seed('Rac2', 3); putDoc({Rac2: {reason: 'forbidden', class: 'transport', slug: 'rac', attempts: 1, streak: 2, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-11T00:00:00.000Z'}});
- await slowTo('Rac2', async () => {const {version} = await Facts.readDiaryIdentityVersioned(env); await Facts.ownerAction(env, {action: 'dismiss', lids: ['Rac2'], expectedVersion: version, by: 'o', why: 'w', at: '2026-11-17T16:00:30.000Z'});});
- await Identity.resolve(env, [], opts()); assert.equal(pending().Rac2.reason, 'owner_dismissed');
+ assert.deepEqual([refusedA.state, [...refusedA.ids]], ['check_in_flight', ['Rac1']], 'refused while the check is in flight'); assert.deepEqual([pending().Rac1.attempts, out.outcomes.get('Rac1').terminal], [6, true], 'the holder charged its one check');
+ assert.equal((await ownerAct('requeue', 'Rac1')).state, 'applied'); assert.equal(pending().Rac1.attempts, 0, 'after the check the owner requeue applies');
+ // (a2) a writer that does not honour reservations (a foreign write that lands mid-flight): the holder's write is bound to the entry it reserved, so it is not installed (entry_changed) and the foreign value stands.
+ reset(); await seed('Rac6', 3); putDoc({Rac6: entryOf(5)});
+ await slowTo('Rac6', async () => {putDoc({Rac6: entryOf(0, {reason: 'owner_requeued', class: 'not_now'})});});
+ out = await Identity.resolve(env, [], opts());
+ assert.deepEqual([pending().Rac6.reason, pending().Rac6.attempts], ['owner_requeued', 0], 'the foreign value stands'); assert.deepEqual([out.outcomes.get('Rac6').reason, out.outcomes.get('Rac6').attempts], ['entry_changed', null]); assert.equal(out.counts.entryChanged, 1);
+ // (b) an owner `dismiss` during the check is refused whole too; afterwards it applies.
+ reset(); await seed('Rac2', 3); putDoc({Rac2: entryOf(1, {reason: 'forbidden', class: 'transport', streak: 2})}); let refusedB = null;
+ await slowTo('Rac2', async () => {refusedB = await ownerAct('dismiss', 'Rac2');});
+ await Identity.resolve(env, [], opts()); assert.equal(refusedB.state, 'check_in_flight'); assert.equal(pending().Rac2.reason, 'not_found'); assert.equal((await ownerAct('dismiss', 'Rac2')).state, 'applied'); assert.equal(pending().Rac2.reason, 'owner_dismissed');
  // (c) two overlapping resolves of the same id: the first RESERVES the check before it reaches the source; the second sees the reservation and performs NO check at all (`in_flight`), so two callers never make two real checks.
  reset(); await seed('Rac3', 3); site.set('Rac3', {status: 404});
  const inner = []; await slowTo('Rac3', async () => {inner.push(await Identity.resolve(env, items(['Rac3', 'rac']), opts({route: 'watchlist_admission'})));});
@@ -514,11 +521,24 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
  reset(); await seed('Rac5', 3); site.set('Rac5', {status: 404}); putDoc({Rac5: {reason: 'checking', class: 'not_now', slug: 'rac', attempts: 0, streak: 0, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: null, nextAttemptAt: '2026-11-01T00:00:00.000Z', reservation: {checkId: 'dead', until: new Date(NOW + 60000).toISOString(), route: 'ratings_diary'}}});
  out = await Identity.resolve(env, items(['Rac5', 'rac']), opts()); assert.equal(out.outcomes.get('Rac5').reason, 'in_flight'); assert.equal(net.calls.length, 0);
  out = await Identity.resolve(env, [], opts({clock: () => NOW + 120000})); assert.deepEqual([pending().Rac5.reason, pending().Rac5.attempts, pending().Rac5.reservation], ['not_found', 1, undefined]);
- // (d) the link intent is fail-closed on a moved entry: no admission starts over a dismissed entry.
- reset(); await seed('Rac4', 3); add('Rac4', 'fixture-rac4-2000', '900301', 'Fixture Rac4', 2000); putDoc({Rac4: {reason: 'forbidden', class: 'transport', slug: 'fixture-rac4-2000', attempts: 0, streak: 1, queuedAt: '2026-11-01T00:00:00.000Z', lastAttemptAt: '2026-11-10T00:00:00.000Z', nextAttemptAt: '2026-11-10T00:00:00.000Z'}});
- const handler4 = net.handler; net.handler = async (url, init) => {const out = await handler4(url, init); if (url.includes('api.themoviedb.org')) {const {version} = await Facts.readDiaryIdentityVersioned(env); await Facts.ownerAction(env, {action: 'dismiss', lids: ['Rac4'], expectedVersion: version, by: 'o', why: 'w', at: 'a'});} return out;};
- const appliedBefore = canonical.applied.length; await Identity.resolve(env, [], opts());
- assert.equal(canonical.applied.length, appliedBefore, 'no admission over an entry the owner dismissed during the check'); assert.equal(pending().Rac4.reason, 'owner_dismissed');
+ // (d) effects: after the reservation and the intent, an owner action is refused until the admission and link are done; a foreign write that changes the entry before the intent fails the intent closed (no admission).
+ reset(); await seed('Rac4', 3); add('Rac4', 'fixture-rac4-2000', '900301', 'Fixture Rac4', 2000); putDoc({Rac4: entryOf(0, {reason: 'forbidden', class: 'transport', slug: 'fixture-rac4-2000', streak: 1, nextAttemptAt: '2026-11-10T00:00:00.000Z'})});
+ {let refused = null; const applyOriginal = ctx.CanonicalRatedAdmission.applyRatedAdmissionRetention;
+  ctx.CanonicalRatedAdmission.applyRatedAdmissionRetention = async (envArg, input) => {refused = await ownerAct('dismiss', 'Rac4'); return applyOriginal(envArg, input);};
+  await Identity.resolve(env, [], opts()); ctx.CanonicalRatedAdmission.applyRatedAdmissionRetention = applyOriginal;
+  assert.equal(refused.state, 'check_in_flight', 'refused after the intent and before the canonical batch'); assert.equal(pending().Rac4, undefined); assert.equal(recordOf('Rac4').links.tmdb, '900301', 'the in-flight admission and link completed under their reservation');}
+ reset(); await seed('Rac7', 3); add('Rac7', 'fixture-rac7-2000', '900303', 'Fixture Rac7', 2000); putDoc({Rac7: entryOf(0, {reason: 'forbidden', class: 'transport', slug: 'fixture-rac7-2000', streak: 1, nextAttemptAt: '2026-11-10T00:00:00.000Z'})});
+ {const handler7 = net.handler; net.handler = async (url, init) => {const result = await handler7(url, init); if (url.includes('api.themoviedb.org')) putDoc({Rac7: entryOf(0, {reason: 'owner_dismissed', class: 'settled', nextAttemptAt: null})}); return result;};
+  const appliedBefore = canonical.applied.length; await Identity.resolve(env, [], opts());
+  net.handler = handler7; assert.equal(canonical.applied.length, appliedBefore, 'no admission over an entry a foreign writer changed during the check'); assert.equal(pending().Rac7.reason, 'owner_dismissed');}
+ // a trusted-bridge repair is reserved too: an owner action during its local link is refused
+ reset(); await seed('Rac8', 3); canonical.bridge.Rac8 = {state: 'ok', filmId: 'film:tmdb:900304', tmdb: '900304', lid: 'Rac8'}; putDoc({Rac8: entryOf(0, {reason: 'forbidden', class: 'transport', slug: 'rac8', streak: 1, nextAttemptAt: '2026-11-10T00:00:00.000Z'})});
+ {let refused = null; const original = Facts.bridgeDiaryFilm; Facts.bridgeDiaryFilm = async (...args) => {Facts.bridgeDiaryFilm = original; refused = await ownerAct('requeue', 'Rac8'); return original(...args);};
+  await Identity.resolve(env, [], opts()); assert.equal(refused.state, 'check_in_flight'); assert.equal(recordOf('Rac8').links.tmdb, '900304');}
+ // a confirmed-admission link repair (`link_failed`) is reserved as well: an owner action during its local link is refused
+ reset(); await seed('Rac9', 3); putDoc({Rac9: entryOf(0, {reason: 'link_failed', class: 'intent', tmdb: '900305', slug: 'rac9', nextAttemptAt: '2026-11-10T00:00:00.000Z'})});
+ {let refused = null; const original = Facts.bridgeDiaryFilm; Facts.bridgeDiaryFilm = async (...args) => {Facts.bridgeDiaryFilm = original; refused = await ownerAct('dismiss', 'Rac9'); return original(...args);};
+  await Identity.resolve(env, [], opts()); assert.equal(refused.state, 'check_in_flight'); assert.equal(recordOf('Rac9').links.tmdb, '900305');}
 }
 // P4: an id refused at the cap keeps the attempts of its Watchlist row; the other caller materializes the entry with them, not with 0.
 {

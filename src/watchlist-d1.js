@@ -529,6 +529,12 @@ export async function admissionInventory(source,{filter='open',after=null,limit=
 // One ledger transition of a `pending` row: still pending with a new retry time (a rate limit does not count an attempt: the caller passes the unchanged count), `resolved` with the writer's receipt
 // reference, or `terminal` (no further automatic retry). Guarded by the authority and the caller's own guards. A row that is no longer pending is left alone (`already`).
 // -> {ok:true,state} | {ok:true,already:true} | {ok:false,reason}
+// AIR-599 (third review of PR #1009): the guard statement of a due row's token. It rides in the SAME batch as any write of the shared check document that applies this row's budget (its seed), so a seed read before an owner
+// `requeue` or `dismiss` can never be installed after it: the batch fails (rolls back) while the row no longer holds the token. [sql, params] for the Ratings document store's `extra`.
+export function admissionRowGuard({lid,attempts,updatedAt}){
+ if(typeof lid!=='string'||!lid||!Number.isInteger(attempts)||typeof updatedAt!=='string'||!updatedAt)return null;
+ return [GUARD("(SELECT COUNT(*) FROM watchlist_admission_pending WHERE lid=? AND state='pending' AND attempts=? AND updated_at=?)"+'=1'),[lid,attempts,updatedAt]];
+}
 // AIR-599 (review of PR #1009): `expect: {attempts, updatedAt}` is the token of the row as the caller READ it. With it the transition is installed only while the row still holds that token (a fence fails the batch otherwise:
 // `{ok:false,reason:'conflict'}`), so a step that finished its check while an owner `requeue` or `dismiss` changed the row cannot overwrite the owner's decision.
 export async function settleAdmission(source,{lid,state,attempts,nextRetryAt=null,reason=null,resolvedBy=null,now=Date.now(),expect=null},ctx={}){

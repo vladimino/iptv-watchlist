@@ -221,6 +221,9 @@ export const FILES={
  "letterboxd-check-legacy-report.mjs": {
   "suite": "core"
  },
+ "letterboxd-owner-race-d1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-owner-action-atomic.mjs": {
   "suite": "core"
  },

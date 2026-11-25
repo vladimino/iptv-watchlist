@@ -66,6 +66,7 @@ async function adminIdentityOwnerActionRoute(request,env,url){
  try{
   const out=await LetterboxdFacts.ownerAction(env,{action:input.action,lids:input.lids,slugs:input.slugs,createMissing:input.lane==='diary_backlog',expectedVersion:input.version,by,why:input.why,at,extra:plan.statements});
   if(out.state==='stale_revision')return adminError('stale_revision',409);
+  if(out.state==='check_in_flight')return json({error:'check_in_flight',committed:false,ids:out.ids},409);
   if(out.state==='backlog_full')return json({action:input.action,lane:input.lane,committed:false,results:out.results,backlogFull:true},409);
   // The readback of ALL THREE places and its proof: after `requeue` every named entry, backlog record and open ledger row is back at 0 attempts (a row `pending`); after `dismiss` no id is left in the backlog, every entry is
   // `owner_dismissed` and every touched row is terminal. An id may be named in any lane: the action covers every place that holds it.

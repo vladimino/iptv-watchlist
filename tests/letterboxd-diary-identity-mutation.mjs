@@ -48,7 +48,7 @@ const MUTANTS = [
   ['a not-now outcome is charged as an attempt', "if(intent||cls==='not_now'){", "if(intent){"],
   ['a 404 is not gone', "if(result.status===404||result.status===410)return 'not_found';", ''],
   ['a 5xx is not transport', "if(result.status>=500)return 'upstream_5xx';", ''],
-  ['a refused reservation still checks the id', "if(taken==='refused'){counts.capRefused++;outcomes.set(lid,{checked:false,class:'not_now',reason:'diary_cap',retryAt:null,attempts:item.seed||0,streak:0,terminal:false});continue;}", ''],
+  ['a refused reservation still checks the id', "if(taken==='ok')return true;", "if(taken==='ok'||taken==='refused')return true;"],
   ['the queue position is ignored', "x.first-y.first||(x.pos<y.pos?-1:x.pos>y.pos?1:0)||x.index-y.index", "x.first-y.first||x.index-y.index"],
   // Review of PR #1009: writes bound to the entry as read; the budget survives the backlog; the stored slug serves a caller without one.
   ['the final write ignores a moved entry', "expect:expectOf([...Object.keys(set),...clearNow,...removeNow])", "expect:null"],
@@ -60,12 +60,17 @@ const MUTANTS = [
   ['the row budget is not applied to the entry', "const before=Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streakBefore", "const before=cur?Number(cur.attempts)||0:item.seed||0,streakBefore"],
   // Second review of PR #1009: exclusive check ownership, the effective cap, the settle token.
   ['a reservation is not honoured', "if(reservedActive(prior)&&!mine.has(lid)){", "if(false){"],
-  ['no reservation before the source', "const taken=await reserve(item,stored.films[lid]||null);", "const taken='ok';"],
+  ['no reservation before the source', "const taken=await reserve(item,prior);", "const taken='ok';"],
   ['a reservation never expires', "Date.parse(entry.reservation.until)>now;", "true;"],
   ['the cap ignores the row budget of a missing entry', "if(!prior&&eff>=MAX_ATTEMPTS){", "if(false){"],
   ['the cap ignores the row budget of an entry', "const eff=Math.max(attempts,item.seed||0);", "const eff=attempts;"],
   ['the reservation ignores the backlog record', "expectBacklog:{[lid]:baseB[lid]??null}", "expectBacklog:null"],
   ['the intake is not removed from the backlog by the reservation', "backlogRemove:fromBacklog?[lid]:[]", "backlogRemove:[]"],
+  // Third review of PR #1009: the stale seed is guarded by the row token; every effect is under a reservation.
+  ['the reservation drops the row-token guard', ",extra:item.guard?[item.guard]:[]});", ",extra:[]});"],
+  ['the final write drops the row-token guard', "extra:guardsOf([...Object.keys(set)]),", ""],
+  ['a trusted-bridge link is not reserved', "if(!(await take(item,stored.films[lid]||null)))continue;\n    if(!(await intend(item,bridge.tmdb)))", "if(!(await intend(item,bridge.tmdb)))"],
+  ['a link repair is not reserved', "if(!(await take(item,prior)))continue;\n    try{", "try{"],
   ['the stored slug is not used', "if(!item.slug&&typeof prior?.slug==='string'&&SLUG.test(prior.slug))item.slug=prior.slug;", ""],
   ['a dismissed entry is checked again', "if(prior&&prior.reason==='owner_dismissed'){settled.set(lid,'owner_dismissed');continue;}", ''],
 ];
@@ -78,6 +83,7 @@ for (const [name, from, to] of MUTANTS) {
   // The behaviour test first; the D1-backed test only when the first did not kill the mutant.
   let run = spawnSync(process.execPath, ['tests/letterboxd-diary-identity.mjs'], {env: {...process.env, DIARY_IDENTITY_SRC: file}, encoding: 'utf8'});
   if (run.status === 0) run = spawnSync(process.execPath, ['tests/letterboxd-diary-identity-d1.mjs'], {env: {...process.env, DIARY_IDENTITY_SRC: file}, encoding: 'utf8'});
+  if (run.status === 0) run = spawnSync(process.execPath, ['tests/letterboxd-owner-race-d1.mjs'], {env: {...process.env, DIARY_IDENTITY_SRC: file}, encoding: 'utf8'});
   assert.notEqual(run.status, 0, 'mutants that no test kills: ' + name);
   killed++;
 }

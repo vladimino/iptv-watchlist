@@ -17,6 +17,7 @@ const LetterboxdFacts={
  ownerAction:async(env,input)=>{calls.push(['action',input]);
   if(input.expectedVersion==='atomic-off'){throw Object.assign(new Error('x'),{code:'atomic_unavailable'});}
   if(input.expectedVersion==='full')return {state:'backlog_full',results:{a:'backlog_full'}};
+  if(input.expectedVersion==='inflight')return {state:'check_in_flight',results:{},ids:['a']};
   if(input.expectedVersion!=='v1')return {state:'stale_revision',results:{}};
   return {state:'applied',results:Object.fromEntries(input.lids.map(l=>[l,'requeued'])),version:'v2',entries:Object.fromEntries(input.lids.map(l=>[l,input.createMissing?null:{attempts:0,reason:input.action==='dismiss'?'owner_dismissed':'owner_requeued'}])),backlog:Object.fromEntries(input.lids.map(l=>[l,input.createMissing&&input.action==='requeue'?{attempts:0}:null]))};},
 };
@@ -77,6 +78,7 @@ const bk=await post({action:'requeue',lane:'diary_backlog',lids:['a'],why:'w',ve
 // a store that cannot batch refuses the whole request, a full backlog is a 409 with nothing committed, a closed ledger plans nothing
 assert.deepEqual(await post({...body,version:'atomic-off'}),{status:503,body:{error:'atomic_unavailable'}});
 const full=await post({...body,lane:'diary_backlog',version:'full'});assert.equal(full.status,409);assert.equal(full.body.committed,false);
+const inflight=await post({...body,version:'inflight'});assert.deepEqual([inflight.status,inflight.body.error,inflight.body.committed,inflight.body.ids],[409,'check_in_flight',false,['a']],'an id with a check in flight refuses the whole action');
 const before=calls.length;assert.deepEqual(await post(body,{environment:{...env,ledgerClosed:true}}),{status:503,body:{error:'ledger_closed'}});assert.equal(calls.length,before+1,'only the plan ran');
 assert.match(fs.readFileSync('src/worker.js','utf8'),/url\.pathname==='\/api\/admin\/identity-work\/owner-action'\)return await adminIdentityOwnerActionRoute\(request,env,url\)/);
 console.log('admin-identity-owner-action: ok');

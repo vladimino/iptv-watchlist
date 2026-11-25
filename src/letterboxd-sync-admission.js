@@ -31,7 +31,9 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       if (snapshot === undefined) { const read = await repository.readSnapshot(ctx.env, row.firstSeenSnapshotId); snapshot = read.ok ? read.snapshot : read.reason === 'unavailable' ? 'unavailable' : null; cache.set(row.firstSeenSnapshotId, snapshot); }
       const member = snapshot && snapshot !== 'unavailable' ? snapshot.films.find(film => film.lid === row.lid) : null;
       const slug = member ? SLUG.exec(member.url)?.[1] ?? null : null;
-      const item = {lid: row.lid, slug, attempts: row.attempts, reason: row.lastReason ?? null, ...(row.firstSeenAt ? {queuedAt: row.firstSeenAt} : {})};
+      // The guard of the row's token (see `admissionRowGuard`): every write of the shared document that applies this row's budget carries it, so an owner action between this read and that write voids the stale seed.
+      const guard = typeof repository.admissionRowGuard === 'function' ? repository.admissionRowGuard({lid: row.lid, attempts: row.attempts, updatedAt: row.updatedAt}) : null;
+      const item = {lid: row.lid, slug, attempts: row.attempts, reason: row.lastReason ?? null, ...(guard ? {guard} : {}), ...(row.firstSeenAt ? {queuedAt: row.firstSeenAt} : {})};
       if (!slug) needCurrent.push(item);
       items.push(item);
       if (snapshot === 'unavailable' && !slug) unreadable[row.lid] = true;

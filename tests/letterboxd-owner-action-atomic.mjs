@@ -143,4 +143,21 @@ async function act(env, {action, lids, rows = null, version, slugs = {}, createM
   const db = open(), env = {DB: db, BUCKET: {get: async () => null, put: async () => ({etag: 'x'})}}; db.sql("UPDATE ratings_domain_authority SET mode='r2'");
   await assert.rejects(() => Facts.ownerAction(env, {doc: 'diary', action: 'requeue', lids: ['X1'], expectedVersion: null, by: 'o', why: 'w', at: AT, extra: [['SELECT 1', []]]}), error => ['atomic_unavailable', 'ratings_domain_not_authoritative', 'ratings_domain_unavailable'].includes(error.code), 'refused whole, never half done');
 }
+// 7. The worst case of the single document (review: D1 partition and batch constraints): 200 entries and 2,000 backlog records at their maximum field sizes, then a maximal owner action. The serialized document stays
+// near one megabyte, its parts stay far below the D1 row limit, and the whole write is one batch of a few dozen statements.
+{
+  const db = open(), env = {DB: db}, long = n => 'x'.repeat(n);
+  const maxEntry = {reason: long(64), class: 'not_now', slug: long(200), tmdb: '123456789012', attempts: 6, streak: 9, queuedAt: AT, lastAttemptAt: AT, nextAttemptAt: AT, route: 'watchlist_admission', checkId: long(36), requeued: {by: long(100), at: AT, why: long(200), action: 'dismiss'}, reservation: {checkId: long(36), until: AT, route: 'watchlist_admission'}};
+  const set = {}; for (let i = 0; i < 200; i++) set['L' + String(i).padStart(79, '0')] = maxEntry;
+  const add = {}; for (let i = 0; i < 2000; i++) add['B' + String(i).padStart(79, '0')] = {slug: long(200), queuedAt: AT, attempts: 6};
+  await Facts.updateDiaryIdentity(env, {set, backlogAdd: add});
+  const {version, doc} = await Facts.readDiaryIdentityVersioned(env);
+  assert.equal(Object.keys(doc.films).length, 200); assert.equal(Object.keys(doc.backlog).length, 2000);
+  const lids = Object.keys(add).slice(0, 50);
+  const out = await Facts.ownerAction(env, {action: 'requeue', lids, expectedVersion: version, by: long(254), why: long(250), at: AT});
+  assert.equal(out.state, 'applied');
+  const bytes = db.sql("SELECT SUM(LENGTH(body)) AS n, COUNT(*) AS parts, MAX(LENGTH(body)) AS biggest FROM ratings_document WHERE key LIKE '%diary-identity.json'")[0];
+  assert.ok(bytes.n < 1300000, 'worst-case document ' + bytes.n + ' bytes'); assert.ok(bytes.biggest <= 60000, 'every part is at most 60 KB'); assert.ok(bytes.parts <= 30, 'at most 30 parts in the batch: ' + bytes.parts);
+  const record = (await Facts.readDiaryIdentityVersioned(env)).doc.backlog[lids[0]]; assert.deepEqual(Object.keys(record.requeued).sort(), ['at', 'by']); assert.equal(record.requeued.by.length, 100);
+}
 console.log('letterboxd-owner-action-atomic: ok');

@@ -688,9 +688,10 @@ function recordRatingChange(record,incoming,effective){
  //  set: {lid: entry}, clear: [lid], backlogAdd: {lid: hint} (an id already in the backlog keeps its record), backlogRemove: [lid], checkedAt: the time of a real check that got an answer (`lastCheckAt`, for the Monitor).
  //  expect / expectBacklog: {lid: JSON text of the entry / backlog record the caller READ, or null for none}. Everything the call does for an id is installed only while BOTH still equal what the caller read; otherwise
  //  nothing is done for that id and it is returned in `conflicts`, so a stale write never overwrites an owner `requeue` / `dismiss`, another caller's check or an intake that landed in between.
+ //  `extra`: [sql, params] guard statements that ride in the SAME batch (a guard that fails rolls the write back; the ledger row token of a seed). Without a D1-owned store a write with `extra` is refused whole (`atomic_unavailable`).
  //  Above the entry cap the settled entries leave first; when the cap is still exceeded the ids this call ADDED are refused (`refused`): they are not entries, they stay (or are put, from `backlogOnRefuse`) in the backlog,
  //  and an id the full backlog cannot hold is returned in `full`. An existing entry is never dropped.
- async function updateDiaryIdentity(env,{set={},clear=[],backlogAdd={},backlogRemove=[],backlogOnRefuse={},expect=null,expectBacklog=null,checkedAt=null}={}){
+ async function updateDiaryIdentity(env,{set={},clear=[],backlogAdd={},backlogRemove=[],backlogOnRefuse={},expect=null,expectBacklog=null,checkedAt=null,extra=[]}={}){
   if(!Object.keys(set).length&&!clear.length&&!Object.keys(backlogAdd).length&&!backlogRemove.length&&!checkedAt)return {changed:false,refused:[],conflicts:[],full:[]};
   let refused=[],conflicts=[],full=[];
   const out=await casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{},backlog:{}},current=>{
@@ -731,20 +732,25 @@ function recordRatingChange(record,incoming,effective){
    }
    if(JSON.stringify(backlog)!==JSON.stringify(backlogBefore))changed=true;
    return changed?{...current,schemaVersion:1,films,backlog,...(lastCheckAt?{lastCheckAt}:{})}:null;
-  });
+  },{extra});
   return {...(out||{}),refused,conflicts,full};
  }
  // The owner `requeue` and `dismiss` for ids wherever the shared check holds them: the entry, the backlog record, and (through `extra`, the ledger statements the caller planned) the Watchlist ledger row. ONE
  // compare-and-swap of the document whose stored version the owner saw, in ONE D1 batch with `extra`: all three change or none does. A moved document, or a moved ledger row (the statements carry its token), refuses the
  // whole request (`stale_revision`, nothing written). The document is written in every request, so `extra` always rides in a batch. Without a D1-owned store the write is refused whole (`atomic_unavailable`).
- // `requeue` resets `attempts` (and `streak`) to 0 on the entry and the backlog record, keeps `queuedAt`, records who, when and why, and drops any check reservation; `dismiss` settles an entry as `owner_dismissed`
+ // `requeue` resets `attempts` (and `streak`) to 0 on the entry and the backlog record, keeps `queuedAt` and records who, when and why; an id with a live check reservation refuses the whole action (`check_in_flight`); `dismiss` settles an entry as `owner_dismissed`
  // and removes a backlog record. `createMissing` (the report lane) gives an id found nowhere a backlog record on `requeue`.
  async function ownerAction(env,{action,lids,slugs={},createMissing=false,expectedVersion,by,why,at,extra=[]}){
-  const results={};let stale=false,full=false;
+  const results={};let stale=false,full=false,inFlight=[];
   try{
    await casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{},backlog:{}},(raw,etag)=>{
     if((etag??null)!==(expectedVersion??null)){stale=true;return null;}
-    const current=normDiary(raw),requeued={by,at,why};
+    // The audit of an owner action is bounded: who (100 chars), when, why (200). A backlog record keeps only who and when (the reason is kept on the entry), so the worst serialized document stays near 1 MB.
+    const current=normDiary(raw),requeued={by:String(by).slice(0,100),at,why:String(why).slice(0,200)},requeuedLight={by:requeued.by,at};
+    // An id with a LIVE check reservation has an effect in flight (a source check, an admission, a link): the action is refused whole, nothing is written, so it can never be reported as committed while that effect can still land.
+    // The reservation expires by itself (a step that was cut off), and the owner retries then or after the step finishes.
+    inFlight=lids.filter(lid=>{const reservation=current.films[lid]?.reservation;return reservation&&Date.parse(reservation.until)>Date.parse(at);});
+    if(inFlight.length)return null;
     const films={...current.films},backlog={...current.backlog};full=false;
     for(const lid of lids){
      const entry=films[lid],record=backlog[lid];let done=null;
@@ -756,12 +762,12 @@ function recordRatingChange(record,incoming,effective){
       }else{films[lid]={...rest,reason:'owner_dismissed',class:'settled',nextAttemptAt:null,lastAttemptAt:at,requeued:{...requeued,action:'dismiss'}};done='dismissed';}
      }
      if(record){
-      if(action==='requeue'){backlog[lid]={...record,attempts:0,requeued};done=done||'requeued';}
+      if(action==='requeue'){backlog[lid]={...record,attempts:0,requeued:requeuedLight};done=done||'requeued';}
       else{delete backlog[lid];done=done||'dismissed';}
      }
      if(!done&&action==='requeue'&&createMissing){
       if(Object.keys(backlog).length>=DIARY_BACKLOG_CAP){full=true;results[lid]='backlog_full';continue;}
-      backlog[lid]={...backlogRecord({slug:slugs[lid],queuedAt:at,attempts:0},at),requeued};done='created';
+      backlog[lid]={...backlogRecord({slug:slugs[lid],queuedAt:at,attempts:0},at),requeued:requeuedLight};done='created';
      }
      results[lid]=done||'absent';
     }
@@ -774,6 +780,7 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
   if(stale)return {state:'stale_revision',results:{}};
+  if(inFlight.length)return {state:'check_in_flight',results:{},ids:inFlight};
   if(full)return {state:'backlog_full',results};
   const after=await readDiaryIdentityVersioned(env);
   return {state:'applied',results,version:after.version,entries:Object.fromEntries(lids.map(lid=>[lid,after.doc.films[lid]??null])),backlog:Object.fromEntries(lids.map(lid=>[lid,after.doc.backlog[lid]??null]))};
