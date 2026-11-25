@@ -227,7 +227,7 @@ D1 table `film_sync_state` ([ADR 0070](../../adr/0070-metadatasync-freshness-clo
 
 ## Readiness is derived, not a new entity status
 
-Proposed [ADR 0218](../../adr/0218-film-lifecycle-dimensions-revision.md) (AIR-644, not decided) inventories which `film_dimension` rows code still reads: only `localization` (display) and `identity` (`titleSource`, owner protection) are load-bearing; `fingerprint`/`prediction` rows are offline-only copies. Until it is decided, this section stays the contract.
+Proposed [ADR 0218](../../adr/0218-film-lifecycle-dimensions-revision.md) (AIR-644; owner selections recorded, final disposition pending, not implemented) would supersede, for D1 consumers, the stored identity/metadata/fingerprint/prediction status graphs and the three readiness predicates below with ordered predicates over the ADR 0216 sections. It would keep `localization` and the control parts of `identity` and `metadata` (`titleSource`, the ADR 0214 lock) as rows. Until it is accepted and delivered, this section stays the contract.
 
 
 - `displayReady`: non-rejected identity, a resolved identity or a Letterboxd external ID, and a usable preferred title (reviewed/provisional, original or EPG). Missing translation, fingerprint or prediction must **not** hide a film.

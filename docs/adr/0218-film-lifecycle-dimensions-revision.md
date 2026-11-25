@@ -3,7 +3,7 @@
 **Status:** Proposed  
 **Original decision date:** pending owner disposition  
 **Recorded at:** 2026-11-25, from `main` `6123890`; revised after the [independent review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7162637848) of `8b7cabf` against `main` `961c045`, and after the [second review](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7163011485) of `91284c9`  
-**Approval source:** not yet decided  
+**Approval source:** not yet decided. Owner selections A1, B1, C1, D1 recorded on 2026-11-25 ([handoff](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360)); final disposition pending re-review  
 **Related work:** [AIR-644](https://trello.com/c/nFBGvvnU). Builds on Accepted [ADR 0211](0211-catalog-enrichment-producer.md), [ADR 0213](0213-film-identity-evidence-ledger.md), [ADR 0214](0214-film-metadata-per-field-provenance.md), [ADR 0215](0215-identity-evidence-full-model.md) and [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md). Coordinated with PV1 [AIR-631](https://trello.com/c/i8td3wu0) and PVE [AIR-636](https://trello.com/c/0jJADYxg).  
 **Supersedes:** In part, the AIR-42 D1 status and readiness rules listed in [decision 4](#4-readiness) (the stored identity, metadata, fingerprint and prediction status graphs and the domain readiness predicates, for D1 consumers). It amends no other accepted ADR.  
 **Superseded by:** None
@@ -109,19 +109,59 @@ The effective localization row stays a projection of `owner_review_entry` (owner
 
 The AIR-42 domain predicates (`src/domain/film-person.js:227-237`) read dimension statuses. For every D1 consumer this ADR **supersedes** them with predicates over ADR 0216 sections. The in-memory domain predicates remain for the offline lifecycle reader and parity only, until that reader is retired.
 
-**Identity gate (all readiness).** A positive readiness requires a successful, fenced survivor verdict: `found` or `redirected`.
+Each predicate returns exactly one of `true`, `false`, `unknown` or `not_applicable`. The rules are evaluated **in order; the first match wins**, so the cases are exhaustive and mutually exclusive. `false` means the authoritative section proves the negative; `unknown` means it cannot; every non-`true` result carries a reason.
 
-- On any other verdict there are no sections, and readiness is `not_applicable` with the verdict as reason: `absent`, `retired`, `conflict`, `unverified` or `cycle`.
-- An identity section that is `unavailable` gives readiness `unknown`.
-- A verified lid never bypasses this gate. A conflicting or retired request that carries a lid is not ready.
+**Usable values.** A title is usable when it is a string that is non-empty after trimming. A core field (ADR 0214's six: `year`, `runtime`, `synopsis`, `poster`, `url`, `genres`) is usable when it is well-typed and not a default:
+- `year` and `runtime` are positive integers;
+- `synopsis`, `poster` and `url` are non-blank strings;
+- `genres` is a non-empty array of non-blank strings.
 
-Each predicate below returns `true`, `false` or `unknown`. `false` means the authoritative section proves the negative; `unknown` means it cannot.
+An empty string, `0`, `[]`, an unparsable `genres_json` or a wrong type is **not usable**. It counts as `unknown`, never as `present` and never as proved absent. A field is proved absent only by an explicit-null provenance row (ADR 0214).
 
-| Predicate | `true` | `false` | `unknown` |
-| --- | --- | --- | --- |
-| `displayReady` | gate passes and a preferred title is `present` (effective localization, else original title) | gate passes, and every title source is `absent` with explicit negative proof | display section `unavailable`/`partial`, or title `unknown` |
-| `catalogReady` | gate passes, the survivor has a stable alias (a verified lid, or the trusted non-conflicting TMDB claim the verdict used), and at least one core field `present` | gate passes, every core field is `absent` with explicit null provenance | any core field `unknown` with none `present`, or display section `unavailable` |
-| `predictionReady` | fingerprint `present` and compatible, prediction `present` and compatible, per the prediction domain | fingerprint or prediction proved incompatible, or prediction `none` under ADR 0216's full negative proof | marker held, compatibility unknown, section `partial`, G1 coverage incomplete, or a known conflict (a known conflict plus incomplete coverage is `unknown` with reason `conflict`) |
+**Priority of positives over partial coverage.**
+- For `displayReady` and `catalogReady`, a usable positive value wins over partial coverage, because another source cannot negate a present title or field.
+- For `predictionReady`, it does not: an unseen candidate could hold a conflicting pointer (ADR 0216 §6b), so incomplete coverage keeps the result `unknown`.
+
+Gate rules, applied first to every predicate:
+
+| # | Condition | Result |
+| --- | --- | --- |
+| G1 | identity section `unavailable` | `unknown` (`identity_unavailable`) |
+| G2 | verdict `absent`, `retired`, `conflict`, `unverified` or `cycle` | `not_applicable` (the verdict) |
+| G3 | verdict `found` or `redirected` | continue |
+
+A verified lid never bypasses the gate. A conflicting or retired request that carries a lid is `not_applicable`.
+
+`displayReady`:
+
+| # | Condition | Result |
+| --- | --- | --- |
+| D1 | a usable preferred title: effective localization, else `original_title` | `true` |
+| D2 | display section `unavailable` | `unknown` (`display_unavailable`) |
+| D3 | every title source is proved absent (no localization row or source row, and `original_title` explicitly null) | `false` (`no_title`) |
+| D4 | otherwise | `unknown` (`title_unknown`) |
+
+`catalogReady`:
+
+| # | Condition | Result |
+| --- | --- | --- |
+| C1 | the verdict's survivor has no stable alias: no verified `letterboxd_lid` and no trusted non-conflicting `tmdb` movie claim (for example a `tmdb_tv`-only Film) | `false` (`no_stable_alias`) |
+| C2 | at least one usable core field | `true` |
+| C3 | display section `unavailable` | `unknown` (`display_unavailable`) |
+| C4 | all six core fields proved absent | `false` (`no_core_metadata`) |
+| C5 | otherwise (unknown, unusable or partially read fields) | `unknown` (`metadata_unknown`) |
+
+`predictionReady`:
+
+| # | Condition | Result |
+| --- | --- | --- |
+| P1 | predictions or fingerprint section `unavailable` (marker held, unreadable token) | `unknown` (`prediction_unavailable`) |
+| P2 | a known conflict between authorized storage ids, whatever the coverage | `unknown` (`conflict`) |
+| P3 | the prediction domain proves no fingerprint on every authorized storage id and coverage is complete | `false` (`fingerprint_absent`) |
+| P4 | prediction `none` under ADR 0216's full negative proof | `false` (`prediction_absent`) |
+| P5 | the fingerprint or the prediction is proved incompatible by the prediction-domain verdict | `false` (`incompatible`) |
+| P6 | fingerprint and prediction present, both compatible, coverage complete | `true` |
+| P7 | otherwise (compatibility unknown, coverage incomplete, section partial) | `unknown` (with that reason) |
 
 Freshness and provenance confidence are reported beside readiness, never required by it.
 
@@ -153,30 +193,36 @@ Read rules for this row:
 
 Under B1 the row shape and the lock predicate are unchanged: `status='reviewed' OR authority='owner'` on `(film_id, 'metadata')`.
 
-**Lock ownership.** Only the explicit **review routes** create or clear a lock. ADR 0214 decision 9's metadata owner-command route never changes it ("the review routes own it"). No producer, owner-command route, importer, merge or retirement creates, clears, transfers or rewrites a locked row.
+**Lock ownership.** The explicit **review routes** create and clear a lock. ADR 0214 decision 9's metadata owner-command route never changes it ("the review routes own it"). The only other path that moves a lock is the authorized merge of ADR 0214 decision 9 (dormant `reconcile`, with the release row of decision 11), which this ADR keeps exactly. No producer, owner-command route, importer or retirement creates, clears, transfers or rewrites a locked row. This ADR changes no lock policy.
 
 Consequences for every writer:
 
 - **W1:** producers keep ADR 0211 decision 1 and do not pass `dimensions.metadata`. W1 refuses a `dimensions.metadata` input that would change a locked row unless it comes from a review route.
 - **W2:** governed by decision 7.
 - **W3 offline `retireFilm`:** it deletes the whole retired Film including its dimension rows. It is fenced: it refuses when the retired Film holds any control row (a lock, a `reviewed`/`owner` row, a `titleSource`) or an `unknown_legacy` row, until a review route has settled it.
-- **W4 merge:** a lock on either side is never moved or merged implicitly. The merge proceeds only through ADR 0214's authorized path (decision 11 release rows, applied by a review route), and otherwise refuses with `film_person_data_conflict`. The existing refusal of differing rows stays.
-- **Stage-5 retirement:** it never deletes a row matching the lock predicate.
+- **W4 merge:** the ADR 0214 merge contract applies unchanged:
+  - a lone retired lock (the survivor has no metadata row) moves to the survivor;
+  - two different metadata rows need `resolve.metadataState`, else the merge refuses with `film_person_data_conflict`;
+  - a merge with a pin or a lock on either side inserts the release row of ADR 0214 decision 11, and writes the history rows.
 
-The ADR 0214 triggers are not live today. PV1 reads the same predicate when it lands, so PV1 needs no change, but the W1, W3 and W4 refusals above are coordinated with the PV1 card so that the two do not implement the lock twice. Under B2 the lock moves to its own table. That requires an owner-approved amendment of ADR 0214 decisions 5, 9 and 11 and a revised PV1 graph **before** any conflicting implementation. PVE is unaffected either way.
+  A merge that does not follow that path refuses. `mergeFilms` has no caller, and no live merge is authorized here.
+- **Stage-6 retirement:** it never deletes a row matching the lock predicate.
+
+The ADR 0214 triggers are not live today. PV1 reads the same predicate when it lands, so PV1 needs no change. The W1 and W3 refusals above are coordinated with the PV1 card, so that the two do not implement the lock twice. This is coordination, not a new prerequisite of PV1. PVE is unaffected.
 
 ### 7. Writer, reader and retirement stages
 
 1. **Offline parity reader.** For each Film, it compares the derived facts (decision 2) with the stored row and classifies the row as `agree`, `stale_copy`, `control` (kept) or `unknown_legacy`. Parity compares derivation outputs with stored control columns only; it does not expect stale copies to equal current facts.
 2. **W2 safe import.** W2 today overwrites `film.original_title` and `film.canonical_identity` (`src/canonical-repository.js:165`) before it deletes and reinserts dimensions. The change:
    - writes the title and identity through the same guarded rule as W1: a `strong()` identity row keeps the stored values, and a ranked `titleSource` is respected, so a kept `titleSource` never ranks a value it did not bind;
-   - deletes only rows that are neither control nor `unknown_legacy`, and inserts only into empty slots or over non-control rows;
-   - stops writing `fingerprint`/`prediction` rows and processing fields;
+   - deletes and rewrites only the `identity` and `metadata` rows it imports, and only when they are neither control nor `unknown_legacy`; it inserts only into empty slots or over such rows;
+   - stops inserting `fingerprint`/`prediction` rows and processing fields, and **no longer deletes** `fingerprint`/`prediction` rows or any other retirement candidate: they stay untouched until the separately authorized stage 6;
    - moves its offline readers, verify and export/import fixtures in the same change.
 
    Before any mutation, W2 reads the target schema contract version and refuses when the importer predates it. An old importer is refused on the actual target, not trusted to check itself.
 3. **D1 and C1 writers.** The localization recompute and the identity-row creation of decisions 3 and 5. These write persistent data: a code rollback does not remove the rows they wrote. The rows stay valid under the old code, which reads the same columns with the same resolver. Coordinated with the PV1 card for the W1 lock refusal.
-4. **Reconciler.** The bounded reconciliation writer of decision 3: a code card first, then its own L2/L3 operation.
+4. **Reconciler code.** The bounded reconciliation writer of decision 3, delivered as code under normal review. Delivering the code runs nothing.
+   - **Reconciliation operation (separate).** Running the reconciler against production is its own L2 contract or L3 owner-approved plan, with dry-run, cap and pre-image. It is not part of the code card.
 5. **Reader switch.** Readiness consumers move to decision 4, behind the delivered ADR 0216 aggregate. Prerequisites: stage 1 parity on fixtures and on an offline copy, and the aggregate delivered.
 6. **Retirement (L3).** It deletes only rows classified `stale_copy` by stage 1 that also match a safe-delete predicate:
    - `dimension IN ('fingerprint','prediction')` (A1);
@@ -184,37 +230,26 @@ The ADR 0214 triggers are not live today. PV1 reads the same predicate when it l
 
    It never deletes a row with an `owner`, `reviewed` or unknown `authority`, or a row carrying a `titleSource`. `unknown_legacy` rows are retained and reported. A pre-image export precedes the delete.
 
-## Owner choices
+## Selected options
 
-Each choice is independent; the Coordinator presents them one ADR at a time under the [facilitation protocol](../process/agent-workflow.md#adr-decision-facilitation-protocol). Recommendations are the Executor's.
+The Product Owner selected A1, B1, C1 and D1 on 25 November 2026, 14:42 Europe/Madrid, without qualifications, for reviewed HEAD `eae7cad` ([consolidated handoff](https://github.com/vladimino/iptv-watchlist/pull/997#issuecomment-7164184360)). These selections are recorded here. They are not yet the final ADR disposition, which follows the independent re-review of this revision. The design above is normative for them.
 
-**A. Fingerprint and prediction rows.**
-- **A1 (recommended):** stop writing them (stage 2), derive from the prediction domain, retire the `stale_copy` rows after parity (stage 5). Removes a silently diverging copy.
-- A2: keep as a projection refreshed by the prediction writers. Adds writes to the prediction pipeline for no reader.
-- A3: keep frozen and unread. No cost now; leaves a false source that a future reader may adopt.
-
-**B. Metadata row.**
-- **B1 (recommended):** keep the row only as the lock carrier (decision 6); derive coverage and freshness. ADR 0214 and PV1 unchanged.
-- B2: dedicated lock table; retire the row. Requires an ADR 0214 amendment and a revised PV1 graph before PV1's triggers land.
-- B3: keep as today.
-
-**C. Identity row.**
-- **C1 (recommended):** keep as `titleSource` and owner/reviewed carrier; create it on a ranked title write (decision 5).
-- C2: move `titleSource` and the owner flag to `film` columns and retire the row; migrates every rank and `strong()`.
-
-**D. Effective localization.**
-- **D1 (recommended):** keep the persisted projection; recompute in the same batch with the existing resolver, a new projection-aware receipt kind and the owner-review fence (decision 3); historical receipts stay terminal; a separate bounded reconciler for existing stale rows.
-- D2: compute at read time from sources, reviewed rows and `owner_review_entry`. No projection to drift, but five readers change and the programme/watchlist title read (about 6.7k Films per request, 5 chunked statements) gains joins and per-Film resolution.
+| Choice | Selected | Normative content | Not selected, and why |
+| --- | --- | --- | --- |
+| A. Fingerprint and prediction rows | **A1** | stop inserting them (stage 2, without deleting them); derive from the prediction domain (decision 2); retire only `stale_copy` rows proven safe by parity, in the separately authorized stage 6 | A2 (projection refreshed by prediction writers): writes on the prediction pipeline for no reader. A3 (keep frozen): leaves a false source a future reader may adopt |
+| B. Metadata row | **B1** | the row stays only as the ADR 0214 lock carrier; predicate, review-route ownership and the decision 9/11 merge contract unchanged (decision 6); coverage and freshness derived | B2 (dedicated lock table): needs an ADR 0214 amendment and a revised PV1 graph. B3 (keep as today): leaves F3 |
+| C. Identity row | **C1** | the row carries `titleSource` and owner/reviewed control; created on a ranked title write; other status informational (decision 5) | C2 (move to `film` columns): migrates every rank and `strong()` for no reader gain |
+| D. Effective localization | **D1** | persisted projection recomputed in the same batch by the existing resolver, with a new projection-aware receipt kind and the owner-review fence; historical receipts terminal; separate bounded reconciler (decision 3) | D2 (compute on read): five readers change, and the programme/watchlist title read (about 6.7k Films, 5 chunked statements) gains per-Film resolution |
 
 ## Alternatives considered
 
-- **Persist and refresh all five.** Every writer maintains rows no reader uses (F1–F3). Not recommended.
+- **Persist and refresh all five.** Every writer maintains rows no reader uses (F1–F3). Not selected.
 - **Derive all, delete `film_dimension`.** Loses applied reviewed/owner state, locks and `titleSource` (F6). B2 and C2 are its controlled forms.
-- **Hybrid (recommended).**
+- **Hybrid.** Selected, through A1, B1, C1 and D1.
 
 ## Examples
 
-| Case | Today | After (recommended options) |
+| Case | Today | After (selected options) |
 | --- | --- | --- |
 | New Film, no dimension rows, metadata-sync writes a `tmdb` title source | effective row not written (F5); rank `no_identity_row` | projection written in the same batch (`provisional`, `tmdb`); identity row created with `titleSource` |
 | Sources `letterboxd` (older) and `tmdb` (newer) disagree | resolver picks `letterboxd` | unchanged: `letterboxd` (fixed order first) |
@@ -236,9 +271,10 @@ Real SQLite fixtures in `tests/`, one test per case, plus the cases above:
 
 - Localization: cross-source disagreement (order vs time); owner and reviewed overlay; concurrent dictionary review and an owner-only `owner_review_entry` change between plan and commit (fence refuses, replan); stale `observed_at`; a historical applied source receipt stays terminal and is not replayed; an unsettled old receipt settles under the old rules; no-op; reconciliation of a stale projection with no new source and after an owner change, with pre-image restore against the post-write revision; code rollback leaving projections readable by old readers.
 - Identity: `no_identity_row` rank write; every ADR 0216 verdict (`found`, `redirected`, `absent`, `retired`, `conflict`, `unverified`, `cycle`, `unavailable`) vs readiness, including a conflicting or retired request carrying a verified lid (not ready).
-- Metadata: legacy fresh without fields; legacy unattributed value stays `present`; explicit null vs unknown; no freshness window applied; lock preserved through W1, W2, W3, merge and retirement; merge with a lock refuses without the authorized path.
+- Metadata: legacy fresh without fields; legacy unattributed value stays `present`; explicit null vs unknown; no freshness window applied; lock preserved through W1, W2, W3 and retirement; merge per ADR 0214: a lone retired lock moves with the release row and history, two different metadata rows without `resolve.metadataState` refuse, a merge outside that path refuses.
 - Import: W2 keeps `original_title`/`canonical_identity` under a strong row and a ranked `titleSource`; preserves control and unknown legacy rows on delete and insert; refuses an old importer against the target contract before mutation; W3 refuses a Film with control or unknown rows.
-- Prediction/fingerprint: authorized aliases, held marker, unknown compatibility, incomplete coverage, known conflict plus incomplete coverage (all `unknown`), full negative proof (`false`).
+- Readiness: one fixture per rule G1-G3, D1-D4, C1-C5 and P1-P7, asserting that exactly one rule matches. This includes a `tmdb_tv`-only Film (`no_stable_alias`), a proved-absent fingerprint, a held marker, unknown compatibility, incomplete coverage with a present prediction (`unknown`), and a known conflict plus incomplete coverage (`conflict`). Core-field usability: an empty string, `0`, `[]`, malformed `genres_json` and a wrong type are not usable; an explicit-null provenance row is proved absent.
+- Stage 2: an import over a Film with `fingerprint`/`prediction` rows leaves them byte-identical.
 - Retirement: parity classifications for every class; the predicate never matches a control or unknown row; restore against the recorded post-delete revision.
 - Concurrency: merge and import racing a W1 write (revision CAS).
 
@@ -261,7 +297,7 @@ D1 `rows_read`/`rows_written` are measured on fixtures by each implementation ca
 - **ADR 0216:** all derivations reuse its sections, verdicts, tokens and negative proofs; no new authority.
 - **ADR 0213/0215:** no evidence rule changes.
 - **PVE (AIR-636):** unaffected; stays the prerequisite of AIR-614/615.
-- No native prerequisite change under the recommended options.
+- No native prerequisite change under the selected options: PV1 [AIR-631](https://trello.com/c/i8td3wu0) gets coordination, not a new architecture blocker; PVE [AIR-636](https://trello.com/c/0jJADYxg) stays the prerequisite of mass enrichment AIR-614/615; AIR-275 is unchanged.
 
 ## Delivery graph (no card is created by this ADR)
 
@@ -291,5 +327,5 @@ Removes two silently diverging copies and the localization staleness gap, protec
 
 - **Original decision:** pending.
 - **Implementation:** none.
-- **Dated verification:** code inventory at `main` `6123890`, revised at `961c045`, 2026-11-25; static analysis, no production reads.
+- **Dated verification:** code inventory at `main` `6123890`, revised at `961c045` and against `main` `3b4db68` for the owner selections, 2026-11-25; static analysis, no production reads.
 - **Uncertainty:** production row contents (F5 impact, legacy `authority`/`status` values) not measured; whether any sealed document carries `dimensions`; `mergeFilms` has no caller today.
