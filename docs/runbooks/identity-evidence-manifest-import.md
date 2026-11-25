@@ -1,0 +1,49 @@
+# Identity evidence manifest import (ADR 0215 decision 7; operator contract of card ER, AIR-639)
+
+**Status:** the operators and migration `0043_identity_evidence_reconstruction_import.sql` are delivered **dormant**. The migration is **not applied** (card ERM is a separate production GO), and no family has a dry run yet (cards E3a-E3c). Nothing here authorizes a production operation: **every step below that touches production needs its own owner-approved GO** (a dry run that reads production needs a production read approval; an import is L3 and names the manifest digest). A deploy never applies the migration, runs a dry run or starts an import.
+
+## What the path is
+
+One dedicated import path for every historical family of the identity evidence ledger. Its unit of approval is an **immutable manifest**: the exact list of source records at the dry run's extraction time (a bounded as-of cohort), the rows each yields with their full semantic identity (`source_order` included), ordered chunks of at most 50 source records and 200 rows, and one `evidence_key` once in the whole manifest. Its SHA-256 is printed in the dry-run report, and **the owner's import GO names that digest**; another digest needs another GO. No cross-store snapshot is claimed and the sources need not be quiet.
+
+## Steps (`src/identity-evidence-import.js`)
+
+| Step | Operator | What it does | Writes |
+| --- | --- | --- | --- |
+| 1 | `planManifest` (the dry run) | Pure. Takes the family's extraction (`records`: a frozen source record and the rows it maps to), keys every row with the ledger's own formula, reports **duplicates** (the first record in manifest order owns a key) and **conflicts** (inputs that disagree on the semantic identity, `source_order` included, are left out), excludes R2 objects that are not frozen by contract (`verified_films_after_a2`, `admin_action_applied`) or whose **residual window** the owner did not accept, cuts the chunks and prints the digest | nothing |
+| 2 | owner GO | Names the digest. Reuse of a digest from another cohort is not allowed | - |
+| 3 | `loadManifest` | Validates the manifest, re-derives every key and source token, requires the digest to equal the GO, stages the run, chunk by chunk (one atomic batch each; a repeated call takes only the chunks that are missing), reads the staging back and recomputes the digest | `identity_evidence_import_run`, `_chunk`, `_source`, `_row` |
+| 4 | `sealRun` | One atomic seal (the database refuses it unless the staged counts equal the declared ones per chunk and in total and the digest is the run's), then a second readback. After the seal every staging insert is refused | `identity_evidence_import_seal`, run `sealed` |
+| 5 | `importRun` | Reads the staging back, claims the lease (attempt 1), then per chunk one D1 batch (below), and marks the run `complete` when every chunk has a receipt | ledger rows, `identity_evidence_import_receipt` |
+
+`loadAndSealManifest` runs steps 3 and 4. Any difference between the staged and the approved content stops the run as `staging_mismatch`.
+
+## The chunk batch
+
+1. Asserts the run (`running`, this attempt, the sealed digest, the live lease), that `chunk_no` is the next one, and, for **every staged D1 source record**, that it exists with exactly its staged guard fields (field equality; `json_extract` fields included). The SQL comes from a closed allowlist of tables and columns in code and binds every value; the manifest names no SQL. A changed or deleted listed record fails the chunk as `source_moved`.
+2. Inserts **from the staging rows** (not from caller values) with `ON CONFLICT (evidence_key) DO NOTHING`, `origin = reconstruction`, `reconstruction_run` and `reconstructed_from`.
+3. Asserts that every staged key now has the staged semantic identity. A key present with a different identity, or a different or unknown `source_order`, is a **collision**: the whole chunk rolls back before any receipt and the run stops for owner review.
+4. Appends the create-only receipt with four counts computed in the batch from what the ledger holds: `inserted` (rows of this run), `already_imported` (a replay of the same source record by an earlier run), `live_covered` (a live row with the same identity) and `reconstructed_equivalent` (an earlier reconstruction of a **different** source record with the same identity). They must add up to the staged keys. Only `live_covered` is coverage; the others are never corroboration, independence or coverage. `readImportReport` lists the equivalent pairs with both source records.
+
+The import moves no Film revision, writes no canonical receipt and never changes a live row. A Film-bound staged row is refused by the ledger's own marker trigger unless the Film/Person marker is `d1`/`open`; that refusal is permanent for the manifest (`identity_evidence_import_ledger_refused`).
+
+## Leases, lost responses, resume and stop
+
+- A lease has an **attempt number**. A live lease of another owner is `identity_evidence_import_lease_held`. An **expired** lease is taken over by a new attempt (resume); a chunk sent under a stale attempt fails the run assertion and the receipt's own fence and writes nothing (`identity_evidence_import_lease_lost`). The receipt trigger checks the lease at the receipt's own time.
+- **Lost response:** the chunk's receipt decides. Present means the batch committed; absent means it did not and the same chunk is sent again (idempotent; bounded retries). A resume imports only the exact manifest and writes no duplicate rows.
+- **Stop is terminal.** `source_moved`, `collision`, `r2_moved` and `staging_mismatch` stop the run. The owner re-runs the dry run (a new cohort, a new digest) and gives a new GO; a stopped run is never resumed. Earlier chunks keep their receipts.
+- **A pending writer:** the database refuses a start, a takeover and every chunk while a writer the run names is `pending` ([activation runbook](identity-evidence-writer-activation.md)); the chunk rolls back whole and the run stays `running`. Family (b) imports after E2a and E2c are `on`.
+- **Late and backdated records are out of cohort.** A source record added after the dry run's extraction is not imported and does not stop the run, even if its own timestamp is earlier. The post-import reconciliation of each family card lists them, and a later run with its own cohort takes them, unless a live writer already covers them.
+- **R2 sources cannot be asserted inside D1.** Only an object frozen by contract is eligible. The dry run pins each object's ETag in the manifest, `importRun` re-reads it (`readEtag`) before the chunk that uses it and stops on a difference. The residual window between that read and the D1 commit is stated per object in the report and must be accepted by the owner's GO, or the object is excluded.
+
+## Rollback and recovery
+
+A code rollback does not revert D1 rows. Before use, undoing 0043 is a forward migration. After a run exists, the run is `stopped` (or left `complete`), staging and receipts are kept, and a wrong imported row is answered by a scoped withdrawal in a later row, never by an edit or delete (the ledger is append-only).
+
+## Readback
+
+`readImportRun` (state, attempt, lease, stop reason), `readImportReport` (receipts, totals, equivalent pairs) and `readStagedManifest` through an authorized read path. Record them with the GO's evidence in [evidence](../evidence/README.md). Dated production results never go in this file.
+
+## Offline proof
+
+`tests/identity-evidence-import.mjs`: migration refusal and replay; immutable staging, atomic seal, post-seal insert, tampering before and after the seal, a seal racing a late load; the dry run (digest, duplicates, `source_order` conflicts, bounds, R2); the digest bound to the GO; the four counts; changed and deleted listed records; out-of-cohort additions; a concurrent live insert; collision rollback with no receipt; lost responses at both ends; stale-lease resume; two runs; a pending writer; the R2 ETag; the dormant wiring.
