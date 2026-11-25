@@ -1,11 +1,13 @@
 -- Schema v42: the identity evidence writer control and the ledger extensions of card EC (AIR-637; ADR 0215 Accepted, decisions 1, 4 and 6; follows E1, AIR-601, migration 0041).
--- One forward migration, in four parts, none of which changes an E1 row (the ledger is empty and stays so):
+-- One forward migration, in five parts, none of which changes an E1 row (the ledger is empty and stays so):
 --  1. `identity_evidence_writer` (one durable control row per writer) and the append-only `identity_evidence_writer_change` (every transition with its reason, the deployed
 --     version and the operator's evidence link). A writer with NO control row is `off` (ADR 0215 decision 4).
 --  2. `film_identity_evidence.source_order`, the nullable causal position of an owner row in its own source (ADR 0215 decision 6).
 --  3. The `known_alias` method value (ADR 0215 choice 0215-3 = B). The method set lives in the shape trigger, not in a column CHECK, so the trigger is replaced.
 --  4. The domain path (ADR 0215 decision 1): a Discovery row names no Film and no canonical receipt. The Film/Person marker trigger now fences only Film-bound rows, and an
 --     unbound row is admitted only as a `candidate_for(discovery_observation, tmdb_*)` row of the Discovery routes. Fencing of a domain row belongs to the writer's own batch.
+--  5. Forward withdrawals (ADR 0215 decision 6): a scoped refutation of the domain path may name the key of a row that does not exist YET (an owner revoke recorded before
+--     the historical reconstruction writes its target); the target, when it arrives, must be the same proposition.
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy (applying it is card ECM, a separate production GO). Nothing writes the control
 -- tables, so every writer reads as `off`; nothing writes a domain-path row; nothing reads the ledger. Activation of a writer is a separate owner-approved operation.
 -- It follows a complete version 41 (0041) and refuses anything else before an object is created: the first statement inserts a second schema_contract row and so aborts the
@@ -70,7 +72,8 @@ CREATE TABLE identity_evidence_writer_change (
  CHECK ((kind = 'drain_complete') = (drain_evidence IS NOT NULL)),
  CHECK ((kind = 'break') = (break_from IS NOT NULL))
 ) STRICT;
-CREATE INDEX identity_evidence_writer_change_writer ON identity_evidence_writer_change (writer, seq);
+-- Each writer/generation has exactly ONE transition, ever (the unique index), so history cannot fork or accumulate orphans.
+CREATE UNIQUE INDEX identity_evidence_writer_change_writer ON identity_evidence_writer_change (writer, generation);
 
 CREATE TRIGGER identity_evidence_writer_change_no_update
 BEFORE UPDATE ON identity_evidence_writer_change
@@ -84,8 +87,20 @@ BEGIN
  SELECT RAISE(ABORT, 'identity_evidence_writer_change_append_only');
 END;
 
+-- Append-only also against a conflict policy (the same bypass 0041 closes for the ledger): `INSERT OR REPLACE`, `REPLACE` or an upsert would delete a conflicting change row
+-- without a DELETE trigger while recursive triggers are off. This guard fires BEFORE the conflict is resolved, whatever the policy and the recursive-trigger setting: a taken
+-- `seq` or a taken writer/generation is refused.
+CREATE TRIGGER identity_evidence_writer_change_conflict
+BEFORE INSERT ON identity_evidence_writer_change
+FOR EACH ROW
+WHEN (NEW.seq IS NOT NULL AND EXISTS (SELECT 1 FROM identity_evidence_writer_change WHERE seq = NEW.seq))
+ OR EXISTS (SELECT 1 FROM identity_evidence_writer_change WHERE writer = NEW.writer AND generation = NEW.generation)
+BEGIN
+ SELECT RAISE(ABORT, 'identity_evidence_writer_change_taken');
+END;
+
 -- A change row is the compare-and-swap of one transition: it must start from the writer's CURRENT state (absent is `off`, generation 0) and name the next generation.
--- Two operators racing from the same generation cannot both land: the second one's change row is refused and its whole batch rolls back.
+-- Two operators racing from the same generation cannot both land: the second one's change row is refused.
 CREATE TRIGGER identity_evidence_writer_change_current
 BEFORE INSERT ON identity_evidence_writer_change
 FOR EACH ROW
@@ -95,14 +110,34 @@ BEGIN
  SELECT RAISE(ABORT, 'identity_evidence_writer_change_stale');
 END;
 
--- The control row moves only together with its change row (inserted first, in the same batch): never directly, never backwards, never deleted.
+-- History and control are INSEPARABLE: the operator writes ONLY the change row, and this trigger applies the transition to the control row in the same statement (first
+-- activation inserts it, every other transition updates it by writer and previous generation). The change row therefore never commits alone, and the control row is only ever
+-- the result of exactly one recorded transition. `coverage_from` is the flip time of `drain_complete`, NULL otherwise.
+CREATE TRIGGER identity_evidence_writer_change_apply
+AFTER INSERT ON identity_evidence_writer_change
+FOR EACH ROW
+BEGIN
+ INSERT INTO identity_evidence_writer (writer, state, generation, coverage_from, updated_at)
+ SELECT NEW.writer, NEW.to_state, NEW.generation, NULL, NEW.recorded_at
+ WHERE NEW.generation = 1;
+ UPDATE identity_evidence_writer
+ SET state = NEW.to_state, generation = NEW.generation,
+     coverage_from = CASE WHEN NEW.to_state = 'on' THEN NEW.recorded_at ELSE NULL END,
+     updated_at = NEW.recorded_at
+ WHERE writer = NEW.writer AND generation = NEW.generation - 1 AND state = NEW.from_state AND NEW.generation > 1;
+END;
+
+-- The control row cannot be written directly: it appears (`pending`, generation 1) or moves (exactly generation + 1) only together with the change row that records that very
+-- transition, never replaced or reset (an existing writer row refuses any insert, whatever the conflict policy), never deleted.
 CREATE TRIGGER identity_evidence_writer_insert
 BEFORE INSERT ON identity_evidence_writer
 FOR EACH ROW
-WHEN NEW.state <> 'pending' OR NEW.generation <> 1 OR NOT EXISTS (
- SELECT 1 FROM identity_evidence_writer_change AS c
- WHERE c.writer = NEW.writer AND c.generation = 1 AND c.kind = 'activate' AND c.from_state = 'off' AND c.to_state = 'pending' AND c.recorded_at = NEW.updated_at
-)
+WHEN NEW.state <> 'pending' OR NEW.generation <> 1
+ OR EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer = NEW.writer)
+ OR NOT EXISTS (
+  SELECT 1 FROM identity_evidence_writer_change AS c
+  WHERE c.writer = NEW.writer AND c.generation = 1 AND c.kind = 'activate' AND c.from_state = 'off' AND c.to_state = 'pending' AND c.recorded_at = NEW.updated_at
+ )
 BEGIN
  SELECT RAISE(ABORT, 'identity_evidence_writer_transition');
 END;
@@ -180,6 +215,46 @@ FOR EACH ROW
 WHEN NEW.film_id IS NULL AND NOT (NEW.relation = 'candidate_for' AND NEW.subject_kind = 'discovery_observation' AND NEW.route IN ('discovery_scan', 'owner_action'))
 BEGIN
  SELECT RAISE(ABORT, 'film_identity_evidence_unbound');
+END;
+
+-- 5. Forward withdrawals (ADR 0215 decision 6). 0041 required a scoped refutation to name an EXISTING row. An owner revoke or replacement recorded before the historical
+-- reconstruction writes its target must name the target's deterministic key first, so the domain path may refer FORWARD:
+-- - a target that exists must be the same proposition (unchanged from 0041);
+-- - a target that does not exist yet is accepted only for an unbound owner row (the domain path); a Film-bound row still needs its target (0041 behaviour);
+-- - when the target arrives later, it must be the same proposition as every scoped withdrawal already naming it (a mismatch aborts the arriving row);
+-- - the supersession rules are unchanged.
+DROP TRIGGER film_identity_evidence_scope_target;
+CREATE TRIGGER film_identity_evidence_scope_target
+BEFORE INSERT ON film_identity_evidence
+FOR EACH ROW
+WHEN NEW.scope_evidence_key IS NOT NULL AND (
+ (EXISTS (SELECT 1 FROM film_identity_evidence AS p WHERE p.evidence_key = NEW.scope_evidence_key)
+  AND NOT EXISTS (
+   SELECT 1 FROM film_identity_evidence AS p
+   WHERE p.evidence_key = NEW.scope_evidence_key
+   AND p.subject_kind = NEW.subject_kind AND p.subject_value = NEW.subject_value AND p.relation = NEW.relation
+   AND p.object_kind IS NEW.object_kind AND p.object_value IS NEW.object_value
+  ))
+ OR (NOT EXISTS (SELECT 1 FROM film_identity_evidence AS p WHERE p.evidence_key = NEW.scope_evidence_key)
+  AND NOT (NEW.film_id IS NULL AND NEW.route = 'owner_action'))
+)
+BEGIN
+ SELECT RAISE(ABORT, 'film_identity_evidence_scope');
+END;
+
+CREATE INDEX film_identity_evidence_scope_ref ON film_identity_evidence (scope_evidence_key) WHERE scope_evidence_key IS NOT NULL;
+
+CREATE TRIGGER film_identity_evidence_scope_arrival
+BEFORE INSERT ON film_identity_evidence
+FOR EACH ROW
+WHEN EXISTS (
+ SELECT 1 FROM film_identity_evidence AS w
+ WHERE w.scope_evidence_key = NEW.evidence_key
+ AND NOT (w.subject_kind = NEW.subject_kind AND w.subject_value = NEW.subject_value AND w.relation = NEW.relation
+  AND w.object_kind IS NEW.object_kind AND w.object_value IS NEW.object_value)
+)
+BEGIN
+ SELECT RAISE(ABORT, 'film_identity_evidence_scope');
 END;
 
 CREATE TRIGGER IF NOT EXISTS schema_contract_no_downgrade

@@ -12,7 +12,7 @@ import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {evidenceKeyOf,evidenceStrength,METHODS,normalizeEvidence} from '../src/identity-evidence.js';
-import {CHANGE_KINDS,WRITERS,changeWriter,domainEvidenceStatements,identityEvidenceControlStatus,planDomainEvidence,readWriter,readWriterChanges} from '../src/identity-evidence-writer.js';
+import {ABSENT,CHANGE_KINDS,WRITERS,changeWriter,domainEvidenceStatements,identityEvidenceControlStatus,planDomainEvidence,readWriter,readWriterChanges} from '../src/identity-evidence-writer.js';
 
 const NEW='0042_identity_evidence_writer_control.sql',PREVIOUS='0041_film_identity_evidence.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -78,10 +78,11 @@ const lit=value=>value===null||value===undefined?'NULL':typeof value==='number'?
  // No other table is touched: the schema difference between 41 and 42 is exactly the new objects and the replaced triggers.
  const names=file=>rows(file,"SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").map(row=>row.type+':'+row.name).sort();
  const added=names(template).filter(name=>!names(template40).includes(name));
- assert.deepEqual(added,['index:identity_evidence_writer_change_writer','table:identity_evidence_writer','table:identity_evidence_writer_change','trigger:film_identity_evidence_source_order',
-  'trigger:identity_evidence_writer_change_current','trigger:identity_evidence_writer_change_no_delete','trigger:identity_evidence_writer_change_no_update','trigger:identity_evidence_writer_insert',
-  'trigger:identity_evidence_writer_no_delete','trigger:identity_evidence_writer_update'].sort());
- assert.deepEqual(names(template40).filter(name=>!names(template).includes(name)),[],'0042 removes no object (the three replaced triggers keep their names)');
+ assert.deepEqual(added,['index:film_identity_evidence_scope_ref','index:identity_evidence_writer_change_writer','table:identity_evidence_writer','table:identity_evidence_writer_change','trigger:film_identity_evidence_scope_arrival',
+  'trigger:film_identity_evidence_source_order','trigger:identity_evidence_writer_change_apply','trigger:identity_evidence_writer_change_conflict','trigger:identity_evidence_writer_change_current',
+  'trigger:identity_evidence_writer_change_no_delete','trigger:identity_evidence_writer_change_no_update','trigger:identity_evidence_writer_insert','trigger:identity_evidence_writer_no_delete',
+  'trigger:identity_evidence_writer_update'].sort());
+ assert.deepEqual(names(template40).filter(name=>!names(template).includes(name)),[],'0042 removes no object (the four replaced triggers keep their names)');
  const downgrade=copy(template);
  refused(downgrade,'UPDATE schema_contract SET version=41 WHERE id=1',/schema_contract_downgrade/);
 }
@@ -135,7 +136,45 @@ delete FILM_BOUND.subject_value_;
  assert.equal(one(file,"SELECT request_id FROM film_identity_evidence WHERE evidence_key='"+key(10)+"'"),'req');
 }
 
-// ===== 3. the control tables: absent = off, transitions, compare-and-swap, append-only =====
+// ----- 2b. forward withdrawals (ADR 0215 decision 6): a scoped refutation of the domain path may name a target that does not exist yet -----
+{
+ const file=copy(template);
+ const OWNER={route:'owner_action',method:'owner_statement',source_root:'intent-1'};
+ const revoke=(n,target,over={})=>insert({evidence_key:key(n),...OWNER,polarity:'refutes',scope_evidence_key:key(target),source_order:2,source_root:'intent-revoke-'+n,...over});
+ const assign=(n,over={})=>insert({evidence_key:key(n),...OWNER,source_order:1,source_root:'intent-assign-'+n,...over});
+ // revoke before target: accepted, the target is not there yet.
+ ok(file,revoke(50,51));
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),1);
+ // the target arrives later with the SAME proposition: accepted, the withdrawal and the target are both stored.
+ ok(file,assign(51));
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),2);
+ // a target arriving with ANOTHER proposition than a withdrawal already naming it is refused whole (nothing lands).
+ ok(file,revoke(52,53));
+ refused(file,assign(53,{object_value:'604'}),/film_identity_evidence_scope/);
+ refused(file,assign(53,{subject_value:'another film|2000'}),/film_identity_evidence_scope/);
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_identity_evidence WHERE evidence_key='"+key(53)+"'"),0,'a mismatching arrival rolled back');
+ ok(file,assign(53));
+ // target before revoke: the unchanged 0041 rule for an existing target, same proposition accepted, another refused.
+ ok(file,revoke(54,51));
+ refused(file,revoke(55,51,{object_value:'604'}),/film_identity_evidence_scope/);
+ refused(file,revoke(56,51,{subject_value:'another film|2000'}),/film_identity_evidence_scope/);
+ // the replay of a stored forward withdrawal is still an exact no-op (the conflict trigger of 0041).
+ ok(file,revoke(50,51)+' ON CONFLICT(evidence_key) DO NOTHING');
+ ok(file,'PRAGMA recursive_triggers=OFF;'+revoke(50,51).replace(/^INSERT/,'INSERT OR REPLACE'));
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_identity_evidence WHERE evidence_key='"+key(50)+"'"),1);
+ // the forward reference is NARROW: only an unbound owner row. A Film-bound refutation, or another route, still needs an existing target (0041 behaviour).
+ refused(file,revoke(57,58,{film_id:'film:tmdb:603'}),/film_identity_evidence_(scope|not_open)/);
+ const open=copy(template);ok(open,OPEN);
+ refused(open,revoke(57,58,{film_id:'film:tmdb:603',subject_kind:'letterboxd_lid',subject_value:'lid603',relation:'same_work',object_kind:'tmdb_movie',object_value:'603',route:'ratings_diary',method:'page_check',source_root:hex('p'),source_order:null}),/film_identity_evidence_scope/);
+ refused(file,revoke(59,60,{route:'discovery_scan',source_order:null}),/film_identity_evidence_scope/);
+ // a withdrawal never targets itself, and every other E1 rule still applies to a forward withdrawal (shape, CHECKs, append-only).
+ refused(file,revoke(61,61),/CHECK constraint failed/);
+ refused(file,revoke(62,63,{method:'known_alias'}),/CHECK constraint failed/);
+ refused(file,revoke(64,65,{subject_kind:'letterboxd_lid',subject_value:'lid1'}),/film_identity_evidence_(shape|unbound)/);
+ refused(file,"UPDATE film_identity_evidence SET scope_evidence_key='"+key(99)+"' WHERE evidence_key='"+key(50)+"'",/film_identity_evidence_append_only/);
+}
+
+// ===== 3. the control tables: absent = off, history and control inseparable, compare-and-swap, append-only, no REPLACE bypass =====
 const change=(over={})=>{
  const row={writer:'discovery_decision',kind:'activate',from_state:'off',to_state:'pending',generation:1,reason:'activation',deployed_version:'abc123',evidence_link:'https://trello.com/c/x',drain_evidence:null,break_from:null,recorded_at:AT,...over};
  const columns=['writer','kind','from_state','to_state','generation','reason','deployed_version','evidence_link','drain_evidence','break_from','recorded_at'];
@@ -143,43 +182,76 @@ const change=(over={})=>{
 };
 const control=(over={})=>{const row={writer:'discovery_decision',state:'pending',generation:1,coverage_from:null,updated_at:AT,...over};
  return 'INSERT INTO identity_evidence_writer (writer,state,generation,coverage_from,updated_at) VALUES ('+['writer','state','generation','coverage_from','updated_at'].map(column=>lit(row[column])).join(',')+')';};
+const writerRow=(file,writer='discovery_decision')=>rows(file,"SELECT writer,state,generation,coverage_from,updated_at FROM identity_evidence_writer WHERE writer='"+writer+"'")[0]||null;
+const DRAIN={kind:'drain_complete',from_state:'pending',to_state:'on',generation:2,drain_evidence:'one deployment at 100%',recorded_at:iso(1000)};
+const OFF3={kind:'break',from_state:'on',to_state:'off',generation:3,reason:'rollback',break_from:iso(2000),recorded_at:iso(3000)};
 {
  const file=copy(template);
- // The control row never appears without its change row, and the change row never claims a state the writer is not in.
+ // The control row can never be written on its own: not an insert, not an update.
  refused(file,control(),/identity_evidence_writer_transition/);
+ refused(file,"INSERT OR REPLACE INTO identity_evidence_writer (writer,state,generation,coverage_from,updated_at) VALUES ('discovery_decision','on',2,'"+AT+"','"+AT+"')",/identity_evidence_writer_transition/);
+ // A change row that does not start from the writer's current state, or skips a generation, is refused.
  refused(file,change({from_state:'pending'}),/identity_evidence_writer_change_stale|CHECK constraint failed/);
  refused(file,change({generation:2}),/identity_evidence_writer_change_stale/);
  refused(file,change({kind:'drain_complete',from_state:'pending',to_state:'on',drain_evidence:'proof'}),/identity_evidence_writer_change_stale/);
- ok(file,change()+';'+control());
- assert.deepEqual(rows(file,'SELECT writer,state,generation,coverage_from FROM identity_evidence_writer'),[{writer:'discovery_decision',state:'pending',generation:1,coverage_from:null}]);
- // A change row alone moves nothing in the control row but a control row alone is refused: it needs the change row of this exact generation and time.
+ assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_writer_change'),0,'a refused change leaves no orphan');
+ // The change row ALONE does everything: it inserts the control row (history and control are inseparable).
+ ok(file,change());
+ assert.deepEqual(writerRow(file),{writer:'discovery_decision',state:'pending',generation:1,coverage_from:null,updated_at:AT});
+ assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_writer_change'),1);
+ // A control update on its own is refused, even to the next generation, even with a change row of ANOTHER generation or writer in history.
  refused(file,"UPDATE identity_evidence_writer SET state='on',generation=2,coverage_from='"+iso(1000)+"',updated_at='"+iso(1000)+"' WHERE writer='discovery_decision'",/identity_evidence_writer_transition/);
- refused(file,change({kind:'drain_complete',from_state:'pending',to_state:'on',generation:2,recorded_at:iso(1000)})+";UPDATE identity_evidence_writer SET state='on',generation=2,coverage_from=NULL,updated_at='"+iso(1000)+"' WHERE writer='discovery_decision'",/CHECK constraint failed/);
- refused(file,change({kind:'drain_complete',from_state:'pending',to_state:'on',generation:2,recorded_at:iso(1000)}),/CHECK constraint failed/);
- ok(file,change({kind:'drain_complete',from_state:'pending',to_state:'on',generation:2,drain_evidence:'one deployment at 100%',recorded_at:iso(1000)})
-  +";UPDATE identity_evidence_writer SET state='on',generation=2,coverage_from='"+iso(1000)+"',updated_at='"+iso(1000)+"' WHERE writer='discovery_decision'");
- assert.equal(one(file,"SELECT coverage_from FROM identity_evidence_writer WHERE writer='discovery_decision'"),iso(1000),'coverage starts at the pending -> on flip, not at activation');
+ // A second change row for the same writer and generation (a duplicate or an orphan waiting for its control update) cannot accumulate: the writer/generation is unique.
+ refused(file,change({recorded_at:iso(5)}),/identity_evidence_writer_change_(taken|stale)|UNIQUE/);
+ refused(file,change({kind:'deactivate',from_state:'pending',to_state:'off',generation:1,reason:'other'}),/identity_evidence_writer_change_(taken|stale)|UNIQUE|CHECK/);
+ // Missing drain evidence and a malformed transition are refused.
+ refused(file,change({...DRAIN,drain_evidence:null}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
+ ok(file,change(DRAIN));
+ assert.deepEqual(writerRow(file),{writer:'discovery_decision',state:'on',generation:2,coverage_from:iso(1000),updated_at:iso(1000)},'coverage starts at the pending -> on flip, not at activation');
  // Illegal transitions and shapes.
- refused(file,change({kind:'activate',from_state:'on',to_state:'pending',generation:3}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
- refused(file,change({kind:'deactivate',from_state:'on',to_state:'off',generation:3,break_from:iso(10)}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
- refused(file,change({kind:'break',from_state:'on',to_state:'off',generation:3}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
- refused(file,change({kind:'deactivate',from_state:'off',to_state:'on',generation:3}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
- refused(file,change({kind:'deactivate',from_state:'on',to_state:'off',generation:3,reason:''}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
- refused(file,change({kind:'deactivate',from_state:'on',to_state:'off',generation:3,evidence_link:''}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
+ const illegal=/CHECK constraint failed|identity_evidence_writer_change_(stale|taken)|UNIQUE/;
+ refused(file,change({kind:'activate',from_state:'on',to_state:'pending',generation:3}),illegal);
+ refused(file,change({kind:'deactivate',from_state:'on',to_state:'off',generation:3,break_from:iso(10)}),illegal);
+ refused(file,change({kind:'break',from_state:'on',to_state:'off',generation:3}),illegal);
+ refused(file,change({kind:'deactivate',from_state:'off',to_state:'on',generation:3}),illegal);
+ refused(file,change({kind:'deactivate',from_state:'on',to_state:'off',generation:3,reason:''}),illegal);
+ refused(file,change({kind:'deactivate',from_state:'on',to_state:'off',generation:3,evidence_link:''}),illegal);
+ refused(file,change({writer:'unknown_writer'}),illegal);
+ // Direct writes of the control row stay refused after the history exists.
  refused(file,"UPDATE identity_evidence_writer SET coverage_from='"+iso(5)+"' WHERE writer='discovery_decision'",/identity_evidence_writer_transition/);
  refused(file,"UPDATE identity_evidence_writer SET writer='discovery_owner' WHERE writer='discovery_decision'",/identity_evidence_writer_transition/);
+ refused(file,"UPDATE identity_evidence_writer SET state='pending',generation=1,coverage_from=NULL,updated_at='"+AT+"' WHERE writer='discovery_decision'",/identity_evidence_writer_transition/);
  refused(file,"DELETE FROM identity_evidence_writer",/identity_evidence_writer_no_delete/);
- refused(file,"UPDATE identity_evidence_writer_change SET reason='edited'",/identity_evidence_writer_change_append_only/);
- refused(file,"DELETE FROM identity_evidence_writer_change",/identity_evidence_writer_change_append_only/);
- refused(file,change({writer:'unknown_writer'}),/CHECK constraint failed|identity_evidence_writer_change_stale/);
- // `deactivate` then a later activation starts again at the first step, with history kept.
- ok(file,change({kind:'break',from_state:'on',to_state:'off',generation:3,reason:'rollback',break_from:iso(2000),recorded_at:iso(3000)})
-  +";UPDATE identity_evidence_writer SET state='off',generation=3,coverage_from=NULL,updated_at='"+iso(3000)+"' WHERE writer='discovery_decision'");
- ok(file,change({generation:4,recorded_at:iso(4000)})+";UPDATE identity_evidence_writer SET state='pending',generation=4,coverage_from=NULL,updated_at='"+iso(4000)+"' WHERE writer='discovery_decision'");
- assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_writer_change'),4,'every transition is kept');
+ // The REPLACE bypass of SQLite (a conflict policy deletes the old row without a DELETE trigger while recursive triggers are off) cannot reset the control row to its
+ // original generation-1 values, nor erase or rewrite the history, with recursive_triggers OFF (the default) or ON.
+ for(const recursive of ['OFF','ON']){
+  const pragma='PRAGMA recursive_triggers='+recursive+';';
+  const before=JSON.stringify([writerRow(file),rows(file,'SELECT * FROM identity_evidence_writer_change ORDER BY seq')]);
+  for(const verb of ['INSERT OR REPLACE','REPLACE','INSERT OR IGNORE','INSERT OR ABORT']){
+   const reset=control().replace(/^INSERT/,verb);
+   refused(file,pragma+reset,/identity_evidence_writer_transition/);
+  }
+  refused(file,pragma+control()+" ON CONFLICT(writer) DO UPDATE SET state='pending',generation=1,coverage_from=NULL",/identity_evidence_writer_transition/);
+  // REPLACE of an existing change seq, or of an existing writer/generation, with a transition that would otherwise be valid for ANOTHER writer.
+  refused(file,pragma+change({writer:'discovery_owner'}).replace(/^INSERT INTO identity_evidence_writer_change \(/,'INSERT OR REPLACE INTO identity_evidence_writer_change (seq,').replace('VALUES (','VALUES (1,'),/identity_evidence_writer_change_(taken|stale)/);
+  refused(file,pragma+change(OFF3).replace(/^INSERT/,'INSERT OR REPLACE').replace(/^INSERT OR REPLACE INTO identity_evidence_writer_change \(/,'INSERT OR REPLACE INTO identity_evidence_writer_change (seq,').replace('VALUES (','VALUES (2,'),/identity_evidence_writer_change_(taken|stale)/);
+  refused(file,pragma+change(DRAIN).replace(/^INSERT/,'INSERT OR REPLACE'),/identity_evidence_writer_change_(taken|stale)/);
+  refused(file,pragma+change(DRAIN)+" ON CONFLICT(writer,generation) DO UPDATE SET reason='rewritten'",/identity_evidence_writer_change_(taken|stale)/);
+  refused(file,pragma+"UPDATE identity_evidence_writer_change SET reason='edited'",/identity_evidence_writer_change_append_only/);
+  refused(file,pragma+"DELETE FROM identity_evidence_writer_change",/identity_evidence_writer_change_append_only/);
+  assert.equal(JSON.stringify([writerRow(file),rows(file,'SELECT * FROM identity_evidence_writer_change ORDER BY seq')]),before,'recursive_triggers='+recursive+': control and history are untouched by every bypass attempt');
+ }
+ // A break from `on`, then a later activation starts again at the first step, with history kept and every generation exactly once.
+ ok(file,change(OFF3));
+ assert.deepEqual(writerRow(file),{writer:'discovery_decision',state:'off',generation:3,coverage_from:null,updated_at:iso(3000)});
+ ok(file,change({generation:4,recorded_at:iso(4000)}));
+ assert.deepEqual(writerRow(file),{writer:'discovery_decision',state:'pending',generation:4,coverage_from:null,updated_at:iso(4000)});
+ assert.deepEqual(rows(file,'SELECT writer,generation FROM identity_evidence_writer_change ORDER BY seq'),[1,2,3,4].map(generation=>({writer:'discovery_decision',generation})),'one immutable transition per generation');
  // Writers are independent: one writer's row says nothing about another's.
- ok(file,change({writer:'discovery_owner'})+';'+control({writer:'discovery_owner'}));
+ ok(file,change({writer:'discovery_owner'}));
  assert.deepEqual(rows(file,'SELECT writer,state FROM identity_evidence_writer ORDER BY writer'),[{writer:'discovery_decision',state:'pending'},{writer:'discovery_owner',state:'pending'}]);
+ // The control row always equals the last recorded transition (the invariant the triggers keep).
+ assert.equal(one(file,'SELECT COUNT(*) FROM identity_evidence_writer AS w WHERE w.generation <> (SELECT MAX(generation) FROM identity_evidence_writer_change AS c WHERE c.writer = w.writer) OR w.state <> (SELECT to_state FROM identity_evidence_writer_change AS c WHERE c.writer = w.writer AND c.generation = w.generation)'),0);
 }
 
 // ===== 4. the operator (src/identity-evidence-writer.js changeWriter) =====
@@ -293,7 +365,26 @@ const owner=(over={})=>decision({route:'owner_action',method:'owner_statement',s
  assert.equal(plan.writer,'discovery_decision');
  assert.equal(plan.evidenceKey,await evidenceKeyOf(decision()));
  assert.equal((await planDomainEvidence('discovery_decision',known('known_epg_alias'))).row.method,'known_alias');
- assert.equal((await planDomainEvidence('discovery_decision',decision({polarity:'restricts',method:'title_year_search'}))).row.polarity,'restricts');
+ assert.equal((await planDomainEvidence('discovery_decision',decision({object:{kind:'tmdb_tv',value:'1396'}}))).row.objectKind,'tmdb_tv','a decision may name a TV id');
+ // ADR 0215 Table 3: nothing else is written by the live planner, however valid the pure model finds it.
+ for(const [name,input] of [
+  ['a root other than the observation key',decision({sourceRoot:'another root'})],
+  ['an unrelated root token',decision({sourceRoot:'run-17'})],
+  ['title_only as a standalone row',decision({method:'title_only'})],
+  ['title_year as a standalone row',decision({method:'title_year'})],
+  ['title_year_search restricts',decision({polarity:'restricts',method:'title_year_search'})],
+  ['restricts by a detail check',decision({polarity:'restricts'})],
+  ['a detail check with a scope',decision({sourceScope:'known_epg_alias'})],
+  ['a known alias without a scope',known(null)],
+  ['a refutation by a decision',decision({polarity:'refutes',method:'owner_statement'})],
+ ])await assert.rejects(()=>planDomainEvidence('discovery_decision',input),code('identity_evidence_out_of_slice'),name);
+ for(const [name,input] of [
+  ['owner restricts',owner({polarity:'restricts'})],
+  ['owner TV',owner({object:{kind:'tmdb_tv',value:'1396'}})],
+  ['owner with a scope',owner({sourceScope:'known_epg_alias'})],
+  ['owner by a detail check',owner({method:'tmdb_detail_check'})],
+  ['owner with supersession',owner({supersedesKey:key(77)})],
+ ])await assert.rejects(()=>planDomainEvidence('discovery_owner',input),code('identity_evidence_out_of_slice'),name);
  assert.equal((await planDomainEvidence('discovery_owner',owner())).row.sourceOrder,4);
  assert.equal((await planDomainEvidence('discovery_owner',owner({polarity:'refutes',scopeEvidenceKey:key(99)}))).row.scopeEvidenceKey,key(99));
  const out=async(writer,input)=>assert.rejects(()=>planDomainEvidence(writer,input),code('identity_evidence_out_of_slice'));
@@ -341,13 +432,33 @@ const setWriter=async(env,writer,target)=>{
 };
 {
  const plan=await planDomainEvidence('discovery_decision',decision());
- // A schema without the control tables: the writer reads as off and appends nothing; the domain batch is unchanged.
+ // A schema without the control tables: the writer reads as off and writes no row, but the helper still returns ONE commit-time guard (never an empty list), and the domain
+ // write is otherwise unchanged.
  {
   const file=withProbe(copy(template40));const env=envOf(file);
   const statements=await domainEvidenceStatements(env,plan,{requestId:'req-1',at:AT});
-  assert.deepEqual(statements,[]);
+  assert.equal(statements.length,1,'one guard statement, never nothing');
+  assert.ok(statements[0][0].includes(ABSENT),'the guard asserts the control tables are still absent at commit');
   await domainBatch(env,file,plan);
   assert.deepEqual(probe(file),['m']);
+  assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),0);
+ }
+ // The pre-ECM interleaving (ADR 0215 decision 4; the gap closed by the commit-time guard): a batch is PREPARED while the schema is absent, ECM then applies 0042 and the writer is
+ // activated and drained to `on`, and only then does the delayed batch commit. Without the guard it would commit its domain step with no row inside a claimed coverage
+ // interval. With it the batch fails whole (nothing of the domain step lands), and the replan, which reads the schema again, writes the row.
+ {
+  const file=withProbe(copy(template40));const env=envOf(file);
+  const prepared=await domainEvidenceStatements(env,plan,{requestId:'late',at:AT});
+  ok(file,read(NEW));
+  await setWriter(env,'discovery_decision','on');
+  const db=env.DB;
+  await assert.rejects(()=>db.batch([['INSERT INTO schema_probe (note) VALUES (?)',['delayed']],...prepared].map(([sql,params])=>db.prepare(sql).bind(...params))),/CHECK constraint failed/);
+  assert.deepEqual(probe(file),[],'the delayed pre-ECM batch committed nothing');
+  assert.deepEqual(ledgerRows(file),[]);
+  await domainBatch(env,file,plan,{requestId:'replanned',mark:'replanned'});
+  assert.deepEqual(probe(file),['replanned']);
+  assert.equal(ledgerRows(file).length,1,'the replan carries the insert and its row');
+  assert.equal(ledgerRows(file)[0].request_id,'replanned');
  }
  // Absent and `off`: no row, the domain write is unchanged, the assertion passes.
  for(const state of ['absent','off']){

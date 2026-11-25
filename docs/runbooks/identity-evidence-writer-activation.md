@@ -10,7 +10,7 @@ A row alone is not coverage: a version that predates the writer commits the same
 
 ## Operator: `changeWriter` (`src/identity-evidence-writer.js`)
 
-One call is one atomic D1 batch of a change row and the control row. It takes `writer`, `kind`, `expectedGeneration` (the generation just read, 0 for an absent row), `reason`, `deployedVersion`, `evidenceLink` (a Trello or PR comment, or an evidence file) and, per kind, `drainEvidence` or `breakFrom`. A stale `expectedGeneration`, or a second operator racing from the same generation, writes nothing and fails with `identity_evidence_writer_stale`.
+One call is **one statement**: the change row, whose trigger applies the transition to the control row (history and control are inseparable; the control row is never written directly). It takes `writer`, `kind`, `expectedGeneration` (the generation just read, 0 for an absent row), `reason`, `deployedVersion`, `evidenceLink` (a Trello or PR comment, or an evidence file) and, per kind, `drainEvidence` or `breakFrom`. A stale `expectedGeneration`, or a second operator racing from the same generation, writes nothing and fails with `identity_evidence_writer_stale`.
 
 | Step | `kind` | Transition | Precondition |
 | --- | --- | --- | --- |
@@ -19,6 +19,14 @@ One call is one atomic D1 batch of a change row and the control row. It takes `w
 | 3 | `drain_complete` | `pending` to `on` | `drainEvidence` names that proof; `coverage_from` is the time of this flip, not of step 1 |
 | end | `deactivate` | `pending` or `on` to `off` | records the end of coverage (also recovers a `pending` left by an interrupted activation); a later activation restarts at step 1 |
 | break | `break` | `pending` or `on` to `off` | a rollback to a version without the writer happened: `breakFrom` is the deployment time of that version, taken from the deployment history |
+
+## Coordination with M1 and ECM (holdpoint, no production operation here)
+
+D1 applies pending migration files in number order. EC may merge ahead of A1 and of M1 (the apply of 0041), so M1 cannot skip its lower-numbered file's successor: a plain apply of 0041 with 0042 pending applies **both**. The M1 and ECM GOs must therefore be planned together, or each must name its exact files and the execution path that applies only them; neither apply activates a writer. Do not apply 0042 before 0041, and read the live schema version first.
+
+## Before the first activation: batches prepared before ECM
+
+A domain batch prepared while the control tables were absent carries a commit-time guard (`domainEvidenceStatements` returns one assertion that the tables are still absent), so it fails whole if it commits after 0042 is applied and replans. The drain proof of step 2 therefore needs no extra pre-ECM interval, but **every E2 integration must call the helper and pass its domain assertion builder**; a batch built without the helper is outside this guarantee.
 
 ## Rules
 

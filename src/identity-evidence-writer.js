@@ -9,10 +9,11 @@
 //   the one of ADR 0213 decision 4, unchanged; `source_order` (owner rows) is part of the semantic identity but not of the key.
 // - `domainEvidenceStatements`: the two statements a domain batch appends (ADR 0215 decision 1): an insert that writes only while the writer is `pending` or `on`
 //   (`ON CONFLICT (evidence_key) DO NOTHING`), and an assertion that passes for `off`/absent, a new row and a valid duplicate, and fails (rolling the domain batch back) for a
-//   missing row or a row under the same key with another semantic identity. On a schema without the control tables it returns no statement at all.
+//   missing row or a row under the same key with another semantic identity. On a schema without the control tables it returns ONE guard statement instead (see below).
 // - `changeWriter`: the activation/break operator (ADR 0215 decision 4): `activate` (`off -> pending`), `drain_complete` (`pending -> on`, with drain evidence and the
-//   coverage start), `deactivate` (`pending|on -> off`) and `break` (`pending|on -> off` with the deployment that broke the interval). Each is ONE batch of a change row and
-//   the control row, compare-and-swap on `generation` (the triggers of migration 0042 enforce it), and each is an owner-approved production operation when run for real.
+//   coverage start), `deactivate` (`pending|on -> off`) and `break` (`pending|on -> off` with the deployment that broke the interval). Each is ONE statement: the change row,
+//   whose trigger applies the transition to the control row (history and control are inseparable), compare-and-swap on `generation` (the triggers of migration 0042 enforce
+//   it). Each is an owner-approved production operation when run for real.
 import {database,failed,many,one} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 import {evidenceKeyOf,normalizeEvidence,KNOWN_ALIAS_SCOPES} from './identity-evidence.js';
@@ -23,7 +24,7 @@ export const WRITER_STATES=Object.freeze(['off','pending','on']);
 export const CHANGE_KINDS=Object.freeze(['activate','drain_complete','deactivate','break']);
 // The domain-path writers of this record: the Discovery decision and owner writers. The claim bridge is canonical-path (E2b) and the retirement writers are parked (E2d).
 export const DOMAIN_WRITERS=Object.freeze({
- discovery_decision:Object.freeze({route:'discovery_scan',methods:Object.freeze(['tmdb_detail_check','known_alias','title_only','title_year','title_year_search']),owner:false}),
+ discovery_decision:Object.freeze({route:'discovery_scan',methods:Object.freeze(['tmdb_detail_check','known_alias']),owner:false}),
  discovery_owner:Object.freeze({route:'owner_action',methods:Object.freeze(['owner_statement']),owner:true}),
 });
 
@@ -71,27 +72,34 @@ export async function readWriterChanges(env,writer){
  return many(database(env),'SELECT seq,writer,kind,from_state,to_state,generation,reason,deployed_version,evidence_link,drain_evidence,break_from,recorded_at FROM identity_evidence_writer_change WHERE writer=? ORDER BY seq',[writer]);
 }
 
-// Pure (async only for SHA-256). The live domain-path row of a Discovery writer and its key. input as `normalizeEvidence`, plus `sourceOrder` (an owner row of
-// `discovery_owner`: the observation's history revision of the batch that wrote the action, ADR 0215 decision 6). Refused with `identity_evidence_out_of_slice`: any other
-// writer, relation or route, a method the writer does not use, an unbound subject other than a Discovery observation, a known alias without its variant in `source_scope`,
-// and an owner row without `sourceOrder`. A domain-path row names no Film.
+// Pure (async only for SHA-256). The live domain-path row of a Discovery writer and its key, accepted ONLY in the shapes of ADR 0215 Table 3 (decision 5); the pure model of
+// `normalizeEvidence` keeps the wider vocabulary for future and reconstructed data. input as `normalizeEvidence`, plus `sourceOrder` (an owner row of `discovery_owner`: the
+// observation's history revision of the batch that wrote the action, decision 6).
+// - `discovery_decision`: `candidate_for(observation, tmdb_movie|tmdb_tv)`, `asserts`, route `discovery_scan`, method `tmdb_detail_check` or `known_alias` (with its variant in
+//   `source_scope`), the **source root equal to the observation key** (so a re-check of one observation is one root, never independent corroboration), no `source_order`.
+//   A title method, `title_year_search` or a `restricts` row is not written by this writer.
+// - `discovery_owner`: `candidate_for(observation, tmdb_movie)` only (never TV), route `owner_action`, method `owner_statement`, `asserts` (an assign) or `refutes` (a reject, or a
+//   scoped revoke naming its target's key, which may not exist yet), the root the intent's key, and a `source_order`. No `restricts`.
+// Anything else is `identity_evidence_out_of_slice`; a live row without root or time is refused by the model first. A domain-path row names no Film.
 export async function planDomainEvidence(writer,input){
  writerName(writer);
  const spec=DOMAIN_WRITERS[writer];
  if(!spec)throw failed('identity_evidence_out_of_slice');
  const row=normalizeEvidence(input);
  const refuse=()=>{throw failed('identity_evidence_out_of_slice');};
- if(row.origin!=='live'||row.relation!=='candidate_for'||row.subjectKind!=='discovery_observation'||!['tmdb_movie','tmdb_tv'].includes(row.objectKind))refuse();
- if(row.route!==spec.route||!spec.methods.includes(row.method))refuse();
- if(row.supersedesKey!==null)refuse();
+ if(row.origin!=='live'||row.relation!=='candidate_for'||row.subjectKind!=='discovery_observation')refuse();
+ if(row.route!==spec.route||!spec.methods.includes(row.method)||row.supersedesKey!==null)refuse();
  if(spec.owner){
-  // Owner rows are ordered by their source, never by `seq`: no order, no row. A scoped refutation names its target.
+  if(row.objectKind!=='tmdb_movie'||!['asserts','refutes'].includes(row.polarity))refuse();
+  // Owner rows are ordered by their source, never by `seq`: no order, no row. Only a refutation is scoped.
   if(row.sourceOrder===null)refuse();
   if(row.scopeEvidenceKey!==null&&row.polarity!=='refutes')refuse();
+  if(row.sourceScope!==null)refuse();
  }else{
-  if(row.sourceOrder!==null||row.polarity==='refutes'||row.scopeEvidenceKey!==null)refuse();
-  if(row.method==='title_year_search'&&row.polarity!=='restricts')refuse();
-  if(row.method==='known_alias'&&(row.polarity!=='asserts'||!KNOWN_ALIAS_SCOPES.includes(row.sourceScope)))refuse();
+  if(!['tmdb_movie','tmdb_tv'].includes(row.objectKind)||row.polarity!=='asserts')refuse();
+  if(row.sourceRoot!==row.subjectValue)refuse();
+  if(row.sourceOrder!==null||row.scopeEvidenceKey!==null)refuse();
+  if(row.method==='known_alias'?!KNOWN_ALIAS_SCOPES.includes(row.sourceScope):row.sourceScope!==null)refuse();
  }
  return Object.freeze({writer,row,evidenceKey:await evidenceKeyOf(row)});
 }
@@ -102,10 +110,15 @@ const INSERT='INSERT INTO film_identity_evidence ('+COLUMNS+') SELECT ?,NULL,?,?
 // Semantic identity (ADR 0215 decision 1): proposition, polarity, route, method, root (or its substitute), `source_scope`, `scope_evidence_key`, supersession and `source_order`.
 // `IS` so a NULL equals a NULL. The substitute of an unknown root is `reconstructed_from`; a live row has a root.
 const SAME='SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND subject_kind=? AND subject_value=? AND relation=? AND object_kind IS ? AND object_value IS ? AND polarity=? AND route=? AND method=? AND source_root IS ? AND reconstructed_from IS ? AND source_scope IS ? AND scope_evidence_key IS ? AND supersedes_key IS ? AND source_order IS ?';
+// Commit-time schema guard of a batch prepared without the control tables.
+export const ABSENT="NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('identity_evidence_writer','identity_evidence_writer_change'))";
 const ACTIVE="EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state IN ('pending','on'))";
 
-// The two statements of one evidence row, for the caller to append INSIDE its own domain batch (ADR 0215 decision 1): [] when the schema has no control tables (the batch
-// is unchanged); otherwise the conditional insert and the assertion. `assertSql` builds the caller's own assertion statement from a condition (each domain has its own CAS
+// The statements of one evidence row, for the caller to append INSIDE its own domain batch (ADR 0215 decision 1). On a schema WITHOUT the control tables they are ONE guard
+// statement, never nothing: it asserts at COMMIT time that the tables are still absent, so a batch prepared before migration 0042 was applied cannot commit after the
+// migration and an activation without its evidence row (that would be a silent gap inside a claimed coverage interval); it fails the domain batch instead, and the caller
+// replans, which reads the schema again and now gets the insert and the assertion. Otherwise: the conditional insert and the assertion. The helper never returns an
+// empty list, so an integration cannot omit the guard by treating no evidence as nothing to append. `assertSql` builds the caller's own assertion statement from a condition (each domain has its own CAS
 // table; the default is the Film/Person one, for a canonical-path caller and for tests). Pass `params` of the condition in the order the statement takes them.
 // It does not test `changes() = 1`: a valid duplicate changes nothing. The assertion passes when the writer is `off` or absent, or the row with the key has the planned
 // semantic identity, so it passes for a new row and a valid duplicate and fails for a missing row (the writer flipped to `on`... or the insert was skipped) and for a
@@ -114,7 +127,7 @@ export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=
  if(!plan||!plain(plan.row)||!/^[0-9a-f]{64}$/.test(plan.evidenceKey||'')||!DOMAIN_WRITERS[plan.writer])throw failed('identity_evidence_out_of_slice');
  if(typeof requestId!=='string'||!REQUEST.test(requestId))throw invalid('request_id');
  const recorded=instant(at,'at');
- if(await identityEvidenceControlStatus(env)==='absent')return [];
+ if(await identityEvidenceControlStatus(env)==='absent')return [[assertSql(ABSENT),[]]];
  const r=plan.row;
  const insert=[INSERT,[plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
   r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer]];
@@ -137,7 +150,7 @@ const TRANSITIONS=Object.freeze({
 // - A repeated `activate` of a writer that is already `pending` is a no-op at the same generation ({noop:true}), so an interrupted activation can be re-run safely.
 // - A transition the state does not allow (for example `pending -> on` from `off`) is `identity_evidence_writer_transition`; `drain_complete` without drain evidence and
 //   `break` without the deployment time are refused before any statement.
-// - One batch: the change row (its trigger is the compare-and-swap) then the control row (inserted for the first activation, updated by generation otherwise).
+// - One statement: the change row; its trigger is the compare-and-swap and applies the transition to the control row.
 export async function changeWriter(env,input={}){
  if(!plain(input))throw invalid('input');
  const writer=writerName(input.writer);
@@ -166,16 +179,14 @@ export async function changeWriter(env,input={}){
  if(current.generation!==input.expectedGeneration)throw failed('identity_evidence_writer_stale');
  if(!rule.from.includes(current.state))throw failed('identity_evidence_writer_transition');
  const generation=current.generation+1;
+ // ONE statement: the change row. Its trigger applies the transition to the control row (first activation inserts it, any other updates it by generation), so history
+ // and control are inseparable and the compare-and-swap is the trigger's, not this code's.
  const change=['INSERT INTO identity_evidence_writer_change (writer,kind,from_state,to_state,generation,reason,deployed_version,evidence_link,drain_evidence,break_from,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
   [writer,kind,current.state,rule.to,generation,input.reason,input.deployedVersion,input.evidenceLink,drain,breakFrom,now]];
- const coverageFrom=rule.to==='on'?now:null;
- const control=current.present
-  ?['UPDATE identity_evidence_writer SET state=?,generation=?,coverage_from=?,updated_at=? WHERE writer=? AND generation=?',[rule.to,generation,coverageFrom,now,writer,current.generation]]
-  :['INSERT INTO identity_evidence_writer (writer,state,generation,coverage_from,updated_at) VALUES (?,?,?,?,?)',[writer,rule.to,generation,coverageFrom,now]];
- try{await db.batch([change,control].map(([sql,params])=>db.prepare(sql).bind(...params)));}
+ try{await db.batch([db.prepare(change[0]).bind(...change[1])]);}
  catch(error){
   const message=String(error?.message||error);
-  if(/identity_evidence_writer_change_stale|UNIQUE constraint failed: identity_evidence_writer\.writer/i.test(message))throw failed('identity_evidence_writer_stale',error);
+  if(/identity_evidence_writer_change_stale|identity_evidence_writer_change_taken|UNIQUE constraint failed: identity_evidence_writer_change/i.test(message))throw failed('identity_evidence_writer_stale',error);
   if(/identity_evidence_writer_transition|CHECK constraint failed/i.test(message))throw failed('identity_evidence_writer_transition',error);
   throw failed('identity_evidence_writer_unavailable',error);
  }
