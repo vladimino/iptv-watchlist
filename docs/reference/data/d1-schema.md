@@ -6,7 +6,7 @@
 
 Versioning and recovery are in [ADR 0001](../../adr/0001-d1-schema-v1.md).
 
-Accepted [ADR 0217](../../adr/0217-source-independent-film-admission.md) (architecture only; **not installed, not live**) plans two additive tables, `film_lid_admission` and `lid_recheck_intent`, as separate migrations applied only under the owner's coordinated pending-migration window and a separately approved apply. Neither exists in the schema contract above until then.
+Accepted [ADR 0217](../../adr/0217-source-independent-film-admission.md) (architecture only; **not installed, not live**) plans two additive tables, `film_lid_admission` and `lid_recheck_intent`, as separate migrations applied only under the owner's coordinated pending-migration window and a separately approved apply. Neither exists in the schema contract above until then. The same acceptance needs a separate forward migration that adds the `lid_tmdb_attach` writer to the evidence writer control: the delivered migration `0042` admits five named writers and is never edited.
 
 ## What is stored where
 
