@@ -7,6 +7,7 @@ import {database,failed,many,one} from './film-person-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {RETRY_POLICY,defineOperation,digestOf,operationRegistry,receiptedWrite} from './canonical-receipts.js';
 import {planFilmFacts,readFilmSnapshot,writeFilmFacts} from './canonical-film-writers.js';
+import {PROJECTION_RESOLVER,filmLocalizationProjectionState,planFilmLocalizationProjection,projectionInputs,readOwnerReviewToken,writeFilmLocalizationProjection} from './film-localization-projection.js';
 import {INLINE_RECONCILE_LIMIT,SOURCE_CHANGED,filmFactsContent,producerRequestId,producerRouteOpen,reconcileOwnOrigin} from './canonical-producer-adapters.js';
 import {compareLocalization,loadLocalizationInputs,recordLocalizationSources,resolveLocalization} from './localization-sources.js';
 import {planConflicts,recordLocalizationConflicts} from './canonical-person-state.js';
@@ -16,7 +17,10 @@ export const FILM_METADATA_OPERATION='film_metadata';
 export const FILM_SYNC_OPERATION='film_sync_state';
 export const LOCALIZATION_SOURCE_OPERATION='localization_source';
 export const LOCALIZATION_CONFLICT_OPERATION='localization_conflict';
-export const METADATA_SYNC_KINDS=Object.freeze([FILM_METADATA_OPERATION,FILM_SYNC_OPERATION,LOCALIZATION_SOURCE_OPERATION,LOCALIZATION_CONFLICT_OPERATION]);
+// ADR 0218 decision 3 (D1): the projection-aware Film title write (source rows AND the effective localization row in one fenced batch). New Film units use it;
+// `localization_source` stays registered for Person units and so that an unsettled historical Film receipt still settles under its own (source-only) rules.
+export const FILM_LOCALIZATION_PROJECTION_OPERATION='film_localization_projection';
+export const METADATA_SYNC_KINDS=Object.freeze([FILM_METADATA_OPERATION,FILM_SYNC_OPERATION,LOCALIZATION_SOURCE_OPERATION,LOCALIZATION_CONFLICT_OPERATION,FILM_LOCALIZATION_PROJECTION_OPERATION]);
 const CLOSED=new Set(['film_person_held','film_person_unavailable','film_person_not_open','film_person_generation_moved']);
 const READ_FAILURES=new Set(['film_person_unavailable','film_person_held','film_person_not_open']);
 const TABLE={film:{table:'film_localization_source',column:'film_id',entity:'film'},person:{table:'person_localization_source',column:'person_id',entity:'person'}};
@@ -257,12 +261,70 @@ function locOperation(operation,{replan,now,plan,write}){
  });
 }
 
+// ---- ADR 0218 decision 3 (D1): the projection-aware receipt kind ----
+// Content: the Film, its automatic sources, the resolver identity (PROJECTION_RESOLVER) and the normalized RESOLVER INPUTS the producer planned from (`inputs`: the owner-review
+// token digest, the stored reviewed/owner row, every other stored source row and the legacy provisional candidate, see projectionInputs). The same observation over other
+// resolver inputs is therefore another request identity; the writer re-derives the inputs and refuses (`localization_inputs_moved`) when they no longer match, so a moved input is
+// replanned and never replayed as a different effect under the old identity.
+export function filmProjectionContent(input){
+ if(!plain(input)||typeof input.id!=='string'||!input.id.startsWith('film:')||!Array.isArray(input.sources)||!input.sources.length||!plain(input.inputs))throw failed('film_person_invalid');
+ return {kind:'film',resolver:PROJECTION_RESOLVER,inputs:input.inputs,sources:input.sources.map(item=>({source:item.source,value:item.value,sourceVersion:item.sourceVersion,provenance:item.provenance??null,observedAt:item.observedAt}))};
+}
+export async function filmProjectionDigest(input){
+ return digestOf({operation:FILM_LOCALIZATION_PROJECTION_OPERATION,id:input?.id,content:filmProjectionContent(input)});
+}
+// readback: ONLY `exact` (every incoming source stored with THIS request id and the stored row equal to the resolver output) is a positive proof. A projection that cannot be
+// produced under the guard (`held`), a resolver input that moved, or a source a newer observation superseded is never a proof: the receipt is abandoned with a named class so the
+// next sync replans. A write still to do is not a proof either (`digest:null`: replay). Equal content proves no causality for another receipt: a historical `localization_source`
+// receipt is a different kind and is never replayed through this one.
+export const PROJECTION_HELD='localization_projection_held';
+export const PROJECTION_SUPERSEDED='superseded_by_newer_observation';
+export function filmLocalizationProjectionOperation({replan,now=()=>new Date().toISOString()}={}){
+ if(typeof replan!=='function')throw failed('film_person_invalid');
+ const planned=async receipt=>{
+  let input=null;
+  try{input=await replan(receipt);}catch(error){if(READ_FAILURES.has(error?.code))throw error;input=null;}
+  if(!input)return null;
+  let ok=false;
+  try{ok=(await filmProjectionDigest(input))===receipt.contentDigest;}catch{ok=false;}
+  return {input,ok};
+ };
+ return defineOperation({
+  operation:FILM_LOCALIZATION_PROJECTION_OPERATION,atomic:true,
+  readback:async(env,target,receipt)=>{
+   const found=await planned(receipt);
+   if(found&&!found.ok)return {disposition:'abandon',errorClass:SOURCE_CHANGED};
+   if(!found)return {digest:null,revision:await revisionOf(database(env),'film',target.id)};
+   const proof=await filmLocalizationProjectionState(env,{...found.input,requestId:receipt.requestId});
+   if(proof.state==='exact')return {digest:receipt.contentDigest,revision:proof.revision};
+   if(proof.state==='held')return {disposition:'abandon',errorClass:PROJECTION_HELD};
+   if(proof.state==='moved')return {disposition:'abandon',errorClass:SOURCE_CHANGED};
+   if(proof.state==='superseded')return {disposition:'abandon',errorClass:PROJECTION_SUPERSEDED};
+   return {digest:null,revision:proof.revision};
+  },
+  replay:async(env,receipt,ctx)=>{
+   const found=await planned(receipt);
+   if(!found)throw failed('producer_replan_unavailable');
+   if(!found.ok)throw failed('film_person_invalid');
+   return writeFilmLocalizationProjection(env,{...found.input,requestId:receipt.requestId,expectedRevision:ctx.currentRevision,receiptMark:mark(ctx,now)});
+  },
+  revalidate:async(env,receipt)=>{
+   const found=await planned(receipt);
+   if(!found||!found.ok)return 'stale';
+   const proof=await filmLocalizationProjectionState(env,{...found.input,requestId:receipt.requestId});
+   if(proof.state==='write')return 'proceed';
+   return proof.state==='held'?'stale':'superseded';
+  },
+ });
+}
+
 export function metadataSyncOperations({replan=async()=>null,now}={}){
  return [
   factsKindOperation(FILM_METADATA_OPERATION,{replan,now}),
   factsKindOperation(FILM_SYNC_OPERATION,{replan,now}),
   localizationSourceOperation({replan,now}),
   localizationConflictOperation({replan,now}),
+  filmLocalizationProjectionOperation({replan,now}),
  ];
 }
 
@@ -305,7 +367,36 @@ async function applyLoc(operation,env,{origin,event,input,replan,now,policy=RETR
  return {...outcome,requestId};
 }
 
+// The projection unit: a no-op pre-plan opens no receipt; a Film that is absent (a metadata unit never creates one) is `absent`; an owner domain that is not
+// D1-authoritative fails the unit before any receipt (localization_owner_unavailable), never a source-only write. A resolver input that moved since the plan (the producer's
+// proof no longer matches) is `skipped` with `localization_inputs_moved`: settled, not carried, the next sync replans. A projection the guard cannot produce is `skipped` with
+// `localization_projection_held` (and the reason): nothing is written and no receipt is opened.
+async function applyProjection(env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
+ const route=await writerRoute(env);
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
+ const digest=await filmProjectionDigest(input);
+ const target={kind:'film',id:input.id};
+ const operation=FILM_LOCALIZATION_PROJECTION_OPERATION;
+ const requestId=await producerRequestId({origin,operation,event,target,digest});
+ const clock=clockOf(now);
+ const snapshot=await readFilmSnapshot(env,input.id);
+ if(snapshot.redirect)throw failed('film_person_redirect');
+ if(!snapshot.film)return {state:'absent',receipt:false,requestId};
+ const token=await readOwnerReviewToken(env,input.id);
+ const plan=planFilmLocalizationProjection(snapshot,token,{...input,requestId});
+ if(plan.state==='moved')return {state:'skipped',reason:'localization_inputs_moved',receipt:false,requestId};
+ if(plan.state==='held')return {state:'skipped',reason:PROJECTION_HELD,detail:plan.held.reason,receipt:false,requestId};
+ if(plan.state!=='write')return {state:'noop',receipt:false,requestId};
+ const spec=filmLocalizationProjectionOperation({replan:replan||(async()=>input),now:clock});
+ const outcome=await receiptedWrite(env,{requestId,operation,origin,target,expectedRevision:snapshot.revision,digest,now:clock,policy},{
+  atomic:true,readback:spec.readback,revalidate:spec.revalidate,
+  run:ctx=>writeFilmLocalizationProjection(env,{...input,requestId,expectedRevision:ctx.currentRevision,receiptMark:mark(ctx,clock)}),
+ });
+ return {...outcome,requestId};
+}
+
 export const applyFilmMetadata=(env,options)=>applyFacts(FILM_METADATA_OPERATION,env,options);
+export const applyFilmLocalizationProjection=(env,options)=>applyProjection(env,options);
 export const applyFilmSyncState=(env,options)=>applyFacts(FILM_SYNC_OPERATION,env,options);
 export const applyLocalizationSource=(env,options)=>applyLoc(LOCALIZATION_SOURCE_OPERATION,env,options);
 export const applyLocalizationConflict=(env,options)=>applyLoc(LOCALIZATION_CONFLICT_OPERATION,env,options);
@@ -336,7 +427,7 @@ export function metadataSyncSettled(out){
 // metadataSyncIntent, and only while the current batch is unsettled).
 export function metadataSyncRecord(out){
  if(!out)return null;
- const units=(out.units||[]).map(unit=>({kind:unit.kind,id:unit.id,state:unit.state,requestId:unit.requestId,receipted:!!unit.receipted,...(unit.errorClass?{errorClass:unit.errorClass}:{})}));
+ const units=(out.units||[]).map(unit=>({kind:unit.kind,id:unit.id,state:unit.state,requestId:unit.requestId,receipted:!!unit.receipted,...(unit.errorClass?{errorClass:unit.errorClass}:{}),...(unit.reason?{reason:unit.reason}:{})}));
  return {state:out.state,applied:out.applied,noop:out.noop,skipped:out.skipped,failed:out.failed,absent:out.absent,unknown:out.unknown,preflightFailed:out.preflightFailed,refused:out.refused,units,reconciled:out.reconciled,refusedDetail:out.refusedDetail};
 }
 
@@ -378,7 +469,7 @@ export async function planMetadataSyncIntent(env,{event,films=[],titles={},peopl
   const ev=String(event||'')+':'+id;
   const push=async(operation,suffix,target,input)=>{
    if(!input)return;
-   const digest=operation===FILM_METADATA_OPERATION||operation===FILM_SYNC_OPERATION?await factsKindDigest(operation,input):await localizationDigest(operation,input);
+   const digest=operation===FILM_METADATA_OPERATION||operation===FILM_SYNC_OPERATION?await factsKindDigest(operation,input):operation===FILM_LOCALIZATION_PROJECTION_OPERATION?await filmProjectionDigest(input):await localizationDigest(operation,input);
    const requestId=await producerRequestId({origin,operation,event:ev+suffix,target,digest});
    units.push({requestId,operation,origin,event:ev+suffix,target,input});
   };
@@ -389,8 +480,15 @@ export async function planMetadataSyncIntent(env,{event,films=[],titles={},peopl
   if(title)sources.push({kind:'film',id,source:title.source});
   sources.push(...personSourcesOf(film,people));
   for(const item of sources){
-   const locInput={kind:item.kind,id:item.id,at,sources:[item.source]};
-   await push(LOCALIZATION_SOURCE_OPERATION,':loc:'+item.kind+':'+item.id,{kind:item.kind,id:item.id},locInput);
+   // ADR 0218 D1: a Film title source is the projection-aware unit (its own event suffix, so its request id never equals a historical source receipt's); Person names keep the source unit.
+   if(item.kind==='film'){
+    // The resolver inputs the unit is planned from are bound into its content (see filmProjectionContent). The owner domain being unavailable is a named preflight refusal of THIS unit.
+    let inputs=null;
+    try{inputs=projectionInputs(snapshot,await readOwnerReviewToken(env,item.id),[item.source]);}
+    catch(error){if(CLOSED.has(error?.code))throw error;refused.push({filmId:film.id,errorClass:error?.code||'unclassified',preflight:true});continue;}
+    await push(FILM_LOCALIZATION_PROJECTION_OPERATION,':projection:film:'+item.id,{kind:'film',id:item.id},{id:item.id,at,sources:[item.source],inputs});
+   }
+   else await push(LOCALIZATION_SOURCE_OPERATION,':loc:'+item.kind+':'+item.id,{kind:item.kind,id:item.id},{kind:item.kind,id:item.id,at,sources:[item.source]});
    let held=[];
    try{held=await conflictsFor(env,item.kind,item.id,item.source,at);}catch(error){if(CLOSED.has(error?.code))throw error;}
    if(held.length)await push(LOCALIZATION_CONFLICT_OPERATION,':conflict:'+item.kind+':'+item.id,{kind:item.kind,id:item.id},{kind:item.kind,id:item.id,at,conflicts:held});
@@ -412,12 +510,13 @@ export async function applyMetadataSync(env,{event,films=[],titles={},people={},
   [FILM_SYNC_OPERATION]:(input,event)=>applyFilmSyncState(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
   [LOCALIZATION_SOURCE_OPERATION]:(input,event)=>applyLocalizationSource(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
   [LOCALIZATION_CONFLICT_OPERATION]:(input,event)=>applyLocalizationConflict(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
+  [FILM_LOCALIZATION_PROJECTION_OPERATION]:(input,event)=>applyFilmLocalizationProjection(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
  };
  for(const unit of intent){
   try{
    const out=await applyOf[unit.operation](unit.input,unit.event);
    const receipted=out.receipt!==false&&out.requestId;
-   outcomes.push({kind:unit.operation,id:unit.target.id,state:out.state,requestId:out.requestId||unit.requestId,receipted:!!receipted});
+   outcomes.push({kind:unit.operation,id:unit.target.id,state:out.state,requestId:out.requestId||unit.requestId,receipted:!!receipted,...(out.state==='skipped'&&out.reason?{reason:out.reason}:{})});
    if(out.state==='applied'||out.state==='already')counts.applied++;
    else if(out.state==='noop')counts.noop++;
    else if(out.state==='absent')counts.absent++;

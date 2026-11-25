@@ -14,6 +14,9 @@ export const MUTATION_STATEMENT_CAP=60;
 const FILM_ID=/^film:.+/;
 const PERSON_ID=/^person:.+/;
 const ROLES=new Set(['director','actor']);
+// ADR 0214 decision 5 / ADR 0218 decision 6 (B1): the ONE metadata lock predicate on (film_id,'metadata'): status 'reviewed' OR authority 'owner'. W1 (planFilmFacts),
+// the merge below and PV1 (AIR-631) read this same function; it is not re-implemented elsewhere.
+export const metadataLocked=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
 
 // An assertion is an upsert of ok = 1 or 0. Its value also requires the fence row to exist when the statement runs: a deleted row gives
 // ok = 0 and the CHECK fails, where a zero-row UPDATE would pass silently and let the batch commit without any proven assertion.
@@ -295,6 +298,9 @@ async function reconcile(db,from,to,resolve,at,discarded){
  const same=(left,right)=>['status','source','source_version','provenance_json','value','authority'].every(key=>(left[key]??null)===(right[key]??null));
  const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
  const KEY={identity:'identity',metadata:'metadataState',fingerprint:'fingerprint',prediction:'prediction'};
+ // ADR 0218 decision 6 / ADR 0214 decisions 9 and 11: a merge with a metadata lock on EITHER side must move or keep it with the release row and the history rows. That path
+ // (PV1, AIR-631) does not exist yet, so such a merge refuses before any statement; it never drops, moves or overwrites a lock silently.
+ if(fromDims.some(row=>row.dimension==='metadata'&&metadataLocked(row))||toDims.some(row=>row.dimension==='metadata'&&metadataLocked(row)))throw failed('film_person_metadata_locked');
  for(const row of fromDims){
   const other=held.get(row.dimension);
   const move=()=>out.push(['UPDATE film_dimension SET film_id=? WHERE film_id=? AND dimension=?',[to,from,row.dimension]]);

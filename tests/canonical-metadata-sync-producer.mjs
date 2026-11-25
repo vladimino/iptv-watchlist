@@ -40,6 +40,8 @@ function database(stage='open'){
  if(['prepared','open','held'].includes(stage))assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
  if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
  if(stage==='open')assert.equal(sqlite(file,BASELINE).status,0);
+ // ADR 0218 D1: the projection-aware Film title unit needs a D1-authoritative owner-review domain (as production); the fixtures are D1 at generation 1.
+ if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE owner_review_authority SET mode='d1',generation=1 WHERE id=1").status,0);
  if(stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
  return file;
 }
@@ -55,7 +57,7 @@ const seed=(file)=>{
 const film=over=>({id:'28nq',tmdbId:'1656',title:'Heat',original:'Heat',url:'https://letterboxd.com/film/heat-1995/',year:1995,runtime:170,synopsis:'A group of professional bank robbers.',poster:'p',metadataAt:T,synopsisFetchedAt:T,peopleVersion:1,peopleNamesVersion:2,peopleLocalizedAt:T,directors:[{id:'director/michael-mann',name:'Майкл Манн',original:'Michael Mann'}],actors:[],...over});
 const titles={'28nq':{tmdbId:'1656',title:'Схватка',status:'provisional',sources:['https://www.wikidata.org/wiki/Q202001']}};
 const people={'director/michael-mann':{name:'Майкл Манн',original:'Michael Mann'}};
-const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state'];
+const KEYS=['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state'];
 
 assert.equal(canonicalMetadataFilmId(film()),FID);
 assert.equal(titleSourceOf(film(),titles).source.value,'Схватка');
@@ -86,7 +88,10 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  assert.ok(out.applied>=2,JSON.stringify(out));
  const kinds=rows(file,'SELECT operation FROM canonical_write_receipt ORDER BY created_at').map(row=>row.operation);
  assert.deepEqual(kinds.filter(k=>METADATA_SYNC_KINDS.includes(k)).slice(0,2),[FILM_METADATA_OPERATION,FILM_SYNC_OPERATION]);
- assert.ok(kinds.includes(LOCALIZATION_SOURCE_OPERATION));
+ assert.ok(kinds.includes(LOCALIZATION_SOURCE_OPERATION),'the Person name keeps the source unit');
+ assert.ok(kinds.includes('film_localization_projection'),'the Film title is the projection-aware unit (ADR 0218 D1)');
+ assert.equal(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE operation='localization_source' AND target_kind='film'"),0,'no new source-only Film receipt');
+ assert.deepEqual(rows(file,"SELECT status,source,value FROM film_dimension WHERE dimension='localization' AND film_id="+q(FID)),[{status:'provisional',source:'wikidata',value:'Схватка'}],'the effective row is written in the same batch as its source (F5 closed)');
  assert.equal(one(file,'SELECT synopsis FROM film_metadata WHERE film_id='+q(FID)),'A group of professional bank robbers.');
  assert.equal(one(file,'SELECT metadata_at FROM film_sync_state WHERE film_id='+q(FID)),T);
  assert.equal(one(file,'SELECT value FROM film_localization_source WHERE film_id='+q(FID)),'Схватка');

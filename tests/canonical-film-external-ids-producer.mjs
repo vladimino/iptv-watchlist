@@ -359,7 +359,7 @@ for(const stage of ['legacy','r2','prepared']){
  // ACTIVATION DIFF (runbook activation plan): the activation PR changes this literal together with the constant and tests/canonical-letterboxd-claim.mjs.
  assert.ok(/export const LETTERBOXD_CLAIM_ACTIVATED=true;/.test(fs.readFileSync('src/canonical-letterboxd-claim.js','utf8')),'the activation gate is on');
  assert.ok(!PRODUCER_OPERATIONS.has('film_external_ids'));
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_localization_projection','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  assert.ok(PRODUCER_WIRING.every(item=>!item.requires.includes('film_external_ids')),'PRODUCER_WIRING is unchanged: wiring belongs to the producer wiring PR');
 }
 console.log('canonical-film-external-ids-producer ok');
