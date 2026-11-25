@@ -112,7 +112,7 @@ const LetterboxdDiaryIdentity=(()=>{
  async function checkOne(env,{lid,slug},{clock,fetchImpl,remaining}){
   if(typeof LetterboxdRatedCandidates==='undefined'||typeof LetterboxdIdentity==='undefined'||typeof LetterboxdRatedAdmission==='undefined')return {state:'pending',reason:'unavailable'};
   const net=budgeted(fetchImpl,remaining);
-  const answer=result=>{const reason=pageReason(result);return {state:'pending',reason,...(classify(reason)==='transport'?{stop:true}:{})};};
+  const answer=result=>{const reason=pageReason(result);return {state:'pending',reason,...(classify(reason)==='transport'?{stop:true}:{}),...(Number.isFinite(result.until)?{until:result.until}:{})};};
   const page=await LetterboxdRatedCandidates.follow(net,lid);
   if(page.stop||page.review)return answer(page);
   // The film page must be the page of the Diary row's slug, with one movie id, before TMDB is asked at all.
@@ -197,12 +197,12 @@ const LetterboxdDiaryIdentity=(()=>{
   const newCheckId=()=>typeof crypto!=='undefined'&&typeof crypto.randomUUID==='function'?crypto.randomUUID():String(now)+'-'+Math.random().toString(36).slice(2,12);
   // The one place an entry is written from an outcome. Only `gone` and `definite` charge an attempt (with a fresh check id); `transport` raises the streak and backs off;
   // `not_now` and a link intent keep the count and are due again at the next run. The queue position is never changed.
-  const record=(item,reason,{tmdb=null}={})=>{
+  const record=(item,reason,{tmdb=null,until=null}={})=>{
    const cur=set[item.lid]||stored.films[item.lid]||null,cls=classify(reason),intent=LINK_REASONS.has(reason)||reason===CLAIM_REASON;
    const before=Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streakBefore=Number(cur?.streak)||0;
    let attempts=before,streak=streakBefore,next=now,checkId=cur?.checkId||null;
    if(intent||cls==='not_now'){/* no attempt, place kept, due at the next run */}
-   else if(cls==='transport'){streak=streakBefore+1;next=now+transportDelayMs(streak);}
+   else if(cls==='transport'){streak=streakBefore+1;next=Math.max(now+transportDelayMs(streak),Number.isFinite(until)?until:0);}// AIR-604: the later of the local backoff and the shared cooldown end
    else{attempts=before+1;streak=0;next=now+reviewDelayMs(attempts);checkId=cur?.reservation?.checkId||newCheckId();}
    set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{})};
    counts.pending++;
@@ -372,7 +372,7 @@ const LetterboxdDiaryIdentity=(()=>{
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }
-   record(item,outcome.reason,{tmdb:outcome.tmdb||null});
+   record(item,outcome.reason,{tmdb:outcome.tmdb||null,until:Number.isFinite(outcome.until)?outcome.until:null});
   }
   let persisted=true,refused=[],conflicted=[];
   // A real check that reached the source and got an answer (gone, definite or settled; not a transport stop) is the Monitor's proof of progress.

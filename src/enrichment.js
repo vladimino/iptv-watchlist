@@ -435,11 +435,17 @@ async function saveActualMirror(env,key,body){if(typeof RatingsD1!=='undefined'&
 async function refreshPersonalRating(env,film){
  const id=String(film.id),match=String(film.url||'').match(/^https:\/\/letterboxd\.com\/film\/([a-z0-9-]+)\/$/);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!match)throw new Error('Invalid Letterboxd film identity');
  const username=sourceConfig(env).letterboxdUsername,sourceUrl=`https://letterboxd.com/${username}/film/${match[1]}/`,requestedAt=new Date().toISOString();let response;
- try{response=await fetch(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){throw new Error('Rating lookup failed: '+e.message);}
- // AIR-604 (ADR 0211 decision 5): this request was already claimed (the removal queue skips BEFORE the claim, so a skip never charges an attempt); a 429, a challenge or a 403 writes the shared Letterboxd cooldown.
- await upstreamCoordinator(env,'removal-rating')?.after('letterboxd',{status:response.status,headers:response.headers});
+ // AIR-604 (ADR 0211 decision 5): the shared Letterboxd cooldown, re-checked HERE at the real request (the removal queue also peeks before its claim, but a cooldown can appear during the
+ // awaited plan and claim). A skip throws the typed `upstream_cooldown` error; the removal phase releases the claim without charging the attempt. The body is read once: an ok answer here
+ // (then handed to the shared classifier, so a challenge page behind a 200 is a blocked answer and never a `not_rated` verdict), any other status only as a bounded prefix while coordination is on.
+ const coordination=upstreamCoordinator(env,'removal-rating');
+ try{response=await(coordination?coordination.guard(fetch):fetch)(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){if(e?.code==='upstream_cooldown')throw e;throw new Error('Rating lookup failed: '+e.message);}
+ let body=null,html='';
+ if(response.ok){body=await response.text();html=body;}else if(coordination&&response.status!==404&&await coordination.active())html=await UpstreamCooldown.readBodyBounded(response,32768);
+ const signal=coordination?await coordination.after('letterboxd',{status:response.status,headers:response.headers,html}):null;
  if(response.status===404)return {filmId:id,status:'not_found'};if(!response.ok)throw new Error('Rating source HTTP '+response.status);
- const rating=parsePersonalRating(await response.text(),film.url,username);if(rating===null)return {filmId:id,status:'not_rated'};
+ if(signal&&signal.reason==='challenge')throw new Error('Rating source HTTP 403');
+ const rating=parsePersonalRating(body,film.url,username);if(rating===null)return {filmId:id,status:'not_rated'};
  const facts=await LetterboxdFacts.recordFilmFacts(env,id,{watched:true,rating},{observedAt:requestedAt,source:'letterboxd_film_page',sourceRef:sourceUrl});if(facts.conflict)return {filmId:id,status:'identity_conflict'};const saved=facts.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces');if(saved&&facts.record.rating?.value===rating)await saveActualMirror(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:requestedAt});await enrichRecentRemovalRatings(env,{[id]:rating},requestedAt);return {filmId:id,status:saved?'saved':'unchanged',rating};
 }
 // The removal rating queue (ADR 0060, ADR 0077). A film removed from the watchlist waits here until the Ratings step in

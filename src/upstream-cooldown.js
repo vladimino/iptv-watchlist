@@ -54,6 +54,33 @@ export function parseRetryAfter(value, now = Date.now()) {
   return Math.max(0, Math.ceil((at - now) / 1000));
 }
 
+// At most `limit` bytes of a response body as text, never more: a stream is read chunk by chunk and cancelled at the limit; a body without a stream is read whole and cut. It is
+// used only where the caller has NOT read the body itself (a non-200 answer or a failed read), so nothing is consumed twice and nothing is buffered without a bound.
+export async function readBodyBounded(response, limit = 32768) {
+  try {
+    const body = response && response.body;
+    if (body && typeof body.getReader === 'function') {
+      const reader = body.getReader();
+      const chunks = [];
+      let total = 0;
+      while (total < limit) {
+        const step = await reader.read();
+        if (step.done) break;
+        const value = step.value || new Uint8Array(0);
+        chunks.push(value.byteLength > limit - total ? value.subarray(0, limit - total) : value);
+        total += Math.min(value.byteLength, limit - total);
+      }
+      try {await reader.cancel();} catch { /* the rest of the body is discarded */ }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {bytes.set(chunk, offset); offset += chunk.byteLength;}
+      return new TextDecoder('utf-8', {fatal: false}).decode(bytes);
+    }
+    if (response && typeof response.text === 'function') return String(await response.text()).slice(0, limit);
+  } catch { /* an unreadable body is an empty body: the status and the headers still classify */ }
+  return '';
+}
+
 // The cooldown a response asks for, or null. headers: a Headers-like (get). html: the body text when the caller has it (challenge detection of a 200 page).
 export function classifySignal({status, headers = null, html = ''}, now = Date.now()) {
   let reason = null;
@@ -123,21 +150,40 @@ export class UpstreamCooldownSkip extends Error {
 }
 
 // One coordinator per caller run. The mode is read once per run (a mode change takes effect on the next run); the cooldown row is read before EACH request.
+// The observable evidence of UC2 (ADR 0211 decision 5): every decision that is not a plain pass-through is counted per coordinator (caller x scope x decision, so the cardinality is
+// bounded by the caller list) and written to the Worker log as one JSON line `{"event":"upstream_cooldown",...}` at the 1st, 2nd, 4th, 8th ... occurrence with the running count,
+// so the log volume is logarithmic in the number of decisions. Nothing is written to storage and no GET or MCP read is involved. `off` produces no evidence at all.
+function emitEvidence(entry) {
+  try {console.log(JSON.stringify({event: 'upstream_cooldown', ...entry}));} catch { /* logging never fails a caller */ }
+}
+
 export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
   let modePromise = null;
   const mode = () => (modePromise ||= readMode(env));
   const stats = {skipped: 0, wouldSkip: 0, written: 0, writeFailed: 0};
+  const counts = new Map();
+  const record = (decision, scope, extra = {}) => {
+    const key = decision + ':' + scope;
+    const n = (counts.get(key) || 0) + 1;
+    counts.set(key, n);
+    if ((n & (n - 1)) === 0) emitEvidence({decision, caller: String(caller || 'unknown').slice(0, 64), scope, count: n, ...extra});
+  };
   return {
     stats,
     mode,
+    // The counters of this coordinator by decision, for a caller's run outcome (a plain bounded object).
+    snapshot() {return {skipped: stats.skipped, wouldSkip: stats.wouldSkip, written: stats.written, writeFailed: stats.writeFailed};},
+    // Is coordination on for this run (observe or enforce)? A caller reads a bounded body only when it is.
+    async active() {return (await mode()) !== 'off';},
     // Read-only: is the scope cooling? In `off` nothing but the mode row is read. In `observe` the decision is counted and nothing is skipped.
     async peek(scope) {
       const m = await mode();
       if (m === 'off') return {mode: m, skip: false, until: null, reason: null};
       const cooling = await readCooldown(env, scope, now());
       if (!cooling) return {mode: m, skip: false, until: null, reason: null};
-      if (m === 'observe') {stats.wouldSkip++; return {mode: m, skip: false, wouldSkip: true, until: cooling.until, reason: cooling.reason};}
+      if (m === 'observe') {stats.wouldSkip++; record('would_skip', scope, {reason: cooling.reason}); return {mode: m, skip: false, wouldSkip: true, until: cooling.until, reason: cooling.reason};}
       stats.skipped++;
+      record('skipped', scope, {reason: cooling.reason});
       return {mode: m, skip: true, until: cooling.until, reason: cooling.reason};
     },
     // Writer paths only: record the response of a request that WAS sent. A 404, a 5xx and a success write nothing.
@@ -147,7 +193,7 @@ export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
       const signal = classifySignal({status: response.status, headers: response.headers, html: response.html || ''}, now());
       if (!signal) return null;
       const ok = await writeCooldown(env, scope, signal, caller, now());
-      if (ok) stats.written++; else stats.writeFailed++;
+      if (ok) {stats.written++; record('written', scope, {reason: signal.reason, seconds: signal.seconds});} else {stats.writeFailed++; record('write_failed', scope, {reason: signal.reason});}
       return signal;
     },
     // For callers that read the body themselves (the bounded Letterboxd/TMDB fetches): a fetch that only PEEKS (a skip throws UpstreamCooldownSkip) and carries the coordinator,
@@ -171,7 +217,11 @@ export function createCoordinator(env, {caller, now = () => Date.now()} = {}) {
       const gate = await this.peek(scope);
       if (gate.skip) throw new UpstreamCooldownSkip(scope, gate.until, gate.reason);
       const response = await fetchImpl(url, init);
-      await this.after(scope, response);
+      // A non-ok answer that the caller will not read as a body is classified by status, headers and a bounded body prefix (a challenge page behind any status). An ok answer is the
+      // caller's: it reads the body itself and calls `after` with it where a challenge page can hide behind a 200 (HTML pages); JSON APIs fail their own parse there.
+      let html = '';
+      if (response && response.ok === false && response.status !== 404 && await this.active() && typeof response.clone === 'function') html = await readBodyBounded(response.clone(), 32768);
+      await this.after(scope, {status: response.status, headers: response.headers, html});
       return response;
     }
   };

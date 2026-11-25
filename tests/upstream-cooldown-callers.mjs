@@ -22,7 +22,9 @@ const rows = file => sql(file, 'SELECT scope, until_at, reason, set_by FROM upst
 
 // the Worker sources in one scope, as build.mjs concatenates them (the cooldown module first, scoped)
 let sent = [], answer = () => new Response('{}', {status: 200});
-const context = vm.createContext({Response, Request, URL, URLSearchParams, Date, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, AbortSignal, crypto: webcrypto, console, setTimeout: fn => (fn(), 0), clearTimeout() {},
+const logs = [];
+const capture = {...console, log: line => {if (String(line).includes('"event":"upstream_cooldown"')) logs.push(JSON.parse(line));}};
+const context = vm.createContext({Response, Request, URL, URLSearchParams, Date, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, AbortSignal, crypto: webcrypto, console: capture, setTimeout: fn => (fn(), 0), clearTimeout() {},
   fetch: async (url, init) => {sent.push(String(url)); return answer(String(url), init);}});
 const load = (text, name) => vm.runInContext(text, context, {filename: name});
 function bootstrap({withModule = true} = {}) {
@@ -160,7 +162,7 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   // an enforced Letterboxd cooldown: a transport stop that costs no attempt, and no request
   let f = world('enforce', [['letterboxd', 600]]); reset();
   context.net = guarded(f);
-  assert.deepEqual(plain(await run("LetterboxdRatedCandidates.follow(net,'abc')")), {stop: 'upstream_cooldown'}); assert.deepEqual(sent, []);
+  {const out = plain(await run("LetterboxdRatedCandidates.follow(net,'abc')")); assert.equal(out.stop, 'upstream_cooldown'); assert.equal(typeof out.until, 'number', 'the cooldown end travels with the stop'); assert.deepEqual(sent, []);}
   // TMDB is another scope: the same Letterboxd cooldown does not stop movieDetail
   context.env = {DB: d1Standin(f), TMDB_API_READ_ACCESS_TOKEN: 't'}; reset(); answer = () => new Response('{"id":603}', {status: 200});
   context.net = guarded(f);
@@ -168,7 +170,7 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   assert.ok((await run("LetterboxdRatedCandidates.movieDetail(env,'603',net)")).detail, 'no false cross-source blocking'); assert.equal(sent.length, 1);
   // and a TMDB cooldown stops movieDetail only
   f = world('enforce', [['tmdb', 600]]); reset(); context.net = guarded(f); context.env = {DB: d1Standin(f), TMDB_API_READ_ACCESS_TOKEN: 't'};
-  assert.deepEqual(plain(await run("LetterboxdRatedCandidates.movieDetail(env,'603',net)")), {stop: 'upstream_cooldown'}); assert.deepEqual(sent, []);
+  {const out = plain(await run("LetterboxdRatedCandidates.movieDetail(env,'603',net)")); assert.equal(out.stop, 'upstream_cooldown'); assert.equal(typeof out.until, 'number'); assert.deepEqual(sent, []);}
   // signals: a 429, a 403 and a challenge write the Letterboxd cooldown; a 404 and a 5xx do not
   for (const [label, res, expectCooldown] of [
     ['429', () => new Response('', headers429(60)), true],
@@ -188,6 +190,101 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
     reset(); answer = () => new Response('', headers429(60)); context.net = guarded(file);
     assert.deepEqual(plain(await run("LetterboxdRatedCandidates.follow(net,'abc')")), {stop: 'rate_limited'}, label); assert.equal(sent.length, 1, label);
   }
+}
+
+// ---- 7. challenge and signal coverage through the real caller paths (review of PR #1021, P1-2): a challenge page behind a 200 or a header, a 429 or 403 with an unreadable or oversized body ---------
+{
+  const challengeHtml = '<html><head><title>Just a moment...</title></head><body>cf-chl-opt</body></html>';
+  const unreadable = status => ({ok: false, status, headers: new Headers(), body: {getReader() {return {read: async () => {throw new Error('stream failed');}, cancel: async () => {}};}}, async text() {throw new Error('read failed');}});
+  let bytesRead = 0;
+  const oversized = status => ({ok: false, status, headers: new Headers(), body: new ReadableStream({pull(controller) {bytesRead += 65536; controller.enqueue(new Uint8Array(65536)); if (bytesRead > 20 * 65536) controller.close();}}), async text() {throw new Error('must not be read whole');}});
+  const html200 = html => () => new Response(html, {status: 200, headers: {'content-type': 'text/html'}});
+  const cases = [
+    // [label, response factory, expected cooldown reason or null]
+    ['200 body-only challenge', html200(challengeHtml), 'challenge'],
+    ['200 header challenge', () => new Response('<html>ok</html>', {status: 200, headers: {'cf-mitigated': 'challenge'}}), 'challenge'],
+    ['503 body challenge', () => new Response(challengeHtml, {status: 503}), 'challenge'],
+    ['429 unreadable body', () => unreadable(429), 'rate_limited'],
+    ['403 unreadable body', () => unreadable(403), 'forbidden'],
+    ['403 oversized body', () => oversized(403), 'forbidden'],
+    ['404', () => new Response('', {status: 404}), null],
+    ['500', () => new Response('', {status: 500}), null],
+    ['200 ordinary page', html200('<html>fine</html>'), null],
+  ];
+  const first = async (label, make, expected, call) => {
+    const file = dbWith('enforce'); context.env = {DB: d1Standin(file), TMDB_API_READ_ACCESS_TOKEN: 't'}; reset(); answer = make; bytesRead = 0;
+    context.coordination = run("upstreamCoordinator(env,'letterboxd-watchlist-scan')");
+    const outcome = await run(call).then(value => ({value}), error => ({error: error.message}));
+    const written = rows(file);
+    assert.equal(written.length, expected ? 1 : 0, label + ': ' + JSON.stringify(written));
+    if (expected) assert.equal(written[0].reason, expected, label);
+    assert.ok(bytesRead <= 4 * 65536, label + ': the body is read in a bounded way, not buffered whole (' + bytesRead + ' bytes pulled)');
+    return outcome;
+  };
+  // getHTML (Watchlist scan, metadata film pages): a blocked page is an error, never a page
+  for (const [label, make, expected] of cases) {
+    const out = await first('getHTML ' + label, make, expected, "getHTML('https://letterboxd.com/demo/watchlist/',coordination)");
+    if (expected) assert.match(String(out.error), /^Source HTTP (403|429|503)/, label + ': the blocked answer is an error, not a page');
+  }
+  // the same page with no coordinator, or off: today's behaviour (a 200 challenge page is returned as the page)
+  {const f = dbWith('off'); context.env = {DB: d1Standin(f)}; reset(); answer = html200(challengeHtml); context.coordination = run("upstreamCoordinator(env,'x')");
+   assert.equal(await run("getHTML('https://letterboxd.com/demo/watchlist/',coordination)"), challengeHtml, 'off changes nothing'); assert.deepEqual(rows(f), []);}
+  // a timeout is a local failure, not a signal
+  {const f = dbWith('enforce'); context.env = {DB: d1Standin(f)}; reset(); answer = () => {throw Object.assign(new Error('timed out'), {name: 'TimeoutError'});}; context.coordination = run("upstreamCoordinator(env,'x')");
+   const out = await run("getHTML('https://letterboxd.com/demo/watchlist/',coordination).then(()=>null,e=>e.name)"); assert.equal(out, 'TimeoutError'); assert.deepEqual(rows(f), [], 'a timeout sets no cooldown');}
+  // the bounded identity fetches: a known 429, 403 or challenge is recorded whatever happened to the body
+  for (const [label, make, expected] of cases.filter(([, , reason]) => reason)) {
+    const file = dbWith('enforce'); reset(); answer = make; bytesRead = 0; context.env = {DB: d1Standin(file)};
+    context.net = run("upstreamCoordinator(env,'letterboxd-identity:ratings_diary').guard(fetch)");
+    await run("LetterboxdRatedCandidates.follow(net,'abc')");
+    assert.equal(rows(file).length, 1, 'follow ' + label + ': ' + JSON.stringify(rows(file)));
+    assert.equal(rows(file)[0].reason, expected, 'follow ' + label);
+  }
+  // the removal rating refresh (refreshPersonalRating): the real function, one body read
+  for (const f of ['src/domain/prediction-confidence.js', 'src/enrichment.js']) {try {load(fs.readFileSync(f, 'utf8').replace('export default', 'globalThis.worker='), f);} catch { /* already loaded by section 2 */ }}
+  for (const [label, make, expected] of cases) {
+    const file = dbWith('enforce'); context.env = {DB: d1Standin(file), LETTERBOXD_USERNAME: 'demo', EPG_XML_URL: 'https://epg.test/guide.xml', BUCKET: {get: async () => null}}; reset(); answer = make; bytesRead = 0;
+    const out = await run("refreshPersonalRating(env,{id:'film1',url:'https://letterboxd.com/film/heat-1995/'}).then(v=>({value:v&&v.status}),e=>({error:e.message,code:e.code}))");
+    assert.equal(rows(file).length, expected ? 1 : 0, 'refresh ' + label); assert.ok(bytesRead <= 4 * 65536, 'refresh ' + label + ': bounded');
+    if (expected) assert.match(String(out.error), /Rating source HTTP (403|429|503)/, 'refresh ' + label + ': a blocked answer is never a `not_rated` verdict');
+    if (label === '404') assert.equal(out.value, 'not_found');
+  }
+  // an active cooldown: the real request re-checks and throws the typed skip, sending nothing
+  {const file = dbWith('enforce'); seed(file, 'letterboxd', 600); context.env = {DB: d1Standin(file), LETTERBOXD_USERNAME: 'demo', EPG_XML_URL: 'https://epg.test/guide.xml'}; reset();
+   const out = await run("refreshPersonalRating(env,{id:'film1',url:'https://letterboxd.com/film/heat-1995/'}).then(()=>null,e=>({code:e.code,until:e.until}))");
+   assert.equal(out.code, 'upstream_cooldown'); assert.equal(typeof out.until, 'number'); assert.deepEqual(sent, []);}
+}
+
+// ---- 8. the observable evidence (review of PR #1021, P1-3): observe sends requests and records every would-skip, write and failed write; off records nothing -----------------------------
+{
+  const file = dbWith('observe'); seed(file, 'tmdb', 600);
+  context.env = {DB: d1Standin(file), TMDB_API_READ_ACCESS_TOKEN: 't', TMDB_REQUEST_INTERVAL_MS: 0}; reset(); logs.length = 0;
+  context.c = run("upstreamCoordinator(env,'discovery')");
+  for (let i = 0; i < 5; i++) assert.equal((await run('c.peek("tmdb")')).skip, false, 'observe skips nothing');
+  assert.equal(context.c.stats.wouldSkip, 5);
+  assert.deepEqual(plain(context.c.snapshot()), {skipped: 0, wouldSkip: 5, written: 0, writeFailed: 0});
+  const wouldSkip = logs.filter(l => l.decision === 'would_skip');
+  assert.deepEqual(wouldSkip.map(l => l.count), [1, 2, 4], 'logged at the 1st, 2nd and 4th occurrence: logarithmic volume');
+  assert.ok(wouldSkip.every(l => l.caller === 'discovery' && l.scope === 'tmdb'), 'per caller and scope, bounded cardinality');
+  // observe really sends the request of the caller (Discovery) and writes a cooldown on a signal
+  const w = dbWith('observe'); context.env = {DB: d1Standin(w), TMDB_API_READ_ACCESS_TOKEN: 't', TMDB_REQUEST_INTERVAL_MS: 0}; reset(); logs.length = 0; answer = () => new Response('{}', headers429(60));
+  await run("tmdbRequest(env,'movie/1').catch(()=>null)"); assert.equal(sent.length, 1, 'observe sends the request'); assert.equal(rows(w)[0].scope, 'tmdb');
+  assert.ok(logs.some(l => l.decision === 'written' && l.scope === 'tmdb' && l.caller === 'discovery'), 'the write is evidence too');
+  // a failed cooldown write is logged and never fails the caller
+  const real = d1Standin(dbWith('observe'));
+  context.env = {DB: {prepare(text) {if (/INSERT INTO upstream_cooldown/.test(text)) throw new Error('D1 write failed'); return real.prepare(text);}}, TMDB_API_READ_ACCESS_TOKEN: 't', TMDB_REQUEST_INTERVAL_MS: 0};
+  reset(); logs.length = 0; answer = () => new Response('{}', headers429(60));
+  const outcome = await run("tmdbRequest(env,'movie/1').then(()=>'ok',e=>e.message)"); assert.equal(outcome, 'TMDB HTTP 429', 'the caller still sees its own 429');
+  assert.ok(logs.some(l => l.decision === 'write_failed' && l.caller === 'discovery'), 'a failed write is logged: ' + JSON.stringify(logs));
+  // off: no evidence at all
+  const o = dbWith('off'); seed(o, 'tmdb', 600); context.env = {DB: d1Standin(o), TMDB_API_READ_ACCESS_TOKEN: 't', TMDB_REQUEST_INTERVAL_MS: 0}; reset(); logs.length = 0; answer = () => new Response('{}', headers429(60));
+  await run("tmdbRequest(env,'movie/1').catch(()=>null)"); assert.deepEqual(logs, [], 'off writes no evidence'); assert.equal(sent.length, 1);
+  // the run record keeps the four bounded counters of its coordinators
+  context.runRecord = {upstreamCooldown: {skipped: 1, wouldSkip: 0, written: 0, writeFailed: 0}};
+  context.c1 = {snapshot: () => ({skipped: 2, wouldSkip: 3, written: 1, writeFailed: 0})}; context.c2 = {snapshot: () => ({skipped: 0, wouldSkip: 1, written: 0, writeFailed: 4})};
+  run('recordUpstreamEvidence(runRecord,c1,c2,null)');
+  assert.deepEqual(plain(context.runRecord.upstreamCooldown), {skipped: 3, wouldSkip: 4, written: 1, writeFailed: 4});
+  context.empty = {}; run('recordUpstreamEvidence(empty,null)'); assert.equal(context.empty.upstreamCooldown, undefined, 'nothing to record, nothing recorded');
 }
 
 console.log('upstream-cooldown-callers: ok');

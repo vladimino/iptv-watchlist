@@ -361,6 +361,9 @@ export const FILES={
  "removal-ratings-cooldown.mjs": {
   "suite": "core"
  },
+ "upstream-cooldown-metadata.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },

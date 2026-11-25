@@ -12,13 +12,17 @@ const T0 = Date.parse('2026-10-31T08:00:00.000Z');
 const at = ms => new Date(ms).toISOString();
 const drain = async (R, env, runId, limit = 20) => {const replies = []; for (let i = 0; i < limit; i++) {const r = plain(await R.step(env, {runId})); replies.push(r); if (r.nextAction !== 'continue') break;} return replies;};
 
-async function world({mode, cooldownSeconds = null, members = {}}) {
+async function world({mode, cooldownSeconds = null, members = {}, appearsAtRecheck = false}) {
   const {clock, FakeDate, crypto} = makeClock(T0), net = makeNetwork(), bucket = makeBucket();
   const ctx = loadContext({net, clock, FakeDate, crypto});
   vm.runInContext(scoped('src/upstream-cooldown.js', 'UpstreamCooldown'), ctx); // before any call: a lookup of a missing global can stay cached
   const file = chain();
   if (mode) sql(file, `INSERT INTO upstream_coordination (id, mode, revision, updated_at) VALUES (1, '${mode}', 1, ${T0})`);
-  const env = {...baseEnv(bucket, {...SEPARATE, LETTERBOXD_DIARY_HISTORY: undefined}), DB: d1Standin(file)};
+  // `appearsAtRecheck`: the cooldown is written by ANOTHER writer between the pre-claim read and the real request (the plan and the claim are awaited): the 2nd read of the cooldown row is
+  // the real request's own re-check, and the row appears just before it.
+  let armed = false, reads = 0;
+  const onQuery = text => {if (armed && appearsAtRecheck && /FROM upstream_cooldown/.test(text) && ++reads === 2) sql(file, `INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('letterboxd', ${T0 + 900_000}, 'rate_limited', NULL, 'other-writer', ${T0})`);};
+  const env = {...baseEnv(bucket, {...SEPARATE, LETTERBOXD_DIARY_HISTORY: undefined}), DB: d1Standin(file, {onQuery})};
   const R = g(ctx, 'LetterboxdRatings');
   const ids = ['a', 'b', 'c'], films = {}, eventAt = at(T0 - 2 * H);
   await ctx.writeEvent(env, {id: 'run-1-watchlist', type: 'watchlist', at: eventAt, total: 0, baseline: false, added: [], removed: ids.map(id => ({id, title: id, year: 2000}))});
@@ -29,6 +33,7 @@ async function world({mode, cooldownSeconds = null, members = {}}) {
   const {runId} = plain(await R.start(env, {trigger: 'manual'}));
   await R.step(env, {runId}); // Diary page 1 (the Diary page consults the same cooldown, so it is seeded after this step: the removal phase is what is under test here)
   if (cooldownSeconds) sql(file, `INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('letterboxd', ${T0 + cooldownSeconds * 1000}, 'rate_limited', NULL, 'seed', ${T0})`);
+  armed = true;
   const replies = await drain(R, env, runId);
   return {bucket, net, file, replies, queue: bucket.value(QUEUE), run: bucket.value(RUN)};
 }
@@ -54,7 +59,7 @@ const rows = file => sql(file, 'SELECT scope, until_at, reason, set_by FROM upst
 for (const mode of ['enforce', 'observe']) {
   const w = await world({mode, members: {a: 4, b: 403, c: 4}});
   const written = rows(w.file);
-  assert.equal(written.length, 1, mode); assert.equal(written[0].scope, 'letterboxd'); assert.equal(written[0].reason, 'forbidden'); assert.equal(written[0].set_by, 'removal-rating');
+  assert.equal(written.length, 1, mode); assert.equal(written[0].scope, 'letterboxd'); assert.ok(['forbidden', 'challenge'].includes(written[0].reason), 'a 403 (the harness body is a challenge page): ' + written[0].reason); assert.equal(written[0].set_by, 'removal-rating');
 }
 {
   const w = await world({mode: 'enforce', members: {a: 4, b: 404, c: 'none'}});
@@ -66,6 +71,18 @@ for (const [label, mode] of [['observe', 'observe'], ['off', 'off'], ['absent ro
   const w = await world({mode, cooldownSeconds: 900, members: {a: 4, b: 4, c: 4}});
   assert.equal(w.net.memberFetches().length, 3, label + ': the lookups run as today');
   assert.equal(w.run.removal.lookup.stoppedBy, null, label);
+}
+
+// 5. a cooldown that appears AFTER the pre-claim read, during the awaited plan and claim: the real request re-checks, sends nothing, RELEASES the claim, and consumes no attempt
+{
+  const w = await world({mode: 'enforce', members: {a: 4, b: 4, c: 4}, appearsAtRecheck: true});
+  assert.deepEqual(w.net.memberFetches(), [], 'the real request re-checked the cooldown and sent nothing');
+  const e = w.queue.films.a;
+  assert.equal(e.attempts, 0, 'the claimed attempt is given back'); assert.equal(e.state, 'pending'); assert.equal(e.lastResult, null); assert.equal(e.claim, null, 'the claim is released');
+  assert.equal(e.nextAttemptAt, at(T0 - H), 'the film is due again exactly as before the claim');
+  for (const id of ['b', 'c']) assert.equal(w.queue.films[id].attempts, 0, id + ' was never touched');
+  assert.equal(Date.parse(w.queue.pausedUntil), T0 + 900_000); assert.equal(w.queue.pausedBy, 'upstream_cooldown');
+  assert.equal(w.run.removal.lookup.stoppedBy, 'upstream_cooldown'); assert.equal(w.run.state, 'finished'); assert.equal(w.run.cause, null);
 }
 
 console.log('removal-ratings-cooldown: ok');

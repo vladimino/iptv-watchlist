@@ -281,6 +281,17 @@ assert.equal(records.get('sync.json').ratingAttempt,undefined);
  w=world('enforce');records.clear();etags.clear();requests.length=0;site.set(url(1),()=>respond(429,'',{'Retry-After':'60'}));
  out=await D.syncHistory(w.env);
  assert.equal(diaryRequests().length,1);assert.equal(out.lastOutcome,'rate_limited');assert.deepEqual(plain(cool(w.file)),[{scope:'letterboxd',reason:'rate_limited',set_by:'letterboxd-diary'}]);
+ // P1-2 of the review of PR #1021: a challenge page behind a 200 with no header, a challenge body behind another status, a header challenge: each writes the cooldown (the Diary also reports its
+ // existing `blocked` outcome for the page); an ordinary 404 or 5xx writes nothing
+ const challengePage='<html><head><title>Just a moment...</title></head><body>cf-chl-opt</body></html>';
+ for(const [label,reply,expected] of [['200 body challenge',()=>respond(200,challengePage),'challenge'],['503 body challenge',()=>respond(503,challengePage),'challenge'],['200 header challenge',()=>respond(200,'<html></html>',{'cf-mitigated':'challenge'}),'challenge'],['403',()=>respond(403,''),'forbidden'],['404',()=>respond(404,''),null],['500',()=>respond(500,''),null]]){
+  w=world('enforce');records.clear();etags.clear();requests.length=0;site.set(url(1),reply);
+  out=await D.syncHistory(w.env);
+  assert.equal(plain(cool(w.file)).length,expected?1:0,label);
+  if(expected)assert.equal(plain(cool(w.file))[0].reason,expected,label);
+ }
+ site.set(url(1),()=>respond(200,'<html></html>'));
+ publish([{lid:'C1',slug:'c-1',date:day(0),stars:5}]);
  // a 404-free success writes nothing; off and an absent schema read the page
  for(const [label,build] of [['off',()=>world('off',600)],['absent row',()=>world(null)],['absent schema',()=>({file:null,env:{...env,DB:d1Standin(migrated(44))}})]]){
   const x=build();records.clear();etags.clear();requests.length=0;publish([{lid:'C1',slug:'c-1',date:day(0),stars:5}]);

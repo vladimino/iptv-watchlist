@@ -1340,9 +1340,9 @@ async function metadataSync(env,run){
 async function metadataSyncStep(env,run,marks){
  const mark=name=>{marks[name]=Date.now();};
  const working=await MetadataCache.loadMetadataWorkingSet(env);mark('loaded');const cache=working.records;const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);marks.films=ids.length;
- // AIR-604: the metadata film pages go through the shared Letterboxd cooldown; a skip is recorded (`run.upstreamCooldownSkips`), is not a failure of the film and is not retried in this step.
+ // AIR-604: the metadata film pages go through the shared Letterboxd cooldown; a skip is counted in `run.upstreamCooldown`, is not a failure of the film and is not retried in this step.
  const filmPages=upstreamCoordinator(env,'metadata-sync');
- for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url,filmPages);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){if(e?.code==='upstream_cooldown'){run.upstreamCooldownSkips=(run.upstreamCooldownSkips||0)+1;return;}run.failures.push({id,error:e.message});}}));
+ for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url,filmPages);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){if(e?.code==='upstream_cooldown')return;run.failures.push({id,error:e.message});}}));
  mark('fetched');
  const freeze=await frozenCanonicalMirrorsLocked(env);
  const titles=freeze?{}:await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));const localizationMode=metadataLocalizationMode(env);
@@ -1351,8 +1351,10 @@ async function metadataSyncStep(env,run,marks){
  try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode,wikidata));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  await saveCanonicalMirror(env,'titles.json',titles);
  const people=freeze?{}:await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
- try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode,wikidata));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
- if(wikidata?.stats.skipped)run.upstreamCooldownSkips=(run.upstreamCooldownSkips||0)+wikidata.stats.skipped;
+ // AIR-604: a people localization that skipped its Wikidata request is INCOMPLETE: the films are not marked localized (`peopleNamesVersion`), so the next metadata step picks them up again.
+ const skippedBeforePeople=wikidata?.stats.skipped||0;
+ try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode,wikidata));if((wikidata?.stats.skipped||0)===skippedBeforePeople)for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ recordUpstreamEvidence(run,filmPages,wikidata);
  for(const f of batch)cache[f.id]=f;
  await saveCanonicalMirror(env,'people.json',people);
  mark('localized');
@@ -2651,7 +2653,7 @@ async function epgSync(env,run){
  try{await localizeFilmTitles(run.watchlist,titles,'on',wikidata);await saveCanonicalMirror(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  const people=freeze?{}:await loadJSON(env,'people.json')||{};
  try{await localizeByLetterboxd(run.watchlist,people,wikidata);await saveCanonicalMirror(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
- if(wikidata?.stats.skipped)run.upstreamCooldownSkips=(run.upstreamCooldownSkips||0)+wikidata.stats.skipped;
+ recordUpstreamEvidence(run,wikidata);
  applyEpgLocalization(run.watchlist,people);
  // AIR-263: the source fetch and the scan are one traced phase; an error logs `error` and rethrows unchanged.
  const sources=sourceConfig(env);

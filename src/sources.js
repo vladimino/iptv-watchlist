@@ -326,12 +326,20 @@ function canonicalizeDiscoveryLedger(source,decisions){
 }
 const GENRE_MAP={Action:'Боевик',Thriller:'Триллер',Crime:'Криминал','Science Fiction':'Фантастика',Horror:'Ужасы',Adventure:'Приключения',Comedy:'Комедия',Drama:'Драма',Fantasy:'Фэнтези',Animation:'Мультфильм',History:'Исторический',War:'Военный',Mystery:'Детектив',Romance:'Мелодрама',Family:'Семейный',Documentary:'Документальный',Western:'Вестерн',Music:'Музыкальный','TV Movie':'Телефильм'};
 // AIR-604 (ADR 0211 decision 5): `coordination` is a coordinator or null (today's request). An enforced Letterboxd cooldown sends no request and throws a typed `upstream_cooldown`
-// error, which each caller maps to its own not-now path; it is never a failure of the page.
+// error (with `until`), which each caller maps to its own not-now path; it is never a failure of the page. The body is read exactly once: an ok answer by this function (and then handed
+// to the shared classifier, so a challenge page behind a 200 is a blocked answer and never a page), a non-ok answer only as a bounded prefix and only while coordination is on.
 async function getHTML(url,coordination=null){
  let r;
- try{r=coordination?await coordination.fetch(fetch,url,{signal:AbortSignal.timeout(25000)}):await fetch(url,{signal:AbortSignal.timeout(25000)});}
+ try{r=await(coordination?coordination.guard(fetch):fetch)(url,{signal:AbortSignal.timeout(25000)});}
  catch(error){if(error?.code==='upstream_cooldown')throw Object.assign(new Error(`Upstream cooldown: ${new URL(url).pathname}`),{code:'upstream_cooldown',until:error.until});throw error;}
- if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);const h=await r.text();if(h.length>3000000)throw new Error('Unexpected page size');return h;}
+ let h=null,html='';
+ if(r.ok){h=await r.text();html=h;}else if(coordination&&await coordination.active())html=await UpstreamCooldown.readBodyBounded(r,32768);
+ const scope=coordination?UpstreamCooldown.scopeOfUrl(url):null;
+ const signal=scope?await coordination.after(scope,{status:r.status,headers:r.headers,html}):null;
+ if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);
+ if(signal&&signal.reason==='challenge')throw new Error(`Source HTTP 403: ${new URL(url).pathname}`);
+ if(h.length>3000000)throw new Error('Unexpected page size');return h;
+}
 function parseWatchlist(html){
  const films=[];for(const m of html.matchAll(/<div\b[^>]*data-component-class="LazyPoster"[^>]*>/g)){const tag=m[0],display=attr(tag,'data-item-name'),path=attr(tag,'data-item-link');if(!/^\/film\/[a-z0-9-]+\/$/.test(path))continue;const identity=JSON.parse(attr(tag,'data-postered-identifier'));films.push({id:identity.lid,title:cleanTitle(display),original:cleanTitle(display),year:extractYear(display),url:'https://letterboxd.com'+path});}
  const total=Number(html.match(/js-watchlist-count[^>]*>([\d,]+)/)?.[1]?.replaceAll(',',''));const next=html.match(/<a\b[^>]*class="next"[^>]*href="([^"]+)"/)?.[1];return {films,total,next};
@@ -487,6 +495,14 @@ function channelPolicyCounts(coverage,declared,policies,degraded,boundaryDeclare
 function upstreamCoordinator(env,caller){return typeof UpstreamCooldown==='undefined'?null:UpstreamCooldown.createCoordinator(env,{caller});}
 // AIR-604 (ADR 0211 decision 5): one Wikidata request through the shared cooldown. `coordination` is a coordinator or null; null (and the `off` mode) sends exactly the request of today.
 // An enforced cooldown skips the request: the answer is null, and the caller stops asking Wikidata in its step without counting an error (the skip is `coordination.stats.skipped`).
+// The run's evidence of the shared cooldown (ADR 0211 decision 5, UC2): the four bounded counters of the coordinators the run used, added to `run.upstreamCooldown`. Nothing when all are zero.
+function recordUpstreamEvidence(run,...coordinators){
+ const total={skipped:0,wouldSkip:0,written:0,writeFailed:0};
+ for(const c of coordinators)if(c){const s=c.snapshot();for(const k of Object.keys(total))total[k]+=s[k];}
+ if(!Object.values(total).some(Boolean))return;
+ const old=run.upstreamCooldown||{};for(const k of Object.keys(total))total[k]+=Number.isInteger(old[k])?old[k]:0;
+ run.upstreamCooldown=total;
+}
 async function wikidataRequest(coordination,url,init){
  if(!coordination)return fetch(url,init);
  try{return await coordination.fetch(fetch,url,init,{scope:'wikidata'});}catch(error){if(error?.code==='upstream_cooldown')return null;throw error;}

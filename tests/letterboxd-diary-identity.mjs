@@ -649,4 +649,19 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
   assert.equal((await Facts.diaryLinks(env, ['LateC'])).get('LateC')?.tmdb ?? null, null);
 }
 
+// AIR-604 (ADR 0211 decision 5): a shared-cooldown skip is a transport stop that costs no attempt and whose retry time is the LATER of the local transport backoff and the shared cooldown end.
+{
+ const skipWith = until => async () => {throw Object.assign(new Error('upstream_cooldown'), {code: 'upstream_cooldown', until});};
+ reset(); await seed('Ck01', 3); site.set('Ck01', {status: 404});
+ const farUntil = NOW + 4 * 3600000;
+ out = await Identity.resolve(env, items(['Ck01', 'x']), opts({fetchImpl: skipWith(farUntil)}));
+ assert.deepEqual(net.calls, [], 'no request was sent');
+ assert.deepEqual([pending().Ck01.reason, pending().Ck01.attempts, pending().Ck01.streak, pending().Ck01.nextAttemptAt], ['upstream_cooldown', 0, 1, new Date(farUntil).toISOString()], 'no attempt charged; due at the cooldown end, later than the 15 min backoff');
+ assert.equal(out.outcomes.get('Ck01').retryAt, new Date(farUntil).toISOString());
+ reset(); await seed('Ck02', 3);
+ out = await Identity.resolve(env, items(['Ck02', 'x']), opts({fetchImpl: skipWith(NOW + 60000)}));
+ assert.equal(pending().Ck02.nextAttemptAt, new Date(NOW + 15 * 60000).toISOString(), 'a short cooldown never shortens the local backoff');
+ assert.equal(pending().Ck02.attempts, 0);
+}
+
 console.log('letterboxd-diary-identity: ok');
