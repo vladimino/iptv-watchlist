@@ -1,7 +1,7 @@
 # ADR 0214: Each `film_metadata` field carries provenance bound to its value; one writer rule protects owner values and replaces an automatic value only with a higher-ranked observation
 
-**Status:** Proposed  
-**Original decision date:** not decided. The owner's direction on all eight choices is recorded (below); the final disposition of this revised record is pending.  
+**Status:** Accepted  
+**Original decision date:** 2026-11-25 ([Product Owner final disposition](https://github.com/vladimino/iptv-watchlist/pull/988#issuecomment-7154541718): «Принимаю», after the [final technical review](https://github.com/vladimino/iptv-watchlist/pull/988#pullrequestreview-6052637302) of `c9b8ea2`).  
 **Recorded at:** 2026-11-24. Revised:
 - after the [first independent review](https://github.com/vladimino/iptv-watchlist/pull/988#pullrequestreview-6047546598) of `05509e8`;
 - after the [second review](https://github.com/vladimino/iptv-watchlist/pull/988#pullrequestreview-6047797014) of `5897652`;
@@ -9,19 +9,19 @@
 
   The section [Review findings](#review-findings-and-where-each-is-answered) maps those reviews to the decisions. On 2026-11-25 the record was rewritten to the owner's selected direction, including 0214-1 = B and 0214-8 = B.
 
-**Approval source:** direction selected by the Product Owner on 2026-11-25, transcribed in the [consolidated owner choices](https://trello.com/c/Nc89nzGD#comment-6b06751ce89afc2aa91d3630) and on [PR #988](https://github.com/vladimino/iptv-watchlist/pull/988#issuecomment-7154051573): 0214-1 = B, 0214-2 = A, 0214-3 = A, 0214-4 = B, 0214-5 = A, 0214-6 = A, 0214-7 = A, 0214-8 = B. That is a choice of direction. It is not the final acceptance of this text, and it grants no implementation or production GO.  
+**Approval source:** [Product Owner final disposition of 25 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/988#issuecomment-7154541718), accepting this record as reviewed at `c9b8ea2`, with the choices selected on 2026-11-25 ([transcription](https://trello.com/c/Nc89nzGD#comment-6b06751ce89afc2aa91d3630)): 0214-1 = B, 0214-2 = A, 0214-3 = A, 0214-4 = B, 0214-5 = A, 0214-6 = A, 0214-7 = A, 0214-8 = B. Architecture acceptance only; no implementation, migration, activation or production GO.  
 **Related work:**
 - [AIR-613](https://trello.com/c/Nc89nzGD), card PF of the [ADR 0207 delivery graph](0207-letterboxd-admissions-coordinated-in-d1-only.md#7-delivery-graph-7c). It is **not** a prerequisite of [AIR-275](https://trello.com/c/4x7hH0gI).
 - [ADR 0211](0211-catalog-enrichment-producer.md), owner choice 0211-1 = A: fill-only now, with option B (per-field provenance and a safe refresh and overwrite rule) planned as this record.
 - [ADR 0213](0213-film-identity-evidence-ledger.md), the identity evidence ledger. This record neither reads nor writes it.
 - [ADR 0120](0120-canonical-film-writers-identity-metadata-membership.md), the canonical Film writer. Its rules R1 (blank values, outside the sync clocks) and R5 (the `film_metadata` merge) are still draft.
 
-**Supersedes:** None while Proposed. If Accepted, it would:
-- supersede in part, **only while the provenance mode is `enforce`** (decision 11):
+**Supersedes:**
+- in part, **only while the provenance mode is `enforce`** (decision 11):
   - ADR 0211 decision 1 (fill-only);
   - the ADR 0211 decision 2 rule that a later answer of an earlier source never overwrites;
   - the ADR 0211 decision 3b rule that values written under a superseded anchor are never overwritten;
-- settle ADR 0120 rule R5 (metadata part) and rule R1 for the six fields of decision 1. Everything else in ADR 0120 is unchanged.
+- settles ADR 0120 rule R5 (metadata part) and rule R1 for the six fields of decision 1. Everything else in ADR 0120 is unchanged.
 
 **Superseded by:** None
 
@@ -737,7 +737,7 @@ The caller's guards stay within 12.
 
 ## Owner choices
 
-The direction was selected on 2026-11-25 ([transcription](https://trello.com/c/Nc89nzGD#comment-6b06751ce89afc2aa91d3630)). The final disposition of this text is pending.
+Selected on 2026-11-25 ([transcription](https://trello.com/c/Nc89nzGD#comment-6b06751ce89afc2aa91d3630)) and accepted with this record ([final disposition](https://github.com/vladimino/iptv-watchlist/pull/988#issuecomment-7154541718)). No choice remains open.
 
 | # | Choice | Selected |
 | --- | --- | --- |
@@ -752,7 +752,7 @@ The direction was selected on 2026-11-25 ([transcription](https://trello.com/c/N
 
 ## Follow-ups
 
-- **On final acceptance:** create the cards of decision 15 with their gates.
+- **On acceptance:** the coordinator creates the cards of decision 15 with their gates.
 - **When PV1 is delivered**, the maintained contracts change in that PR:
   - `docs/reference/data/d1-schema.md`;
   - `docs/reference/domain/film-person.md`;
