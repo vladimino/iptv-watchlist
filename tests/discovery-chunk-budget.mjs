@@ -1224,7 +1224,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
 // AIR-682 (owner decision, 25 Nov 2026): a caller that passes a 300 s chunk budget (the Workflow) runs longer than the 40 s default. Correctness only: one coherent clock.
 // The resolver VM clock and the imported DiscoveryAuthority (which reads the host Date.now for acquire, renew and expiry) share one virtual offset, so a lease that is not
 // renewed in time really expires. Every D1 write batch costs 3 virtual seconds and every TMDB request 5; 25 eligible candidates make the 16-request cap the stop.
-async function sharedClockChunk({budget=300000,disturb=null,mix=20}={}){
+async function sharedClockChunk({budget=300000,disturb=null,mix=20,advance=false}={}){
  const base=await fixture({mix});
  const clock={offset:0},state={published:RUN,fired:false,firedAtMs:null,decisionsAtFire:null,statusBefore:statusPayload(base.file)};
  const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=3000;}})};
@@ -1241,8 +1241,13 @@ async function sharedClockChunk({budget=300000,disturb=null,mix=20}={}){
  const hostNow=Date.now;Date.now=()=>hostNow.call(Date)+clock.offset;
  let result=null,error=null,checkpoints=0,leaseExpiresAt=null,nowAtEnd=null;
  try{
-  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
-  try{result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;},null,budget??undefined);}catch(e){error=e;}
+  if(advance){
+   // The real engine entry the Workflow calls: it takes the lease itself, forwards the budget, and persists the owned continuation checkpoint.
+   try{result=await context.advanceDiscovery(env,{caller:'internal',chunkBudgetMs:budget??undefined});}catch(e){error=e;}
+  }else{
+   const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+   try{result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;},null,budget??undefined);}catch(e){error=e;}
+  }
   nowAtEnd=Date.now();leaseExpiresAt=Number(leaseRow(base.file).expires_at);
  }finally{Date.now=hostNow;}
  return {base,state,result,error,checkpoints,searched,leaseExpiresAt,nowAtEnd,clock};
@@ -1270,6 +1275,30 @@ async function sharedClockChunk({budget=300000,disturb=null,mix=20}={}){
  assert.equal(run.error,null);
  assert.ok(run.result.timings.totalMs<=40000,'the default budget is 40 s: '+run.result.timings.totalMs);
  assert.ok(run.searched.length<16,'fewer TMDB requests fit in 40 s: '+run.searched.length);
+}
+{
+ // The real advanceDiscovery(env,{caller:'internal',chunkBudgetMs:300000}): the forwarded budget, the owned continuation checkpoint and the stored status.
+ // A dropped budget would stop at 40 s, so a chunk longer than 90 s proves the forwarding seam itself.
+ const run=await sharedClockChunk({advance:true});
+ assert.equal(run.error,null);
+ const outcome=run.result,chunk=outcome.diagnostic.chunk,saved=outcome.diagnostic.saved;
+ assert.ok(chunk.timings.totalMs>90000&&chunk.timings.totalMs<=300000,'advanceDiscovery forwards the 300 s budget: '+chunk.timings.totalMs);
+ assert.ok(chunk.timings.renewals>=2,'successive lease renewals: '+chunk.timings.renewals);
+ assert.equal(chunk.tmdbCalls,16,'the cap is reached');
+ assert.equal(chunk.error,null);
+ assert.equal(saved.owned,true,'the continuation checkpoint was committed by this hop');
+ assert.equal(saved.write,'saved');
+ assert.equal(outcome.diagnostic.leaseReleased,true,'the lease is released after the checkpoint');
+ const row=sql(run.base.file,'SELECT revision, payload_json FROM discovery_continuation WHERE id=1')[0],continuation=JSON.parse(row.payload_json),status=JSON.parse(statusPayload(run.base.file));
+ assert.ok(Number(row.revision)>0,'the continuation row was written');
+ assert.equal(continuation.stage,'paused');
+ assert.ok(continuation.remainingChunks>0,'the series continues');
+ assert.equal(continuation.hopId,saved.hopId,'the stored continuation names the committing hop');
+ assert.equal(status.hopId,saved.hopId,'and so does the stored status');
+ assert.equal(status.programmeRunId,RUN,'the status carries the programme generation');
+ assert.equal(status.stage,'partial');
+ assert.equal(status.tmdbCalls,16);
+ assert.equal(decisionCount(run.base.file),outcome.checked,'every counted candidate has its decision');
 }
 for(const [name,disturb] of [
  ['the lease expires late',(base)=>sql(base.file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1')],
