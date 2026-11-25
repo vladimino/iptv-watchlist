@@ -49,54 +49,75 @@ for(const [n,v] of [['year',0],['year','1995'],['runtime',-1],['synopsis',''],['
 }
 assert.equal(usableCoreField('genres',['Drama']),true);assert.equal(usableCoreField('runtime',120),true);assert.equal(usableTitle(' x '),true);assert.equal(usableTitle(5),false);
 
-// predictionReady P1-P7, with bound prediction-domain evidence (a bare verdict is never proof).
+// predictionReady P1-P7. P3/P5/P6 need an OBSERVATION (predictionEvidence) that coheres with an independently supplied, already fenced CONTEXT.
 import {predictionEvidence,checkPredictionEvidence,authorizedStorageIds,PREDICTION_EVIDENCE_CONTRACT} from '../src/film-readiness.js';
-const TOKEN={generation:1,pointers:'sha256:a'},CTOKEN='c1';
-const P=(status,coverage='complete',extra={})=>({...body(),identity:{verdict:'found',filmId:'film:1',claims:[lid,tmdb]},predictions:{status,token:TOKEN,coverage:{status:coverage,token:CTOKEN},current:[{storageId:'abc',tasteProfileVersion:3}],...extra}});
+const IT={generation:1,readSet:'sha256:i'},TOKEN={generation:1,pointers:'sha256:a'},CTOKEN='c1';
+const P=(status,coverage='complete',extra={})=>({...body(),identity:{verdict:'found',filmId:'film:1',claims:[lid,tmdb],token:IT},predictions:{status,token:TOKEN,coverage:{status:coverage,token:CTOKEN},current:[{storageId:'abc',tasteProfileVersion:3}],...extra}});
 const ids=['abc','tmdb_1'];
-const ev=(over={},facts={fingerprint:{status:'present',storageIds:['abc']},compatibility:'compatible'})=>({...predictionEvidence(facts,{filmId:'film:1',examinedStorageIds:ids,predictionToken:TOKEN,coverageToken:CTOKEN,tasteProfileVersions:[3]}),...over});
+const CTX={identityToken:IT,profile:{version:4,hash:'p4'},registryToken:'r1',fingerprintToken:'f1',examinedStorageIds:ids};
+const FACTS={fingerprint:{status:'present',storageIds:['abc']},compatibility:'compatible'};
+const CAPTURED={filmId:'film:1',identityToken:IT,predictionToken:TOKEN,coverageToken:CTOKEN,profile:CTX.profile,registryToken:'r1',fingerprintToken:'f1',examinedStorageIds:ids};
+const ev=(over={},facts=FACTS)=>({...predictionEvidence(facts,CAPTURED),...over});
 const absent={fingerprint:{status:'absent'},compatibility:'unknown'};
+const run=(b,e,c=CTX)=>predictionReady(b,e,c);
+const atP=(b,rule,value,reason,e,c=CTX)=>{const r=run(b,e,c);assert.deepEqual([r.rule,r.value,r.reason],[rule,value,reason??null],rule+' '+reason);};
 assert.deepEqual(authorizedStorageIds(P('present').identity),ids);
 assert.equal(ev().contract,PREDICTION_EVIDENCE_CONTRACT);
-assert.equal(checkPredictionEvidence(P('present'),ev()),null);
-at(predictionReady,{...P('present'),predictions:{status:'unavailable'}},'P1','unknown','prediction_unavailable');
-at(predictionReady,P('present'),'P1','unknown','prediction_unavailable',ev({fingerprint:'unavailable'},{fingerprint:{status:'unavailable'}}));
+assert.equal(checkPredictionEvidence(P('present'),ev(),CTX),null);
+atP({...P('present'),predictions:{status:'unavailable'}},'P1','unknown','prediction_unavailable');
+atP(P('present'),'P1','unknown','prediction_unavailable',ev({fingerprint:'unavailable'},{fingerprint:{status:'unavailable'}}));
 // P2 has priority over a proved-absent fingerprint, whatever the coverage.
-at(predictionReady,P('conflict','incomplete'),'P2','unknown','conflict',ev({},absent));
-at(predictionReady,P('conflict','complete'),'P2','unknown','conflict',ev({},absent));
-at(predictionReady,P('partial','complete'),'P3',false,'fingerprint_absent',ev({},absent));
-at(predictionReady,P('absent','complete',{reason:'none'}),'P4',false,'prediction_absent');           // aggregate alone proves none
-at(predictionReady,P('present'),'P5',false,'incompatible',ev({},{fingerprint:{status:'present',storageIds:['abc']},compatibility:'incompatible'}));
-// P5 needs no presence guard: a proved incompatible verdict is P5 after P1-P4 even with unknown fingerprint and a partial section.
-at(predictionReady,P('partial','incomplete'),'P5',false,'incompatible',ev({},{fingerprint:{status:'unknown'},compatibility:'incompatible'}));
-at(predictionReady,P('present'),'P6',true,null,ev());
+atP(P('conflict','incomplete'),'P2','unknown','conflict',ev({},absent));
+atP(P('conflict','complete'),'P2','unknown','conflict',ev({},absent));
+atP(P('partial','complete'),'P3',false,'fingerprint_absent',ev({},absent));
+// P4 needs only the aggregate: independent of any evidence, valid or not, supplied or not.
+for(const [e,c] of [[undefined,undefined],[ev({filmId:'film:2'}),CTX],[{bare:1},null]])atP(P('absent','complete',{reason:'none'}),'P4',false,'prediction_absent',e,c);
+atP(P('present'),'P5',false,'incompatible',ev({},{fingerprint:{status:'present',storageIds:['abc']},compatibility:'incompatible'}));
+// P5 needs no presence guard: a proved incompatible verdict follows P1-P4 even with unknown fingerprint and a partial section / incomplete coverage.
+atP(P('partial','incomplete'),'P5',false,'incompatible',ev({},{fingerprint:{status:'unknown'},compatibility:'incompatible'}));
+atP(P('present'),'P6',true,null,ev());
 // Incomplete aggregate coverage with a present prediction stays unknown; so do unknown compatibility and unknown fingerprint.
-at(predictionReady,P('present','incomplete'),'P7','unknown','coverage_incomplete',ev());
-at(predictionReady,P('present'),'P7','unknown','compatibility_unknown',ev({},{fingerprint:{status:'present',storageIds:['abc']},compatibility:'unknown'}));
-at(predictionReady,P('present'),'P7','unknown','fingerprint_unknown',ev({},{fingerprint:{status:'unknown'},compatibility:'compatible'}));
-at(predictionReady,P('present'),'P7','unknown','fingerprint_unknown');
-// Bare strings are not evidence (the old shape certified P6): rejected as unbound, nothing is certified either way.
-at(predictionReady,P('present'),'P7','unknown','prediction_evidence_shape',{fingerprint:'present',compatibility:'compatible'});
-at(predictionReady,P('partial'),'P7','unknown','prediction_evidence_shape',{fingerprint:'absent'});
-// Evidence of another Film, a moved token, a changed profile or an incomplete fingerprint read certifies nothing, positive or negative.
-const bad=[
- ['prediction_evidence_foreign_film',ev({filmId:'film:2'})],
- ['prediction_evidence_foreign_film',ev({fingerprintStorageIds:['other']})],
- ['prediction_evidence_token_moved',ev({predictionToken:{generation:2,pointers:'sha256:b'}})],
- ['prediction_evidence_token_moved',ev({coverageToken:'c2'})],
- ['prediction_evidence_profile_changed',ev({tasteProfileVersions:[4]})],
- ['prediction_evidence_incomplete_fingerprint_coverage',ev({examinedStorageIds:['abc']})],
- ['prediction_evidence_incomplete_fingerprint_coverage',ev({examinedStorageIds:[]})],
- ['prediction_evidence_incoherent',ev({fingerprint:'absent',fingerprintStorageIds:['abc']})],
+atP(P('present','incomplete'),'P7','unknown','coverage_incomplete',ev());
+atP(P('present'),'P7','unknown','compatibility_unknown',ev({},{fingerprint:{status:'present',storageIds:['abc']},compatibility:'unknown'}));
+atP(P('present'),'P7','unknown','fingerprint_unknown',ev({},{fingerprint:{status:'unknown'},compatibility:'compatible'}));
+atP(P('present'),'P7','unknown','fingerprint_unknown',undefined,null);
+// Bare strings and an observation without a context are not evidence.
+atP(P('present'),'P7','unknown','prediction_evidence_shape',{fingerprint:'present',compatibility:'compatible'});
+atP(P('present'),'P7','unknown','prediction_context_missing',ev(),null);
+// The evidence is compared with the EXPECTED context, never with values it carries itself. Same pointer, same aggregate tokens, but:
+const stale=[
+ ['prediction_evidence_profile_changed',ev(),{...CTX,profile:{version:5,hash:'p5'}}],                       // active profile moved v4 -> v5
+ ['prediction_evidence_profile_changed',ev(),{...CTX,profile:{version:4,hash:'other'}}],                    // same version, different hash
+ ['prediction_evidence_profile_changed',ev(),{...CTX,registryToken:'r2'}],                                  // compatibility registry changed
+ ['prediction_evidence_fingerprint_changed',ev(),{...CTX,fingerprintToken:'f2'}],                           // fingerprint changed only
+ ['prediction_evidence_identity_moved',ev(),{...CTX,identityToken:{generation:2,readSet:'sha256:j'}}],      // identity moved
+ ['prediction_evidence_identity_moved',ev({identityToken:{generation:2,readSet:'sha256:j'}}),CTX],
+ ['prediction_evidence_token_moved',ev({predictionToken:{generation:2,pointers:'sha256:b'}}),CTX],
+ ['prediction_evidence_token_moved',ev({coverageToken:'c2'}),CTX],
+ ['prediction_evidence_foreign_film',ev({filmId:'film:2'}),CTX],
+ ['prediction_evidence_foreign_film',ev({fingerprintStorageIds:['other']}),CTX],
+ ['prediction_evidence_incomplete_fingerprint_coverage',ev({examinedStorageIds:['abc']}),CTX],              // read omitted an authorized id
+ ['prediction_evidence_incomplete_fingerprint_coverage',ev(),{...CTX,examinedStorageIds:['abc']}],
+ ['prediction_evidence_incomplete_fingerprint_coverage',ev({examinedStorageIds:[]}),{...CTX,examinedStorageIds:[]}],
+ ['prediction_evidence_incoherent',ev({fingerprint:'absent',fingerprintStorageIds:['abc']}),CTX],
 ];
-for(const [reason,e] of bad){
- at(predictionReady,P('present'),'P7','unknown',reason,e);                                  // positive not certified
- if(!e.fingerprintStorageIds.length)at(predictionReady,P('partial'),'P7','unknown',reason,{...e,fingerprint:'absent',fingerprintStorageIds:[]}); // negative not certified
+for(const [reason,e,c] of stale){
+ atP(P('present'),'P7','unknown',reason,e,c);                                                               // positive not certified
+ if(!e.fingerprintStorageIds.length)atP(P('partial'),'P7','unknown',reason,{...e,fingerprint:'absent',compatibility:'incompatible'},c); // neither P3 nor P5 certified
 }
-// Absent fingerprint with incomplete fingerprint read (only some authorized ids examined) never reaches P3.
-at(predictionReady,P('partial','complete'),'P7','unknown','prediction_evidence_incomplete_fingerprint_coverage',ev({fingerprint:'absent',fingerprintStorageIds:[],examinedStorageIds:['abc']}));
-// Held/moved aggregate sections stay P1 whatever the evidence says.
-at(predictionReady,{...P('present'),predictions:{status:'unavailable',reason:'generation_moved'}},'P1','unknown','prediction_unavailable',ev());
+// Missing or null proof is never equal to another missing or null proof.
+for(const key of ['identityToken','predictionToken','coverageToken','profile','registryToken','fingerprintToken'])for(const v of [undefined,null,'',{}]){
+ const e=ev({[key]:v}),c={...CTX,...(key in CTX?{[key]:v}:{})};
+ assert.notEqual(run(P('present'),e,c).rule,'P6',key+String(v));
+ assert.equal(run(P('present'),e,c).value,'unknown',key+String(v));
+}
+// Absent tokens in the body as well: an aggregate that states no token certifies nothing.
+{const b=P('present');delete b.predictions.token;const r=run(b,ev({predictionToken:undefined}));assert.equal(r.value,'unknown');}
+// A genuinely complete fingerprint absence (every authorized id examined, tokens agree) versus an omitted or unreadable read.
+atP(P('partial','complete'),'P3',false,'fingerprint_absent',ev({},absent));
+atP(P('partial','complete'),'P7','unknown','prediction_evidence_incomplete_fingerprint_coverage',ev({examinedStorageIds:['abc']},absent));
+atP(P('partial','complete'),'P1','unknown','prediction_unavailable',ev({},{fingerprint:{status:'unavailable'},compatibility:'unknown'}));
+atP({...P('present'),predictions:{status:'unavailable',reason:'generation_moved'}},'P1','unknown','prediction_unavailable',ev());
 for(const s of ['present','partial','unknown'])assert.notEqual(predictionReady(P(s)).value,true);
 
 // Report: provenance and freshness beside readiness, never required by it; the derivation does not mutate its input.

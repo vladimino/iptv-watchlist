@@ -66,17 +66,25 @@ export function catalogReady(body){
 }
 
 // ---- Prediction-domain evidence (checked handoff) ----
-// The aggregate has no fingerprint section and no compatibility verdict (ADR 0216), so P3, P5 and P6 need prediction-domain evidence. A bare verdict string
-// is not evidence: it could belong to another Film, another pointer or profile, or to a generation that has since moved. The evidence is therefore a bound
-// object: the reading side (offline parity/diagnostics, `predictionFacts` of the AIR-660 parity domain) states which Film and which
-// authorized storage ids its fingerprint read examined, and the aggregate token, coverage token and taste profile versions it was computed against.
-// `checkPredictionEvidence` verifies that binding against the body being judged; anything unbound, partial, moved or unreadable certifies neither a positive
-// nor a negative. No storage read, no compatibility algorithm and no adapter lives here.
+// The aggregate has no fingerprint section and no compatibility verdict (ADR 0216), so P3, P5 and P6 need prediction-domain facts. Two independent objects:
+//  - `evidence`: the OBSERVATION, built by the reading side from `predictionFacts` (AIR-660) with the context it captured while reading: the Film, the
+//    identity token, the aggregate prediction and coverage tokens, the active taste profile (version and hash), the compatibility registry snapshot token,
+//    and the fingerprint read-set (authorized storage ids examined) with its token;
+//  - `context`: the EXPECTED coherent context, supplied independently by the trusted, already-fenced composition that owns those inputs (AIR-648 acquires and
+//    fences it from the existing domain authority; this module reads nothing): identity token, active profile, registry token, fingerprint read-set and token.
+// `checkPredictionEvidence` compares what the observation captured with that context and with the body being judged: nothing is copied from the evidence to
+// validate itself, every proof must be present (a missing or null token never equals another missing token), and any difference (moved identity, moved active
+// profile or registry, changed fingerprint, omitted or unreadable fingerprint read) makes the evidence uncertifying: P3/P5/P6 are not reached, the result is
+// `unknown`. P4 never depends on it. No storage read, no compatibility algorithm and no adapter lives here, and no new eligibility or limit is imposed.
 export const PREDICTION_EVIDENCE_CONTRACT='film-prediction-evidence/v1';
 const FINGERPRINT_STATES=['present','absent','partial','unavailable','unknown'];
 const COMPATIBILITY=['compatible','incompatible','unknown'];
-const canonical=v=>JSON.stringify(v??null,(k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(key=>[key,x[key]])):x);
-const sameSet=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&canonical([...a].sort())===canonical([...b].sort());
+const canonical=v=>JSON.stringify(v,(k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(key=>[key,x[key]])):x);
+const defined=v=>v!==undefined&&v!==null&&(typeof v!=='object'||Object.values(v).every(defined));
+// A proof is a value that states something: not undefined, null, blank or empty, with no undefined or null member (an empty list inside a token is a statement).
+const proven=v=>defined(v)&&(typeof v==='string'?v.trim().length>0:typeof v==='object'?Array.isArray(v)?v.length>0:Object.keys(v).length>0:true);
+const same=(a,b)=>proven(a)&&proven(b)&&canonical(a)===canonical(b);
+const sameSet=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&same([...a].sort(),[...b].sort());
 
 // The storage ids the aggregate authorizes: each verified lid and `tmdb_<n>` of a trusted, non-conflicting, non-retired, uncontested movie claim.
 export function authorizedStorageIds(identity){
@@ -88,27 +96,34 @@ export function authorizedStorageIds(identity){
  return ids.sort();
 }
 
-// Build the evidence from `predictionFacts` output and what the read examined. A plain object: the reading side owns the facts, this only fixes the shape.
-export function predictionEvidence(facts,{filmId,examinedStorageIds,predictionToken,coverageToken,tasteProfileVersions=[]}){
+// Build the observation from `predictionFacts` output and the context captured with it. A plain object: the reading side owns the facts, this fixes the shape.
+export function predictionEvidence(facts,captured={}){
+ const {filmId,identityToken,predictionToken,coverageToken,profile,registryToken,fingerprintToken,examinedStorageIds}=captured;
  return {
-  contract:PREDICTION_EVIDENCE_CONTRACT,filmId,examinedStorageIds:[...(examinedStorageIds||[])],predictionToken:predictionToken??null,coverageToken:coverageToken??null,
-  tasteProfileVersions:[...tasteProfileVersions],fingerprint:facts?.fingerprint?.status??'unknown',fingerprintStorageIds:[...(facts?.fingerprint?.storageIds||[])],
+  contract:PREDICTION_EVIDENCE_CONTRACT,filmId,identityToken,predictionToken,coverageToken,profile,registryToken,fingerprintToken,
+  examinedStorageIds:[...(examinedStorageIds||[])],fingerprint:facts?.fingerprint?.status??'unknown',fingerprintStorageIds:[...(facts?.fingerprint?.storageIds||[])],
   compatibility:facts?.compatibility??'unknown',
  };
 }
 
-// -> null when the evidence is coherent with `body`, else the reason it is not. Never throws.
-export function checkPredictionEvidence(body,evidence){
+// -> null when the observation is coherent with `body` and the independently supplied `context`, else the reason it is not. Never throws.
+export function checkPredictionEvidence(body,evidence,context){
  try{
   if(evidence==null||typeof evidence!=='object'||evidence.contract!==PREDICTION_EVIDENCE_CONTRACT)return 'evidence_shape';
   if(!FINGERPRINT_STATES.includes(evidence.fingerprint)||!COMPATIBILITY.includes(evidence.compatibility))return 'evidence_shape';
+  if(context==null||typeof context!=='object')return 'context_missing';
   const identity=body?.identity,p=body?.predictions;
-  if(evidence.filmId!==identity?.filmId)return 'evidence_foreign_film';
+  if(!proven(evidence.filmId)||evidence.filmId!==identity?.filmId)return 'evidence_foreign_film';
+  // Identity: the observation, the context and the body's own fenced identity token must be one and the same, and stated.
+  if(!same(evidence.identityToken,identity?.token)||!same(context.identityToken,identity?.token))return 'evidence_identity_moved';
+  // The aggregate's own prediction and coverage tokens, as the observation captured them.
+  if(!p||!same(evidence.predictionToken,p.token)||!same(evidence.coverageToken,p.coverage?.token))return 'evidence_token_moved';
+  // The active profile and the compatibility registry the verdict was computed against, versus the expected ones.
+  if(!same(evidence.profile,context.profile)||!same(evidence.registryToken,context.registryToken))return 'evidence_profile_changed';
+  // The fingerprint read-set: every authorized storage id examined, under the expected read-set and its token.
   const authorized=authorizedStorageIds(identity);
-  if(!authorized.length||!sameSet(evidence.examinedStorageIds,authorized))return 'evidence_incomplete_fingerprint_coverage';
-  if(!p||canonical(evidence.predictionToken)!==canonical(p.token)||canonical(evidence.coverageToken)!==canonical(p.coverage?.token))return 'evidence_token_moved';
-  const versions=[...new Set((p.current||[]).map(x=>x.tasteProfileVersion??null))];
-  if(!sameSet(evidence.tasteProfileVersions,versions))return 'evidence_profile_changed';
+  if(!authorized.length||!sameSet(evidence.examinedStorageIds,authorized)||!sameSet(context.examinedStorageIds,authorized))return 'evidence_incomplete_fingerprint_coverage';
+  if(!same(evidence.fingerprintToken,context.fingerprintToken))return 'evidence_fingerprint_changed';
   if(!evidence.fingerprintStorageIds.every(id=>authorized.includes(id)))return 'evidence_foreign_film';
   if(evidence.fingerprint==='absent'&&evidence.fingerprintStorageIds.length)return 'evidence_incoherent';
   if(evidence.fingerprint==='present'&&!evidence.fingerprintStorageIds.length)return 'evidence_incoherent';
@@ -116,14 +131,14 @@ export function checkPredictionEvidence(body,evidence){
  }catch{return 'evidence_shape';}
 }
 
-// `evidence` is optional prediction-domain evidence (above). Absent or unbound evidence is `unknown` on every axis: a negative or a positive that only the
-// prediction domain can state is never inferred from the aggregate or from a bare verdict.
-export function predictionReady(body,evidence){
+// `evidence` and `context` are optional (above). Without both, or when they do not cohere, every prediction fact only the prediction domain can state is
+// `unknown`: a negative or a positive is never inferred from the aggregate, from a bare verdict or from a freshly relabelled stale observation.
+export function predictionReady(body,evidence,context){
  const g=gate(body?.identity);
  if(g)return g;
  const p=body.predictions;
  const supplied=evidence!=null;
- const unbound=supplied?checkPredictionEvidence(body,evidence):null;
+ const unbound=supplied?checkPredictionEvidence(body,evidence,context):null;
  const ev=supplied&&!unbound?evidence:null;
  const fingerprint=ev?.fingerprint??'unknown';
  const compatibility=ev?.compatibility??'unknown';
@@ -146,12 +161,12 @@ export function readinessContext(body){
  return {provenance,freshness:'unknown'};
 }
 
-export function deriveReadiness(body,{prediction}={}){ // `prediction`: prediction-domain evidence, see predictionReady
+export function deriveReadiness(body,{prediction}={}){ // `prediction`: {evidence, context}, see predictionReady
  return {
   contract:READINESS_CONTRACT,
   displayReady:displayReady(body),
   catalogReady:catalogReady(body),
-  predictionReady:predictionReady(body,prediction),
+  predictionReady:predictionReady(body,prediction?.evidence,prediction?.context),
   ...readinessContext(body),
  };
 }

@@ -1126,12 +1126,15 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
 {
  const rd=async(file,id,options={})=>{const e=env(file,options);const out=await readFilmReadiness(e,id,options.prediction?{prediction:options.prediction}:{});return {...out,calls:e.calls};};
  const sig=r=>[r.readiness.displayReady.rule,r.readiness.catalogReady.rule,r.readiness.predictionReady.rule];
- const evidenceFor=(fingerprints=[])=>body=>{
+ // The expected context is what a trusted, fenced composition (AIR-648) owns; the observation captures it while reading. Here: fixed domain state.
+ const DOMAIN={profile:{version:4,hash:'p4'},registryToken:'r1',fingerprintToken:'f1'};
+ const observed=(body,fingerprints=[],over={})=>{
   const storageIds=authorizedStorageIds(body.identity);
   const pointers=(body.predictions.current||[]).map(c=>({film_id:c.storageId,r2_key:c.body.r2Key,content_sha256:c.contentSha256,fingerprint_hash:c.fingerprintHash}));
   const facts=predictionFacts({storageIds,fingerprints,pointers,coverage:body.predictions.coverage});
-  return predictionEvidence(facts,{filmId:body.identity.filmId,examinedStorageIds:storageIds,predictionToken:body.predictions.token,coverageToken:body.predictions.coverage?.token,tasteProfileVersions:[...new Set((body.predictions.current||[]).map(c=>c.tasteProfileVersion??null))]});
+  return predictionEvidence(facts,{filmId:body.identity.filmId,identityToken:body.identity.token,predictionToken:body.predictions.token,coverageToken:body.predictions.coverage?.token,examinedStorageIds:storageIds,...DOMAIN,...over});
  };
+ const prediction=(fingerprints=[],{over={},context={}}={})=>body=>({evidence:observed(body,fingerprints,over),context:{identityToken:body.identity.token,examinedStorageIds:authorizedStorageIds(body.identity),...DOMAIN,...context}});
  // found: usable title and metadata, complete coverage, a pointer. Without prediction-domain evidence predictionReady is unknown, never true.
  const file=world();pointer(file,'l5',3.5);metadata(file,'film:tmdb:5',{year:1995,runtime:120,synopsis:'s',poster:'p',url:'u',genres:['Drama']});ownerTitle(file,'k1','film:tmdb:5','Heat');
  const before=fileSha(file);
@@ -1144,13 +1147,21 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  // Measured cost: the derivation adds no D1 statement, no write, no R2 or network (the proxies throw).
  assert.equal(found.calls.queries,plain.calls.queries,'zero additional D1 statements');
  assert.equal(fileSha(file),before,'no write');
- // Bound evidence from the real body: coherent evidence is accepted (never a positive without a fingerprint and compatibility verdict); another Film's is not.
+ // Bound evidence from the real body and the expected context: coherent evidence is accepted (a positive still needs a fingerprint and compatibility verdict).
  const fp=[{film_id:'l5',fingerprint_hash:'h',invalidated_at:null}];
- const good=await rd(file,'tmdb_5',{prediction:evidenceFor(fp)});
- assert.notEqual(good.readiness.predictionReady.reason,'prediction_evidence_shape');
+ const good=await rd(file,'tmdb_5',{prediction:prediction(fp)});
  assert.ok(!String(good.readiness.predictionReady.reason).startsWith('prediction_evidence_'),'coherent evidence binds: '+good.readiness.predictionReady.reason);
- const foreign=await rd(file,'tmdb_5',{prediction:body=>({...evidenceFor(fp)(body),filmId:'film:other'})});
- assert.deepEqual([foreign.readiness.predictionReady.value,foreign.readiness.predictionReady.reason],['unknown','prediction_evidence_foreign_film']);
+ const why=async p=>(await rd(file,'tmdb_5',{prediction:p})).readiness.predictionReady;
+ // Same Film, same pointer, same aggregate tokens, but the expected context moved: the observation is not certified.
+ assert.equal((await why(prediction(fp,{context:{profile:{version:5,hash:'p5'}}}))).reason,'prediction_evidence_profile_changed');
+ assert.equal((await why(prediction(fp,{context:{registryToken:'r2'}}))).reason,'prediction_evidence_profile_changed');
+ assert.equal((await why(prediction(fp,{context:{fingerprintToken:'f2'}}))).reason,'prediction_evidence_fingerprint_changed');
+ assert.equal((await why(prediction(fp,{context:{identityToken:{generation:99,readSet:'x'}}}))).reason,'prediction_evidence_identity_moved');
+ assert.equal((await why(prediction(fp,{over:{filmId:'film:other'}}))).reason,'prediction_evidence_foreign_film');
+ assert.equal((await why(prediction(fp,{over:{examinedStorageIds:['l5']}}))).reason,'prediction_evidence_incomplete_fingerprint_coverage');
+ for(const key of ['fingerprintToken','registryToken','profile'])assert.equal((await why(prediction(fp,{over:{[key]:null}}))).value,'unknown','missing '+key);
+ // The relabelled stale observation (tokens of an earlier body) never certifies: it is checked against the body actually judged.
+ assert.equal((await why(body=>({evidence:observed(plain.body,fp,{identityToken:{generation:0,readSet:'old'}}),context:prediction(fp)(body).context}))).reason,'prediction_evidence_identity_moved');
  // redirected: display and catalog are judged on the survivor.
  const redir=world();film(redir,'film:old:5');sqlite(redir,`INSERT INTO film_redirect VALUES ('film:old:5','film:tmdb:5','${AT}')`);metadata(redir,'film:tmdb:5',{year:1995});
  const viaRedirect=await rd(redir,'film:old:5');
@@ -1183,7 +1194,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  const mv=world();pointer(mv,'l5',3);
  let moved=false;
  const em=env(mv,{onQuery:t=>{if(!moved&&t.includes('FROM watchlist_authority')){moved=true;pointer(mv,'l5',3,{sha:'e'.repeat(64)});}}});
- const movedOut=await readFilmReadiness(em,'tmdb_5',{prediction:evidenceFor()});
+ const movedOut=await readFilmReadiness(em,'tmdb_5',{prediction:prediction()});
  assert.deepEqual([movedOut.readiness.predictionReady.rule,movedOut.readiness.predictionReady.reason],['P1','prediction_unavailable']);
  // Identity moved during the read: 503, identity only: G1.
  const idm=world();let m2=false;

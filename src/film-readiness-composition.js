@@ -2,8 +2,9 @@
 // DORMANT like both modules it joins: not in the Worker bundle, nothing imports it, no route and no consumer. It adds ZERO D1 statements (the derivation reads
 // only the aggregate body), no write, no R2 and no network. It is the composition that offline aggregate, diagnostics and parity use today; the D1 reader wiring
 // of the stage-5 reader switch belongs to the aggregate activation (AIR-648), which calls this same function behind its own owner GO.
-// `prediction` is prediction-domain evidence (predictionEvidence, bound to the Film, tokens and profile) or a function (body) => evidence supplied by the
-// caller's own trusted reader; without it every prediction fact only the prediction domain can state stays `unknown`.
+// `prediction` is `{evidence, context}` (or a function (body) => that): the observation (predictionEvidence) and the independently supplied, already fenced
+// expected context (identity token, active profile, registry, fingerprint read-set) of the caller's own trusted reader; see src/film-readiness.js. Without
+// both, or when they do not cohere, every prediction fact only the prediction domain can state stays `unknown`. AIR-648 acquires and fences that context.
 import {readFilmAggregate} from './film-aggregate.js';
 import {deriveReadiness} from './film-readiness.js';
 
