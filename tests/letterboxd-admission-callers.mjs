@@ -255,7 +255,7 @@ const file=fresh('d1'),env=world(file);
  reset();
  const p3b=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3b',receipt:{tmdb:'900079',archiveSha256:'a'.repeat(64),title:'Fixture RJ',year:2005},now:()=>new Date(NOW).toISOString()});
  assert.equal(p3b.outcome,'admitted');
- seedRow(row('rc3b','900079','/film/fixture-rc-79/','Fixture RJ',2005));add('rc3b','fixture-rc-79','900079','Fixture RJ',2005);
+ seedRow(row('rc3b','900079','/film/fixture-rc-79/','Fixture RJ',2005,{evidenceDue:true}));add('rc3b','fixture-rc-79','900079','Fixture RJ',2005);
  calls.length=0;
  const due3b=await step();
  assert.equal(due3b.verified,true,JSON.stringify(due3b));
@@ -474,12 +474,12 @@ const file=fresh('d1'),env=world(file);
  assert.equal((await Facts.diaryLinks(env,['hw3'])).get('hw3').tmdb,'900063','linked to the INTENDED movie, not the one the page names now');
  assert.equal(evidence(file).length,evAfterSetup,'a recovery that made no check writes no evidence');
 
- // (3b) the admission exists but the caller's OWN evidence row does not (the intent is a NEW check of an admitted pair whose invocation died before its evidence was written, or the other caller's route): the
- // item is NOT settled from the intent: a real check is due, and it records the evidence
+ // (3b) the intent OWES its evidence (a NEW genuine check of an admitted pair whose invocation died before its evidence was written): the admission is applied and matches the intent, but the item is NOT settled
+ // from the intent: a real check is due, and it records the evidence. The obligation is a flag set before the first effect; the evidence ledger is never read to decide it (ADR 0213 decision 8)
  reset();
  await seed(env,'hw3b');
  assert.equal((await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3b',receipt:{tmdb:'900071',archiveSha256:'a'.repeat(64),title:'Fixture HK',year:2012},now:()=>new Date(NOW).toISOString()})).outcome,'admitted');
- await putIntent('hw3b','900071');add('hw3b','fixture-h-900071','900071','Fixture HK',2012);
+ await putIntent('hw3b','900071',{evidenceDue:true});add('hw3b','fixture-h-900071','900071','Fixture HK',2012);
  calls.length=0;
  const due=await resolve1('hw3b','fixture-h-900071','watchlist_admission');
  assert.equal(due.outcomes.get('hw3b').class,'settled',JSON.stringify([...due.outcomes]));
@@ -489,7 +489,7 @@ const file=fresh('d1'),env=world(file);
  reset();
  await seed(env,'hw3c');
  assert.equal((await D1.admitVerifiedFilm(env,{kind:'lid',lid:'hw3c',receipt:{tmdb:'900072',archiveSha256:'a'.repeat(64),title:'Fixture HL',year:2011},now:()=>new Date(NOW).toISOString()})).outcome,'admitted');
- await putIntent('hw3c','900072');add('hw3c','fixture-h-900072','900073','Fixture HM',2010);
+ await putIntent('hw3c','900072',{evidenceDue:true});add('hw3c','fixture-h-900072','900073','Fixture HM',2010);
  const changed3c=await resolve1('hw3c','fixture-h-900072','watchlist_admission');
  assert.deepEqual([changed3c.outcomes.get('hw3c').class,changed3c.outcomes.get('hw3c').reason],['definite','source_changed'],JSON.stringify([...changed3c.outcomes]));
 

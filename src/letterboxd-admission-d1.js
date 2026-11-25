@@ -77,9 +77,10 @@ const result=(outcome,extra={})=>({outcome,terminal:!NON_TERMINAL[outcome],...ex
 //   intent      optional `{tmdb}`: the movie the writer's OWN durable record (its `linking` intent, its `admitting` row) named for this item before this call. An applied attempt of the key that matches it
 //               settles the item WITHOUT a fetch and without fresh evidence; when the source (acquired now, or given) names ANOTHER movie the outcome is `source_changed` (terminal, owner review): no
 //               admission, no link, and every earlier unresolved receipt of the key has been settled first (step 2), so the old attempt can never land and contradict it (the race of decision 4)
-//   evidenceProof     optional `{subjectKind, subjectValue, route, scope?}`: what the caller's OWN evidence row for this pair looks like. An applied attempt that matches the intent settles the item WITHOUT a
-//               fetch only when that row already exists (or a `pendingEvidence` obligation is kept): otherwise the work is not provably complete (a genuine check of an already admitted pair may have
-//               died before its evidence was written, and a resumer's route is its own evidence), so the call reacquires the source for real. No proof payload is stored for this: the ledger itself is the proof
+//   evidenceDue       optional boolean: the writer's own durable record says a genuine check of this item OWES an evidence row (set before the first effect, cleared when the evidence is proven recorded). An applied
+//               attempt that matches the intent then does NOT settle the item without a fetch (the admission may be another route's, and the check that created this intent may have died before its evidence
+//               was written): the source is really reacquired and its evidence recorded, unless a `pendingEvidence` obligation is kept. It is a boolean obligation, not a proof payload (ADR 0207 4A), and the
+//               evidence ledger is never READ to decide it (ADR 0213 decision 8)
 //   pendingEvidence   optional evidence input an earlier call could not record (`evidence_unrecorded`); a retry that settles from the intent records it before reporting success
 //   finalize    `async (result, guard) => {refused?:true, ...}` for the terminal outcomes that reserve nothing (`other_code`, `conflict`, `source_changed`): the caller writes its OWN terminal state with `guard`
 //               (one SQL boolean over the operation history) in the same batch and answers `{refused:true}` when it was refused; the attempt then replans from step 2. Without it the outcome is returned
@@ -130,13 +131,8 @@ export async function admitVerifiedFilm(env,input={}){
   if(want===null)return 'historical';
   const row=await one(db,'SELECT film_id,tmdb FROM film_rated_admission WHERE source_code=?',[code]);
   if(!(row&&row.film_id===currentTarget.id&&row.tmdb===want))return 'historical';
-  // Settling from the intent alone (no check in this call) needs the obligation fulfilled: the caller's own evidence row exists, or the evidence to record is kept. Otherwise a real check is due.
-  if(!checked&&input.evidenceProof&&!input.pendingEvidence){
-   const proof=input.evidenceProof;
-   const has=await one(db,"SELECT 1 AS ok FROM film_identity_evidence WHERE subject_kind=? AND subject_value=? AND object_kind='tmdb_movie' AND object_value=? AND route=? AND polarity='asserts' AND method='page_check'"+(proof.scope?' AND source_scope=?':'')+' LIMIT 1',
-    [proof.subjectKind,proof.subjectValue,want,proof.route,...(proof.scope?[proof.scope]:[])]);
-   if(!has)return 'historical';
-  }
+  // Settling from the intent alone (no check in this call) is allowed only when no evidence is owed, or the evidence to record is kept.
+  if(!checked&&input.evidenceDue===true&&!input.pendingEvidence)return 'historical';
   return 'settled';
  };
  let observed=null;

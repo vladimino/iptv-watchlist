@@ -363,7 +363,7 @@ const LetterboxdRatedCandidates = (() => {
         return null;
       }
       if (row.state !== 'pending') {outcome = 'claim_changed'; return null;}
-      current.candidates[code] = {...row, state: 'admitting', intendedTmdb: String(tmdb), filmPath: film.filmPath, enrichment: 'pending', reason: null};
+      current.candidates[code] = {...row, state: 'admitting', intendedTmdb: String(tmdb), filmPath: film.filmPath, enrichment: 'pending', reason: null, ...(atD1 ? {evidenceDue: true} : {})};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       outcome = 'claimed';
       return current;
@@ -408,7 +408,7 @@ const LetterboxdRatedCandidates = (() => {
       const row = current.candidates[code];
       if (!sameClaim(row, tmdb, film.filmPath)) return null;
       // At `d1` enrichment is retired from this step (ADR 0207 decision 6): the row is verified with nothing left to enrich in R2.
-      current.candidates[code] = {...row, state: 'verified', tmdb: String(tmdb), filmPath: film.filmPath, enrichment: atD1 ? 'done' : (row.enrichment || 'pending'), intendedTmdb: null, reason: null};
+      current.candidates[code] = {...row, state: 'verified', tmdb: String(tmdb), filmPath: film.filmPath, enrichment: atD1 ? 'done' : (row.enrichment || 'pending'), intendedTmdb: null, reason: null, ...(atD1 ? {evidenceDue: false} : {})};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
     });
@@ -682,7 +682,7 @@ const LetterboxdRatedCandidates = (() => {
     let recoverGuard = null;
     const recovering = atD1 && item.state === 'admitting' && !!item.intendedTmdb;
     if (recovering) {
-      const settled = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: {tmdb: item.intendedTmdb}, evidenceProof: {subjectKind: 'letterboxd_short_code', subjectValue: code, route: 'letterboxd_rated_archive', scope: sha}, settleOnly: true, pendingEvidence: item.pendingEvidence || null, now: () => new Date().toISOString()})
+      const settled = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: {tmdb: item.intendedTmdb}, evidenceDue: item.evidenceDue === true, settleOnly: true, pendingEvidence: item.pendingEvidence || null, now: () => new Date().toISOString()})
         .catch(error => ({outcome: 'deferred', reason: error && error.code || 'admission_unavailable'}));
       if (settled.outcome === 'present' && settled.fromIntent) {
         const committed = await commitVerified(env, sha, code, item, item.intendedTmdb, {title: item.name, years: Number.isInteger(item.year) ? [item.year] : [], path: item.filmPath}, doc.generatedAt, atD1, {settled: true});

@@ -204,6 +204,7 @@ const LetterboxdDiaryIdentity=(()=>{
   const newCheckId=()=>typeof crypto!=='undefined'&&typeof crypto.randomUUID==='function'?crypto.randomUUID():String(now)+'-'+Math.random().toString(36).slice(2,12);
   // The one place an entry is written from an outcome. Only `gone` and `definite` charge an attempt (with a fresh check id); `transport` raises the streak and backs off;
   // `not_now` and a link intent keep the count and are due again at the next run. The queue position is never changed.
+  const dueOf=entry=>!entry?false:(entry.reason==='linking'?entry.evidenceDue===true:entry.intent?.evidenceDue===true);
   const record=(item,reason,{tmdb=null}={})=>{
    const cur=set[item.lid]||stored.films[item.lid]||null,cls=classify(reason),intent=LINK_REASONS.has(reason)||reason===CLAIM_REASON;
    // AIR-602 (review of PR #1018): the movie this id's own durable record named (a `linking` intent, or the `intent` an earlier not-now outcome carried) survives every outcome except the one that
@@ -214,7 +215,7 @@ const LetterboxdDiaryIdentity=(()=>{
    if(intent||cls==='not_now'){/* no attempt, place kept, due at the next run */}
    else if(cls==='transport'){streak=streakBefore+1;next=now+transportDelayMs(streak);}
    else{attempts=before+1;streak=0;next=now+reviewDelayMs(attempts);checkId=cur?.reservation?.checkId||newCheckId();}
-   set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{}),...(carried?{intent:{tmdb:carried},...(cur?.pendingEvidence?{pendingEvidence:cur.pendingEvidence}:{})}:{})};
+   set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{}),...(carried?{intent:{tmdb:carried,...(dueOf(cur)?{evidenceDue:true}:{})},...(cur?.pendingEvidence?{pendingEvidence:cur.pendingEvidence}:{})}:{})};
    counts.pending++;
   };
   // An id this step could not reach is kept for the next ordinary step (due now, attempts unchanged), never dropped. A new id gets its entry (and its place in the queue).
@@ -232,8 +233,9 @@ const LetterboxdDiaryIdentity=(()=>{
   // Before the first non-atomic effect (receipt, admission, alias, record link, projection) a bounded link intent is made durable, so a kill or a lost final write
   // after a partial commit leaves an entry that a later ordinary step repairs (review of PR #720). If it cannot be written, nothing is written (fail closed). No attempt is charged here.
   const intend=async(item,tmdb)=>{
+   const due=!item.bridged; // a trusted-bridge intent performs no check, so it owes no evidence
    const cur=stored.films[item.lid]||null;
-   const value={reason:'linking',class:'intent',slug:item.slug||null,tmdb:String(tmdb),attempts:Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streak:Number(cur?.streak)||0,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route,...(cur?.reservation?{reservation:cur.reservation}:{})};
+   const value={reason:'linking',class:'intent',...(admissionAtD1&&due?{evidenceDue:true}:{}),slug:item.slug||null,tmdb:String(tmdb),attempts:Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streak:Number(cur?.streak)||0,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route,...(cur?.reservation?{reservation:cur.reservation}:{})};
    try{
     const out=await LetterboxdFacts.updateDiaryIdentity(env,{set:{[item.lid]:value},expect:expectOf([item.lid])});
     if(out?.refused?.includes(item.lid)||out?.conflicts?.includes(item.lid))return false;
@@ -322,7 +324,7 @@ const LetterboxdDiaryIdentity=(()=>{
    try{
     const effectEnv=late()?null:guarded(lid);
     if(!effectEnv){defer(item,prior);return;}
-    out=await LetterboxdAdmissionD1.admitVerifiedFilm(effectEnv,{kind:'lid',lid,intent:intended?{tmdb:intended}:null,evidenceProof:intended?{subjectKind:'letterboxd_lid',subjectValue:lid,route}:null,pendingEvidence:prior?.pendingEvidence||null,reacquire,finalize,now:()=>iso(clock())});
+    out=await LetterboxdAdmissionD1.admitVerifiedFilm(effectEnv,{kind:'lid',lid,intent:intended?{tmdb:intended}:null,evidenceDue:intended!==null&&dueOf(prior),pendingEvidence:prior?.pendingEvidence||null,reacquire,finalize,now:()=>iso(clock())});
    }catch(error){record(item,error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||'deferred');return;}
    const tmdb=verdict?String(verdict.tmdb):intended;
    switch(out.outcome){
@@ -341,7 +343,7 @@ const LetterboxdDiaryIdentity=(()=>{
      // The pair is admitted but the evidence of THIS check is not proven recorded: the repair intent stays, with the evidence to record, so the next step records it WITHOUT a fetch and only then links.
      if(out.reason==='evidence_unrecorded'&&tmdb){
       const cur=stored.films[lid]||prior||{};
-      set[lid]={reason:'linking',class:'intent',slug:item.slug||cur.slug||null,tmdb,attempts:Number(cur.attempts)||0,streak:Number(cur.streak)||0,queuedAt:queuePos(cur)||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route,pendingEvidence:out.pendingEvidence};
+      set[lid]={reason:'linking',class:'intent',slug:item.slug||cur.slug||null,tmdb,attempts:Number(cur.attempts)||0,streak:Number(cur.streak)||0,queuedAt:queuePos(cur)||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(now),route,evidenceDue:true,pendingEvidence:out.pendingEvidence};
       counts.pending++;
       outcomes.set(lid,{checked:checked.has(lid),class:'not_now',reason:'evidence_unrecorded',retryAt:null,attempts:Number(cur.attempts)||0,streak:Number(cur.streak)||0,terminal:false});
       return;
@@ -413,6 +415,7 @@ const LetterboxdDiaryIdentity=(()=>{
    try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){defer(item,prior);continue;}bridge=null;}
    // At `d1` an unresolved intent (or an evidence obligation) of this id is settled by the coordinator, never replaced or bypassed by a bridge shortcut that performed no check.
    if(bridge?.state==='ok'&&bridge.tmdb&&!(admissionAtD1&&(intentOf(prior)!==null||prior?.pendingEvidence))){
+    item.bridged=true;
     if(late()){defer(item,prior);continue;}
     if(!(await take(item,stored.films[lid]||null)))continue;
     if(!(await intend(item,bridge.tmdb))){release(item);counts.deferred++;continue;}
