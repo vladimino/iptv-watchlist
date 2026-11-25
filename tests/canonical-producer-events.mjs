@@ -16,6 +16,13 @@ import {reconcileProducerChain,runProducerWorkflow} from '../src/canonical-produ
 
 const H=3600000,iso=ms=>new Date(ms).toISOString();
 const AT='2026-11-25T08:00:00.000Z',T0=Date.parse(AT);
+// AIR-642: the real Workflow stamps its terminal batch with the wall clock (`new Date()`), and that time is the outcome's `at` and first `next_attempt_at`;
+// the reconciles below drain at fixed instants (T0+H, ...). Run this process on a clock that starts at AT and advances in real time, so a row the Workflow
+// writes is due at T0+H on any day and at any hour, exactly as when the test is run at AT. Elapsed time (budgets, timeouts) stays real.
+{
+ const Real=Date,offset=T0-Real.now();
+ globalThis.Date=class extends Real{constructor(...args){super(...(args.length?args:[Real.now()+offset]));}static now(){return Real.now()+offset;}};
+}
 const P='run-p',SHA='a'.repeat(64);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-producer-outcome-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
@@ -133,6 +140,7 @@ async function claimed(env,{nonce='bbbbbbbb-0000-0000-0000-000000000000',generat
  assert.equal(row.open_at_completion,run.open_at_completion,'and the open count, written in the same batch before it');
  assert.deepEqual([row.run_recorded,row.unit_count,row.n_applied+row.n_noop+row.n_kept+row.n_failed],[1,run.unit_count,run.n_applied+run.n_noop+run.n_kept+run.n_failed]);
  assert.equal(row.owner_epoch,1);
+ assert.ok(Date.parse(row.at)>=T0&&Date.parse(row.at)<T0+H&&row.next_attempt_at===row.at,'the Workflow ran on the test clock: its row is due before the T0+H reconcile');
  // The hourly reconcile delivers it once; later ticks write nothing.
  const bucket=env.BUCKET;
  await reconcileProducerChain(env,{now:T0+H,hold:false});
