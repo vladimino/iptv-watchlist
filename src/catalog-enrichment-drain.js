@@ -80,7 +80,7 @@ export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set()}){
  const base=`FROM catalog_enrichment_state s WHERE s.cohort=? AND s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement')`;
  const examined={live:0,history:0},picked=new Map();
  for(const cohort of ['live','history']){
-  const rows=await many(handle,`SELECT s.film_id AS film_id,s.due_since AS due_since,s.retry_at AS retry_at ${base} AND ((s.part<>'film' AND s.status IN ('due','deferred_repair') AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT (s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))) OR (s.part='film' AND s.reason='check_anchors')) ORDER BY s.retry_at,s.due_since,s.film_id LIMIT ?`,[cohort,now,window]);
+  const rows=await many(handle,`SELECT s.film_id AS film_id,s.due_since AS due_since,s.retry_at AS retry_at ${base} AND ((s.part<>'film' AND s.status IN ('due','deferred_repair') AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT (s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))) OR (s.part='film' AND s.reason='check_anchors' AND (s.retry_at IS NULL OR s.retry_at<=?))) ORDER BY s.retry_at,s.due_since,s.film_id LIMIT ?`,[cohort,now,now,window]);
   examined[cohort]=rows.length;
   for(const row of rows){
    if(skip.has(row.film_id))continue;
@@ -102,6 +102,26 @@ export async function repairPending(env){
  const row=await one(database(env),"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>?",[CODE_VERSION]);
  return Number(row?.n??0)>0;
 }
+// The narrow EPG yield (ADR 0219 decision 6, P4 = B). Evidence that an EPG publication or seal phase is ACTIVE AND PROGRESSING is its own live lease on the catalog resolver lease: `discovery_lease` held by `holder_kind = 'epg'`
+// with an expiry still ahead. A Discovery-held lease, no lease, an expired lease and an unreadable row are NOT a hold (a failed or stalled EPG never holds enrichment, and no timeout is invented). -> {until: ms} or null.
+export async function epgPublicationWindow(env,nowMs){
+ try{
+  const lease=await one(database(env),"SELECT expires_at AS expiresAt FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND holder_kind='epg'");
+  const until=Number(lease?.expiresAt);
+  return Number.isFinite(until)&&until>nowMs?{until}:null;
+ }catch{return null;}
+}
+// Durable per-item deferral after a contention or authority-fence failure: a SHORT bounded backoff on the Film's due rows (1, 5, 15 minutes, then hourly; ADR 0098 tiers), guarded by the lease and the control generation. It sets no
+// pending_since, consumes no failure and sets no cooldown: the 72 h fallback never counts a local failure. The Film resumes by itself when the retry is due.
+export const DEFER_MINUTES=Object.freeze([1,5,15,60]);
+export async function deferFilm(env,{filmId,leaseId,generation,now}){
+ const row=await one(database(env),"SELECT MAX(transport_streak) AS streak FROM catalog_enrichment_state WHERE film_id=? AND ((status IN ('due','deferred_repair') AND part<>'film') OR (part='film' AND reason='check_anchors'))",[filmId]);
+ const streak=Number(row?.streak??0)+1;
+ const retryAt=new Date(Date.parse(now)+DEFER_MINUTES[Math.min(streak-1,DEFER_MINUTES.length-1)]*60000).toISOString();
+ const guard=await repairGuard(null,leaseId,generation,now);
+ await database(env).prepare(`UPDATE catalog_enrichment_state SET transport_streak=?,retry_at=?,updated_at=? WHERE film_id=? AND ((part<>'film' AND status IN ('due','deferred_repair')) OR (part='film' AND reason='check_anchors')) AND ${guard.sql}`).bind(streak,retryAt,now,filmId,...guard.params).run();
+ return retryAt;
+}
 // The earliest time a deferred item becomes runnable again, or null: the due time of a parked run.
 export async function earliestWake(env,{now}){
  const row=await one(database(env),`SELECT MIN(s.retry_at) AS at FROM catalog_enrichment_state s WHERE s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND s.retry_at>?`,[now]);
@@ -114,7 +134,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  // The background share is measured in COMMITTED units across runs (a handover must not reset it): the recent runs' outbox entries are the baseline.
  let baseLive=0,baseBackground=0;
  try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
- const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0};
+ const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0};
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed}});
  const control=await readControl(env);
  if(control.state!=='active')return finish(control.state==='paused'?'paused':'not_active');
@@ -150,13 +170,17 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
    if(fresh.state!=='active')return finish('not_active');
    if(fresh.generation!==generation)return finish('generation_moved');
    if(!await renewLease(env,{leaseId,now:clock()}))return finish('lease_lost');
-   if(shouldYield&&await shouldYield())return finish('yield');
+   // (the narrow yield is decided below, after the inbox: signal consumption and anchor planning write only the producer's own state, never canonical Film or Person state)
    // the inbox first: runnable signals are consumed exactly once, each by one guarded batch; one failing signal never blocks the others
    let consumed=0;
    for(const signal of await runnableSignals(env,{now:clock(),limit:50})){
     const outcome=await consumeSignal(env,{signal,generation,leaseId,now:clock()});
     if(outcome.consumed){consumed++;counts.signals++;}
    }
+   // The narrow EPG yield: while an EPG publication or seal phase is active and progressing (its own live lease) the WRITE units of a new step do not start. Fetching, planning and the inbox above continue; the run parks until
+   // the holder's lease expiry at the latest (a kick wakes it earlier), so a repeated yield is one parked wait, never a loop.
+   const hold=shouldYield?await shouldYield():await epgPublicationWindow(env,Date.parse(clock()));
+   if(hold){const until=typeof hold==='object'&&Number.isFinite(hold.until)?hold.until:Date.parse(clock())+60000;counts.yields++;return finish('yield',{wakeAt:new Date(Math.max(until,Date.parse(clock())+1000)).toISOString(),reason:'epg_publication'});}
    const due=await dueFilms(env,{now:clock(),skip});
    const klass=nextClass({hasLive:due.live.length>0,hasBackground:due.background.length>0,committedLive:baseLive+counts.committedLive,committedBackground:baseBackground+counts.committedBackground});
    if(!klass){
@@ -173,6 +197,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
    catch(error){
     // Reactive yield (ADR 0219 decision 6): a storage or authority failure defers THIS Film for the rest of the run and the independent work continues; repeated failures back the whole run off. Never a crash.
     counts.errors++;skip.add(pick.filmId);counts.lastError=String(error?.code||'error').slice(0,80);
+    try{await deferFilm(env,{filmId:pick.filmId,leaseId,generation,now:clock()});counts.deferred++;}catch{/* the in-run skip still holds */}
     if(counts.errors>=3)return finish('error_backoff');
     continue;
    }

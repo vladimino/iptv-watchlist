@@ -103,6 +103,20 @@ const deps=(fetchImpl,extra={})=>({tools:{},fetchImpl,clock,...extra});
  assert.ok(!wrangler.includes(W.CRON),'the reconcile cron is delivered by the activation change, not by a deploy');
 }
 
+// ---- a yield and an error backoff are deliberate holds: the instance parks (one wait) and the held work is NOT mistaken for runnable work ----
+{
+ const h=world({films:2});
+ let holds=0;
+ const stepH=mockStep();
+ const until=Date.parse(T)+600000;
+ const out=await W.run(h.env,{instance:'ce-00000001'},stepH,deps(upstream(),{shouldYield:async()=>holds++<2?{until}:null}));
+ const waits=stepH.log.filter(entry=>entry[0]==='wait');
+ assert.ok(waits.length>=2,'each yield parked the instance once instead of looping: '+waits.length);
+ assert.equal(waits[0][2].type,'kick');assert.ok(waits[0][2].timeout>=1000,'the wait runs to the holder\'s lease expiry');
+ assert.equal(out.stop,'idle');assert.equal(metaCount(h.file),2,'after the hold the work completes');
+ assert.equal(holds>=3,true);
+}
+
 // ---- a new code version is reachable by the reconcile even when every retry is in the future ----
 {
  const w=world();

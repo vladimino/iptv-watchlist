@@ -74,6 +74,14 @@ Known work is made pending by the change that causes it: triggers on `film_exter
 
 A run acquires the lease, consumes the runnable signals, picks due Films (live before background, the background share measured in committed units) and ends only for a reason: `idle`, `parked` (with the earliest due time), `handover` (the statement budget), `paused`, `generation_moved`, `lease_held`, `yield` or `error_backoff`. The budgets are safety budgets, not throughput quotas; the defaults are constants in `catalog-enrichment-drain.js` and each run's outbox entry reports them.
 
+## Contention with EPG publication
+
+The producer takes neither the Discovery lease nor the projector window and has no blanket dependency on EPG success. The existing EPG and Discovery gates are unchanged.
+
+- **Narrow yield, proactive.** While an EPG publication or seal phase is active and progressing, the write units of a new step do not start. The evidence is that phase's own live lease: `discovery_lease` held by `holder_kind = 'epg'` with an expiry still ahead. A Discovery-held lease, no lease, an expired lease and an unreadable row are not a hold, so a failed or stalled EPG never holds enrichment and no timeout is invented. The inbox, signal consumption and anchor planning continue (they write only the producer's own state, never canonical Film or Person state).
+- **No hot loop.** A yield ends the run with the stop reason `yield` and a wake time at the holder's lease expiry at the latest; the Workflow parks until then (a kick wakes it earlier), and the held work is not mistaken for runnable work.
+- **Reactive deferral.** A storage or authority-fence failure on one Film defers that Film durably (the Film row and its due rows: a retry after 1, 5, 15 minutes, then hourly), sets no `pending_since`, consumes no failure and sets no cooldown, and the run continues with independent Films. Three failing Films in one run end it with `error_backoff`, and the Workflow parks by the same tiers before the next run. The deferred Film resumes by itself when its retry is due.
+
 ## Priority and fairness
 
 Eligibility is retained; priority is derived at pick time from authoritative facts, and **unknown is not false**. A state row carries the cohort of its Film: `live` when any retained membership is in a live scope (rated, Watchlist, Discovery), `history` when only the historical widening holds it. A pick examines at most a window of rows per cohort at the head of the state index (ordered by `retry_at`, then `due_since`, so a backed-off item is not in the window), and classifies exactly those Films:

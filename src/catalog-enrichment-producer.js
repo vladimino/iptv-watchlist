@@ -105,12 +105,12 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    void superseded;
   }
   // the marker stays until the second pass has created or reopened the rows: a Film whose rows do not exist yet must stay in the queue
-  filmRow={...filmRow,status:corrected?'active':filmRow.status,reason:'check_anchors',planEpoch:filmRow.planEpoch+1,film:next};
+  filmRow={...filmRow,status:corrected?'active':filmRow.status,reason:'check_anchors',retryAt:null,planEpoch:filmRow.planEpoch+1,film:next};
   await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch-1});
   return {state:'replan',reason:corrected?'identity_corrected':'anchors_changed'};
  }
  // the anchors are unchanged: the pending anchor-check marker of an admission or an anchor signal is settled
- if(filmRow.reason==='check_anchors'){filmRow={...filmRow,reason:null};await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch});}
+ if(filmRow.reason==='check_anchors'){filmRow={...filmRow,reason:null,retryAt:null,transportStreak:0};await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch});}
  if(filmRow.status==='identity_disagreement')return {state:'blocked',reason:'identity_disagreement'};
  // the rows of the applicable sources; a missing one is created due, a removed source becomes not_applicable (its earlier writes remain)
  const need=[];

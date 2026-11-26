@@ -8,7 +8,7 @@
 //     and a send that throws (the instance is not running) is read as "no live owner" and creates one. A lost kick is recovered by the reconcile.
 //   - A `waitForEvent` that times out THROWS and would fail the instance, so it is wrapped and the timeout is the due-time wake.
 //   - HANDOVER: at the statement budget the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor writes only after it acquires its own lease.
-import {drain,dueFilms,BUDGET,repairPending} from './catalog-enrichment-drain.js';
+import {drain,dueFilms,BUDGET,repairPending,DEFER_MINUTES} from './catalog-enrichment-drain.js';
 import {readControl,runnableSignals} from './catalog-enrichment-store.js';
 
 export const RUN_PROJECTION='catalog_enrichment_run';
@@ -122,7 +122,7 @@ export async function run(env,payload,step,deps={}){
  let last='none';
  // INSTANCE-level accounting: the statements every executed step issued (failed calls included) accumulate across the steps of this instance, so the instance hands over at its own budget instead of every step starting
  // from zero; a replayed (cached) step issues nothing and adds nothing.
- let spent=0;
+ let spent=0,errorRounds=0;
  const base=deps.budget||BUDGET;
  for(let round=0;round<MAX_ROUNDS;round++){
   const control=await readControl(env);
@@ -164,7 +164,19 @@ export async function run(env,payload,step,deps={}){
    if(await hasRunnable(env,{now:nowIso(clock)})){await settle(env,id,'running');continue;}
    return {stop:'idle',rounds:round+1};
   }
-  if(result.stop==='generation_moved'||result.stop==='yield'){continue;}
+  // YIELD (the narrow EPG hold) and ERROR BACKOFF are deliberate holds, not an absence of work: the instance parks until the holder's lease expiry, or by the ADR 0098 tiers (1, 5, 15 minutes, then hourly) after repeated
+  // storage or authority failures, and a kick wakes it earlier. The hold is NOT cancelled by the runnable-work re-check (that work is exactly what is held), so a repeated yield is one parked wait, never a loop.
+  if(result.stop==='yield'||result.stop==='error_backoff'){
+   errorRounds=result.stop==='error_backoff'?errorRounds+1:0;
+   const now=Date.parse(nowIso(clock));
+   const until=result.stop==='yield'&&result.wakeAt?Date.parse(result.wakeAt):now+DEFER_MINUTES[Math.min(errorRounds-1,DEFER_MINUTES.length-1)]*60000;
+   await settle(env,id,'parked',{wakeAt:new Date(until).toISOString()});
+   await sleepFor('hold-'+round,Math.max(1000,until-now),null);
+   await settle(env,id,'running');
+   continue;
+  }
+  errorRounds=0;
+  if(result.stop==='generation_moved'){continue;}
   await settle(env,id,'retired');
   return {stop:result.stop,rounds:round+1};
  }

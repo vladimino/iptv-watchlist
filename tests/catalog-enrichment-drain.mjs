@@ -162,7 +162,9 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  assert.equal(result.counts.errors,3);
  assert.equal(rows(w.file,'SELECT lease_id FROM projection_run')[0].lease_id,null,'the lease is released after an error stop');
  assert.equal(JSON.parse(ticks(w.file).at(-1).counts_json).stop,'error_backoff');
- // the healthy path recovers the same Films afterwards
+ // the Films were deferred DURABLY: before their retry they are not asked again; when it is due the healthy path recovers them
+ assert.ok(rows(w.file,'SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE retry_at IS NOT NULL')[0].n>=1);
+ sqlite(w.file,'UPDATE catalog_enrichment_state SET retry_at=NULL');
  assert.equal((await run(w,upstream())).stop,'idle');assert.equal(metaCount(w.file),4);
 }
 // ---- a large cast across handovers: the Film resumes from its persisted chunk rows, nothing is applied twice, and completing persisted units makes no upstream request ----
@@ -248,5 +250,49 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  assert.equal(last.stop,'idle');assert.equal(order.length,11,'every Film finished');
  const firstHistory=order.findIndex(id=>id.startsWith('5')),lastLive=order.map(id=>id.startsWith('4')).lastIndexOf(true);
  assert.ok(firstHistory>=0&&firstHistory<lastLive,'background Films were served while live Films were still arriving, across handovers: '+order.join(','));
+}
+// ---- the narrow EPG yield: only an EPG-held, live lease holds the WRITES; inbox and planning continue; a repeated yield is a parked wait, not a loop ----
+{
+ const w=world(3);
+ const nowMs=()=>Date.parse(T)+86400000;
+ const setLease=(holder,expiresAt)=>sqlite(w.file,`INSERT INTO discovery_lease (id,lease_id,expires_at,holder_kind) VALUES (1,'epg-lease',${expiresAt},${holder?`'${holder}'`:'NULL'}) ON CONFLICT(id) DO UPDATE SET lease_id='epg-lease',expires_at=${expiresAt},holder_kind=${holder?`'${holder}'`:'NULL'};`);
+ const far=Date.parse(T)+3600000;
+ const up=upstream();
+ // a Discovery-held lease is not an EPG publication: no yield
+ setLease('discovery',far);
+ assert.equal(await D.epgPublicationWindow(w.env,Date.parse(T)),null);
+ // an expired EPG lease and no lease are not a hold either: a failed or stalled EPG never holds enrichment
+ setLease('epg',Date.parse(T)-1);
+ assert.equal(await D.epgPublicationWindow(w.env,Date.parse(T)),null);
+ // a live EPG lease: the writes yield
+ setLease('epg',far);
+ assert.deepEqual(await D.epgPublicationWindow(w.env,Date.parse(T)),{until:far});
+ const held=await D.drain(w.env,{runId:'run-epg-1',clock,tools:{},fetchImpl:up});
+ assert.equal(held.stop,'yield');assert.equal(held.reason,'epg_publication');
+ assert.ok(Date.parse(held.wakeAt)>=Date.parse(T)&&Date.parse(held.wakeAt)<=far+1000,'the run parks until the holder\'s lease expiry at the latest: '+held.wakeAt);
+ assert.equal(held.counts.signals,3,'the inbox is consumed while the writes yield (it writes only the producer\'s own state)');
+ assert.equal(held.counts.films,0);assert.equal(up.calls.length,0,'no upstream request and no Film write during the publication');
+ assert.equal(metaCount(w.file),0);assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM canonical_write_receipt')[0].n,0,'no canonical write');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_member")[0].n,3,'the memberships were recorded');
+ // repeated yields do not loop: each is one parked answer with a wake time
+ for(let i=0;i<3;i++){const again=await D.drain(w.env,{runId:'run-epg-r'+i,clock,tools:{},fetchImpl:up});assert.equal(again.stop,'yield');assert.ok(again.wakeAt);}
+ assert.equal(up.calls.length,0);
+ // when the publication ends the work runs
+ setLease('epg',Date.parse(T)-1);
+ assert.equal((await run(w,up)).stop,'idle');assert.equal(metaCount(w.file),3,'the held work completes after the window');
+}
+
+// ---- a contention failure defers the Film DURABLY with a short backoff and never touches the 72 h clock ----
+{
+ const w=world(2);
+ const flaky={DB:d1Standin(w.file,{rewrite:sql=>/FROM film_dimension WHERE film_id=\? AND dimension='metadata'/.test(sql)&&!/film_id IN/.test(sql)?'SELECT broken FROM nowhere':sql})};
+ const result=await D.drain(flaky,{runId:'run-defer-'+(tick++),clock,tools:{},fetchImpl:upstream()});
+ assert.ok(result.counts.deferred>=1,'a failed Film is deferred durably');
+ const deferred=rows(w.file,"SELECT film_id,retry_at,transport_streak,pending_since,failures FROM catalog_enrichment_state WHERE retry_at IS NOT NULL");
+ assert.ok(deferred.length>=1);
+ for(const row of deferred){assert.equal(row.transport_streak,1);assert.equal(row.pending_since,null,'a local failure never starts the 72 h fallback clock');assert.equal(row.failures,0,'and consumes no failure');assert.ok(row.retry_at>T);}
+ // automatic safe resume: when the retry is due the healthy path finishes the Film
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET retry_at=NULL");
+ assert.equal((await run(w,upstream())).stop,'idle');assert.equal(metaCount(w.file),2);
 }
 console.log('catalog enrichment drain: ok');
