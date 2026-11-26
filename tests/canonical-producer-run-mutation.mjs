@@ -19,7 +19,7 @@ const MUTANTS=[
  ["a failed strike commit is no systemic code", "'producer_strike_commit_failed',", ""],
  ["a missing store is no systemic code", "'producer_store_missing',", ""],
  ["an unreadable check is no systemic code", "'owner_review_check_failed',\n ]),", "]),"],
- ["a collision is no unit failure", "'identity_collision','person_role_collision',", "'person_role_collision',"],
+ ["a collision is no unit failure", "'identity_collision','film_person_identity_held','person_role_collision',", "'film_person_identity_held','person_role_collision',"],
  ["a role collision is no unit failure", "'person_role_collision','credit_ordinal_conflict',", "'credit_ordinal_conflict',"],
  ["an ordinal conflict is no unit failure", "'credit_ordinal_conflict','film_person_identity_conflict',", "'film_person_identity_conflict',"],
  ["a revision conflict is no unit failure", "rows(CLASS.UNIT,['film_person_revision_conflict','film_person_precondition',", "rows(CLASS.UNIT,['film_person_precondition',"],
