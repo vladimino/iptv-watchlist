@@ -113,11 +113,15 @@ export async function planFilmExternalIds(env,input){
 const mark=(ctx,clock)=>({requestId:ctx.requestId,attempt:ctx.attempt,now:clock(),target:ctx.target});
 // The fenced write: what is still to add or remove NOW, from a fresh read, through `mutateFilm` with the receipt tail and `requireExisting`. Nothing to write means no batch, so no receipt mark (the receipt then ends `unknown`, E5). A Film that vanished is
 // refused; what the fresh read saw is proven again INSIDE the batch (the Film row must exist, the revision is the one read).
+// AIR-618 (ADR 0215 decision 1, canonical path): the optional input function `evidence({requestId,at})` returns the [sql,params] statements of an identity evidence row that joins THIS batch (see `claimBridgeEvidence` in
+// src/identity-evidence-writer.js). It is NOT content: the request id and the content digest are the same with or without it. It is called only when a batch is about to be written (never for a no-op), with the receipt's request id.
 async function writeUnit(env,input,requestId,ctx,clock){
  const plan=await planFilmExternalIds(env,input);
  if(plan.absent)throw failed('film_person_reference');
  if(plan.noop)return {id:input.id,revision:plan.revision,already:true};
- return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,requireExisting:true,...(input.guards!==undefined?{guards:input.guards}:{}),
+ if(input.evidence!==undefined&&typeof input.evidence!=='function')throw failed('film_person_invalid');
+ const evidence=input.evidence?await input.evidence({requestId,at:input.at}):[];
+ return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,requireExisting:true,...(input.guards!==undefined?{guards:input.guards}:{}),...(evidence.length?{evidence}:{}),
   film:{contractVersion:plan.contractVersion,
    removeExternalIds:plan.remove.map(({scheme,value})=>({scheme,value})),
    externalIds:plan.add.map(({scheme,value,trusted,conflicting,provenance})=>({scheme,value,trusted,conflicting,provenance}))},

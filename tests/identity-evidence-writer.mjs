@@ -600,10 +600,13 @@ const setWriter=async(env,writer,target)=>{
  const mentions=sources.filter(name=>/identity_evidence_writer/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(mentions,['src/discovery-owner-evidence.js','src/identity-evidence-writer.js'],'no other module reads or writes the control tables');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence-writer\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,['src/discovery-authority.js','src/discovery-owner-evidence.js'],'only the Discovery writers import the helper (E2a decision, E2c owner); no route, Workflow, cron or producer imports the writer control');
+ // E2a/E2c (the Discovery writers) and E2b (the ADR 0184 claim unit, canonical-path bridge row) are the only importers; no route, Workflow, cron or other producer imports the writer control.
+ assert.deepEqual(importers,['src/canonical-letterboxd-claim.js','src/discovery-authority.js','src/discovery-owner-evidence.js'],'only the Discovery writers (E2a decision, E2c owner) and the claim unit (E2b) import the writer helpers');
+ assert.match(fs.readFileSync('src/canonical-letterboxd-claim.js','utf8'),/import \{claimBridgeEvidence\} from '\.\/identity-evidence-writer\.js';/,'the claim unit imports only the bridge row helper');
  const operator=sources.filter(name=>name!=='src/identity-evidence-writer.js'&&/\bchangeWriter\b/.test(fs.readFileSync(name,'utf8')));
  assert.deepEqual(operator,[],'nothing in the Worker calls the activation/break operator: no row of any writer is ever flipped by code');
  assert.ok(!/changeWriter/.test(fs.readFileSync('build.mjs','utf8')+fs.readFileSync('scripts/bundle-scope.mjs','utf8').replace(/\/\/.*$/gm,'')),'the bundle hands the operator to nothing');
+ assert.ok(!fs.readFileSync('build.mjs','utf8').includes('identity-evidence-import'),'the Worker bundle does not include the import path');
  // The migration is a file only: no code applies it, and the deploy workflow never applies a migration.
  for(const workflow of fs.readdirSync('.github/workflows')){
   assert.ok(!/migrations\s+apply|d1\s+execute|0042_identity/.test(fs.readFileSync('.github/workflows/'+workflow,'utf8')),workflow+' does not apply 0042');

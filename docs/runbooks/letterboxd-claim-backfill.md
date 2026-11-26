@@ -126,6 +126,10 @@ The plan names: the frozen cohort (private list, count and a digest), the prefli
 
 Run only after the owner's exact GO. Re-run the preflight immediately before: a cohort that differs from the frozen one needs a new plan. Replaying the same event with the same cohort adds no rows, revisions or receipts; an item reported `unknown` (for example an applied receipt whose claim is no longer stored) is never a success and needs a new event after a fresh preflight. Read back: every `pass` item now has exactly one trusted, non-conflicting `letterboxd` claim with provenance `ratings_alias_bridge`; `catalogStartedFilm` answers `found`; unrelated Film and Person rows are unchanged. Record aggregates as dated evidence.
 
+## Bridge evidence row (AIR-618, [ADR 0215](../adr/0215-identity-evidence-full-model.md) choice 0215-8b = C)
+
+The backfill hands over **no page-check root**, so a claim it writes never has a `claim_alias_bridge` evidence row, whatever the writer's state: it is ineligible for bridge evidence by definition, which is neither a refutation nor a coverage failure. The nine historical claims are reported as `bridge_root_unavailable` by the later reconstruction card, not written here. Only the live Diary or Watchlist step that has just page-checked and linked a pair can hand a root over; see the [writer activation runbook](identity-evidence-writer-activation.md). Receipts, request ids and the cohort digest of the backfill are unchanged.
+
 ## Rollback and recovery
 
 Code rollback does not remove written claims. A claim written by mistake is corrected case by case after a separate owner decision (the baseline `unlink` route is retired, [ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md)); the receipt and the fixed provenance are the audit trail. Do not delete rows by hand.

@@ -28,6 +28,15 @@ D1 applies pending migration files in number order. EC may merge ahead of A1 and
 
 A domain batch prepared while the control tables were absent carries a commit-time guard (`domainEvidenceStatements` returns one assertion that the tables are still absent), so it fails whole if it commits after 0042 is applied and replans. The drain proof of step 2 therefore needs no extra pre-ECM interval, but **every E2 integration must call the helper and pass its domain assertion builder**; a batch built without the helper is outside this guarantee.
 
+## Writer `claim_alias_bridge` (card E2b, AIR-618; code delivered dormant)
+
+The row is written by the ADR 0184 claim unit inside the claim's own canonical batch, and only for a write whose Diary or Watchlist caller handed over the page-check digest of the check it had just performed (every other path is rootless and writes no row, by design). Merged code inserts nothing until the control row is `pending` or `on` (no row = `off`); the decision is taken at commit time inside the batch.
+
+- **Drain evidence for `pending -> on`** must show that only versions containing the bridge writer can commit a claim: one deployment at 100% built from a commit that contains AIR-618, and no Diary or Watchlist step, Ratings import chunk or owner backfill of an older version still running. An elapsed interval alone is not evidence.
+- **Coverage is about eligible commits only:** a rooted claim write committed while the writer was `on` has its row (or the same key already present); a rootless write, a backfill, a replay or a claim that was applied by an attempt whose hand-over was lost is outside coverage and never counts as a gap or a refutation. A missing row for a key means no eligible commit for it in an unbroken `on` interval, never "not checked".
+- **Acceptance readback (after `on`, bounded and per key):** wait for a natural eligible commit, that is a claim written by a Diary or Watchlist step that has just page-checked a pair in this interval (a `letterboxd_claim` receipt `applied` whose pair this step verified). For that pair, compute the deterministic key and read the one `film_has_id` / `alias_bridge` row (and its request id equal to the receipt's); read at most a handful of such pairs, never an event query over the interval. Do **not** force a page check or a claim to create evidence, and never infer an absence from a rootless step (the owner backfill, a bridge or repair link, a `claim_pending` retry): a missing row is meaningful only for a pair whose first committed claim was rooted. No eligible commit yet means the acceptance stays unproven, not failed.
+- **Rollback:** switch the writer `off` first (`deactivate`); rows written stay as history. The activation is one part of the shared package with the ADR 0215 writers, after the ECM apply, and needs its own owner GO; it is not part of the code card.
+
 ## The `discovery_decision` writer (card E2a, AIR-617)
 
 Delivered dormant inside the Discovery decision write; see [Discovery and resolution](../architecture/discovery-and-resolution.md#identity-evidence-on-the-decision-write-e2a-adr-0215-dormant) for the exact row. Activation is one part of the shared activation package of the three E2 writers, each with its own gates; this card authorizes none of it.
@@ -60,4 +69,4 @@ Delivered dormant inside the Discovery decision write; see [Discovery and resolu
 
 ## Offline proof
 
-`tests/identity-evidence-writer.mjs` (migration replay, absent/off/pending/on, compare-and-swap race, duplicate and mismatching rows, old-version commit during `pending`, recovery from an interrupted activation, break recording).
+`tests/identity-evidence-claim-bridge.mjs` (the `claim_alias_bridge` rows on the real claim path: rooted and rootless first commits, retries, re-add, collision rollback, commit-time flip, schema without the control tables, receipt parity, statement budget), `tests/identity-evidence-writer.mjs` (migration replay, absent/off/pending/on, compare-and-swap race, duplicate and mismatching rows, old-version commit during `pending`, recovery from an interrupted activation, break recording).

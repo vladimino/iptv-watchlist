@@ -145,6 +145,37 @@ export async function domainEvidenceStatements(env,plan,{requestId,at,assertSql=
  return [insert,assertion];
 }
 
+// ---- The canonical-path bridge row (AIR-618, card E2b, ADR 0215 decision 5 and choice 0215-8b = C) ----
+// `film_has_id(film:<id>, letterboxd_lid:<lid>)`, `asserts`, route `ratings_alias_bridge`, method `alias_bridge`, the source root the page-check digest that the Diary or Watchlist caller handed over with the link
+// (never looked up, never inferred from a receipt or a matching `same_work` row), observed at the batch time. Unlike a domain row it is Film-bound and rides in the claim's own canonical batch
+// (`mutateFilm`'s `evidence`): under the Film/Person fence, with the claim's receipt, so a collision rolls the claim back. No root, no row: `claimBridgeEvidence` answers `[]` for a rootless write.
+const HEX64=/^[0-9a-f]{64}$/;
+export async function planBridgeEvidence({filmId,lid,root,observedAt}={}){
+ if(typeof root!=='string'||!HEX64.test(root))throw failed('identity_evidence_out_of_slice');
+ const row=normalizeEvidence({subject:{kind:'film',value:filmId},relation:'film_has_id',object:{kind:'letterboxd_lid',value:lid},polarity:'asserts',route:'ratings_alias_bridge',method:'alias_bridge',sourceRoot:root,observedAt});
+ return Object.freeze({writer:'claim_alias_bridge',row,filmId,evidenceKey:await evidenceKeyOf(row)});
+}
+// The insert and the assertion of one bridge row for the claim's batch; same semantics as `domainEvidenceStatements` (inserts only while the writer is `pending` or `on`, an existing key is a no-op, the assertion fails for a
+// missing or mismatching row), but Film-bound. On a schema without the control tables: ONE commit-time guard that the tables are still absent (the batch replans after an apply), never nothing.
+export async function bridgeEvidenceStatements(env,plan,{requestId,at,assertSql=fenced.assertSql}={}){
+ if(!plan||!plain(plan.row)||plan.writer!=='claim_alias_bridge'||!HEX64.test(plan.evidenceKey||'')||plan.row.relation!=='film_has_id')throw failed('identity_evidence_out_of_slice');
+ if(typeof requestId!=='string'||!REQUEST.test(requestId))throw invalid('request_id');
+ const recorded=instant(at,'at');
+ if(await identityEvidenceControlStatus(env)==='absent')return [[assertSql(ABSENT),[]]];
+ const r=plan.row;
+ const insert=[INSERT.replace('SELECT ?,NULL,','SELECT ?,?,'),[plan.evidenceKey,plan.filmId,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
+  r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,recorded,r.sourceOrder,plan.writer]];
+ const assertion=[assertSql('NOT '+ACTIVE+' OR EXISTS ('+SAME+')'),[plan.writer,plan.evidenceKey,r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,
+  r.sourceRoot,null,r.sourceScope,r.scopeEvidenceKey,r.supersedesKey,r.sourceOrder]];
+ return [insert,assertion];
+}
+// What the claim unit passes as the producer input's `evidence` function (see `writeUnit` of the Film external-id unit): rooted -> the bridge statements for THIS batch's request id and clock;
+// rootless -> no statement at all (the write is ineligible for bridge evidence, ADR 0215 decision 5: neither a refutation nor a coverage failure).
+export function claimBridgeEvidence(env,{filmId,lid,root}={}){
+ if(root===undefined||root===null)return undefined;
+ return async({requestId,at})=>bridgeEvidenceStatements(env,await planBridgeEvidence({filmId,lid,root,observedAt:at}),{requestId,at});
+}
+
 // The transitions of ADR 0215 decision 4, by kind.
 const TRANSITIONS=Object.freeze({
  activate:{from:['off'],to:'pending'},

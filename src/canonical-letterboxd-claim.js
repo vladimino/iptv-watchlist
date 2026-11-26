@@ -14,6 +14,7 @@
 import {database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {applyFilmExternalIds} from './canonical-film-external-ids-producer.js';
 import {readOwned} from './ratings-d1.js';
+import {claimBridgeEvidence} from './identity-evidence-writer.js';
 
 export const LETTERBOXD_CLAIM_ORIGIN='letterboxd_claim';
 export const LETTERBOXD_CLAIM_SOURCE='ratings_alias_bridge';
@@ -25,6 +26,10 @@ const LID=/^[A-Za-z0-9_-]{1,80}$/;
 const FACT_KEY=/^[A-Za-z0-9_-]{1,100}$/;
 const TMDB=/^[1-9]\d{0,11}$/;
 const RETIRED_SQL="SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1";
+// AIR-618 (ADR 0215 decision 5, choice 0215-8b = C): the causal root of a bridge evidence row is the page-check digest of the very check that proved the link, handed over EXPLICITLY by the Diary or Watchlist caller that has just verified and linked
+// the pair. Exactly 64 lowercase hex characters, or no root: a malformed value is a missing hand-over (the write stays rootless), never a guess and never looked up from a matching `same_work` row or a receipt.
+const ROOT=/^[0-9a-f]{64}$/;
+const rootOf=value=>typeof value==='string'&&ROOT.test(value)?value:null;
 const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
 const verdict=(state,reason,extra={})=>({verdict:state,reason,...extra});
 
@@ -152,13 +157,16 @@ export async function planLetterboxdClaim(env,{lid,tmdb}={}){
 }
 
 // The re-plan of a receipt retry: a FRESH proof from the current stores, or null when the source no longer proves exactly this claim for the same Film (the receipt then ends as a moved source, never a write from a stale proof).
-export async function replanLetterboxdClaim(env,{lid,tmdb,filmId,now,extraGuards=[]}){
+// `root` (AIR-618): the hand-over of the first attempt, kept by the in-process retry of the SAME call; a receipt reconciler that re-plans from the receipt alone has no root, so such a write is rootless (the first committed attempt decides).
+export async function replanLetterboxdClaim(env,{lid,tmdb,filmId,now,extraGuards=[],root=null}){
  const fresh=await planLetterboxdClaim(env,{lid,tmdb});
- return fresh.verdict==='pass'&&!fresh.already&&fresh.filmId===filmId?claimInput(fresh,(typeof now==='function'?now:()=>now||new Date().toISOString())(),extraGuards):null;
+ return fresh.verdict==='pass'&&!fresh.already&&fresh.filmId===filmId?claimInput(fresh,(typeof now==='function'?now:()=>now||new Date().toISOString())(),extraGuards,rootOf(root),env):null;
 }
 
-function claimInput(plan,at,extraGuards=[]){
- return {id:plan.filmId,at,schemes:['letterboxd'],addOnly:true,guards:[...plan.guards,...extraGuards],
+// The unit input. `evidence` (a function, not content: the request id and the content digest are the same with or without it) is present only for a rooted write; it adds the bridge row's two statements to the claim's own batch.
+function claimInput(plan,at,extraGuards=[],root=null,env=null){
+ const evidence=root?claimBridgeEvidence(env,{filmId:plan.filmId,lid:plan.lid,root}):undefined;
+ return {id:plan.filmId,at,schemes:['letterboxd'],addOnly:true,guards:[...plan.guards,...extraGuards],...(evidence?{evidence}:{}),
   externalIds:[{scheme:'letterboxd',value:plan.lid,trusted:true,conflicting:false,provenance:{source:LETTERBOXD_CLAIM_SOURCE,tmdb:plan.tmdb,adr:'0184'}}]};
 }
 
@@ -167,15 +175,18 @@ function claimInput(plan,at,extraGuards=[]){
 // stores on every receipt retry (a stale proof is never replayed: a source that no longer proves the claim ends the receipt as a moved source), and the write-time guards are asserted inside the batch. An applied receipt is not evidence of a
 // claim: `written` is returned only when the readback finds the trusted claim now stored; an applied receipt without the claim (a lid removed after an earlier run of the same event) is `unknown`, never a success.
 // `extraGuards` ([{sql,params}], at most 5) are the caller's frozen-state pins (an operator's approved generations), asserted INSIDE the same fenced batch next to the planner's own guards; one that does not hold writes nothing.
-export async function applyLetterboxdClaim(env,{event,lid,tmdb,now,extraGuards=[]}={}){
+// `root` (AIR-618, ADR 0215 choice 0215-8b = C): the page-check digest handed over by the Diary or Watchlist caller that has just verified and linked this pair. Rooted: the claim batch also carries the `claim_alias_bridge` evidence row
+// (inserted only while that writer is `pending` or `on`; absent or `off`: nothing). Rootless (the backfill, a replay, a pre-A2 link, a lost hand-over): the claim write is unchanged and writes no row.
+export async function applyLetterboxdClaim(env,{event,lid,tmdb,now,extraGuards=[],root}={}){
  if(typeof event!=='string'||!event.trim())throw failed('film_person_invalid');
  const clock=typeof now==='function'?now:()=>now||new Date().toISOString();
  const plan=await planLetterboxdClaim(env,{lid,tmdb});
  if(plan.verdict!=='pass')return {state:'refused',...plan};
  if(plan.already)return {state:'already',...plan};
  if(!Array.isArray(extraGuards)||extraGuards.length>5)throw failed('film_person_invalid');
- const input=claimInput(plan,clock(),extraGuards);
- const replan=()=>replanLetterboxdClaim(env,{lid,tmdb,filmId:plan.filmId,now:clock,extraGuards});
+ const rooted=rootOf(root);
+ const input=claimInput(plan,clock(),extraGuards,rooted,env);
+ const replan=()=>replanLetterboxdClaim(env,{lid,tmdb,filmId:plan.filmId,now:clock,extraGuards,root:rooted});
  const outcome=await applyFilmExternalIds(env,{origin:LETTERBOXD_CLAIM_ORIGIN,event,input,replan,now:clock});
  const {guards:_guards,...shown}=plan;
  if(outcome.state==='absent'||outcome.state==='skipped')return {state:'refused',...shown,verdict:'not_proved',reason:outcome.state==='absent'?'film_absent':'film_person_route_not_open',outcomeState:outcome.state,requestId:outcome.requestId??null};
@@ -187,7 +198,7 @@ export async function applyLetterboxdClaim(env,{event,lid,tmdb,now,extraGuards=[
  return {state:outcome.state==='unknown'?'unknown':'deferred',...shown,outcomeState:outcome.state,requestId:outcome.requestId??null};
 }
 
-// Bounded batch of the same: items [{lid,tmdb}], at most LETTERBOXD_CLAIM_UNIT_CAP, one after another (never in parallel). A typed infrastructure failure stops the batch and propagates; a refusal of one item never stops another.
+// Bounded batch of the same: items [{lid,tmdb}] (never a root: the owner backfill is rootless by definition), at most LETTERBOXD_CLAIM_UNIT_CAP, one after another (never in parallel). A typed infrastructure failure stops the batch and propagates; a refusal of one item never stops another.
 // {written, already, refused, unknown, deferred, results:[...]}; `dryRun: true` plans only and writes nothing.
 export async function applyLetterboxdClaims(env,{event,items=[],now,dryRun=false}={}){
  if(!Array.isArray(items)||items.length>LETTERBOXD_CLAIM_UNIT_CAP)throw failed('film_person_bounded');
@@ -216,6 +227,7 @@ export async function applyLetterboxdClaims(env,{event,items=[],now,dryRun=false
 // false in a reviewed PR: it stops new offers; claims already written stay. Tests that are not about the gate pass `enabled` explicitly.
 export const LETTERBOXD_CLAIM_ACTIVATED=true;
 
+// A pair may carry `root`: the page-check digest of the check that verified and linked it, handed over only by a caller that performed that check in this very step (AIR-618). A pair without one is rootless.
 // The pairs a flow has JUST made durable on the Ratings side (the fact record and the link index) and, for an admitted Film, the D1 admission. Never throws into the caller: the rating fact, the Diary fact and the Event do not wait
 // for the claim and never fail because of it. {state:'inactive'|'complete'|'incomplete'|'skipped', requested, written, already, refused, unknown, deferred, overflow, failed, results?}. At most LETTERBOXD_CLAIM_UNIT_CAP pairs are
 // attempted per call; the rest are `overflow` (the next ordinary run of the same flow offers them again, and `already` makes a repeat free). `event` is stable per pair (`link:<lid>:<tmdb>`), never a timestamp.
@@ -225,8 +237,10 @@ export async function ensureLetterboxdClaims(env,{pairs=[],enabled=LETTERBOXD_CL
  const seen=new Set(),all=[];
  for(const pair of Array.isArray(pairs)?pairs:[]){
   const lid=typeof pair?.lid==='string'?pair.lid:'',tmdb=pair?.tmdb==null?'':String(pair.tmdb);
-  if(!LID.test(lid)||lid.startsWith('tmdb_')||!TMDB.test(tmdb)||seen.has(lid))continue;
-  seen.add(lid);all.push({lid,tmdb});
+  if(!LID.test(lid)||lid.startsWith('tmdb_')||!TMDB.test(tmdb))continue;
+  // The same lid offered twice for the same movie (a hand-over and a retry of one step): one pair, and a root that one of them carries is kept (an explicit hand-over is never dropped for a retry without one).
+  if(seen.has(lid)){const first=all.find(item=>item.lid===lid);if(first&&first.tmdb===tmdb&&!first.root)first.root=rootOf(pair?.root);continue;}
+  seen.add(lid);all.push({lid,tmdb,root:rootOf(pair?.root)});
  }
  // The whole call has a fixed budget: ONE ordering read, then at most LETTERBOXD_CLAIM_UNIT_CAP full proofs (each a bounded number of reads and at most one fenced batch). Everything beyond is `overflow` (offered again by the next ordinary run).
  const list=all.slice(0,LETTERBOXD_CLAIM_OFFER_MAX),beyond=all.slice(LETTERBOXD_CLAIM_OFFER_MAX);
@@ -246,7 +260,7 @@ export async function ensureLetterboxdClaims(env,{pairs=[],enabled=LETTERBOXD_CL
  for(const pair of attempt){
   if(stopped){unattempted.push(pair.lid);out.overflow++;continue;}
   try{
-   const result=await applyLetterboxdClaim(env,{event:'link:'+pair.lid+':'+pair.tmdb,lid:pair.lid,tmdb:pair.tmdb,now});
+   const result=await applyLetterboxdClaim(env,{event:'link:'+pair.lid+':'+pair.tmdb,lid:pair.lid,tmdb:pair.tmdb,now,root:pair.root});
    if(result.state==='written')out.written++;
    else if(result.state==='already')out.already++;
    else if(result.state==='refused')out.refused++;

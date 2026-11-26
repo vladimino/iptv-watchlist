@@ -121,6 +121,7 @@ function head(gate,entities){
 // input: {id, expectedRevision, at, film:{contractVersion, canonicalIdentity?, originalTitle?, externalIds?, removeExternalIds?, aliases?},
 //         credits?:{upsert?:[{personId,role,ordinal?}], remove?:[{personId,role}]}, requireExisting?:true, guards?:[{sql,params}]}
 // `guards` (AIR-559) are caller-supplied proof conditions asserted INSIDE the same fenced batch, after the redirect and presence assertions and before any write: each is one SQL boolean expression over rows of this database with its bound params (internal code only, never request input). A guard that does not hold fails the whole batch with the receipt tail and nothing is written. At most 12.
+// `evidence` (AIR-618, ADR 0215 decision 1, canonical path): at most 4 [sql,params] statements of the caller's identity evidence row (an insert and its assertion, built by src/identity-evidence-writer.js), appended INSIDE the same fenced batch after the Film's own writes and before the revision bump, so the evidence row and the canonical effect commit together or not at all. Absent: the batch is exactly as before.
 // `requireExisting: true` (AIR-374 P3a, ADR 0126) adds ONE assertion INSIDE the same fenced batch, before the Film upsert: the Film row must exist when the batch runs. A Film that vanished after the caller's last read then fails the whole batch
 // (receipt tail included) with `film_person_precondition`, and this writer never recreates it. Without the option nothing changes (the upsert creates the Film, as every other caller relies on).
 function guardsOf(guards){
@@ -131,11 +132,20 @@ function guardsOf(guards){
   return {sql:guard.sql,params:guard.params};
  });
 }
+function evidenceOf(evidence){
+ if(evidence===undefined)return [];
+ if(!Array.isArray(evidence)||evidence.length>4)throw failed('film_person_invalid');
+ return evidence.map(statement=>{
+  if(!Array.isArray(statement)||typeof statement[0]!=='string'||!statement[0]||!Array.isArray(statement[1])||statement[1].some(value=>value===undefined))throw failed('film_person_invalid');
+  return [statement[0],statement[1]];
+ });
+}
 export async function mutateFilm(env,input){
  const id=filmId(input?.id),expected=revisionOf(input?.expectedRevision),at=text(input?.at),film=input?.film||{};
  if(!Number.isInteger(film.contractVersion))throw failed('film_person_invalid');
  const tail=receiptTail(input.receiptMark,{kind:'film',id});
  if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
+ const evidence=evidenceOf(input.evidence);
  const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
  const db=database(env);
  const redirect=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]);
@@ -160,6 +170,7 @@ export async function mutateFilm(env,input){
   // An existing credit keeps its ordinal. A new one without an ordinal is appended after the highest of its role.
   statements.push(['INSERT INTO film_person_credit (film_id,person_id,role,ordinal) SELECT ?,?,?,COALESCE(?,(SELECT COALESCE(MAX(ordinal),-1)+1 FROM film_person_credit WHERE film_id=? AND role=?)) WHERE NOT EXISTS (SELECT 1 FROM film_person_credit WHERE film_id=? AND person_id=? AND role=?)',[id,person,item.role,item.ordinal??null,id,item.role,id,person,item.role]]);
  }
+ statements.push(...evidence);
  statements.push([BUMP,['film',id,at]]);
  await commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1};
