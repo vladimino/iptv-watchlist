@@ -12,7 +12,7 @@ A Film's effective `localization` row (`film_dimension`) is a stored projection 
 | Shared logic | `src/film-localization-projection.js` | `projectionOf`, `legacyCandidate`, `PROJECTION_UPSERT`, `readOwnerReviewToken`, `ownerTokenStatements` (one implementation, exported, not copied) |
 | Tests | `tests/film-localization-reconciler.mjs` | real SQLite fixtures built from every migration |
 
-Nothing imports the module outside the tests: no Worker entry, route, MCP tool, Workflow, cron tick, script or workflow file, and the build does not bundle it (asserted by the test). No flag, Scheduled Task, migration, table, index or column exists for it.
+Since [AIR-683](https://trello.com/c/VJYgJuOW) the build bundles the module for ONE read-only entry, `diagnoseLocalizationCohort`, called only by the owner-only MCP tool `film_localization_diagnose` ([below](#read-only-cohort-diagnosis-air-683)). No route, Workflow, cron tick, script or MCP tool reaches `applyLocalizationReconcile`, `resumeLocalizationReconcile`, `recoverLocalizationReconcile` or `restoreLocalizationReconcile` (asserted by the test: the Worker references only the diagnosis). No flag, Scheduled Task, migration, table, index or column exists for it.
 
 ## Contract
 
@@ -48,7 +48,26 @@ The write applies only while the Film is **still at exactly `postRevision`** and
 
 The reconciler writes only rows the previous code already reads with the same resolver. Applied rows and applied receipts stay valid after a code rollback. A receipt of this kind that is still `pending`, `failed` or `unknown` has no operation in the previous registry (`operation_unregistered`, left `waiting`): roll the code back only when `SELECT COUNT(*) FROM canonical_write_receipt WHERE operation='film_localization_reconcile' AND state NOT IN ('applied','abandoned')` is 0 (read only). A code rollback never repairs or removes a row.
 
-## Production operation plan (AIR-664, DRAFT: awaiting plan review; authorizes nothing)
+## Read-only cohort diagnosis (AIR-683)
+
+**Superseding plan: diagnosis first.** On 26 November 2026 the owner reviewed the operation plan below and decided to measure the real cohort before any wave, checkpoint transition or storage choice is designed. The plan below is kept as a **historical draft and deferred proposal**, not as the design of a future operator. The only mandatory next step for [AIR-664](https://trello.com/c/Og9XxXfy) is this diagnosis. The 50 and 25 of the code are technical parameters of the dormant reconciler, not D1 limits or acceptance criteria, and are not part of this contract.
+
+**Why a capability was needed.** The effective value is the output of `resolveLocalization` with owner precedence and redirect ancestors, so it cannot be read by an SQL filter, and the reconciler had no callable entry. The authorized read-only D1 tools can list rows but cannot run the resolver; no private copy with a proven freshness exists. The one proven gap is the entry point.
+
+**Tool.** `film_localization_diagnose` (owner-only IPTV MCP, see the [MCP reference](../reference/api/mcp.md)) classifies each Film with the same `classifyFilm` the dry run uses (the AIR-663 planner), so the resolver is the oracle, and returns aggregates only. It writes nothing, opens no receipt and calls no external service; it is registered in `tests/get-write-audit.mjs` and `tests/get-write-baseline.mjs` (no D1 or R2 effect in any scenario). A test sums its ranges against the dry-run pages of a 121-Film SQLite fixture (stale, reviewed-row hold, redirect).
+
+**Gate and pins.** The call refuses unless the Film/Person marker is `open` and the owner-review domain is `d1` with writes `open` or `held`, even for an empty table. It reads and compares both pins (Film/Person state, generation, schema version, baseline; owner-review mode, writes, generation) at the start and the end of the call (`pinsStable`).
+
+**Continuation (the real limit).** [D1 allows 1,000 queries per Worker invocation on Paid and counts a `db.batch()` as one](https://developers.cloudflare.com/d1/platform/limits/) (checked 26 Nov 2026; the general 10,000 Worker subrequests do not lift it). The planner needs about 12 to 13 queries per Film, so the call **counts its own D1 executions** and stops before the next Film when the count, the largest per-Film cost seen and a reserve for the closing pin reads could pass 1,000 (`stopped: d1_query_budget`); a soft wall-time budget of 20 s, checked between Films and not a hard request deadline, stops it as `budget`. Both are **normal continuation**: pass `cursor` as `after`. A real failure is reported in `failure` and is never a continuation. There is no Film-count quota; a fixture enforces that no call exceeds the 1,000 queries including the end-pin reads.
+
+**Range, not catalog.** A call reports the contiguous range after `after`. `complete` is true only for a call that started at the first Film and reached the end (`fromStart` and `reachedEnd`, no failure); `zeroEligible` is `complete` and `rangeClean` and nothing else. A resumed call, a clean suffix after the last stale Film, or a cursor beyond the last Film is never complete and never zero. **Accepting zero eligible Films** is the Controller's aggregation of the calls of one walk: contiguous ranges from the first Film (`startedAfter` empty) to a `reachedEnd` range, each with `failure` null, `stale` 0, `unavailable` 0, `rangeClean` true and **identical pins** across all calls. `stopped` of `d1_query_budget` or `budget` in the earlier calls is normal. Any other ending is **unknown**, never zero. This is a census of observations at the time each Film was read, not a global snapshot: Films inserted behind the cursor or changed during the walk are outside it.
+
+**Result.** `staleIds` lists the Films the reconciler would repair; if the summed `stale` is above 0 under these rules, the actual scale and the simplest safe operation go to the coordinator and the owner, and nothing is written. If it is 0, AIR-664 closes as an explicit no-op. The live result is recorded in [the dated evidence](../evidence/film-person/air-683-localization-cohort-diagnosis-2026-11-26.md) (counts, scope and time, pins, cost and duration; no payload). The card stays open until it is recorded.
+
+## Production operation plan (AIR-664, HISTORICAL DRAFT, DEFERRED by the owner on 26 Nov 2026; authorizes nothing)
+
+> **Superseded as the next step by the [diagnosis-first plan](#read-only-cohort-diagnosis-air-683).** Waves, checkpoint transitions and the R2 or D1 storage choice below are a deferred proposal that is revisited only if the measured cohort has eligible Films.
+
 
 [AIR-664](https://trello.com/c/Og9XxXfy) is the Stage 4 **operation**. This section is a proposal. It grants no operation GO, accepts no storage choice and creates no card. The live cohort (Films, stale, held) is **unknown** until a read-only scan has run.
 

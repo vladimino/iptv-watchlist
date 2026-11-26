@@ -133,6 +133,10 @@ const forbidden=[
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
  ['prediction_hot_parity',{key:'enrichment/prediction-queue.json'}],
  ['prediction_hot_parity',{now:1}],
+ ['film_localization_diagnose',{limit:5}],
+ ['film_localization_diagnose',{after:'person:x'}],
+ ['film_localization_diagnose',{after:'film:'+'x'.repeat(200)}],
+ ['film_localization_diagnose',{after:7}],
  ['prediction_batch_manifest',{runId:'../secret'}],
  ['prediction_batch_manifest',{runId:'run-1',part:'all'}],
  ['prediction_batch_manifest',{prefix:'enrichment/'}],
@@ -428,6 +432,11 @@ const hotParity=await tool(diagnosticEnv,'prediction_hot_parity',{});
 assert.equal(hotParity.body.result.isError,undefined);
 assert.equal(hotParity.body.result.structuredContent.verdict,'unknown');
 assert.deepEqual(hotParity.body.result.structuredContent.reasons,['queue_shape_invalid']);
+// AIR-683: the Film localization diagnosis is owner-only like its siblings and needs D1 only: no R2 read or write, and a missing or unproven Film/Person authority is a tool error, never a report.
+const anonymousDiagnose=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'film_localization_diagnose',{},{assertion:null});
+assert.equal(anonymousDiagnose.response.status,403);assert.deepEqual(denied,[]);
+const diagnoseNoDb=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'film_localization_diagnose',{});
+assert.equal(diagnoseNoDb.body.result.isError,true);assert.match(diagnoseNoDb.body.result.content[0].text,/Film localization diagnosis/);assert.deepEqual(denied,[],'the diagnosis never touches R2');
 assert.equal(hotParity.body.result.structuredContent.expected,undefined);
 const diagnosticOverview=await tool(diagnosticEnv,'prediction_queue_overview',{});
 assert.equal(diagnosticOverview.body.result.isError,undefined);

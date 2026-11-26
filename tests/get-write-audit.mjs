@@ -74,6 +74,8 @@ for(const name of names){
   if(write){if(tool.annotations?.readOnlyHint===true)failures.push('MCP write tool '+tool.name+' is annotated readOnlyHint true');continue;}
   const result=await probe.run(scenario,null,{mcp:{name:tool.name,arguments:read.arguments||{}}});
   const found=effectsOf(result);
+  // AIR-683: the bundled diagnosis must reach the reconciler module (its scope exists and its authority gate answers); it is never the 'unavailable.' of a missing scope.
+  if(tool.name==='film_localization_diagnose'&&!/"complete"|film_person_unavailable|Film localization diagnosis unavailable \(/.test(result.body||''))failures.push('film_localization_diagnose does not reach the reconciler in the bundle @ '+name+': '+String(result.body).slice(0,200));
   observed[key('MCP',tool.name,name)]=found;statuses[key('MCP',tool.name,name)]=result.status;
   const {entry,effects,sql}=baselineFor(MCP_BASELINE,'MCP',tool.name,name),statements=[...new Set(result.statements)];
   if(entry&&effects.length&&same(found,effects)&&same(statements,sql))consumed.add(entry.id+'@'+name);
