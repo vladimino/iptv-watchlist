@@ -367,6 +367,9 @@ export const FILES={
  "catalog-enrichment-sources.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-producer.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
