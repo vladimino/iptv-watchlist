@@ -249,15 +249,31 @@ const LetterboxdDiary=(()=>{
   else{
    try{
     mark('diary_page_fetch','enter',{page});
-    const response=await fetch(pageUrl(username,page),{headers:HEADERS,redirect:'manual',signal:AbortSignal.timeout(15000)});
-    if(response.status!==200){mark('diary_page_fetch','exit',{page,status:response.status});fail(outcomeOf(response.status),'http_'+response.status+'_page_'+page);}
+    // AIR-604 (ADR 0211 decision 5): the shared Letterboxd cooldown. An enforced cooldown reads no page and reports the existing non-charging `rate_limited` outcome; `off` is today's request.
+    const coordinator=typeof UpstreamCooldown==='undefined'?null:UpstreamCooldown.createCoordinator(env,{caller:'letterboxd-diary'});
+    let response;const request=[pageUrl(username,page),{headers:HEADERS,redirect:'manual',signal:AbortSignal.timeout(15000)}];try{response=await(coordinator?coordinator.guard(fetch):fetch)(...request);}catch(skip){if(skip?.code!=='upstream_cooldown')throw skip;response=null;}
+    if(!response){mark('diary_page_fetch','exit',{page,status:'cooldown'});fail('rate_limited','upstream_cooldown_page_'+page);}
+    else if(response.status!==200){
+     // the status and the headers (and a bounded body prefix, read only while coordination is on) go through the shared classifier: a 429, a 403 or a challenge behind any status
+     if(coordinator){const early=await coordinator.after('letterboxd',{status:response.status,headers:response.headers,html:''});if(!early&&await coordinator.active())await coordinator.after('letterboxd',{status:response.status,headers:response.headers,html:await UpstreamCooldown.readBodyBounded(response,32768)});}
+     mark('diary_page_fetch','exit',{page,status:response.status});fail(outcomeOf(response.status),'http_'+response.status+'_page_'+page);}
     else{
-     let html;try{html=await response.text();}catch(e){mark('diary_page_fetch','error',{page,status:200});fail('failed','read:'+String(e.message).slice(0,120)+'_page_'+page);}
-     if(!outcome){
-      mark('diary_page_fetch','exit',{page,status:200,bytes:html.length});
-      mark('diary_page_parse','enter',{page});
-      parsed=parsePage(html);
-      mark('diary_page_parse','exit',{page,rows:parsed.rows.length,challenge:parsed.challenge});
+     // A 200 with a known challenge signal is a BLOCKED answer, never a Diary page: the status and the headers are recorded first and alone (no body is read for them), and a failed body read
+     // cannot hide them. A challenge page behind a 200 without a header is found by the shared classifier in the one body read below, not only by the page parser's own marker.
+     const early=coordinator?await coordinator.after('letterboxd',{status:200,headers:response.headers,html:''}):null;
+     if(early&&early.reason==='challenge'){mark('diary_page_fetch','exit',{page,status:200,challenge:true});fail('blocked','challenge_page_'+page);}
+     else{
+      let html;try{html=await response.text();}catch(e){mark('diary_page_fetch','error',{page,status:200});fail('failed','read:'+String(e.message).slice(0,120)+'_page_'+page);}
+      if(!outcome){
+       const late=coordinator?await coordinator.after('letterboxd',{status:200,headers:response.headers,html}):null;
+       if(late&&late.reason==='challenge'){mark('diary_page_fetch','exit',{page,status:200,challenge:true});fail('blocked','challenge_page_'+page);}
+      }
+      if(!outcome){
+       mark('diary_page_fetch','exit',{page,status:200,bytes:html.length});
+       mark('diary_page_parse','enter',{page});
+       parsed=parsePage(html);
+       mark('diary_page_parse','exit',{page,rows:parsed.rows.length,challenge:parsed.challenge});
+      }
      }
     }
    }catch(e){fail('failed','fetch:'+String(e.message).slice(0,120));}

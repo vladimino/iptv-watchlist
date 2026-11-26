@@ -10,6 +10,7 @@ export function loadArchiveWorker({now, console: logger, fetch}) {
   const context = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, AbortController, Date: FrozenDate, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, Uint32Array, DataView, ArrayBuffer, atob, btoa, crypto: webcrypto, console: logger, setTimeout, structuredClone, Number, Math,
     FormData, File, Blob, ReadableStream, DecompressionStream,
     ASSETS: {}, INITIAL_PERSONAL_RATINGS: {}, FILM_TITLE_DICTIONARY: [], PERSON_NAME_DICTIONARY: [], fetch});
+  vm.runInContext(scoped('src/upstream-cooldown.js', 'UpstreamCooldown'), context); // AIR-604: in scope before any call, as in the bundle (a test gives env.DB only where it exercises the cooldown)
   vm.runInContext(scoped('src/ratings-d1.js', 'RatingsD1'), context);
   for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/domain/tmdb-tv-identity.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), context);
