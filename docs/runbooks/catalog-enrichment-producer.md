@@ -6,7 +6,7 @@ Operational reference for the [Catalog Enrichment Producer](../reference/domain/
 
 | Operation | Gate |
 | --- | --- |
-| Apply `migrations/0046_catalog_enrichment.sql` | Owner production operation with its own preflight and readback; follows the operation-key schema apply. A deploy never applies it |
+| Apply `migrations/0047_catalog_enrichment.sql` | Owner production operation with its own preflight and readback; follows the operation-key schema apply. A deploy never applies it |
 | Activate the control and enable a scope | Owner production operation. Not reachable from the admin route |
 | Pause, resume | Owner, through `POST /api/admin/settings/catalog-enrichment` |
 | Retry a blocked or deferred part | Owner, through the same route, on the rows the owner saw |
@@ -15,7 +15,7 @@ Operational reference for the [Catalog Enrichment Producer](../reference/domain/
 
 ## Preflight before any activation
 
-1. The schema version is at least 46 and every table of the [schema section](../reference/data/d1-schema.md#catalog-enrichment-producer-schema-v46-dormant) exists. The producer refuses to run without them.
+1. The schema version is at least 47 and every table of the [schema section](../reference/data/d1-schema.md#catalog-enrichment-producer-schema-v47-dormant) exists. The producer refuses to run without them.
 2. The operation-key schema (`canonical_write_receipt.operation_key`) is applied: every unit is keyed.
 3. The Film/Person authority marker is open (`d1`): a closed marker defers every unit; the producer never falls back.
 4. The control row is absent or `inactive`, and `enrichment_signal` holds no stale `staged` row.

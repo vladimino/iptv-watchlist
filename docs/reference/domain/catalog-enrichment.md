@@ -1,6 +1,6 @@
 # Catalog Enrichment Producer
 
-The producer that fills the canonical metadata, credits and Russian titles of admitted Films from Letterboxd, TMDB and Wikidata. It is **dormant**: without a control row in `active` it reads "not active" and writes nothing. Decisions live in [ADR 0211](../../adr/0211-catalog-enrichment-producer.md) as amended by [ADR 0219](../../adr/0219-discovery-film-enrichment-and-refresh.md); this page is the maintained contract of the code in `src/catalog-enrichment-*.js` and `src/admin/settings.js`. Schema: [D1 schema](../data/d1-schema.md#catalog-enrichment-producer-schema-v46-dormant). Operations: [runbook](../../runbooks/catalog-enrichment-producer.md).
+The producer that fills the canonical metadata, credits and Russian titles of admitted Films from Letterboxd, TMDB and Wikidata. It is **dormant**: without a control row in `active` it reads "not active" and writes nothing. Decisions live in [ADR 0211](../../adr/0211-catalog-enrichment-producer.md) as amended by [ADR 0219](../../adr/0219-discovery-film-enrichment-and-refresh.md); this page is the maintained contract of the code in `src/catalog-enrichment-*.js` and `src/admin/settings.js`. Schema: [D1 schema](../data/d1-schema.md#catalog-enrichment-producer-schema-v47-dormant). Operations: [runbook](../../runbooks/catalog-enrichment-producer.md).
 
 ## What it never does
 

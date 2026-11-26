@@ -343,7 +343,7 @@ async function seedFilm(env,id,externalIds=[]){return mutateFilm(env,{id,expecte
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-admission'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.filter(file=>!file.endsWith('film-admission.js')&&!file.endsWith('canonical-producers.js')&&!file.endsWith('canonical-rated-admission-producer.js')).sort(),[],'only the producers registry and the rated_admission_retention unit import film-admission');
+ assert.deepEqual(importers.filter(file=>!file.endsWith('film-admission.js')&&!file.endsWith('canonical-producers.js')&&!file.endsWith('canonical-rated-admission-producer.js')&&!file.endsWith('letterboxd-admission-d1.js')).sort(),[],'only the producers registry, the rated_admission_retention unit and the d1 admission coordinator of card A1 (AIR-602, dormant until the marker reads d1) import film-admission');
  for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-admission'),file+' does not name it');
  assert.ok(fs.readFileSync('build.mjs','utf8').includes("scopedImports('src/film-admission.js','CanonicalFilmAdmission'"));
  assert.ok(fs.readFileSync('migrations/README.md','utf8').includes(NEW),'migrations/README.md lists 0015');

@@ -218,6 +218,30 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-admission-callers.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-closed.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-documents.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-import.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-archive-apply-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-archive-readers-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-admission-authority.mjs": {
+  "suite": "core"
+ },
  "letterboxd-check-legacy-report.mjs": {
   "suite": "core"
  },
@@ -352,7 +376,7 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
- "migration-0046-catalog-enrichment.mjs": {
+ "migration-0047-catalog-enrichment.mjs": {
   "suite": "core"
  },
  "catalog-enrichment-plan.mjs": {
@@ -1238,6 +1262,9 @@ export const FILES={
   "note": "Fake S3-compatible R2 bucket over loopback HTTP (paged listing, conditional HEAD and GET, signature check, write refusal) shared by tests/r2-snapshot-export.mjs, tests/r2-snapshot-export-scoped.mjs and tests/prediction-aux-export-convert.mjs. Executing this file runs no check."
  },
  "prediction-catalog-held-event.mjs": {
+  "suite": "core"
+ },
+ "ratings-diary-admission-d1.mjs": {
   "suite": "core"
  },
  "ratings-diary-identity.mjs": {

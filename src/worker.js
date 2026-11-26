@@ -558,6 +558,8 @@ function catalogFilmPage({film:stored,programmeRunId,completedOnly=false,index,a
  const future=shows.filter(show=>Number(show.start)>now);
  return {id,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
   directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
+  // AIR-656: the canonical fallback's honest completeness: truncated by the read bound, and credits omitted for lack of a usable name. Absent on a complete, fully named cast.
+  ...(film.creditsPartial===true?{creditsPartial:true}:{}),...(Number.isInteger(film.creditsUnnamed)&&film.creditsUnnamed>0?{creditsUnnamed:film.creditsUnnamed}:{}),
   ...catalogLifecycle(shows,film.runtime,now),nextStart:future.length?Number(future[0].start):null,
   // The owner's own facts (ratings domain): the known Letterboxd rating and the watched mark, shown for any retained Film whether or not it is on the watchlist; a watched film without a rating has none.
   actualRating:rating,watched:item?.watched===true,

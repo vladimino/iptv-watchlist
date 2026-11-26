@@ -593,7 +593,7 @@ Through a bucket wrapper that exposes only `get`; no key is listed:
 | `enrichment/ratings/published.json`, then its generation when `projected: true` | The ratings the matcher uses as evidence |
 | `letterboxd/facts/links.json` | The link index: which films already have a fact record and under which key |
 | `letterboxd/facts/scans/films-list.json`, `letterboxd/facts/scans/watchlist.json` | The scan summaries, the floor of every observation ([ADR 0024](../../adr/0024-letterboxd-scan-summary.md)) |
-| `letterboxd/imports/<sha256>/chunks/0.intent.json`, `0.receipt.json` | Whether **this** archive was already imported (`committed`, `opened`, `absent`) |
+| `letterboxd/imports/<sha256>/chunks/0.intent.json`, `0.receipt.json` (R2 at marker `r2`; D1 Ratings documents at marker `d1`, [ADR 0222](../../adr/0222-letterboxd-import-coordination-documents-in-d1.md)) | Whether **this** archive was already imported (`committed`, `opened`, `absent`) |
 | `letterboxd/facts/films/<key>.json` | Only for accepted films whose alias is in the link index. At most 300 fact-record GETs, six at a time; one redirect hop counts toward that cap. A film whose hop does not fit is `unverified` with `record_read_limit` and is not compared from the stub. A record that is migrating, a second redirect or a failed read makes the film `unverified` |
 | The pointer, `metadata.json`, the ratings pointer, the link index and both summaries again | ETag fence: any change makes `consistency.status` `drift` and the proposal `partial` |
 

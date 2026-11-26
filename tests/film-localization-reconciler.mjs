@@ -444,7 +444,11 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
   for(const file of walk(dir))if(!file.endsWith('src/film-localization-reconciler.js')&&/\.(js|mjs|yml|yaml|json|html)$/.test(file)&&fs.readFileSync(file,'utf8').includes('film-localization-reconciler.js'))importers.push(file);
  }
  assert.deepEqual(importers,[],'no Worker, route, MCP tool, Workflow, cron, script or workflow imports the reconciler');
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('film-localization-reconciler.js'),'the build does not bundle it');
+ // AIR-683: the build bundles the module, but the ONLY entry the Worker calls is the read-only diagnosis (the owner-only MCP tool); no mutation entry is referenced outside this module and its tests.
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes('film-localization-reconciler.js'),'the build bundles the module for the read-only diagnosis');
+ const workerCalls=[];
+ for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='film-localization-reconciler.js'))for(const match of fs.readFileSync('src/'+file,'utf8').matchAll(/FilmLocalizationReconciler\.([A-Za-z]+)/g))workerCalls.push(file+':'+match[1]);
+ assert.deepEqual(workerCalls,['mcp.js:diagnoseLocalizationCohort'],'the Worker reaches only the read-only diagnosis');
  const spec=R.filmLocalizationReconcileOperation();
  assert.equal(spec.atomic,true);
  const {OPERATION_KINDS}=await load('canonical-receipts.js');
@@ -465,5 +469,83 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
  await R.resumeLocalizationReconcile(env,{intent,checkpoint:memory(),now:clock});
  const other={...intent,runId:'v'};
  await assert.rejects(()=>R.resumeLocalizationReconcile(env,{intent:other,checkpoint:memory(),now:clock}),code('film_person_invalid'),'an intent whose request id does not recompute is refused');
+}
+
+// ---- 15. AIR-683 diagnosis: the census agrees with the dry run (the oracle), counts its own D1 queries against the real 1,000 per invocation, and never reports a clean range as a clean catalog ----
+{
+ const file=database();
+ // 121 raw Films: 5 stale, 1 reviewed-row hold, 1 redirect, the rest current (no source: noop)
+ for(let i=1;i<=120;i++)seedFilm(file,'film:tmdb:'+String(1000+i),String(1000+i));
+ for(const i of [3,60,61,100,119])sourceRow(file,'film:tmdb:'+(1000+i),'tmdb','Т'+i,T1);
+ reviewedRow(file,{id:'film:tmdb:1010',value:'Словарь'});sourceRow(file,'film:tmdb:1010','tmdb','Другое',T1);
+ seedFilm(file,'film:tmdb:9000','9000');exec(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:9000','film:tmdb:1001','"+T+"')");
+ const before=snapshotRows(file),receiptsBefore=JSON.stringify(receipts(file));
+ // the oracle: every page of the dry run, summed
+ const oracle={examined:0,stale:[],held:{},noop:0,absent:0,unavailable:0};
+ {const env={DB:d1Standin(file)};for(let cursor='';;){const page=await R.dryRunLocalizationReconcile(env,{after:cursor,limit:50,now:clock});oracle.examined+=page.examined;oracle.noop+=page.noop;oracle.absent+=page.absent;oracle.unavailable+=page.unavailable.length;for(const item of page.stale)oracle.stale.push(item.id);for(const item of page.held)oracle.held[item.reason]=(oracle.held[item.reason]||0)+1;cursor=page.cursor;if(!page.hasMore)break;}}
+ assert.equal(oracle.examined,121);assert.ok(oracle.stale.length>=5);
+ // the walk: each call has its OWN binding, so the instrumented counters are that invocation's. The real D1 limit is 1,000 queries (a batch counts once): no call may exceed it, end-pin reads included.
+ const calls=[],sum={examined:0,stale:[],held:{},noop:0,absent:0,unavailable:0};
+ for(let cursor='';;){
+  const db=d1Standin(file);
+  const report=await R.diagnoseLocalizationCohort({DB:db},{after:cursor,now:clock});
+  const used=db.calls.queries+db.calls.batches;
+  assert.equal(report.d1Queries,used,'the call counts exactly the D1 executions the binding saw');
+  assert.ok(used<=R.DIAGNOSE_D1_QUERY_LIMIT,'a call stays inside the 1,000 D1 queries of an invocation (including the closing pin reads): '+used);
+  assert.deepEqual([report.failure,report.pinsStable,report.pins.start.filmPerson.state,report.pins.start.ownerReview.mode],[null,true,'open','d1']);
+  calls.push(report);sum.examined+=report.examined;sum.noop+=report.noop;sum.absent+=report.absent;sum.unavailable+=report.unavailable;sum.stale.push(...report.staleIds);for(const [reason,count] of Object.entries(report.heldByReason))sum.held[reason]=(sum.held[reason]||0)+count;
+  if(report.reachedEnd)break;
+  assert.equal(report.stopped,'d1_query_budget','an unfinished call stopped on the counted D1 budget');
+  assert.ok(report.examined>0&&report.cursor>cursor,'every call makes progress');
+  cursor=report.cursor;
+ }
+ assert.ok(calls.length>=2,'121 Films need more than one invocation at about 12 queries per Film');
+ assert.deepEqual([sum.examined,sum.noop,sum.absent,sum.unavailable,sum.stale,sum.held],[oracle.examined,oracle.noop,oracle.absent,oracle.unavailable,oracle.stale,oracle.held],'the contiguous ranges sum to the dry-run oracle');
+ assert.deepEqual([calls[0].fromStart,calls[0].complete,calls[0].zeroEligible,calls.at(-1).reachedEnd,calls.at(-1).complete],[true,false,false,true,false],'only a call that starts at the first Film and reaches the end is a complete scan');
+ for(const report of calls.slice(1))assert.deepEqual([report.fromStart,report.complete,report.zeroEligible],[false,false,false],'a resumed call is never a complete scan');
+ for(const report of calls)assert.equal(report.examined,report.stale+report.held+report.noop+report.absent+report.unavailable,'every examined Film is classified exactly once');
+ assert.ok(calls.every(report=>report.maxQueriesPerFilm>0&&report.maxQueriesPerFilm<=16),'measured queries per Film: '+Math.max(...calls.map(report=>report.maxQueriesPerFilm)));
+ console.log('film-localization-diagnose: '+calls.length+' invocations for 121 Films, '+calls.map(report=>report.d1Queries).join('+')+' D1 queries, at most '+Math.max(...calls.map(report=>report.maxQueriesPerFilm))+' per Film');
+ assert.equal(snapshotRows(file),before,'the diagnosis writes no row and bumps no revision');
+ assert.equal(JSON.stringify(receipts(file)),receiptsBefore,'the diagnosis opens no receipt');
+ assert.ok(!JSON.stringify(calls).includes('Схватка')&&!JSON.stringify(calls).includes('Т3'),'no stored value in the answer');
+ // stale prefix, clean suffix: a range after the last stale Film is a clean RANGE, never a clean catalog
+ const lastStale=oracle.stale.at(-1);
+ const suffix=await R.diagnoseLocalizationCohort({DB:d1Standin(file)},{after:lastStale,now:clock});
+ assert.deepEqual([suffix.reachedEnd,suffix.stale,suffix.rangeClean,suffix.fromStart,suffix.complete,suffix.zeroEligible],[true,0,true,false,false,false],'a clean suffix after the stale Films is not zero');
+ const beyond=await R.diagnoseLocalizationCohort({DB:d1Standin(file)},{after:'film:tmdb:99999999',now:clock});
+ assert.deepEqual([beyond.examined,beyond.reachedEnd,beyond.complete,beyond.zeroEligible],[0,true,false,false],'a cursor beyond the last Film proves nothing about the catalog');
+ // the soft wall-time stop and a lowered counted budget are normal continuations with a resume cursor
+ let ticks=0;const slow=()=>ticks++*15000;
+ const soft=await R.diagnoseLocalizationCohort({DB:d1Standin(file)},{now:clock,clock:slow,budgetMs:20000});
+ assert.deepEqual([soft.stopped,soft.failure,soft.reachedEnd,soft.zeroEligible],['budget',null,false,false]);
+ const tiny=await R.diagnoseLocalizationCohort({DB:d1Standin(file)},{now:clock,queryBudget:60});
+ assert.deepEqual([tiny.stopped,tiny.reachedEnd,tiny.d1Queries<=60,tiny.examined>0],['d1_query_budget',false,true,true]);
+ for(const bad of [0,-1,1.5,1001,'3'])await assert.rejects(()=>R.diagnoseLocalizationCohort({DB:d1Standin(file)},{queryBudget:bad}),code('film_person_invalid'));
+ for(const bad of [0,-1,1.5,25001,'3'])await assert.rejects(()=>R.diagnoseLocalizationCohort({DB:d1Standin(file)},{budgetMs:bad}),code('film_person_invalid'));
+ await assert.rejects(()=>R.diagnoseLocalizationCohort({DB:d1Standin(file)},{after:'person:x'}),code('film_person_invalid'));
+
+ // a complete walk from the first Film with nothing stale and nothing unavailable claims zero
+ const clean=database();seedFilm(clean);
+ const zero=await R.diagnoseLocalizationCohort({DB:d1Standin(clean)},{now:clock});
+ assert.deepEqual([zero.fromStart,zero.reachedEnd,zero.complete,zero.examined,zero.noop,zero.rangeClean,zero.zeroEligible],[true,true,true,1,1,true,true]);
+ const empty=await R.diagnoseLocalizationCohort({DB:d1Standin(database())},{now:clock});
+ assert.deepEqual([empty.complete,empty.examined,empty.zeroEligible],[true,0,true],'an empty table with a valid open gate walked to its end is zero');
+ // the gates are enforced even for an empty table: an owner-review domain that is not D1, a held or r2 marker, an absent database
+ await assert.rejects(()=>R.diagnoseLocalizationCohort({DB:d1Standin(database({owner:'r2'}))},{now:clock}),code('localization_owner_unavailable'));
+ const held=database();exec(held,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
+ await assert.rejects(()=>R.diagnoseLocalizationCohort({DB:d1Standin(held)},{now:clock}),code('localization_authority_not_open'));
+ await assert.rejects(()=>R.diagnoseLocalizationCohort({},{now:clock}),code('film_person_unavailable'));
+ // changed pins: the owner-review generation moves during the walk, so the range is not stable and never zero
+ const moving=database();for(const id of ['film:tmdb:1','film:tmdb:2','film:tmdb:3'])seedFilm(moving,id,id.split(':')[2]);
+ let seen=0;
+ const moved=await R.diagnoseLocalizationCohort({DB:d1Standin(moving,{onQuery:async()=>{if(++seen===14)exec(moving,"UPDATE owner_review_authority SET generation=generation+1 WHERE id=1");}})},{now:clock});
+ assert.deepEqual([moved.reachedEnd,moved.pinsStable,moved.rangeClean,moved.zeroEligible,moved.pins.end.ownerReview.generation-moved.pins.start.ownerReview.generation],[true,false,false,false,1],'a moved owner-review pin is reported and blocks zero');
+ // an unavailable Film (its own owner evidence cannot be proven) is unknown, never zero
+ const brokenOwner=database();staleFilm(brokenOwner,FID,'1656');
+ const db=d1Standin(brokenOwner);const realPrepare=db.prepare.bind(db);
+ db.prepare=sql=>/FROM owner_review_entry/.test(sql)?{bind:()=>({first:async()=>{throw new Error('D1_ERROR: no such table: owner_review_entry');},all:async()=>{throw new Error('D1_ERROR: no such table: owner_review_entry');}})}:realPrepare(sql);
+ const unknown=await R.diagnoseLocalizationCohort({DB:db},{now:clock});
+ assert.deepEqual([unknown.reachedEnd,unknown.unavailable,unknown.rangeClean,unknown.zeroEligible],[true,1,false,false]);
 }
 console.log('film-localization-reconciler: ok');

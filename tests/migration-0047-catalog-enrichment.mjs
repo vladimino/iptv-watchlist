@@ -1,6 +1,6 @@
-// AIR-605: migration 0046, the Catalog Enrichment Producer schema (ADR 0211 decisions 3, 5, 6 as amended by ADR 0219 decisions 2, 3, 7, 8, 9). Offline only: scratch sqlite databases built from the real chain; nothing is
+// AIR-605: migration 0047, the Catalog Enrichment Producer schema (ADR 0211 decisions 3, 5, 6 as amended by ADR 0219 decisions 2, 3, 7, 8, 9). Offline only: scratch sqlite databases built from the real chain; nothing is
 // applied anywhere. Synthetic ids only.
-//  - the chain 45 -> 46 and the refusals (wrong predecessor, a second apply);
+//  - the chain 46 -> 47 and the refusals (wrong predecessor, a second apply);
 //  - the inbox key is normalized and never null, a repeated event coalesces into one row and re-arms (version token), an acknowledgement cannot pass the version;
 //  - every identity emitter of the ADR 0219 matrix writes its signal in the causal statement (anchor insert / update of value, trust, conflict and owner / delete, competing owner, retirement, redirect), and a rolled-back
 //    change writes none;
@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import {migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
-const M46=fs.readFileSync('migrations/0046_catalog_enrichment.sql','utf8');
+const M46=fs.readFileSync('migrations/0047_catalog_enrichment.sql','utf8');
 const run=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<28});
 const exec=(file,text)=>{const result=run(file,text);if(result.status!==0)throw new Error(result.stderr);return String(result.stdout);};
 const rows=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=String(result.stdout).trim();return out?JSON.parse(out):[];};
@@ -30,16 +30,16 @@ const DIM=(film,dimension,status,authority)=>`INSERT INTO film_dimension (film_i
 const FILMS=`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:a',2,NULL,'A','${T}'),('film:b',2,NULL,'B','${T}'),('film:c',2,NULL,'C','${T}');`;
 
 // ---- 1. the chain and the refusals ----
-const v45=migrated(45);
-assert.equal(version(v45),45);
-assert.ok(rows(v45,"SELECT name FROM sqlite_master WHERE name LIKE 'catalog_enrichment_%' OR name='enrichment_signal'").length===0,'version 45 has none of the objects');
+const v46=migrated(46);
+assert.equal(version(v46),46);
+assert.ok(rows(v46,"SELECT name FROM sqlite_master WHERE name LIKE 'catalog_enrichment_%' OR name='enrichment_signal'").length===0,'version 46 has none of the objects');
 {
- const v44=migrated(44),before=dump(v44);
- assert.notEqual(run(v44,M46).status,0,'on version 44 the file aborts');
- assert.deepEqual(dump(v44),before,'and the whole state is unchanged');
+ const v45=migrated(45),before=dump(v45);
+ assert.notEqual(run(v45,M46).status,0,'on version 45 the file aborts');
+ assert.deepEqual(dump(v45),before,'and the whole state is unchanged');
 }
 const db=migrated();
-assert.equal(version(db),46);
+assert.equal(version(db),47);
 {
  const again=copyOf(db,'again'),before=dump(again);
  assert.notEqual(run(again,M46).status,0,'a second apply is refused');
@@ -48,7 +48,7 @@ assert.equal(version(db),46);
 assert.equal(rows(db,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,0,'created empty');
 for(const table of ['catalog_enrichment_scope','catalog_enrichment_member','catalog_enrichment_state','catalog_enrichment_unit_generation','catalog_enrichment_tick','catalog_enrichment_control'])assert.equal(rows(db,`SELECT COUNT(*) AS n FROM ${table}`)[0].n,0,table+' is created empty');
 // the downgrade guard of the contract still holds
-fails(copyOf(db,'down'),'UPDATE schema_contract SET version=45 WHERE id=1');
+fails(copyOf(db,'down'),'UPDATE schema_contract SET version=46 WHERE id=1');
 
 // ---- 2. the inbox: normalized key, coalescing, version token ----
 {
@@ -207,4 +207,4 @@ fails(copyOf(db,'down'),'UPDATE schema_contract SET version=45 WHERE id=1');
  assert.ok(signals(file).every(item=>item.version>=2),'every holder was re-armed by the change');
  assert.equal(signals(file).length,40,'still one row per Film');
 }
-console.log('migration 0046: ok');
+console.log('migration 0047: ok');

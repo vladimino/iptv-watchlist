@@ -19,7 +19,7 @@ import {scoped,scopedReplacing,scopedEpgPriority,scopedDiscoveryAuthority,loadDi
 import {sqliteSync} from './sqlite-session.mjs';
 import {nodeSqliteOrSkip,nonFunctional} from './suite-gate.mjs';
 
-const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
+const IMPORT='const {CREDIT_SELECTION_SQL,database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-footer-memory-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};

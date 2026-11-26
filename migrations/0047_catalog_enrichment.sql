@@ -1,4 +1,4 @@
--- Schema v46: the Catalog Enrichment Producer's own schema (AIR-605, card C1; ADR 0211 decisions 3, 5 and 6 as amended by ADR 0219 decisions 2, 3, 7, 8 and 9; ADR 0207 decision 7). ADDITIVE: new tables, and
+-- Schema v47: the Catalog Enrichment Producer's own schema (AIR-605, card C1; ADR 0211 decisions 3, 5 and 6 as amended by ADR 0219 decisions 2, 3, 7, 8 and 9; ADR 0207 decision 7). ADDITIVE: new tables, and
 -- triggers on existing tables that write ONLY the bounded, coalesced inbox `enrichment_signal`. No existing table, column or row changes.
 --  1. `enrichment_signal`: the inbox, the whole contract between emitters and the producer (key (kind, subject, source, part), all NOT NULL; `version` is the change token, `acked_version` the newest applied one).
 --  2. `catalog_enrichment_scope`: one row per scope (rated, c3a, c3b, discovery) with the permanent `activated` flag, the current `enabled` flag, the cutoff, the bootstrap state and cursor and a `revision`.
@@ -9,16 +9,17 @@
 --  7. `catalog_enrichment_control`: the one durable control row (inactive | active | paused, `generation`, `revision`). An ABSENT row reads as `inactive`. Every change of a scope row advances the generation.
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it is card CM (AIR-606), a separate owner GO. The scope table is created EMPTY and the gated rated trigger writes nothing
 -- while no scope row is activated; the producer reads "not active" without a control row. The identity triggers write only the inbox, and the producer ignores subjects that belong to no enabled scope.
--- It follows a complete version 45 and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file. The version becomes 46 and never goes down.
--- If another change takes number 46 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern beyond a short name prefix in the refusal guard (D1 limits pattern length, see 0021; tests/migration-pattern-limit.mjs scans this file).
+-- It follows a complete version 46 and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file. The version becomes 47 and never goes down.
+-- If another change takes number 47 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern beyond a short name prefix in the refusal guard (D1 limits pattern length, see 0021; tests/migration-pattern-limit.mjs scans this file).
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
  (SELECT COUNT(*) FROM schema_contract) = 1
- AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 45)
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 46)
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upstream_cooldown')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upstream_coordination')
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'letterboxd_admission_authority')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'schema_contract_no_downgrade')
  AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name LIKE 'catalog_enrichment_%' OR name = 'enrichment_signal')
 );
@@ -239,6 +240,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 46,
-    note = 'Schema v46: the Catalog Enrichment Producer schema (inbox, scope, member, state, unit generation, outbox, control) and its inbox-only emitters (dormant). Version 46 follows a complete version 45.'
-WHERE id = 1 AND version = 45;
+SET version = 47,
+    note = 'Schema v47: the Catalog Enrichment Producer schema (inbox, scope, member, state, unit generation, outbox, control) and its inbox-only emitters (dormant). Version 47 follows a complete version 46.'
+WHERE id = 1 AND version = 46;

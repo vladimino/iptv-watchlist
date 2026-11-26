@@ -37,7 +37,7 @@ export const PAGES=['/','/admin','/admin/health','/admin/limb','/admin/limbo','/
 // MCP: every tool in tools/list is one of these. A read tool is called with these arguments in every scenario; a write tool is never called (it writes by contract).
 export const MCP_READ_TOOLS={
  probe_read:{},probe_echo:{arguments:{text:'audit'}},feature_flags:{},epg_status:{},epg_pipeline_status:{},enrichment_schema:{},enrichment_profile:{},enrichment_runner:{},enrichment_queue:{},enrichment_status:{},
- prediction_queue_overview:{},prediction_film_diagnostics:{arguments:{filmId:'w1'}},prediction_batch_validate:{arguments:{items:[{filmId:'w1',prediction:{}}]}},prediction_pending:{},prediction_hot_parity:{},prediction_batch_manifest:{arguments:{runId:'w1'}},prediction_batch_key:{},ratings_sync_status:{},
+ prediction_queue_overview:{},prediction_film_diagnostics:{arguments:{filmId:'w1'}},prediction_batch_validate:{arguments:{items:[{filmId:'w1',prediction:{}}]}},prediction_pending:{},prediction_hot_parity:{},film_localization_diagnose:{},prediction_batch_manifest:{arguments:{runId:'w1'}},prediction_batch_key:{},ratings_sync_status:{},
 };
 export const MCP_WRITE_TOOLS=['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill','watchlist_membership_operator','producer_chain_operator'];
 

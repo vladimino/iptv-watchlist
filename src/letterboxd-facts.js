@@ -123,7 +123,14 @@ function recordRatingChange(record,incoming,effective){
  // ---- Storage. While the ratings marker is r2, every write is an R2 compare-and-swap.
  // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
  // The stored object as it is, for the compare-and-swap writers (the view index is not one of them: AIR-558).
- async function readRawJSON(env,key){
+ // `routed:false` reads the R2 object directly: a legacy compare-and-swap that already routed to R2 must never silently read a D1 document if the marker moved meanwhile (its fresh guard before the PUT refuses instead).
+ async function readRawJSON(env,key,{routed=true}={}){
+  // ADR 0222: the chunk intent / receipt / candidates documents are D1 Ratings documents at marker `d1` (no R2 read, no fallback); at r2 and under `closed` (R2 quiescent, still the record) this falls through to R2.
+  if(routed&&typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+   let route;
+   try{route=await LetterboxdAdmissionDocuments.readRoute(env,key);}catch{throw new FactsError('admission_unavailable','The admission authority cannot be read');}
+   if(route.d1)return LetterboxdAdmissionDocuments.readDocument(env,key);
+  }
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
   const object=await env.BUCKET.get(key);let value=object?await object.json():null;
   return {value,etag:object?.etag??null};
@@ -134,7 +141,22 @@ function recordRatingChange(record,incoming,effective){
   if(key===FACTS_KEYS.viewIndex)return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
   return readRawJSON(env,key);
  }
+ // A `closed` marker and an unreadable one surface as the typed admission errors of this module (409 `admission_closed`, 503 `admission_unavailable`), never as the legacy path.
+ async function documentRouteOf(env,key){
+  try{return await LetterboxdAdmissionDocuments.documentRoute(env,key);}
+  catch(error){
+   if(error&&error.code==='letterboxd_admission_closed')throw new FactsError('admission_closed','Admissions are closed');
+   throw new FactsError('admission_unavailable','The admission authority cannot be read');
+  }
+ }
  async function casJSON(env,key,empty,apply,{extra=[]}={}){
+  if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+   const routed=await documentRouteOf(env,key);
+   if(routed.d1){
+    try{return await LetterboxdAdmissionDocuments.casDocument(env,key,empty,apply,{extra,authority:routed.authority});}
+    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
+   }
+  }
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
    try{const owned=await RatingsD1.casOwned(env,key,empty,apply,{extra});if(owned.owned)return owned.result;}
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
@@ -143,8 +165,22 @@ function recordRatingChange(record,incoming,effective){
   if(extra.length)throw new FactsError('atomic_unavailable','The document store cannot commit the write atomically');
   if(key===FACTS_KEYS.viewIndex)throw new FactsError('view_index_not_owned','The view index has no raw store; it is written only through the D1 ratings domain');
   for(let attempt=0;attempt<5;attempt++){
-   const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
+   const {value,etag}=await readRawJSON(env,key,{routed:false}),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
+   // AIR-602 / ADR 0207 decision 1 and ADR 0222 decision 7: every R2 object of the admission coordination (the admissions object and the moved import documents) is written only while the marker, read FRESH here,
+   // proves `r2` or proves the migration absent. The guard is the last awaited step before the PUT; `closed`, `d1` and an unreadable marker refuse (a write routed to R2 earlier is refused, never switched to D1).
+   // (A PUT already past this check cannot be recalled: the activation compares the objects before the flip.)
+   if(typeof LetterboxdAdmissionAuthority!=='undefined'&&(key==='letterboxd/admissions/verified-films.json'||(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)))){
+    try{await LetterboxdAdmissionAuthority.guardLegacyWrite(env);}
+    catch(error){
+     // the admissions object keeps its delivered typed error; the moved import documents answer the typed Facts errors of the chunk handler (409 / 503)
+     if(key!=='letterboxd/admissions/verified-films.json'){
+      if(error&&error.code==='letterboxd_admission_closed')throw new FactsError('admission_closed','Admissions are closed');
+      if(error&&error.code==='letterboxd_admission_unavailable')throw new FactsError('admission_unavailable','The admission authority cannot be read');
+     }
+     throw error;
+    }
+   }
    const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}});
    if(saved!==null)return {value:next,changed:true};
   }
@@ -599,6 +635,40 @@ function recordRatingChange(record,incoming,effective){
   return withdrawn;
  }
 
+ // AIR-602 / ADR 0207 decision 3, at the marker mode `d1`: the admission of ONE inferred item through the D1 coordinator. The evidence row is the `restricts` row of the title and year search (ADR 0213:
+ // never proof). -> 'admitted' | 'present' | 'present_other_code' | 'refused_after_link'; a non-terminal answer stops the chunk before its receipt (the same chunk is re-sent).
+ async function admitInferredAtD1(env,item,origin,chunk,terminalGuards=[]){
+  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,finalize:async(result,guard)=>{terminalGuards.push(guard);return {wrote:true};},receipt:{tmdb:String(item.tmdb),archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year},
+   evidence:{subject:{kind:'letterboxd_lid',value:item.lid},relation:'same_work',object:{kind:'tmdb_movie',value:String(item.tmdb)},polarity:'restricts',route:'letterboxd_export_import',method:'title_year_search',sourceRoot:origin.archiveSha256,sourceRef:'chunk:'+chunk,observedAt:new Date().toISOString()},
+   now:()=>new Date().toISOString()});
+  if(out.outcome==='admitted'||out.outcome==='present')return out.outcome;
+  if(out.outcome==='other_code'||out.outcome==='conflict'){
+   // PR #1018 review: a typed refusal is a settled terminal verdict ONLY when it was finalized (its history guard was handed to `finalize` and is now in `terminalGuards`). One that surfaced from a reservation batch that lost
+   // a race left its receipt unresolved and carries no guard: it is not a verdict. The failed attempt is reconciled, the verdict is recomputed against the now-clear history and its FRESH guard is the one the facts
+   // and the chunk receipt carry; anything other than a clean conflict or other-code answer stops the chunk (re-send replans).
+   if(out.finalized?.wrote!==true){
+    const rec=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,settleOnly:true,now:()=>new Date().toISOString()});
+    if(rec.outcome!=='needs_check')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+rec.outcome+'): the chunk stops before its receipt');
+    const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
+    if(plan.outcome==='present')return 'present';
+    if(plan.outcome!=='other_code'&&plan.outcome!=='conflict')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
+    terminalGuards.push(rec.guard);
+    return plan.outcome==='other_code'?'present_other_code':'refused_after_link';
+   }
+   return out.outcome==='other_code'?'present_other_code':'refused_after_link';
+  }
+  throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+out.outcome+'): the chunk stops before its receipt');
+ }
+ // A replay at `d1` offers the admission again only for the items its receipt recorded as `admitted` or `present` (the answer is idempotent). A chunk committed before the activation has no such field: it gets no
+ // admission on replay, only its facts and claims (its admissions were proven present at the parity pin).
+ async function replayInferredAdmissionsD1(env,origin,chunk,items,entries){
+  const settled=new Set((entries||[]).filter(entry=>entry&&(entry.admission==='admitted'||entry.admission==='present')).map(entry=>entry.lid));
+  for(const item of items||[]){
+   if(!item?.admit||!item.tmdb||!settled.has(item.lid))continue;
+   const out=await admitInferredAtD1(env,item,origin,chunk);
+   if(out==='refused_after_link')throw new FactsError('admission_not_settled','The recorded admission of '+item.lid+' is now refused');
+  }
+ }
  async function applyCanonicalInferredAdmissions(env,event,origin,items){
   if(typeof CanonicalRatedAdmission==='undefined')return;
   const {value:doc}=await readJSON(env,ADMISSIONS_KEY);
@@ -809,10 +879,20 @@ function recordRatingChange(record,incoming,effective){
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
  async function commitBaselineChunk(env,body){
   const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
+  // AIR-602 / ADR 0207 decision 1: under `closed` a chunk with any `admit` item answers 409 `admission_closed` BEFORE its intent (and before a replay offers its admissions). The check is a fresh read of the
+  // marker; an unreadable marker is `admission_unavailable` (503), never the legacy path. A chunk without an `admit` item admits nothing and is unaffected.
+  let atD1=false;
+  if(typeof LetterboxdAdmissionAuthority!=='undefined'&&items.some(item=>item?.admit)){
+   let admission;
+   try{admission=await LetterboxdAdmissionAuthority.admissionRouteNow(env);}catch{throw new FactsError('admission_unavailable','The admission authority cannot be read');}
+   if(admission.route==='closed')throw new FactsError('admission_closed','Admissions are closed');
+   atD1=admission.route==='d1'&&typeof LetterboxdAdmissionD1!=='undefined';
+  }
   const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
   if(receipt){
    if(receipt.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was committed with other items');
-   await applyCanonicalInferredAdmissions(env,'inferred:'+sha+':'+chunk,origin,items);
+   if(atD1)await replayInferredAdmissionsD1(env,origin,chunk,items,receipt.entries);
+   else await applyCanonicalInferredAdmissions(env,'inferred:'+sha+':'+chunk,origin,items);
    await ensureChunkClaims(env,items,(receipt.entries||[]).map(entry=>({lid:entry.lid,factKey:entry.factKey||null,conflict:!!entry.conflict})));
    return {...receipt,replay:true};
   }
@@ -823,16 +903,36 @@ function recordRatingChange(record,incoming,effective){
    if(current){if(current.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was opened with other items');intent=current;return null;}
    intent={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,films:items.map(item=>item.lid),viewBefore:before,openedAt:new Date().toISOString()};return intent;
   });
-  const counts={},films=[],records=[];let conflicts=0;
+  const counts={},films=[],records=[],terminalGuards=[];let conflicts=0;
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb};
-   let admitted=null;
+   let admitted=null,d1Admission=null;
+   // PR #1018 review: at `d1` every irreversible effect of an `admit` item that runs before the item's own admission (the inferred mark, the link and, for another code on the Film, the facts) asserts the operation
+   // history the verdict was computed against IN ITS OWN BATCH. A moved history refuses that batch whole and the chunk stops before its receipt (re-send replans); nothing is linked or published on a superseded verdict.
+   let itemEnv=env;
+   const fenced=async effect=>{try{return await effect();}catch(error){if(error&&error.code==='ratings_domain_fence'&&itemEnv!==env)throw new FactsError('admission_not_settled','The operation history of '+item.lid+' moved before its link or facts: the chunk stops before its receipt');throw error;}};
    if(item.admit){
     // The authoritative link conflict is checked BEFORE the admission, so a code that already aliases another movie admits nothing.
     const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
     if(!plannedKey(linkIndex||{},links)){await noteConflict(env,links,'alias_conflict');conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+    if(atD1){
+     // AIR-602 / ADR 0207 decision 3 (table, inferred commit), at the marker mode `d1`: no R2 entry. The pair is classified against D1 BEFORE the link (read only): a code held by another Film is a conflict (no link, no
+     // fact); another code on the Film is `present_other_code` (no admission, the link and the facts proceed); a held or redirected identity is non-terminal (the chunk stops before its receipt). The admission itself
+     // follows the link, so nothing has to be withdrawn when the link conflicts.
+     // The key's history is RECONCILED first (a live attempt waits, stale ones are abandoned, an applied one is validated), so this verdict is never computed against an unsettled history; the history guard it
+     // returns is re-checked before the chunk receipt (the terminal write of this writer, an R2 document that cannot carry the assertion) is written.
+     const reconciled=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,settleOnly:true,now:()=>new Date().toISOString()});
+     if(reconciled.outcome!=='needs_check')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+reconciled.outcome+'): the chunk stops before its receipt');
+     const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
+     itemEnv={...env,admissionGuards:[reconciled.guard.statement]};
+     if(plan.outcome==='conflict'||plan.outcome==='other_code')terminalGuards.push(reconciled.guard);
+     if(plan.outcome==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'conflict'});continue;}
+     if(plan.outcome==='held'||plan.outcome==='redirect')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
+     d1Admission=plan.outcome==='other_code'?'present_other_code':'planned';
+    }else{
     admitted=await admitInferredFilm(env,item,origin);
     if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+    }
    }
    // AIR-559: an inferred pair is marked on its record first, and linked only to that same record.
    const inferredIdentity=item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null;
@@ -840,13 +940,29 @@ function recordRatingChange(record,incoming,effective){
    if(inferredIdentity){
     const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
     markedKey=plannedKey(linkIndex||{},links);
-    if(markedKey&&!(await markInferredPair(env,markedKey,links,inferredIdentity)))markedKey=null;
+    if(markedKey&&!(await fenced(()=>markInferredPair(itemEnv,markedKey,links,inferredIdentity))))markedKey=null;
    }
-   const factKey=inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await linkOrNote(env,links,inferredIdentity?{expectKey:markedKey}:undefined);
+   const factKey=inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await fenced(()=>linkOrNote(itemEnv,links,inferredIdentity?{expectKey:markedKey}:undefined));
    if(!factKey){
     // A writer linked the code between the check and the link: the entry this commit just created is withdrawn, never one it found.
     if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;
+   }
+   if(d1Admission==='planned'){
+    const out=await admitInferredAtD1(env,item,origin,chunk,terminalGuards);
+    if(out==='refused_after_link'){
+     // The batch refused after the link (a concurrent writer admitted the code for another Film): terminal. No fact and no claim; the inferred-marked link stays (it is never a claim proof, ADR 0184); the entry
+     // is an admission conflict for owner repair.
+     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'refused_after_link'});continue;
+    }
+    d1Admission=out;
+    // The item's own admission settled the history it observed (its receipt moved the fingerprint): the facts that follow depend on that admission, not on the pre-link verdict. A settled `present_other_code`
+    // verdict (the pair is not admitted again) publishes facts only under the terminal history guard of THAT verdict (PR #1018 review): a conflicting admission that settles before the fact write refuses the batch.
+    if(out==='present_other_code'){
+     const verdictGuard=terminalGuards[terminalGuards.length-1];
+     if(!verdictGuard)throw new FactsError('admission_not_settled','The verdict of '+item.lid+' has no history guard: the chunk stops before its receipt');
+     itemEnv={...env,admissionGuards:[verdictGuard.statement]};
+    }else itemEnv=env;
    }
    if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
     const key='tmdb_'+item.tmdb;
@@ -857,9 +973,9 @@ function recordRatingChange(record,incoming,effective){
      CanonicalRatedAdmission.assertRatedAdmissionAccepted(canonical);
     }
    }
-   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:inferredIdentity});
+   const observations=await exportObservations(factKey,item,origin),floors=await floorsFor(env,item.lid,factKey),result=await fenced(()=>recordObservations(itemEnv,factKey,links,observations,{floors,identity:inferredIdentity}));
    tally(counts,result.outcomes);records.push(result.record);
-   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
+   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),...(d1Admission?{admission:d1Admission}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
   }
   await projectRecords(env,records);
   // Read back: every fact this import made current is still current, or a greater observation replaced it.
@@ -872,8 +988,12 @@ function recordRatingChange(record,incoming,effective){
    }
   }
   const entries=films.map(film=>film.conflict?film:{...film,observations:film.observations.map(({fact,observationId})=>({fact,observationId}))});
+  // AIR-602 (review of PR #1018): every terminal verdict of this chunk (a conflict, another code on the Film, a refusal after the link) was computed against an operation history; the receipt records them, so the
+  // history must still be the one observed. The receipt is an R2 document and cannot carry the assertion: it is checked immediately before the write, and a moved history stops the chunk before its receipt (re-send).
+  // ADR 0222: at `d1` the receipt is a D1 document and carries every observed history assertion in the SAME batch (no separate re-check); a refused batch stops the chunk before its receipt.
   const next={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,committedAt:new Date().toISOString(),films:films.length,conflicts,outcomes:counts,entries,viewBefore:intent.viewBefore};
-  await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next);
+  const sealed=await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next,{extra:terminalGuards.map(guard=>guard.statement)});
+  if(sealed&&sealed.refused===true)throw new FactsError('admission_not_settled','The operation history of an admission moved: the chunk stops before its receipt');
   // After the receipt: a claim is never written for a chunk whose commit could still fail.
   await ensureChunkClaims(env,items,films);
   return {...next,replay:false};
@@ -891,7 +1011,7 @@ function recordRatingChange(record,incoming,effective){
    if(action==='commit')return json(await commitBaselineChunk(env,body));
    return json({error:'Not found'},404);
   }catch(error){
-   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409,not_inferred:409}[error.code]||500;return json({error:error.message,code:error.code},status);}
+   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409,not_inferred:409,admission_closed:409,admission_not_settled:409,admission_unavailable:503}[error.code]||500;return json({error:error.message,code:error.code},status);}
    throw error;
   }
  }

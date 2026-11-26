@@ -1,6 +1,6 @@
 # Catalog Enrichment Producer: offline cost harness, 26 Nov 2026
 
-**What this is.** A measurement of the dormant producer on a synthetic catalog. It is **not** a production measurement and claims no production capacity. Nothing was fetched, nothing was applied and nothing was written to production: the run used the sqlite3 CLI as the D1 stand-in, over a scratch database built from the real migration chain (schema 46), with injected upstream responses.
+**What this is.** A measurement of the dormant producer on a synthetic catalog. It is **not** a production measurement and claims no production capacity. Nothing was fetched, nothing was applied and nothing was written to production: the run used the sqlite3 CLI as the D1 stand-in, over a scratch database built from the real migration chain (schema 47), with injected upstream responses.
 
 **How to repeat it.**
 

@@ -56,7 +56,9 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
     for (const key of ['capRefused', 'backlogFull']) counts[key] += Number(out?.counts?.[key]) || 0;
     const links = await identity.diaryLinks(ctx.env, offered.map(item => item.lid)).catch(() => new Map());
     // Every settle carries the row's token as read with the due list (AIR-599, review of PR #1009): a row an owner requeued or dismissed since cannot be overwritten by the outcome of a check that started before.
-    const settle = (row, fields) => repository.settleAdmission(ctx.env, {lid: row.lid, now, ...fields, expect: {attempts: row.attempts, updatedAt: row.updatedAt}}, {guards});
+    // AIR-602 (review of PR #1018): a terminal or charged outcome of the check was written against an operation history; its settlement here carries that history's guard IN the ledger batch, so an attempt that
+    // reserved or applied under the key between the check's own write and this settlement refuses it (the row keeps its token and is read again).
+    const settle = (row, fields, historyGuard = null) => repository.settleAdmission(ctx.env, {lid: row.lid, now, ...fields, expect: {attempts: row.attempts, updatedAt: row.updatedAt}}, {guards: historyGuard ? [...guards, historyGuard] : guards});
     let resolved = 0, terminal = 0;
     for (const row of due.rows) {
       if (unreadable[row.lid] === true) continue;
@@ -86,7 +88,7 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       if (exhausted) counts.atCap++;
       const reason = String(outcome.reason || 'unresolved');
       const retryAt = typeof outcome.retryAt === 'string' && Number.isFinite(Date.parse(outcome.retryAt)) && Date.parse(outcome.retryAt) > now ? outcome.retryAt : null;
-      const result = await settle(row, exhausted ? {state: 'terminal', attempts, reason} : {state: 'pending', attempts, reason, nextRetryAt: retryAt});
+      const result = await settle(row, exhausted ? {state: 'terminal', attempts, reason} : {state: 'pending', attempts, reason, nextRetryAt: retryAt}, Array.isArray(outcome.historyGuard) ? outcome.historyGuard : null);
       if (result.ok && exhausted && !result.already) terminal++;
       else if (!result.ok && result.reason === 'conflict') counts.rowChanged++; // an owner action changed the row since the due list was read: the owner's decision stands
     }

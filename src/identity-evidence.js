@@ -355,3 +355,67 @@ export async function recordIdentityEvidence(env,input={}){
  const row=await readEvidence(env,plan.evidenceKey);
  return {...outcome,receipt:true,requestId,evidenceKey:plan.evidenceKey,written:row?.request_id===requestId,seq:row?Number(row.seq):null};
 }
+
+// AIR-602 / ADR 0207 decision 3 (review of PR #1018): the evidence-only operation under its OWN operation key `evidence:<evidence_key>` on the AIR-600 protocol, so a lost response, an
+// expired or competing attempt and a Film merged away in between are all settled from durable state, never from timing. `run` is the protocol runner (`runOperationKey`, injected so this
+// module keeps its imports). input: {evidence, filmId, now?, policy?}. -> {state:'present'|'written'|'wait'|'failed', written, evidenceKey, seq?, filmId?, errorClass?}.
+// - settled: an applied attempt is validated against the LEDGER: the key exists, whatever Film it is bound to (a merge does not move a row), so a lost response after a redirect is `present`.
+// - the write targets the Film that holds the id NOW (a redirect is followed, a few hops), and the receipt's own target is that Film.
+// - `wait` (a live attempt) and `failed` are NOT success: the caller must not report the check as recorded.
+export const evidenceOperationKey=evidenceKey=>'evidence:'+evidenceKey;
+const REDIRECT_HOPS=8;
+async function currentFilm(db,id){
+ let at=id;
+ for(let hop=0;hop<=REDIRECT_HOPS;hop++){
+  const row=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[at]);
+  if(!row)return at;
+  at=row.to_film_id;
+ }
+ throw failed('film_person_redirect');
+}
+export async function recordIdentityEvidenceKeyed(env,input={},{run}={}){
+ if(typeof run!=='function')throw failed('film_person_invalid');
+ const plan=await planIdentityEvidence(input.evidence);
+ const askedFilm=fenced.filmId(input.filmId);
+ const status=await identityEvidenceStatus(env);
+ if(status!=='ready')throw failed('identity_evidence_unavailable');
+ assertWritable(await readAuthority(env));
+ const db=database(env);
+ const clock=clockOf(input.now);
+ const policy=input.policy||RETRY_POLICY;
+ const known=async()=>{const row=await readEvidence(env,plan.evidenceKey);return row?{state:'present',written:false,evidenceKey:plan.evidenceKey,seq:Number(row.seq),filmId:row.film_id}:null;};
+ let ran;
+ try{
+  ran=await run(env,{origin:IDENTITY_EVIDENCE_ORIGIN,operationKey:evidenceOperationKey(plan.evidenceKey),now:clock,policy},{
+   validate:async()=>(await readEvidence(env,plan.evidenceKey))?'settled':'historical',
+   decide:async()=>{
+    const existing=await known();
+    if(existing)return {kind:'none',result:existing};
+    const filmId=await currentFilm(db,askedFilm);
+    const film=await one(db,"SELECT (SELECT id FROM film WHERE id=?) AS film,(SELECT revision FROM canonical_revision WHERE kind='film' AND id=?) AS revision",[filmId,filmId]);
+    if(!film?.film)throw failed('identity_evidence_unknown_film');
+    const digest=await identityEvidenceDigest({evidenceKey:plan.evidenceKey,filmId});
+    return {kind:'reserve',request:{operation:IDENTITY_EVIDENCE_OPERATION,target:{kind:'film',id:filmId},expectedRevision:Number(film.revision??0),digest,source:{evidenceKey:plan.evidenceKey,filmId}},write:{
+     atomic:true,
+     run:ctx=>writeEvidence(env,{plan,filmId,expectedRevision:ctx.currentRevision,requestId:ctx.requestId,at:clock(),receiptMark:{requestId:ctx.requestId,attempt:ctx.attempt,now:clock(),target:ctx.target}}),
+     readback:async()=>({digest:(await readEvidence(env,plan.evidenceKey))?digest:null,revision:await revisionOf(db,filmId)}),
+     revalidate:async()=>(await readEvidence(env,plan.evidenceKey))?'superseded':'proceed',
+    }};
+   },
+  });
+ }catch(error){
+  // The lost race: another request recorded the key first. Nothing of this attempt landed.
+  if(error?.code===EVIDENCE_PRESENT){const row=await known();if(row)return row;}
+  throw error;
+ }
+ if(ran.status==='settled'||ran.status==='none'){const row=await known();return row||{state:'failed',written:false,evidenceKey:plan.evidenceKey,errorClass:'evidence_missing'};}
+ if(ran.status==='reserved'){
+  const o=ran.outcome||{};
+  const row=await known();
+  if((o.state==='applied'||o.state==='already')&&row)return {...row,state:o.already?'present':'written',written:o.already!==true&&row.seq!==undefined,requestId:ran.requestId};
+  if(row)return row;
+  return {state:'failed',written:false,evidenceKey:plan.evidenceKey,errorClass:o.errorClass||o.state||'unclassified'};
+ }
+ if(ran.status==='wait')return {state:'wait',written:false,evidenceKey:plan.evidenceKey,reason:ran.reason??'in_flight'};
+ return {state:'failed',written:false,evidenceKey:plan.evidenceKey,errorClass:ran.status};
+}

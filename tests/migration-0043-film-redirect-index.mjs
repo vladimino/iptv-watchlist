@@ -127,7 +127,7 @@ assert.deepEqual(objects(after),[...objects(before),'index:'+INDEX].sort(),'exac
 refuse(copyOf(after,'again'),'a second apply on version 43');
 assert.equal(version(migrated(42)),42,'the chain through 0042 ends at version 42');
 assert.ok(!objects(migrated(42)).includes('index:'+INDEX),'the chain through 0042 has no such index');
-assert.equal(version(migrated()),46,'the full chain ends at version 46 (0046, AIR-605, after 0045, AIR-604, which follows 0044, AIR-639 and this 0043)');
+assert.equal(version(migrated()),47,'the full chain ends at version 47 (0047, AIR-605, after 0046, AIR-602, after 0045, AIR-604, after 0044, AIR-639, which follows this 0043)');
 assert.ok(objects(migrated()).includes('index:'+INDEX),'the full chain carries the index');
 assert.ok(objects(migrated(42)).every(name=>objects(migrated()).includes(name)),'0043 keeps every earlier object');
 
@@ -144,7 +144,7 @@ assert.equal(Number(rows(after,'SELECT COUNT(*) AS n FROM film_redirect')[0].n),
 
 // ---- 3. the real ancestry statement of the display section ----------------------------------------------------------------------------------------------
 const bind=id=>{
- const params=[id,OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,id,id,OWNER_ENTRIES_MAX+1,id,11,id,id,61];let i=0;
+ const params=[id,OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,id,id,OWNER_ENTRIES_MAX+1,id,11,id,id,61,id,61];let i=0;
  const text=DISPLAY_SQL.replace(/\?/g,()=>{const v=params[i++];return typeof v==='number'?String(v):q(v);});
  assert.equal(i,params.length,'every parameter is bound');return text;
 };
@@ -158,7 +158,7 @@ for(const [name,id] of Object.entries(survivors)){
  assert.ok(/SCAN film_redirect\b|AUTOMATIC/.test(stepBefore+'|'+b.join('|')),name+': before 0043 the redirect table is scanned or auto-indexed per query\n'+b.join('\n'));
  assert.ok(a.some(d=>/^SEARCH film_redirect USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),name+': after 0043 the ancestry step is a SEARCH by the new index\n'+a.join('\n'));
  assert.ok(!a.some(d=>/^SCAN film_redirect\b/.test(d))&&!a.some(d=>/AUTOMATIC/.test(d)),name+': after 0043 no scan and no automatic index of the redirect table\n'+a.join('\n'));
- const scans=a.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN (a|anc)$/.test(d));
+ const scans=a.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN (a|anc|c)$/.test(d)); // AIR-656: `c` is the bounded derived table of one credit-role probe (the base table is SEARCHed through film_person_credit_order)
  assert.deepEqual(scans,[],name+': no base-table scan\n'+a.join('\n'));
  assert.deepEqual(ancestry(after,text),ancestry(before,text),name+': the statement returns the same ancestry rows');
 }
