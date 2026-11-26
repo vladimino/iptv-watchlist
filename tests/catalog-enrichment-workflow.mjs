@@ -32,7 +32,8 @@ function world({films=0,active=true}={}){
  const w={file,created:[],events:[],sendFails:false};
  w.addFilms=(ids)=>assert.equal(sqlite(file,ids.map(id=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',2,NULL,'K${id}','${T}');INSERT INTO film_external_id VALUES ('film:tmdb:${id}','tmdb','${id}',1,0,NULL);INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:${id}','rated','',1,'pending','${T}');`).join('')).status,0);
  w.addFilms(Array.from({length:films},(_,i)=>100+i));
- w.env={DB:d1Standin(file),CATALOG_ENRICHMENT_WORKFLOW:{
+ w.bucket={objects:new Map(),async put(key,body,options){if(options?.onlyIf?.etagDoesNotMatch==='*'&&this.objects.has(key))throw new Error('precondition failed (412)');this.objects.set(key,body);}};
+ w.env={DB:d1Standin(file),BUCKET:w.bucket,CATALOG_ENRICHMENT_WORKFLOW:{
   create:async ({id,params})=>{if(w.created.includes(id))throw new Error('instance already exists');w.created.push(id);},
   get:async id=>({sendEvent:async event=>{if(w.sendFails)throw new Error('instance not running');w.events.push({id,event});}}),
  }};
@@ -101,6 +102,27 @@ const deps=(fetchImpl,extra={})=>({tools:{},fetchImpl,clock,...extra});
  assert.equal(W.CRON,'11-59/15 * * * *');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
  assert.ok(!wrangler.includes(W.CRON),'the reconcile cron is delivered by the activation change, not by a deploy');
+}
+
+// ---- the run reaches the Events Log with per-source counts; the reconcile delivers what a crashed instance left ----
+{
+ const e=world({films:2});
+ await W.run(e.env,{instance:'ce-00000001'},mockStep(),deps(upstream()));
+ const events=[...e.bucket.objects.values()].map(body=>JSON.parse(body));
+ assert.ok(events.length>=1,'the terminal outbox entry of the run was delivered');
+ const total=events.reduce((sum,event)=>sum+(event.counts.films||0),0);
+ assert.equal(total,2);
+ const bySource=events.reduce((acc,event)=>{for(const [source,entry] of Object.entries(event.bySource))acc[source]=(acc[source]||0)+entry.requests;return acc;},{});
+ assert.deepEqual(bySource,{tmdb:2,wikidata:2},'source-specific request counts: one TMDB and one Wikidata request per Film, nothing for an inapplicable source');
+ assert.ok(events.every(event=>event.type==='catalog_enrichment'&&!JSON.stringify(event).match(/film:tmdb/)),'counts only');
+ assert.equal(rows(e.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_tick WHERE state IN ('finished','stopped') AND delivered_at IS NULL")[0].n,0,'every terminal entry is marked delivered');
+ // a crashed instance leaves a terminal entry undelivered: the reconcile (the safety net) delivers it, once
+ const c=world({films:0});
+ sqlite(c.file,`INSERT INTO catalog_enrichment_tick (tick_id,started_at,finished_at,state,counts_json) VALUES ('ce-00000009-0','${T}','${new Date(Date.parse(T)+60000).toISOString()}','stopped','{"films":1,"stop":"lease_lost","bySource":{}}');`);
+ await W.reconcile(c.env,{clock:()=> '2026-11-26T14:00:00.000Z'});
+ assert.equal(c.bucket.objects.size,1,'delivered by the reconcile');
+ await W.reconcile(c.env,{clock:()=> '2026-11-26T15:00:00.000Z'});
+ assert.equal(c.bucket.objects.size,1,'never duplicated');
 }
 
 // ---- a yield and an error backoff are deliberate holds: the instance parks (one wait) and the held work is NOT mistaken for runnable work ----

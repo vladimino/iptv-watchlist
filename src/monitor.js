@@ -145,10 +145,16 @@ const Monitor=(()=>{
   }
   return facts;
  });
+ // AIR-605: the Catalog Enrichment Producer from bounded READ-ONLY D1 reads (`CatalogEnrichmentStore.readMonitorFacts`). D1 is the authority of every fact: the Monitor keeps no enrichment clock or R2 record. A missing schema or control
+ // row is a neutral fact, a read failure is {error:true}, and an unbundled module answers null.
+ const catalogEnrichmentFacts=(env,now)=>guarded(async()=>{
+  if(typeof CatalogEnrichmentStore==='undefined'||!env?.DB)return null;
+  return CatalogEnrichmentStore.readMonitorFacts(env,{now});
+ });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);
-  const [discovery,ratings,predictions,catalogPosters,letterboxd,canonicalProducer]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state),letterboxdFacts(env,now),canonicalProducerFacts(env,now,state?.canonicalProducer||null)]);
-  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters}),...(letterboxd===null?{}:{letterboxd}),...(canonicalProducer===null?{}:{canonicalProducer})};
+  const [discovery,ratings,predictions,catalogPosters,letterboxd,canonicalProducer,catalogEnrichment]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state),letterboxdFacts(env,now),canonicalProducerFacts(env,now,state?.canonicalProducer||null),catalogEnrichmentFacts(env,now)]);
+  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters}),...(letterboxd===null?{}:{letterboxd}),...(canonicalProducer===null?{}:{canonicalProducer}),...(catalogEnrichment===null?{}:{catalogEnrichment})};
  }
 
  // ---- delivery: one transport chosen by deliberate configuration. `MONITOR_TRANSPORT` absent or `webhook` is the generic JSON webhook

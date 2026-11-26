@@ -9,7 +9,7 @@
 //   - A `waitForEvent` that times out THROWS and would fail the instance, so it is wrapped and the timeout is the due-time wake.
 //   - HANDOVER: at the statement budget the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor writes only after it acquires its own lease.
 import {drain,dueFilms,BUDGET,repairPending,DEFER_MINUTES} from './catalog-enrichment-drain.js';
-import {readControl,runnableSignals} from './catalog-enrichment-store.js';
+import {readControl,runnableSignals,deliverTicks} from './catalog-enrichment-store.js';
 
 export const RUN_PROJECTION='catalog_enrichment_run';
 // The safety-net cron expression. It is NOT in wrangler.jsonc: the activation change delivers it as a reviewed, versioned configuration change.
@@ -102,6 +102,8 @@ export async function reconcile(env,{clock}={}){
  const now=nowIso(clock);
  const control=await readControl(env);
  if(control.state!=='active')return {reconciled:false,reason:'not_active'};
+ // the safety net also delivers any terminal outbox entry that a crashed instance left undelivered
+ try{await deliverTicks(env,{nowMs:Date.parse(now)});}catch{/* delivery is retried */}
  if(!await hasRunnable(env,{now}))return {reconciled:true,created:false,reason:'nothing_runnable'};
  return {reconciled:true,...await kick(env,{clock})};
 }
@@ -135,6 +137,8 @@ export async function run(env,payload,step,deps={}){
    return {stop:out.stop,wakeAt:out.wakeAt||null,counts:out.counts};
   });
   spent+=Number(result.counts?.statements)||0;
+  // the terminal outbox entry of the run reaches the Events Log best effort: delivery never blocks a run and a failure is retried by the next run or the reconcile
+  try{await deliverTicks(env,{nowMs:Date.parse(nowIso(clock))});}catch{/* delivery is retried */}
   last=result.stop;
   if(result.stop==='handover'){
    // the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor re-checks the runnable work in full

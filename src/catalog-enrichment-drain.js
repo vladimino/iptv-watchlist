@@ -134,7 +134,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  // The background share is measured in COMMITTED units across runs (a handover must not reset it): the recent runs' outbox entries are the baseline.
  let baseLive=0,baseBackground=0;
  try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
- const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0};
+ const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,bySource:{}};
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed}});
  const control=await readControl(env);
  if(control.state!=='active')return finish(control.state==='paused'?'paused':'not_active');
@@ -209,7 +209,11 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     counts.units+=committed;
     if(klass==='live')counts.committedLive+=committed;else counts.committedBackground+=committed;
     counts.transport+=step.report.transport.length;counts.failed+=step.report.failed.length;if(step.report.disagreement)counts.disagreements++;
-    counts.requests+=step.report.transport.length+step.report.failed.length;
+    // per SOURCE: requests actually asked (a cooldown skip sends none), transport outcomes, definite failures and cooldown skips
+    for(const source of step.report.fetched||[]){const entry=(counts.bySource[source]||={requests:0,transport:0,failed:0,cooldownSkips:0});const skipped=step.report.transport.some(item=>item.source===source&&item.cooldown);if(skipped)entry.cooldownSkips++;else entry.requests++;}
+    for(const item of step.report.transport){const entry=(counts.bySource[item.source]||={requests:0,transport:0,failed:0,cooldownSkips:0});entry.transport++;}
+    for(const item of step.report.failed){const entry=(counts.bySource[item.source]||={requests:0,transport:0,failed:0,cooldownSkips:0});entry.failed++;}
+    counts.requests=Object.values(counts.bySource).reduce((sum,entry)=>sum+entry.requests,0);
    }
    if(['idle','blocked','not_admitted','absent','redirected'].includes(step.state)||(step.state==='done'&&!step.report.units.length))skip.add(pick.filmId);
    if(step.state==='partial')return finish('handover'); // progress is durable per unit: the successor resumes this Film from D1, without a new upstream request

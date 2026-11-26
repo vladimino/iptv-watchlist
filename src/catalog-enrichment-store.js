@@ -180,3 +180,105 @@ export async function recordFailure(env,{signal,now,error}){
  const code=String(error?.code||error?.cause?.code||'consume_failed').replace(/[^a-z0-9_]/gi,'_').slice(0,80);
  await handle.prepare('UPDATE enrichment_signal SET attempts=?,last_error=?,retry_at=? WHERE kind=? AND subject=? AND source=? AND part=? AND state=\'pending\'').bind(attempts,code,retryAt,signal.kind,signal.subject,signal.source??'',signal.part??'').run();
 }
+
+// ---- the Monitor fact reader (ADR 0211 decision 5 as amended by ADR 0219) ----
+// BOUNDED, READ-ONLY D1 reads that the Monitor judges with `MonitorPolicy.evaluateCatalogEnrichment`: the control, the enabled scopes, the newest run and the run record, the drainer lease, the newest run that committed units,
+// the due and runnable Films, the oldest upstream transport streak per source, and the rows that need attention. D1 stays the authority of every fact here: the Monitor keeps no enrichment clock of its own.
+// A missing schema or a missing control row is NEUTRAL (`configured: false`), never an error. Nothing is written.
+export async function readMonitorFacts(env,{now}){
+ const handle=db(env);
+ const iso=new Date(now).toISOString();
+ const first=(sql,params=[])=>one(handle,sql,params);
+ let control;
+ try{control=await first('SELECT state,generation FROM catalog_enrichment_control WHERE id=1');}
+ catch(error){if(absentTable(error))return {configured:false,reason:'schema_missing'};throw failed('film_person_unavailable',error);}
+ if(!control)return {configured:false,reason:'no_control'};
+ const [scopes,tick,progress,record,lease,due,transport,attention,repair,delivery]=await Promise.all([
+  first('SELECT COUNT(*) AS n FROM catalog_enrichment_scope WHERE enabled=1'),
+  first('SELECT tick_id,state,started_at,finished_at FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 1'),
+  first("SELECT MAX(started_at) AS at FROM catalog_enrichment_tick WHERE COALESCE(json_extract(counts_json,'$.units'),0)>0"),
+  first("SELECT summary_json FROM projection_run WHERE projection='catalog_enrichment_run'"),
+  first("SELECT lease_until FROM projection_run WHERE projection='catalog_enrichment' AND lease_id IS NOT NULL"),
+  first("SELECT COUNT(DISTINCT s.film_id) AS films,MIN(s.due_since) AS oldest FROM catalog_enrichment_state s WHERE s.part<>'film' AND s.status IN ('due','deferred_repair') AND (s.retry_at IS NULL OR s.retry_at<=?) AND s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement')",[iso]),
+  many(handle,"SELECT source,MIN(pending_since) AS since,COUNT(DISTINCT film_id) AS films FROM catalog_enrichment_state WHERE part<>'film' AND status IN ('due','deferred_repair') AND pending_since IS NOT NULL GROUP BY source"),
+  many(handle,"SELECT status,source,COUNT(*) AS n FROM catalog_enrichment_state WHERE status IN ('identity_disagreement','needs_attention') GROUP BY status,source"),
+  many(handle,"SELECT source,COUNT(*) AS n,MIN(updated_at) AS oldest FROM catalog_enrichment_state WHERE status='deferred_repair' GROUP BY source"),
+  first("SELECT COUNT(*) AS n,MIN(finished_at) AS oldest FROM catalog_enrichment_tick WHERE state IN ('finished','stopped') AND delivered_at IS NULL"),
+ ]);
+ let run=null;
+ try{const parsed=record?.summary_json?JSON.parse(record.summary_json):null;run=parsed&&typeof parsed==='object'?{phase:parsed.phase||null,at:parsed.at||null,wakeAt:parsed.wakeAt||null,instance:parsed.instance||null}:null;}catch{run=null;}
+ return {configured:true,control:{state:control.state,generation:Number(control.generation)},enabledScopes:Number(scopes?.n??0),
+  lastTick:tick?{state:tick.state,startedAt:tick.started_at,finishedAt:tick.finished_at}:null,progressAt:progress?.at??null,run,leaseUntil:lease?.lease_until??null,
+  due:{films:Number(due?.films??0),oldestDueSince:due?.oldest??null},
+  transport:Object.fromEntries(transport.map(row=>[row.source,{since:row.since,films:Number(row.films)}])),
+  attention:attention.map(row=>({status:row.status,source:row.source,count:Number(row.n)})),
+  repair:repair.map(row=>({source:row.source,count:Number(row.n),oldestAt:row.oldest})),
+  // shown, never judged (the same rule as the canonical Producer's outcome delivery): undelivered terminal runs
+  delivery:{pending:Number(delivery?.n??0),oldestAt:delivery?.oldest??null}};
+}
+
+// ---- the run outbox and its delivery to the Events Log (ADR 0211 decision 5 as amended by ADR 0219) ----
+// One row of `catalog_enrichment_tick` per run: `started`, then `finished` or `stopped` with its counts. A terminal row is delivered to the user Events Log as ONE event of type `catalog_enrichment`, create-only under a key that
+// is a pure function of the run id and its end time (the same key layout as the canonical Producer's outcomes): a put that finds the key counts as delivered, so a retry never duplicates. A failed put moves the row one hour
+// back (the attempt counter is the compare-and-swap and the schedule); a row that keeps failing cannot starve the others, nothing is ever deleted and delivery never blocks a run.
+export const EVENT_TYPE='catalog_enrichment';
+export const DELIVERY_MAX=8;
+export const DELIVERY_RETRY_MS=3600000;
+const isTime=value=>typeof value==='string'&&value.length>=20&&value.length<=40&&Number.isFinite(Date.parse(value));
+const whole=value=>{const n=Number(value);return Number.isInteger(n)&&n>=0?n:null;};
+const SOURCES=['letterboxd','tmdb','wikidata'];
+export const tickEventKey=event=>'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
+// PURE. The event of one terminal outbox row, or null when the row is not deliverable. Counts only: no Film id, title, name or payload.
+export function tickEvent(row){
+ if(!row||typeof row.tick_id!=='string'||!['finished','stopped'].includes(row.state)||!isTime(row.finished_at))return null;
+ let counts=null;
+ try{counts=JSON.parse(row.counts_json);}catch{counts=null;}
+ if(!counts||typeof counts!=='object')return null;
+ const bySource={};
+ for(const source of SOURCES){
+  const entry=counts.bySource?.[source];
+  if(entry&&typeof entry==='object')bySource[source]={requests:whole(entry.requests)??0,transport:whole(entry.transport)??0,failed:whole(entry.failed)??0,cooldownSkips:whole(entry.cooldownSkips)??0};
+ }
+ const stop=/^[a-z][a-z_0-9]{0,39}$/.test(String(counts.stop||''))?counts.stop:null;
+ const startedMs=Date.parse(row.started_at),endedMs=Date.parse(row.finished_at);
+ return {id:row.tick_id,type:EVENT_TYPE,at:new Date(endedMs).toISOString(),outcome:row.state,stop,
+  startedAt:isTime(row.started_at)?new Date(startedMs).toISOString():null,durationMs:isTime(row.started_at)&&endedMs>=startedMs?endedMs-startedMs:null,
+  counts:{films:whole(counts.films),signals:whole(counts.signals),units:whole(counts.units),steps:whole(counts.steps),statements:whole(counts.statements),failedStatements:whole(counts.failedStatements),
+   committedLive:whole(counts.committedLive),committedBackground:whole(counts.committedBackground),yields:whole(counts.yields),deferred:whole(counts.deferred),errors:whole(counts.errors),disagreements:whole(counts.disagreements)},
+  bySource};
+}
+async function putTickEvent(env,event){
+ for(let attempt=0;attempt<2;attempt++){
+  try{await env.BUCKET.put(tickEventKey(event),JSON.stringify(event),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});return true;}
+  catch(error){
+   // R2 reports an existing key on a create-only put as a failed precondition: the event is already there, which is delivery
+   if(/precondition|412|already exists/i.test(String(error?.message||error)))return true;
+  }
+ }
+ return false;
+}
+// -> {taken, delivered, failed, conflicts}. Only the delivery of terminal rows; a `started` row is never delivered.
+export async function deliverTicks(env,{nowMs=Date.now(),limit=DELIVERY_MAX}={}){
+ const stats={taken:0,delivered:0,failed:0,conflicts:0};
+ if(typeof env?.BUCKET?.put!=='function')return {...stats,skipped:'bucket_unavailable'};
+ const handle=db(env);
+ const now=new Date(nowMs).toISOString(),cap=Math.max(1,Math.min(DELIVERY_MAX,Number(limit)||DELIVERY_MAX));
+ let rows;
+ try{rows=await many(handle,"SELECT tick_id,started_at,finished_at,state,counts_json,delivery_attempts FROM catalog_enrichment_tick WHERE state IN ('finished','stopped') AND delivered_at IS NULL ORDER BY finished_at LIMIT ?",[cap*4]);}
+ catch(error){if(absentTable(error))return {...stats,skipped:'schema_missing'};throw failed('film_person_unavailable',error);}
+ // the retry schedule is the attempt counter: a row is due one hour after its end for each failed attempt
+ const due=rows.filter(row=>isTime(row.finished_at)&&Date.parse(row.finished_at)+Number(row.delivery_attempts||0)*DELIVERY_RETRY_MS<=nowMs).slice(0,cap);
+ for(const row of due){
+  stats.taken++;
+  const event=tickEvent(row);
+  const ok=event?await putTickEvent(env,event):false;
+  const statement=ok
+   ?["UPDATE catalog_enrichment_tick SET delivered_at=?,delivery_attempts=delivery_attempts+1 WHERE tick_id=? AND delivered_at IS NULL AND delivery_attempts=? RETURNING tick_id",[now,row.tick_id,row.delivery_attempts]]
+   :["UPDATE catalog_enrichment_tick SET delivery_attempts=delivery_attempts+1 WHERE tick_id=? AND delivered_at IS NULL AND delivery_attempts=? RETURNING tick_id",[row.tick_id,row.delivery_attempts]];
+  let moved=false;
+  try{moved=!!await handle.prepare(statement[0]).bind(...statement[1]).first();}catch{moved=false;}
+  if(ok)stats.delivered++;else stats.failed++;
+  if(!moved)stats.conflicts++;
+ }
+ return stats;
+}

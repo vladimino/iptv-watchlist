@@ -406,6 +406,12 @@ export const FILES={
  "catalog-enrichment-letterboxd-credits.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-monitor.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-events.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },

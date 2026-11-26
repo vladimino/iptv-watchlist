@@ -146,6 +146,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const resumeRows=dueRows.filter(row=>row.part==='credits'&&plans[row.source]&&plans[row.source].rows.includes(row));
  const toFetch=[...new Set(dueRows.filter(row=>!resumeRows.includes(row)).map(row=>row.source))];
  if(!toFetch.length&&!resumeRows.length)return {state:'idle'};
+ report.fetched=[...toFetch];
  const lbAnchor=context.anchors.letterboxd,tmdbAnchor=context.anchors.tmdb;
  const answers={};
  await Promise.all(toFetch.map(async source=>{
@@ -157,7 +158,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  for(const [source,answer] of Object.entries(answers)){
   const rows=[...byKey.values()].filter(row=>row.source===source&&row.part!=='film'&&['due','deferred_repair'].includes(row.status));
   const outcome=answer.status==='ok'?{type:'success'}:answer.status==='transport'?{type:'transport',cooldownUntil:answer.cooldownUntil}:answer.status==='disagreement'?{type:'owner_required'}:{type:'repairable',signature:answer.reason,responseDigest:await sha({source,reason:answer.reason,status:answer.httpStatus??null})};
-  if(answer.status==='transport')report.transport.push({source,reason:answer.reason});
+  if(answer.status==='transport')report.transport.push({source,reason:answer.reason,cooldown:answer.reason==='upstream_cooldown'});
   if(answer.status==='failed')report.failed.push({source,reason:answer.reason});
   // Success is classified PER APPLICABLE PART: a 200 whose translations or credits section is unreadable is not a recovery of that part, so its counter is preserved here and incremented by the section-specific outcome below
   // (repeated identical malformed responses therefore reach quarantine instead of sitting at one failure).
