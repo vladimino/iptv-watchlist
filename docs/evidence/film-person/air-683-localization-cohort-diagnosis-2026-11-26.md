@@ -14,10 +14,11 @@ Date: **26 November 2026** (UTC). Card: [AIR-683](https://trello.com/c/VJYgJuOW)
 
 ## 2. Capability (offline, synthetic SQLite fixtures built from every migration)
 
-- `diagnoseLocalizationCohort` (in `src/film-localization-reconciler.js`) on top of `dryRunLocalizationReconcile`; the only Worker entry is the owner-only MCP tool `film_localization_diagnose`. No new service, Workflow, queue, storage, table or migration.
-- Equality with the oracle: on a 121-Film fixture (5 stale, 1 reviewed-row hold, 1 redirect, the rest current) the aggregate equals the sum of the dry-run pages (stale ids, held reasons, noop, absent, unavailable). An unavailable owner domain is `unavailable`, never zero; an early stop is incomplete and never zero; an empty table walked to its end is zero.
+- `diagnoseLocalizationCohort` (in `src/film-localization-reconciler.js`) over the same `classifyFilm` the dry run uses; the only Worker entry is the owner-only MCP tool `film_localization_diagnose`. No new service, Workflow, queue, storage, table or migration.
+- Equality with the oracle: on a 121-Film fixture (5 stale, 1 reviewed-row hold, 1 redirect, the rest current) the contiguous ranges of the walk sum to the summed dry-run pages (stale ids, held reasons, noop, absent, unavailable).
+- **Real limit** (review of the first revision corrected it): [D1 allows 1,000 queries per Worker invocation on Paid, a batch counting as one](https://developers.cloudflare.com/d1/platform/limits/) (page updated 20 Nov 2026); the earlier 10,000-subrequest and 500-Film rationale was wrong and is removed. The call counts its own D1 executions and stops before the next Film (`d1_query_budget`). Measured on the fixture: **2 invocations for 121 Films (983 + 486 D1 queries, none above 1,000 including the closing pin reads), at most 13 queries per Film.** A Film with many owner entries or ancestors costs more, which is why the stop uses the largest cost seen.
+- Range semantics: a resumed call, a clean suffix after the last stale Film and a cursor beyond the last Film are never `complete` or `zeroEligible` (fixtures); an empty table with a non-D1 owner-review domain or a held marker is refused; a moved owner-review generation during the walk gives `pinsStable: false` and blocks zero; an unavailable Film is never zero.
 - No effect: the fixture snapshot of `film_dimension`, `film_localization_source` and receipts is unchanged; `tests/get-write-audit.mjs` (8 scenarios, instrumented R2 and D1) shows no R2 or D1 write, receipt, workflow, dispatch, background or outbound effect; the tool is anonymous-refused (403) and never reads R2.
-- Measured cost: **12.13 D1 statements per Film** (1,468 for 121 Films). A Worker invocation allows 10,000 subrequests (Workers Paid), so one call examines at most **500 Films** (about 6,100 statements) or stops after a 20 s budget and returns a cursor. This bound comes from the subrequest limit, not from the dormant reconciler's 50 and 25.
 
 ## 3. Live cohort (to be filled by a scoped L0 read)
 
@@ -25,8 +26,8 @@ Date: **26 November 2026** (UTC). Card: [AIR-683](https://trello.com/c/VJYgJuOW)
 | --- | --- |
 | Films examined, current (noop), stale, held (by reason), absent, unavailable (by code) | **unknown, not read** |
 | Coverage and time boundary | **unknown** |
-| Authority and schema pins (marker, owner-review domain, version) | **unknown, not read** |
+| Authority and schema pins (Film/Person marker, schema version, owner-review domain and generation) per call | **unknown, not read** |
 | Observed cost and duration of the live walk | **unknown** |
-| Verdict | **none**: AIR-664 cannot be closed as a no-op and no eligible count is claimed until a complete walk (`complete`, `unavailable` 0, `authorityStable`, `stopped` null across all calls) is recorded here |
+| Verdict | **none**: AIR-664 cannot be closed as a no-op and no eligible count is claimed until contiguous ranges from the first Film to a `reachedEnd` range, every one `rangeClean` with identical pins and no `failure`, are recorded here (`stopped` of `d1_query_budget` or `budget` is a normal continuation) |
 
-Next step for the Controller or owner: after the post-merge deploy, call `film_localization_diagnose` repeatedly with the returned `cursor` until `complete`, then record the sanitized aggregates in section 3 (ids and counts only, no payload).
+Next step for the Controller or owner: after the post-merge deploy, call `film_localization_diagnose` repeatedly with the returned `cursor` until a range reports `reachedEnd`, then aggregate the ranges and record the sanitized aggregates in section 3 (ids and counts only, no payload).
