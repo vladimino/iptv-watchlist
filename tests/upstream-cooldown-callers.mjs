@@ -322,4 +322,19 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   {const f = env0(); answer = () => new Response('', {status: 404}); const out = await run("refreshPersonalRating(env,{id:'film1',url:'https://letterboxd.com/film/heat-1995/'}).then(v=>v.status)"); assert.equal(out, 'not_found', 'an ordinary 404 is still not_found'); assert.deepEqual(rows(f), []);}
 }
 
+// ---- 7. movieDetail carries its typed TMDB state (AIR-670, ADR 0217 decision 3), additively: `review`, `status` and `stop` are what the live callers already read -------------------
+{
+  const f = dbWith('off');
+  const detailOf = async (make, token = 't') => {reset(); answer = make; context.env = {DB: d1Standin(f), ...(token ? {TMDB_API_READ_ACCESS_TOKEN: token} : {})}; context.net = run('fetch'); return plain(await run("LetterboxdRatedCandidates.movieDetail(env,'603',net)"));};
+  assert.deepEqual(await detailOf(() => new Response('', {status: 404})), {review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'});
+  assert.deepEqual(await detailOf(() => new Response('', {status: 500})), {review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_failed'});
+  assert.deepEqual(await detailOf(() => new Response('', {status: 401})), {review: 'tmdb_fetch_failed', status: 401, state: 'tmdb_failed'});
+  assert.deepEqual(await detailOf(() => new Response('not json', {status: 200})), {review: 'tmdb_fetch_failed', state: 'tmdb_failed'});
+  assert.deepEqual(await detailOf(() => new Response('', {status: 429})), {stop: 'rate_limited', state: 'tmdb_unavailable'}, 'a transport stop is no charge');
+  assert.deepEqual(await detailOf(() => new Response('', {status: 403})), {stop: 'forbidden', state: 'tmdb_unavailable'});
+  assert.deepEqual(await detailOf(() => new Response('{"id":603}', {status: 200}), null), {stop: 'tmdb_unavailable', state: 'tmdb_unavailable'}, 'a missing token never reaches the network');
+  assert.equal(sent.length, 0);
+  assert.deepEqual(await detailOf(() => new Response('{"id":603}', {status: 200})), {detail: {id: 603}}, 'a usable document is unchanged');
+}
+
 console.log('upstream-cooldown-callers: ok');

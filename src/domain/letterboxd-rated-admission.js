@@ -208,6 +208,47 @@ export function movieDetailAgrees(detail, tmdbId, title, year) {
   return {ok: true};
 }
 
+// ADR 0217 decision 3 (AIR-670), pure and dormant: the typed TMDB state of one check and its outcome. Nothing calls it from a live path; `tmdb_none` (H1, lid-only admission) is a later delivery step and is
+// never produced here, so no state is ever downgraded to it. `charged` is the existing retry contract (ADR 0207 decision 4b): a charged outcome is `definite` there (one attempt, review backoff, owner review
+// at the cap), an uncharged one is `transport` (no attempt, the place in the queue is kept). The outcome names are reasons the existing classifier already treats as `definite`.
+export const TMDB_STATES = Object.freeze({
+  tmdb_movie: {outcome: null, charged: false, admits: true},
+  tmdb_disagrees: {outcome: 'detail_mismatch', charged: true, admits: false},
+  tmdb_tv: {outcome: 'tmdb_not_movie', charged: true, admits: false},
+  tmdb_missing: {outcome: 'tmdb_contradiction', charged: true, admits: false},
+  tmdb_unavailable: {outcome: 'tmdb_unavailable', charged: false, admits: false},
+  tmdb_failed: {outcome: 'tmdb_fetch_failed', charged: true, admits: false},
+  tmdb_unreadable: {outcome: 'page_unreadable', charged: true, admits: false},
+});
+const typed = (state, extra = {}) => ({state, ...TMDB_STATES[state], ...extra});
+
+// What the film page says about TMDB. `fetched` is the follow result ({html} or {stop}); `evidence` is pageEvidence of it. A page that is incomplete (no closing html tag), not parseable, carries no id
+// (an absence is not proven here), several ids, an id that is not numeric, or no readable movie/tv marker is `tmdb_unreadable`, never "no TMDB".
+export function pageTmdbState(fetched, evidence) {
+  if (fetched && fetched.stop) return fetched.stop === 'oversized' ? typed('tmdb_unreadable') : typed('tmdb_unavailable', {stop: fetched.stop});
+  const html = fetched && typeof fetched.html === 'string' ? fetched.html : '';
+  if (!/<\/html\s*>\s*$/i.test(html)) return typed('tmdb_unreadable');
+  if (!evidence || evidence.kind !== 'page') return typed('tmdb_unreadable');
+  const ids = Array.isArray(evidence.tmdbIds) ? evidence.tmdbIds : [];
+  const types = Array.isArray(evidence.tmdbTypes) ? evidence.tmdbTypes : [];
+  if (ids.length !== 1 || !TMDB.test(String(ids[0]))) return typed('tmdb_unreadable');
+  if (types.length !== 1) return typed('tmdb_unreadable');
+  if (types[0] === 'tv') return typed('tmdb_tv', {tmdbId: String(ids[0])});
+  if (types[0] !== 'movie') return typed('tmdb_unreadable');
+  return typed('tmdb_movie', {tmdbId: String(ids[0])});
+}
+
+// What TMDB says about the movie id: `result` is the movieDetail answer. Only a usable document is compared (movieDetailAgrees); its disagreement keeps the existing reason.
+export function detailTmdbState(result, tmdbId, title, year) {
+  if (!result) return typed('tmdb_failed');
+  if (result.stop) return typed('tmdb_unavailable', {stop: result.stop});
+  if (result.state === 'tmdb_unavailable' || result.state === 'tmdb_missing' || result.state === 'tmdb_failed') return typed(result.state);
+  if (result.review) return typed('tmdb_failed');
+  const agree = movieDetailAgrees(result.detail, tmdbId, title, year);
+  if (agree.ok) return typed('tmdb_movie');
+  return agree.reason === 'tmdb_tv' ? typed('tmdb_tv') : typed('tmdb_disagrees', {outcome: agree.reason});
+}
+
 // The Film id is the verified movie id. No watchlist field is stored.
 export function admissionFilm({tmdb, sourceCode, archiveSha256, title = null, year = null}) {
   if (!TMDB.test(String(tmdb || '')) || !CODE.test(String(sourceCode || ''))) return null;

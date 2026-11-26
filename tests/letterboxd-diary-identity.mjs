@@ -42,6 +42,9 @@ vm.runInContext(scoped('src/letterboxd-match.js', 'LetterboxdMatch') + '\n' + sc
 for (const file of ['src/letterboxd-facts.js', 'src/letterboxd-rated-candidates.js', process.env.DIARY_IDENTITY_SRC || 'src/letterboxd-diary-identity.js']) run(file);
 installRawViewProjection(ctx); // AIR-558
 const Facts = vm.runInContext('LetterboxdFacts', ctx), Identity = vm.runInContext('LetterboxdDiaryIdentity', ctx);
+// AIR-670 / ADR 0217 decision 3: the typed outcomes ride the existing retry contract (ADR 0207 decision 4b): charged ones are `definite`, the unavailable one is `transport`; nothing new is `gone` or settled.
+for (const reason of ['tmdb_contradiction', 'page_unreadable', 'tmdb_fetch_failed', 'tmdb_not_movie']) assert.equal(Identity.classify(reason), 'definite', reason);
+assert.equal(Identity.classify('tmdb_unavailable'), 'transport');
 const env = {BUCKET: bucket, TMDB_API_READ_ACCESS_TOKEN: 'fixture-token'};
 
 const filmPage = ({lid, slug, title, year, tmdbIds = ['900001'], type = 'movie', shortlink = true, canonicalSlug = slug}) => {

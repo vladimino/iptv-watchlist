@@ -1,6 +1,6 @@
 // Pure rated-archive classification (AIR-340). Synthetic rows only. No storage and no network.
 import assert from 'node:assert/strict';
-import {admissionFilm, classifyArchive, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, retryFingerprint, splitPending, validatedRetryExpected} from '../src/domain/letterboxd-rated-admission.js';
+import {TMDB_STATES, admissionFilm, classifyArchive, detailTmdbState, pageTmdbState, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, retryFingerprint, splitPending, validatedRetryExpected} from '../src/domain/letterboxd-rated-admission.js';
 import {transportStop} from '../src/letterboxd-identity.js';
 
 const rated = (code, extra = {}) => ({code, name: extra.name || 'Invented', year: extra.year ?? 2001, inRatings: true, rating: extra.rating ?? 4, ...extra});
@@ -92,5 +92,59 @@ assert.equal(planIdentityRetry({candidates: {'103U': {...stamped, registeredAt: 
 assert.equal(planIdentityRetry({candidates: {'103U': {code: '103U', state: 'pending', retryOf: 'shortlink_missing', observedAt: stamped.observedAt, registeredAt: stamped.registeredAt}}}, {codes: ['103U'], expected: {'103U': expectOf(stamped)}}).outcomes[0].outcome, 'already_applied');
 assert.equal(planIdentityRetry({candidates: {'103U': {code: '103U', state: 'pending', retryOf: 'shortlink_missing', observedAt: '2026-11-01T00:00:00.000Z', registeredAt: stamped.registeredAt}}}, {codes: ['103U'], expected: {'103U': expectOf(stamped)}}).outcomes[0].outcome, 'skipped_changed');
 assert.equal(validatedRetryExpected({candidates: retryRows}, ['103U'], {}).ok, false);
+
+// AIR-670 / ADR 0217 decision 3: the typed TMDB states and their outcomes. Synthetic pages only; pure.
+{
+  const page = (tmdbIds, tmdbTypes, extra = {}) => ({kind: 'page', tmdbIds, tmdbTypes, ...extra});
+  const html = '<html><body>invented</body></html>';
+  const state = (fetched, evidence) => pageTmdbState(fetched, evidence);
+  // a valid movie page is unchanged: exactly one id, a movie marker, a complete body
+  assert.deepEqual([state({html}, page(['900001'], ['movie'])).state, state({html}, page(['900001'], ['movie'])).tmdbId], ['tmdb_movie', '900001']);
+  assert.equal(state({html}, page(['900001'], ['movie'])).outcome, null);
+  assert.equal(state({html}, page(['900001'], ['tv'])).outcome, 'tmdb_not_movie');
+  // unreadable: malformed or truncated page, an unreadable type marker or id block, several ids, a non-numeric id. One attempt counted, never admitted
+  for (const [label, fetched, evidence] of [
+    ['truncated body', {html: '<html><body>cut'}, page(['900001'], ['movie'])],
+    ['empty body', {html: ''}, page(['900001'], ['movie'])],
+    ['oversized body', {stop: 'oversized'}, null],
+    ['unparsable page', {html}, {kind: 'unparsable_page'}],
+    ['no evidence', {html}, null],
+    ['no id block', {html}, page([], [])],
+    ['several ids', {html}, page(['900001', '900002'], ['movie'])],
+    ['non-numeric id', {html}, page(['abc'], ['movie'])],
+    ['id without marker', {html}, page(['900001'], [])],
+    ['unknown marker', {html}, page(['900001'], ['person'])],
+    ['two markers', {html}, page(['900001'], ['movie', 'tv'])],
+  ]) {
+    const out = state(fetched, evidence);
+    assert.deepEqual([out.state, out.outcome, out.charged, out.admits], ['tmdb_unreadable', 'page_unreadable', true, false], label);
+  }
+  // transport: no charge, no admission, whatever the page said
+  for (const stop of ['challenge', 'forbidden', 'rate_limited', 'timeout', 'upstream_cooldown']) {
+    const out = state({stop}, null);
+    assert.deepEqual([out.state, out.charged, out.admits, out.stop], ['tmdb_unavailable', false, false, stop], stop);
+  }
+  assert.equal(transportStop(200, new Headers(), '<html><title>Just a moment...</title></html>'), 'challenge', 'a challenge behind a 200 is the transport stop the follow step reports');
+  // TMDB document states: 404 is its own state with its own outcome, other non-200 and an unparseable document are tmdb_failed
+  const movie = {id: 900001, media_type: 'movie', title: 'Invented Alpha', release_date: '2001-06-01'};
+  const detail = result => detailTmdbState(result, '900001', 'Invented Alpha', 2001);
+  assert.equal(detail({detail: movie}).state, 'tmdb_movie');
+  assert.equal(detail({detail: movie}).admits, true);
+  assert.deepEqual([detail({review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}).state, detail({review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}).outcome, detail({review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}).charged], ['tmdb_missing', 'tmdb_contradiction', true]);
+  for (const result of [{review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_failed'}, {review: 'tmdb_fetch_failed', status: 400, state: 'tmdb_failed'}, {review: 'tmdb_fetch_failed', state: 'tmdb_failed'}, {review: 'tmdb_fetch_failed', status: 404}, null]) {
+    const out = detail(result);
+    assert.deepEqual([out.state, out.outcome, out.charged, out.admits], ['tmdb_failed', 'tmdb_fetch_failed', true, false], JSON.stringify(result));
+  }
+  for (const result of [{stop: 'tmdb_unavailable', state: 'tmdb_unavailable'}, {stop: 'upstream_cooldown', until: 1, state: 'tmdb_unavailable'}, {stop: 'rate_limited', state: 'tmdb_unavailable'}]) {
+    const out = detail(result);
+    assert.deepEqual([out.state, out.charged, out.admits], ['tmdb_unavailable', false, false], JSON.stringify(result));
+  }
+  assert.deepEqual([detail({detail: {...movie, title: 'Other'}}).state, detail({detail: {...movie, title: 'Other'}}).outcome], ['tmdb_disagrees', 'detail_title_mismatch'], 'the existing disagreement reason is kept');
+  assert.equal(detail({detail: {...movie, id: 8}}).outcome, 'detail_id_mismatch');
+  assert.equal(detail({detail: {...movie, media_type: 'tv'}}).state, 'tmdb_tv');
+  // only a movie that agrees admits, and no state is ever tmdb_none (the lid-only admission is a later delivery step)
+  assert.deepEqual(Object.entries(TMDB_STATES).filter(([, value]) => value.admits).map(([key]) => key), ['tmdb_movie']);
+  assert.equal('tmdb_none' in TMDB_STATES, false);
+}
 
 console.log('Rated archive admission: pending is this archive, a historical count is not the queue, conflicts stay unmerged, a Film id is the movie id');
