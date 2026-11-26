@@ -642,8 +642,21 @@ function recordRatingChange(record,incoming,effective){
    evidence:{subject:{kind:'letterboxd_lid',value:item.lid},relation:'same_work',object:{kind:'tmdb_movie',value:String(item.tmdb)},polarity:'restricts',route:'letterboxd_export_import',method:'title_year_search',sourceRoot:origin.archiveSha256,sourceRef:'chunk:'+chunk,observedAt:new Date().toISOString()},
    now:()=>new Date().toISOString()});
   if(out.outcome==='admitted'||out.outcome==='present')return out.outcome;
-  if(out.outcome==='other_code')return 'present_other_code';
-  if(out.outcome==='conflict')return 'refused_after_link';
+  if(out.outcome==='other_code'||out.outcome==='conflict'){
+   // PR #1018 review: a typed refusal is a settled terminal verdict ONLY when it was finalized (its history guard was handed to `finalize` and is now in `terminalGuards`). One that surfaced from a reservation batch that lost
+   // a race left its receipt unresolved and carries no guard: it is not a verdict. The failed attempt is reconciled, the verdict is recomputed against the now-clear history and its FRESH guard is the one the facts
+   // and the chunk receipt carry; anything other than a clean conflict or other-code answer stops the chunk (re-send replans).
+   if(out.finalized?.wrote!==true){
+    const rec=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,settleOnly:true,now:()=>new Date().toISOString()});
+    if(rec.outcome!=='needs_check')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+rec.outcome+'): the chunk stops before its receipt');
+    const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
+    if(plan.outcome==='present')return 'present';
+    if(plan.outcome!=='other_code'&&plan.outcome!=='conflict')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
+    terminalGuards.push(rec.guard);
+    return plan.outcome==='other_code'?'present_other_code':'refused_after_link';
+   }
+   return out.outcome==='other_code'?'present_other_code':'refused_after_link';
+  }
   throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+out.outcome+'): the chunk stops before its receipt');
  }
  // A replay at `d1` offers the admission again only for the items its receipt recorded as `admitted` or `present` (the answer is idempotent). A chunk committed before the activation has no such field: it gets no
@@ -943,8 +956,13 @@ function recordRatingChange(record,incoming,effective){
      conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'refused_after_link'});continue;
     }
     d1Admission=out;
-    // The item's own admission settled the history it observed (its receipt moved the fingerprint): the facts that follow depend on that admission, not on the pre-link verdict.
-    itemEnv=env;
+    // The item's own admission settled the history it observed (its receipt moved the fingerprint): the facts that follow depend on that admission, not on the pre-link verdict. A settled `present_other_code`
+    // verdict (the pair is not admitted again) publishes facts only under the terminal history guard of THAT verdict (PR #1018 review): a conflicting admission that settles before the fact write refuses the batch.
+    if(out==='present_other_code'){
+     const verdictGuard=terminalGuards[terminalGuards.length-1];
+     if(!verdictGuard)throw new FactsError('admission_not_settled','The verdict of '+item.lid+' has no history guard: the chunk stops before its receipt');
+     itemEnv={...env,admissionGuards:[verdictGuard.statement]};
+    }else itemEnv=env;
    }
    if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
     const key='tmdb_'+item.tmdb;

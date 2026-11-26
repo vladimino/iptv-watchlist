@@ -177,6 +177,14 @@ async function admitRatedFilmD1(env,input,{admission,expected,at,requestId,gate,
  catch(error){
   const message=String(error?.cause?.message||'');
   if(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_rated_admission/i.test(message))throw conflict(/source_code/.test(message)?'code_on_other_film':'other_code_on_film');
+  // The batch's own keep-first assertion refused it (a row for this Film or this code appeared after the reads above): classify by reading what is there now, so the refusal is a typed outcome and not a crash.
+  // Anything that is not one of the two typed conflicts (a moved revision, the same pair already admitted, an unreadable table) is rethrown unchanged.
+  if(error?.code==='film_person_precondition'){
+   let now;
+   try{now={holder:await one(db,'SELECT film_id FROM film_rated_admission WHERE source_code=?',[admission.sourceCode]),prior:await one(db,'SELECT tmdb,source_code FROM film_rated_admission WHERE film_id=?',[target.id])};}catch{throw error;}
+   if(now.holder&&now.holder.film_id!==target.id)throw conflict('code_on_other_film');
+   if(now.prior&&(now.prior.tmdb!==admission.tmdb||now.prior.source_code!==admission.sourceCode))throw conflict('other_code_on_film');
+  }
   throw error;
  }
  return {id,revision:expected+1,admitted:true,replay:false};

@@ -263,6 +263,11 @@ const file=fresh('d1'),env=world(file);
  assert.equal(cap.count(),1,'the competitor landed before the terminal batch');
  assert.deepEqual([heldCap.state,heldCap.reason],['admitting','in_flight'],JSON.stringify(heldCap));
  assert.deepEqual([rowOf('rc2b').state,rowOf('rc2b').intendedTmdb],['admitting','900075'],'not terminal on a moved history, and the intent is kept');
+ assert.equal(rowOf('rc2b').sourceAttempts,5,'the charge and the disposition are one batch: a refused terminal outcome leaves NO stale charge');
+ // control: the same row without the competitor reaches the cap and is terminal in that one write (counter and disposition together)
+ const capped2b=await step();
+ assert.deepEqual([capped2b.state,capped2b.reason],['needs_review','source_unavailable'],JSON.stringify(capped2b));
+ assert.deepEqual([rowOf('rc2b').state,rowOf('rc2b').sourceAttempts,rowOf('rc2b').intendedTmdb],['needs_review',6,null]);
  // (2c) a PENDING row's terminal review (the page cannot be reviewed) reconciles first and is guarded the same way: the row stays pending
  reset();
  seedRow({...row('rc2c',null,null,'Fixture RDC',2011),state:'pending',intendedTmdb:null,filmPath:null});
@@ -460,7 +465,7 @@ const file=fresh('d1'),env=world(file);
   const ADD=(lid,tmdb,title='Held',year=1981)=>D1.admitVerifiedFilm(env,{kind:'lid',lid,receipt:{tmdb,archiveSha256:'a'.repeat(64),title,year},now:()=>new Date(NOW).toISOString()});
   const competitor=(lid,film)=>"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('late-"+lid+"','film_admission','rated_admission_retention','film','"+film+"','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()-3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:"+lid+"')";
   const factRecords=()=>rows(file,"SELECT key FROM ratings_document WHERE key LIKE 'letterboxd/facts/films/%' AND part=0").length;
-  const receiptDoc=(chunk)=>getDocD1(file,'letterboxd/imports/'+'a'.repeat(64)+'/chunks/'+chunk+'.receipt.json');
+  const receiptDoc=(chunk)=>getDocD1(file,'letterboxd/imports/'+SHA+'/chunks/'+chunk+'.receipt.json');
   for(const [lid,tmdb,other,chunk] of [['Fz1','700041',true,41],['Fz2','700042',false,42]]){
    // `other`: the movie already belongs to another code (the verdict is present_other_code and the link and the facts proceed); otherwise the pair is planned (admission after the link)
    if(other)assert.equal((await ADD('Fo'+lid,tmdb)).outcome,'admitted');
@@ -480,6 +485,54 @@ const file=fresh('d1'),env=world(file);
    assert.equal(receiptDoc(chunk),null,lid+': no chunk receipt (so no claim either)');
    assert.equal(admissionRows(file).length,before.admissions,lid+': no admission');
    assert.equal(evidence(file).filter(entry=>entry.subject_value===lid).length,0,lid+': no evidence');
+  }
+ }
+
+ // PR #1018 re-review: a typed refusal that surfaced from the ACTUAL reservation batch (the writer's own admission batch refused it) left its receipt unresolved: it is not a settled verdict. The failed attempt is reconciled,
+ // the verdict recomputed, and its fresh guard is carried into the post-link facts and the chunk receipt.
+ {
+  const rivalFor=(lid,film,tmdb,code)=>"INSERT OR IGNORE INTO film (id,contract_version,canonical_identity,updated_at) VALUES ('"+film+"',1,'tmdb:"+tmdb+"','"+STAMP+"');INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('"+film+"','"+tmdb+"','"+code+"','"+'a'.repeat(64)+"','Rival',1970,'d1','tmdb_"+tmdb+"','"+STAMP+"','rival-"+code+"','"+STAMP+"')";
+  const pend=lid=>"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('late-"+lid+"','film_admission','rated_admission_retention','film','film:tmdb:0',"+"'"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()-3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:"+lid+"')";
+  const records=()=>rows(file,"SELECT key FROM ratings_document WHERE key LIKE 'letterboxd/facts/films/%' AND part=0").length;
+  const receiptOf=chunk=>getDocD1(file,'letterboxd/imports/'+SHA+'/chunks/'+chunk+'.receipt.json');
+  const commit=(e,items,chunk)=>Facts.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body(items,chunk))}),e,'/api/letterboxd/baseline/commit');
+  const onWriterBatch=(lid,fn)=>{let hit=0;return {count:()=>hit,env:{...env,DB:d1Standin(file,{onBatch:async list=>{
+   if(!hit&&list.some(entry=>/INSERT INTO film_rated_admission/.test(entry.text)&&entry.text.includes("'"+lid+"'"))){hit++;fn();}
+  }})}};};
+  // (i) the writer batch loses to a rival that admits the same CODE for another Film: after the reconcile the verdict is a conflict: refused_after_link (the inferred-marked link stays; no facts, no claim), recorded WITH its guard
+  {
+   const w=onWriterBatch('Rb1',()=>sqlite(file,rivalFor('Rb1','film:tmdb:700152','700152','Rb1')));
+   const res=await commit(w.env,[item('Rb1','700151')],51);const json=await res.json();
+   assert.equal(w.count(),1,'the rival landed inside the writer\'s own admission batch');
+   assert.equal(res.status,200,JSON.stringify(json));
+   assert.deepEqual([json.conflicts,json.entries[0].conflict,json.entries[0].admission],[1,true,'refused_after_link'],JSON.stringify(json.entries[0]));
+   assert.equal((await Facts.diaryLinks(env,['Rb1'])).get('Rb1').tmdb,null,'no fact was published for the refused item (the inferred-marked alias link stays)');
+   assert.equal(receiptOf(51).entries[0].admission,'refused_after_link','the receipt records the verdict');
+   assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Rb1').length,1,'only the rival admission exists');
+  }
+  // (ii) the writer batch loses to a rival that admits ANOTHER code for the same movie: after the reconcile the verdict is present_other_code: facts publish, under that verdict's guard
+  {
+   const w=onWriterBatch('Rb2',()=>sqlite(file,rivalFor('Rb2','film:tmdb:700161','700161','RbOther')));
+   const res=await commit(w.env,[item('Rb2','700161')],52);const json=await res.json();
+   assert.equal(w.count(),1);assert.equal(res.status,200,JSON.stringify(json));
+   assert.equal(json.entries[0].admission,'present_other_code',JSON.stringify(json.entries[0]));
+   assert.equal((await Facts.diaryLinks(env,['Rb2'])).get('Rb2').tmdb,'700161','the facts of a genuinely settled present_other_code verdict are published');
+   assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Rb2').length,0,'and no admission is made for the second code');
+   assert.ok(receiptOf(52),'with its chunk receipt');
+  }
+  // (iii) the same, and a conflicting admission of the code settles AFTER the failed attempt and BEFORE the fact write: the stale present_other_code verdict publishes nothing (the fact batch asserts its guard) and the chunk stops
+  {
+   let landed=0;
+   const w=onWriterBatch('Rb3',()=>sqlite(file,rivalFor('Rb3','film:tmdb:700171','700171','RbOther3')));
+   const watching={...w.env,DB:d1Standin(file,{onBatch:async list=>{
+    if(!w.count()&&list.some(entry=>/INSERT INTO film_rated_admission/.test(entry.text)&&entry.text.includes("'Rb3'"))){sqlite(file,rivalFor('Rb3','film:tmdb:700171','700171','RbOther3'));w.env.__hit=1;landed=0;}
+    else if(w.env.__hit===1&&!landed&&list.some(entry=>/letterboxd\/facts\/films\//.test(entry.text))&&list.some(entry=>/admission:lid:Rb3/.test(entry.text))){landed++;sqlite(file,pend('Rb3'));}
+   }})};
+   const res=await commit(watching,[item('Rb3','700171')],53);const json=await res.json();
+   assert.equal(landed,1,'the conflicting attempt settled before the fact write');
+   assert.equal(res.status,409,JSON.stringify(json));assert.equal(json.code,'admission_not_settled');
+   assert.equal((await Facts.diaryLinks(env,['Rb3'])).get('Rb3').tmdb,null,'no fact was published on the stale verdict');
+   assert.equal(receiptOf(53),null,'and the chunk has no receipt');
   }
  }
 

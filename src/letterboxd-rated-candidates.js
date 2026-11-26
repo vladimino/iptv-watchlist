@@ -322,21 +322,36 @@ const LetterboxdRatedCandidates = (() => {
   // (ADR 0207 decision 3 table, rated step). Nothing is marked for review on a first transport-like answer, and nothing is admitted from the stored intent.
   const SOURCE_ATTEMPT_CAP = 6;
   async function retryAdmitting(env, key, code, reason, guard = null) {
-    let attempts = 0;
-    await casDoc(env, key, null, current => {
-      const row = current.candidates[code];
-      if (!row || row.state !== 'admitting') return null;
-      attempts = (Number.isInteger(row.sourceAttempts) ? row.sourceAttempts : 0) + 1;
-      current.candidates[code] = {...row, sourceAttempts: attempts, sourceReason: String(reason).slice(0, 60)};
-      return current;
-    });
-    if (attempts >= SOURCE_ATTEMPT_CAP) {
-      // PR #1018 review: the sixth source answer is terminal, so it is one D1 batch with the history assertion the step's reconcile observed; a moved history leaves the row `admitting` with its intent.
-      const review = await markReview(env, key, code, 'source_unavailable', undefined, undefined, {guard});
-      if (review.refused) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'in_flight', phase: 'identity', writes: attempts > 0};
-      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity', writes: review.changed === true};
+    // PR #1018 review: the charge and the disposition are ONE compare-and-swap. A source answer that is not the cap only counts an attempt (unguarded: nothing terminal happens); the answer that REACHES the cap writes the
+    // counter and the terminal `needs_review` together, in the same batch as the history assertion the step's reconcile observed, so a refused terminal outcome leaves no stale charge and the row keeps its intent.
+    const payload = reviewReasons('source_unavailable');
+    for (let round = 0; round < 3; round++) {
+      const peek = await readDoc(env, key);
+      if (peek.value === undefined) throw new Error('storage_unavailable');
+      const seen = peek.value && peek.value.candidates && peek.value.candidates[code];
+      if (!seen || seen.state !== 'admitting') return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: false};
+      const capping = (Number.isInteger(seen.sourceAttempts) ? seen.sourceAttempts : 0) + 1 >= SOURCE_ATTEMPT_CAP;
+      let attempts = 0, terminal = false, moved = false;
+      const saved = await casDoc(env, key, null, current => {
+        const row = current.candidates[code];
+        if (!row || row.state !== 'admitting') return null;
+        attempts = (Number.isInteger(row.sourceAttempts) ? row.sourceAttempts : 0) + 1;
+        const counted = {...row, sourceAttempts: attempts, sourceReason: String(reason).slice(0, 60)};
+        if (attempts >= SOURCE_ATTEMPT_CAP) {
+          // the document moved between the peek and this write and now reaches the cap without the assertion in the batch: replan
+          if (!capping) {moved = true; return null;}
+          current.candidates[code] = {...counted, state: 'needs_review', reason: payload.reason, reasons: payload.reasons, reasonKind: payload.reasonKind, intendedTmdb: null};
+          current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
+          terminal = true;
+        } else current.candidates[code] = counted;
+        return current;
+      }, {extra: capping && guard ? [guard.statement] : []});
+      if (moved) continue;
+      if (saved.refused) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'in_flight', phase: 'identity', writes: false};
+      if (terminal) return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: payload.reason, reasons: payload.reasons, reasonKind: payload.reasonKind, phase: 'identity', writes: saved.changed === true};
+      return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: attempts > 0};
     }
-    return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: attempts > 0};
+    throw new Error('write_contention');
   }
   // A terminal review of an `admitting` row at `d1` is ONE D1 batch with the operation-history assertion (ADR 0222): the document write and `guard.statement` commit together or not at all. A moved history refuses
   // the batch, nothing is written, and the row stays `admitting` for the next step to replan from the reconciled state.
