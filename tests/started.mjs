@@ -45,7 +45,7 @@ const bucket={
 const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);
-vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
+vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {CREDIT_SELECTION_SQL,database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
 vm.runInContext(fs.readFileSync('src/sources.js','utf8'),ctx);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
 

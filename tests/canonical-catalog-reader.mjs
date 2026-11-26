@@ -14,6 +14,8 @@ import {readAdmissions as readerAdmissions} from '../src/canonical-catalog-reade
 import {readAdmissions,loadAdmissionRows,ADMISSION_READ_CHUNK} from '../src/film-admission.js';
 import {canonicalReaderMode} from '../src/canonical-read-model.js';
 import {sqliteSync} from './sqlite-session.mjs';
+import {spawnSync} from 'node:child_process';
+import {CREDIT_SELECTION_SQL} from '../src/film-person-authority.js';
 
 const MODULE=process.env.CANONICAL_CATALOG_READER_MODULE;
 // The mutation check points ONE target at the part of this file that exercises it (reader: sections 1 and 2; route: section 3); unset runs everything.
@@ -21,7 +23,7 @@ const ONLY=process.env.CANONICAL_CATALOG_READER_ONLY||'';
 const reader=await import(MODULE||'../src/canonical-catalog-reader.js');
 const READER_FILE=MODULE?fileURLToPath(MODULE):'src/canonical-catalog-reader.js';
 const D1_FILE=process.env.CATALOG_D1_MODULE?fileURLToPath(process.env.CATALOG_D1_MODULE):'src/catalog-d1.js';
-const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
+const IMPORT='const {CREDIT_SELECTION_SQL,database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-canonical-catalog-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -123,6 +125,58 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:
  assert.equal((await ask('301')).state,'retired','an unsuperseded retire decision retires the movie id');
  sqlite(file,decision('q2','restore','1'));
  assert.equal((await ask('301')).state,'found','an explicit restore lifts it');
+ {
+  // AIR-656: alias fallback, deterministic choice, omission, and a >200-credit cast that stays readable (partial, never refused).
+  const big=database('open');
+  const people=[['loc','Localized'],['alias-only',null],['two-alias',null],['none',null]];
+  sqlite(big,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:400',1,'tmdb:400','Cast','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:400','tmdb','400',1,0,NULL);`);
+  const ins=people.map(([k])=>`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/${k}','actor/${k}',1,'${T}');`).join('')
+   +`INSERT INTO person_dimension (person_id,dimension,status,value,updated_at) VALUES ('person:actor/loc','localization','provisional','Localized','${T}');`
+   +`INSERT INTO person_alias VALUES ('person:actor/loc','name','Zed Alias',NULL),('person:actor/alias-only','name','Only Alias',NULL),('person:actor/two-alias','name','Zeta',NULL),('person:actor/two-alias','name','Alpha',NULL);`
+   +`INSERT INTO film_person_credit VALUES ${people.map(([k],i)=>`('film:tmdb:400','person:actor/${k}','actor',${i})`).join(',')};`;
+  sqlite(big,ins);
+  let r=await reader.catalogCanonicalFilmFromD1({DB:d1Standin(big)},'400');
+  assert.deepEqual(r.film.actors.map(a=>a.name),['Localized','Only Alias','Alpha'],'localized wins, alias fallback, deterministic alias, nameless omitted, ordinal order');
+  assert.equal(r.film.creditsPartial,undefined,'no false partial on a complete cast');
+  assert.equal(r.film.creditsUnnamed,1,'a complete cast still counts its one nameless credit');
+  // a whitespace-only localized value or alias is not a name and never hides a usable alias
+  sqlite(big,`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/ws','actor/ws',1,'${T}');INSERT INTO person_dimension (person_id,dimension,status,value,updated_at) VALUES ('person:actor/ws','localization','provisional',' '||char(9),'${T}');INSERT INTO person_alias VALUES ('person:actor/ws','name','  ',NULL),('person:actor/ws','name','Real Alias',NULL);INSERT INTO film_person_credit VALUES ('film:tmdb:400','person:actor/ws','actor',50);`);
+  r=await reader.catalogCanonicalFilmFromD1({DB:d1Standin(big)},'400');
+  assert.equal(r.film.actors.at(-1).name,'Real Alias','whitespace-only values are skipped for the valid alias');
+  const many=Array.from({length:260},(_,i)=>i);
+  sqlite(big,many.map(i=>`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/b${i}','actor/b${i}',1,'${T}');INSERT INTO person_alias VALUES ('person:actor/b${i}','name','B ${i}',NULL);INSERT INTO film_person_credit VALUES ('film:tmdb:400','person:actor/b${i}','actor',${100+i});`).join('')+"INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:director/d','director/d',1,'"+T+"');INSERT INTO person_alias VALUES ('person:director/d','name','The Director',NULL);INSERT INTO film_person_credit VALUES ('film:tmdb:400','person:director/d','director',0);");
+  r=await reader.catalogCanonicalFilmFromD1({DB:d1Standin(big)},'400');
+  assert.equal(r.state,'found','more than 200 credits is not a whole-film refusal');
+  assert.equal(r.film.creditsPartial,true,'honest partial completeness');
+  assert.deepEqual(r.film.directors.map(d=>d.name),['The Director'],'directors survive truncation');
+  assert.equal(r.film.actors.length,199,'200 actor slots (the per-role budget), one nameless omitted');
+  assert.equal(r.film.creditsUnnamed,1,'the omitted unusable name is counted, not hidden');
+ }
+ {
+  // AIR-656: the credit selection is bounded in WORK, not only in output. Two indexed per-role range probes on film_person_credit_order (no sort of the Film's whole cast):
+  // the same statement over a 260-actor and a 20,000-actor cast returns the same bounded rows with (almost exactly) the same SQLite VM work.
+  const cast=count=>{
+   const file=database('open');
+   sqlite(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:500',1,'tmdb:500','Big','${T}');INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:director/d','director/d',1,'${T}');INSERT INTO film_person_credit VALUES ('film:tmdb:500','person:director/d','director',0);
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<${count-1}) INSERT INTO person (id,role_id,contract_version,updated_at) SELECT 'person:actor/a'||i,'actor/a'||i,1,'${T}' FROM n;
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<${count-1}) INSERT INTO film_person_credit SELECT 'film:tmdb:500','person:actor/a'||i,'actor',i FROM n;
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<${count-1}) INSERT INTO person_alias SELECT 'person:actor/a'||i,'name','A '||i,NULL FROM n;`);
+   return file;
+  };
+  const bound=CREDIT_SELECTION_SQL.replace(/\?/g,(()=>{const values=["'film:tmdb:500'",201,"'film:tmdb:500'",201];let at=0;return ()=>String(values[at++]);})());
+  const probe=file=>{
+   const run=input=>{const out=spawnSync('sqlite3',[file],{input,encoding:'utf8',maxBuffer:1<<26});assert.equal(out.status,0,out.stderr);return out.stdout;};
+   const steps=Number(/VM-steps: (\d+)/.exec(run('.stats vmstep\n'+bound+';\n'))?.[1]);
+   const plan=run('EXPLAIN QUERY PLAN '+bound+';').split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
+   const rows=run('SELECT count(*) FROM ('+bound+');').trim();
+   return {steps,plan,rows};
+  };
+  const small=probe(cast(260)),large=probe(cast(20000));
+  assert.equal(small.rows,'202',"director + a bounded 201 actors for a 260 cast");assert.equal(large.rows,'202','the same bounded rows for a 20,000 cast');
+  assert.equal(large.plan.filter(line=>/^SEARCH film_person_credit USING INDEX film_person_credit_order \(film_id=\? AND role=\?\)/.test(line)).length,2,'one indexed probe per role\n'+large.plan.join('\n'));
+  assert.ok(!large.plan.some(line=>/film_person_credit/.test(line)&&/^SCAN /.test(line)),'film_person_credit is never scanned');
+  assert.ok(large.steps<=small.steps*1.05,'work does not grow with the stored cast: '+small.steps+' steps at 260, '+large.steps+' at 20,000');
+ }
  for(const bad of ['0','abc','1.5','007',301,null,'1234567890123'])await assert.rejects(()=>ask(bad),code('canonical_read_invalid'),'typed id only: '+String(bad));
  for(const state of STATES.filter(state=>state!=='open')){
   const seen=[],other={DB:standin(database(state),state,{onQuery:async text=>{seen.push(text);}})};

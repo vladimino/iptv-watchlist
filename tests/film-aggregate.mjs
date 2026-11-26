@@ -283,6 +283,28 @@ function world({lids=['l5'],links=null,records=true}={}){
  sqlite(credits,people);
  const c=await read(credits,'tmdb_5');
  assert.deepEqual([c.body.display.credits.status,c.body.display.credits.items.length],['partial',CREDITS_MAX]);
+ // AIR-656: the SAME bounded selection and name resolution as the canonical film page, over a large persisted cast: the director comes first whatever the cast size, a
+ // localized name wins, an alias-only Person is named by its same-Person alias, an unnamed one stays in place with a null name (never dropped, never invented), and the section is partial.
+ {
+  const big=world();
+  const person=(id,role)=>`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:${role}/${id}','${id}',1,'${AT}');`;
+  const credit=(id,role,ordinal)=>`INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:5','person:${role}/${id}','${role}',${ordinal});`;
+  sqlite(big,person('dir','director')+credit('dir','director',0)+`INSERT INTO person_alias VALUES ('person:director/dir','name','Director Alias',NULL);`
+   +person('loc','actor')+credit('loc','actor',0)+`INSERT INTO person_dimension (person_id,dimension,status,value,updated_at) VALUES ('person:actor/loc','localization','provisional','Localized','${AT}');INSERT INTO person_alias VALUES ('person:actor/loc','name','Zed',NULL);`
+   +person('only','actor')+credit('only','actor',1)+`INSERT INTO person_alias VALUES ('person:actor/only','name','Beta',NULL),('person:actor/only','name','Alpha',NULL);`
+   +person('none','actor')+credit('none','actor',2)
+   +person('blank','actor')+credit('blank','actor',3)+`INSERT INTO person_alias VALUES ('person:actor/blank','name','   ',NULL);`
+   +Array.from({length:3000},(_,i)=>person('m'+i,'actor')+credit('m'+i,'actor',100+i)).join(''));
+  const b=await read(big,'tmdb_5');
+  const items=b.body.display.credits.items;
+  assert.equal(b.body.display.credits.status,'partial');
+  assert.deepEqual(items.slice(0,5).map(item=>[item.role,item.ordinal,item.name]),[['director',0,'Director Alias'],['actor',0,'Localized'],['actor',1,'Alpha'],['actor',2,null],['actor',3,null]],'director first, localized wins, deterministic alias, unnamed and whitespace-only stay with a null name');
+  assert.equal(items.length,CREDITS_MAX);
+  // The after-read fence covers the consumed NAME evidence too: an alias that changes between the two reads of the section is generation_moved.
+  const fenced=env(big,{onQuery:text=>{if(text.includes('FROM ratings_document WHERE part=0'))sqlite(big,"UPDATE person_alias SET value='Changed Alias' WHERE person_id='person:director/dir'");}});
+  const moved=await readFilmAggregate(fenced,'tmdb_5');
+  assert.deepEqual([moved.body.display.status,moved.body.display.reason],['unavailable','generation_moved'],'a changed consumed name is caught by the after-read fence');
+ }
 }
 
 // Test 13: a stale membership projection (drained effects with an owed per-Film write): lag true, source.member from the source authority.
@@ -853,18 +875,18 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  assert.equal(out.body.sectionsUnavailable,undefined,'no section_read_failed: the resolver\'s generic fallback is not reached');
  assert.ok(e.calls.queries<=REQUEST_STATEMENT_BUDGET);
  // A display processing failure (a malformed result column): display unavailable, the rest intact.
- const display=env(file,{rewrite:sql=>sql.replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0) AS credits")});
+ const display=env(file,{rewrite:sql=>sql.replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal,name\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0 AND id=? AND ?>0) AS credits")});
  const d=await readFilmAggregate(display,'tmdb_5');
  assert.deepEqual([d.http,d.body.display.status,d.body.display.reason],[200,'unavailable','display_unavailable']);
  assert.deepEqual([d.body.personal.status,d.body.predictions.status,d.body.watchlist.status,d.body.availability.status],['present','present','present','present']);
  // Both at once, plus an identity movement during the failure: the whole answer is 503 with no section.
  let moved=false;
- const both=env(file,{rewrite:sql=>rewrite(sql).replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0) AS credits"),onQuery:text=>{if(!moved&&text.includes('FROM published_epg_show')){moved=true;claim(file,'film:tmdb:5','letterboxd','late9');}}});
+ const both=env(file,{rewrite:sql=>rewrite(sql).replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal,name\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0 AND id=? AND ?>0) AS credits"),onQuery:text=>{if(!moved&&text.includes('FROM published_epg_show')){moved=true;claim(file,'film:tmdb:5','letterboxd','late9');}}});
  const b=await readFilmAggregate(both,'tmdb_5');
  assert.deepEqual([b.http,b.body.identity.reason,Object.keys(b.body).sort()],[503,'identity_moved',['contract','identity']]);
  // With both failing and nothing moved the identity fence still runs and the budget holds.
  const calm=world();
- const bothCalm=env(calm,{rewrite:sql=>rewrite(sql).replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0) AS credits")});
+ const bothCalm=env(calm,{rewrite:sql=>rewrite(sql).replace(/\(SELECT json_group_array\(json_array\(person_id,role,ordinal,name\)\)[\s\S]*?\) AS credits/,"(SELECT '{bad' FROM film WHERE id=? AND ?>0 AND id=? AND ?>0) AS credits")});
  const c=await readFilmAggregate(bothCalm,'tmdb_5');
  assert.deepEqual([c.http,c.body.personal.reason,c.body.display.reason,c.body.availability.status],[200,'ratings_unavailable','display_unavailable','present']);
  assert.ok(bothCalm.calls.queries<=REQUEST_STATEMENT_BUDGET);
@@ -965,7 +987,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   const hugeWide=wide(OWNER_ANCESTORS_MAX*3);
   const hugeChain=chain(OWNER_ANCESTOR_DEPTH*4);
   const ancestryRows=(file)=>{
-   const params=['film:tmdb:5',OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,'film:tmdb:5','film:tmdb:5',OWNER_ENTRIES_MAX+1,'film:tmdb:5',11,'film:tmdb:5','film:tmdb:5',61];
+   const params=['film:tmdb:5',OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,'film:tmdb:5','film:tmdb:5',OWNER_ENTRIES_MAX+1,'film:tmdb:5',11,'film:tmdb:5','film:tmdb:5',61,'film:tmdb:5',61];
    let i=0;const text=DISPLAY_SQL.replace(/\?/g,()=>{const v=params[i++];return typeof v==='number'?String(v):q(v);});
    return JSON.parse(JSON.parse(sqliteSync(['-json',file],{input:text+';',encoding:'utf8'}).stdout)[0].ancestors);
   };
@@ -1110,12 +1132,17 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
   const out=sqliteSync([file],{input:'EXPLAIN QUERY PLAN '+text+';',encoding:'utf8'});
   assert.equal(out.status,0,out.stderr);
   const plan=out.stdout.split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
-  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN (g|a|anc)$/.test(d));
+  const scans=plan.filter(d=>/^SCAN /.test(d)&&!/json_each|^SCAN j\b|SCAN CONSTANT ROW|^SCAN \(subquery-\d+\)$|^SCAN (g|a|anc|c)$/.test(d));
   assert.deepEqual(scans,[],text.slice(0,160)+'\n'+plan.join('\n'));
   assert.ok(!plan.some(d=>/film_redirect/.test(d)&&/^SCAN /.test(d)),'film_redirect is never scanned');
   if(text.startsWith('WITH RECURSIVE anc')){
    assert.ok(plan.some(d=>/^SEARCH film_redirect USING INDEX film_redirect_by_target \(to_film_id=\?\)/.test(d)),'the ancestry step is served by film_redirect_by_target (migration 0043)\n'+plan.join('\n'));
    assert.ok(plan.some(d=>/^SEARCH owner_review_entry USING INDEX owner_review_entry_identity \(identity_link=\?\)/.test(d)),'the owner entries are found by identity_link, not by a range of every film entry\n'+plan.join('\n'));
+  }
+  if(text.startsWith('WITH RECURSIVE anc')){
+   // AIR-656: the credit selection is two indexed per-role range probes on film_person_credit_order, never a scan or a sort of the Film's whole cast.
+   assert.equal(plan.filter(d=>/^SEARCH film_person_credit USING INDEX film_person_credit_order \(film_id=\? AND role=\?\)/.test(d)).length,2,'one indexed probe per credit role\n'+plan.join('\n'));
+   assert.ok(!plan.some(d=>/film_person_credit/.test(d)&&/^SCAN /.test(d)),'film_person_credit is never scanned');
   }
   if(text.startsWith('WITH g AS'))assert.ok(plan.some(d=>/^SEARCH ratings_document USING INDEX sqlite_autoindex_ratings_document_1 \(key=\?\)/.test(d)),'the measure is a primary-key search\n'+plan.join('\n'));
  }

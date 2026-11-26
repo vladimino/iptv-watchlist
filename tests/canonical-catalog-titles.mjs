@@ -15,7 +15,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 const READER_FILE=process.env.CATALOG_TITLES_READER_FILE||'src/canonical-catalog-reader.js',WORKER_FILE=process.env.CATALOG_TITLES_WORKER_FILE||'src/worker.js';
 // The mutation check sets CATALOG_TITLES_ONLY=mutant: the byte-identity sweep (1) and the registry scan (6) are skipped there, they exercise no mutated guard.
 const ONLY=process.env.CATALOG_TITLES_ONLY||'';
-const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
+const IMPORT='const {CREDIT_SELECTION_SQL,database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-canonical-titles-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
