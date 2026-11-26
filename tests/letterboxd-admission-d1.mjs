@@ -255,7 +255,10 @@ const revision=(file,id)=>Number(rows(file,"SELECT revision FROM canonical_revis
    sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,updated_at) VALUES ('film:tmdb:603',1,'tmdb:603','"+STAMP+"') ON CONFLICT(id) DO NOTHING;INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:603','603','Zz9','"+sha('1')+"','X',1999,'d1','tmdb_603','"+STAMP+"','rival','"+STAMP+"')");
   }
  }})};
- await assert.rejects(()=>admitVerifiedFilm(racing,{...itemOf(),now:clock()}),error=>/film_person_(precondition|revision_conflict)/.test(error.code),'the batch refused: the rival row is not overwritten and no second row is added');
+ // PR #1018 re-review: the refusal of the writer's own batch is classified from what is stored now: a TYPED outcome (not a crash) that is NOT finalized (no history guard was written), so no caller may treat it as a settled verdict
+ const refused=await admitVerifiedFilm(racing,{...itemOf(),now:clock()});
+ assert.deepEqual([refused.outcome,refused.reason],['other_code','other_code_on_film'],'the batch refused with a typed conflict: the rival row is not overwritten and no second row is added');
+ assert.equal(refused.finalized,undefined,'a refusal of the reservation batch is not a finalized verdict');
  assert.equal(injected,true);
  assert.deepEqual(admissionRows(file).map(row=>[row.source_code,row.request_id]),[['Zz9','rival']],'the rival admission is untouched');
  assert.equal(evidenceRows(file).length,0,'the refused batch wrote no evidence row');
