@@ -458,13 +458,34 @@ const LetterboxdRatings=(()=>{
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>started){lookup.stoppedBy=queue.pausedBy||'blocked';lookup.pausedUntil=queue.pausedUntil;return finish({settled,lookup,more});}
   const facts=await resolveDueRemovalFacts(env,started,{skip:run.diary?.unratedLids||[],limit:REMOVAL_FACT_BATCH,getBudget:budget,beforeEach:()=>remaining()>LEASE_MARGIN_MS});
   queue=facts.queue||queue;
+  // AIR-604 (ADR 0211 decision 5): the shared Letterboxd cooldown, read BEFORE each claim so that a skip never charges an attempt. An enforced cooldown extends the queue pause to max(pausedUntil, until)
+  // and stops the phase cleanly (`stoppedBy: upstream_cooldown`); the run outcome comes from the Diary part, so a skip is neither a failure nor a quarantine charge. `off` reads only the mode row.
+  const cooldown=typeof UpstreamCooldown==='undefined'?null:UpstreamCooldown.createCoordinator(env,{caller:'removal-rating',now:clock});
   for(const id of facts.gettable){
    if(!(remaining()>LEASE_MARGIN_MS)){more=true;break;}
+   const gate=cooldown?await cooldown.peek('letterboxd'):{skip:false};
+   if(gate.skip){
+    const until=iso(gate.until);
+    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)?{...q,pausedUntil:Date.parse(q.pausedUntil||'')>gate.until?q.pausedUntil:until,pausedBy:Date.parse(q.pausedUntil||'')>gate.until?q.pausedBy:'upstream_cooldown'}:null)||queue;
+    lookup.stoppedBy='upstream_cooldown';lookup.pausedUntil=queue.pausedUntil||until;break;
+   }
    const t=clock(),at=iso(t),token=crypto.randomUUID();
    await plan([{kind:'rated',id}]);
+   const before=queue.films[id],prior=before?{attempts:before.attempts,lastAttemptAt:before.lastAttemptAt,nextAttemptAt:before.nextAttemptAt,lastResult:before.lastResult}:null;
    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&claimRemovalEntry(q,id,t,at,token)?q:null);
    if(!removalClaimHeld(queue,id,at,token))continue;
-   let result=null,error=null;try{result=await refreshPersonalRating(env,{id,url:queue.films[id].url});}catch(e){error=String(e.message);}
+   let result=null,error=null,skipped=null;try{result=await refreshPersonalRating(env,{id,url:queue.films[id].url});}catch(e){if(e?.code==='upstream_cooldown'&&prior)skipped=e;else error=String(e.message);}
+   if(skipped){
+    // AIR-604: the cooldown appeared between the pre-claim check and the real request (the plan and the claim are awaited). The claim is RELEASED: the entry returns to its exact pre-claim
+    // attempt, time and result, so the skip consumes no attempt; the pause is max(pausedUntil, until).
+    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
+     const held=q?.films?.[id];if(!removalQueueV2(q)||!held||held.state!=='pending'||held.claim?.token!==token)return null;
+     q.films[id]={...held,...prior,claim:null};
+     if(!(Date.parse(q.pausedUntil||'')>skipped.until)){q.pausedUntil=iso(skipped.until);q.pausedBy='upstream_cooldown';}
+     return q;
+    })||queue;
+    lookup.stoppedBy='upstream_cooldown';lookup.pausedUntil=queue.pausedUntil||iso(skipped.until);break;
+   }
    let accepted=false;
    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{accepted=applyRemovalOutcome(q,id,result,error,at,t,token);return accepted?q:null;});
    const entry=queue.films[id];lookup.checked++;if(!accepted)lookup.refused++;

@@ -73,7 +73,7 @@ The Worker commits a chunk with several sequential R2 operations per film (link 
 
 ## The commit under the admission marker (AIR-602, [ADR 0207](../adr/0207-letterboxd-admissions-coordinated-in-d1-only.md); dormant until the marker is applied and activated)
 
-The commit route reads the admission marker `letterboxd_admission_authority` ([schema 45](../reference/data/d1-schema.md#letterboxd-admission-authority-schema-v45-adr-0207-decision-1-accepted-air-602-in-the-repository-not-applied)) before it does anything for a chunk with an `admit` item. A chunk without an `admit` item admits nothing and is unaffected.
+The commit route reads the admission marker `letterboxd_admission_authority` ([schema 46](../reference/data/d1-schema.md#letterboxd-admission-authority-schema-v46-adr-0207-decision-1-accepted-air-602-in-the-repository-not-applied)) before it does anything for a chunk with an `admit` item. A chunk without an `admit` item admits nothing and is unaffected.
 
 - **`r2`, or the migration not applied:** the delivered behaviour (the R2 receipt entry, then the legacy `film_admission` unit). Nothing to do differently.
 - **`closed`:** the route answers **409 `admission_closed`** before the chunk's intent is written (also for a replay), and `503 admission_unavailable` while the marker cannot be read. Nothing is stored. The chunk is re-sent after the marker is reopened (`closed → r2`) or after the activation.

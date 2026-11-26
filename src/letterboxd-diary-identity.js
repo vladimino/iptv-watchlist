@@ -92,12 +92,14 @@ const LetterboxdDiaryIdentity=(()=>{
  // The end-to-end budget of a step (review of PR #720): every network request is cut at the time left in the lease minus the reserve the canonical
  // writes need, and no write starts without that reserve. A cut request is a `timeout` pending, never a partial write.
  function budgeted(fetchImpl,remaining){
-  return async(url,init={})=>{
+  const wrapped=async(url,init={})=>{
    const left=remaining()-WRITE_RESERVE_MS;
    if(!(left>1000))throw Object.assign(new Error('step budget exhausted'),{name:'TimeoutError'});
    const signals=[AbortSignal.timeout(left)];if(init&&init.signal)signals.push(init.signal);
    return fetchImpl(url,{...init,signal:typeof AbortSignal.any==='function'?AbortSignal.any(signals):signals[0]});
   };
+  wrapped.coordinator=fetchImpl.coordinator;// AIR-604: the shared upstream cooldown rides along to the bounded fetches
+  return wrapped;
  }
  // Positive evidence of one fenced admission unit. A skipped route, a no-unit answer or any failed/unknown/refused/deferred count is not an admission.
  function admissionConfirmed(out){
@@ -110,7 +112,7 @@ const LetterboxdDiaryIdentity=(()=>{
  async function checkOne(env,{lid,slug},{clock,fetchImpl,remaining}){
   if(typeof LetterboxdRatedCandidates==='undefined'||typeof LetterboxdIdentity==='undefined'||typeof LetterboxdRatedAdmission==='undefined')return {state:'pending',reason:'unavailable'};
   const net=budgeted(fetchImpl,remaining);
-  const answer=result=>{const reason=pageReason(result);return {state:'pending',reason,...(classify(reason)==='transport'?{stop:true}:{})};};
+  const answer=result=>{const reason=pageReason(result);return {state:'pending',reason,...(classify(reason)==='transport'?{stop:true}:{}),...(Number.isFinite(result.until)?{until:result.until}:{})};};
   const page=await LetterboxdRatedCandidates.follow(net,lid);
   if(page.stop||page.review)return answer(page);
   // The film page must be the page of the Diary row's slug, with one movie id, before TMDB is asked at all.
@@ -137,7 +139,9 @@ const LetterboxdDiaryIdentity=(()=>{
  //  - due ids run in one stable order: link repairs and pending claims first, then by queue position (`queuedAt`, oldest first);
  //  - an id without an entry is not checked while the document is full of entries it may not evict: it goes to the bounded backlog (`cap_refused`).
  // route: 'ratings_diary' | 'watchlist_admission' (the caller whose step performs the check). Returns {labels,counts,outcomes}.
- async function resolve(env,items,{clock=()=>Date.now(),remaining:callerRemaining=()=>Infinity,fetchImpl=fetch,route='ratings_diary'}={}){
+ async function resolve(env,items,{clock=()=>Date.now(),remaining:callerRemaining=()=>Infinity,fetchImpl:baseFetch=fetch,route='ratings_diary'}={}){
+  // AIR-604 (ADR 0211 decision 5): the shared Letterboxd and TMDB cooldown. `off` and an unavailable state change nothing; an enforced cooldown stops the check as a transport stop `upstream_cooldown`, which costs no attempt.
+  const fetchImpl=typeof UpstreamCooldown==='undefined'||baseFetch.coordinator?baseFetch:UpstreamCooldown.createCoordinator(env,{caller:'letterboxd-identity:'+route}).guard(baseFetch);
   const counts={considered:0,bridged:0,verified:0,repaired:0,pending:0,deferred:0,skipped:0,checked:0,transport:0,notNow:0,gone:0,definite:0,atCap:0,capRefused:0,backlogFull:0},labels=new Map(),outcomes=new Map();
   const now=clock();
   // AIR-599 (fourth review of PR #1009): the reservation expires at now+RESERVATION_MS. No effect of this step may begin or run on after that: the time left is also bounded by the reservation (less the write reserve and a
@@ -205,7 +209,7 @@ const LetterboxdDiaryIdentity=(()=>{
   // The one place an entry is written from an outcome. Only `gone` and `definite` charge an attempt (with a fresh check id); `transport` raises the streak and backs off;
   // `not_now` and a link intent keep the count and are due again at the next run. The queue position is never changed.
   const dueOf=entry=>!entry?false:(entry.reason==='linking'?entry.evidenceDue===true:entry.intent?.evidenceDue===true);
-  const record=(item,reason,{tmdb=null}={})=>{
+  const record=(item,reason,{tmdb=null,until=null}={})=>{
    const cur=set[item.lid]||stored.films[item.lid]||null,cls=classify(reason),intent=LINK_REASONS.has(reason)||reason===CLAIM_REASON;
    // AIR-602 (review of PR #1018): the movie this id's own durable record named (a `linking` intent, or the `intent` an earlier not-now outcome carried) survives every outcome except the one that
    // settles it (`source_changed`): a wait, a transport stop or an unknown answer never discards it.
@@ -213,7 +217,7 @@ const LetterboxdDiaryIdentity=(()=>{
    const before=Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streakBefore=Number(cur?.streak)||0;
    let attempts=before,streak=streakBefore,next=now,checkId=cur?.checkId||null;
    if(intent||cls==='not_now'){/* no attempt, place kept, due at the next run */}
-   else if(cls==='transport'){streak=streakBefore+1;next=now+transportDelayMs(streak);}
+   else if(cls==='transport'){streak=streakBefore+1;next=Math.max(now+transportDelayMs(streak),Number.isFinite(until)?until:0);}// AIR-604: the later of the local backoff and the shared cooldown end
    else{attempts=before+1;streak=0;next=now+reviewDelayMs(attempts);checkId=cur?.reservation?.checkId||newCheckId();}
    set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{}),...(carried?{intent:{tmdb:carried,...(dueOf(cur)?{evidenceDue:true}:{})},...(cur?.pendingEvidence?{pendingEvidence:cur.pendingEvidence}:{})}:{})};
    counts.pending++;
@@ -459,7 +463,7 @@ const LetterboxdDiaryIdentity=(()=>{
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }
-   record(item,outcome.reason,{tmdb:outcome.tmdb||null});
+   record(item,outcome.reason,{tmdb:outcome.tmdb||null,until:Number.isFinite(outcome.until)?outcome.until:null});
   }
   let persisted=true,refused=[],conflicted=[];
   // A real check that reached the source and got an answer (gone, definite or settled; not a transport stop) is the Monitor's proof of progress.

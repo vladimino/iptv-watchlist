@@ -37,6 +37,7 @@ ctx.CanonicalRatedAdmission = {
 };
 const run = file => vm.runInContext(fs.readFileSync(file, 'utf8').replace(/^export default/m, 'globalThis.x='), ctx);
 run('src/domain/tmdb-tv-identity.js'); run('src/sources.js');
+vm.runInContext(scoped('src/upstream-cooldown.js', 'UpstreamCooldown'), ctx); // AIR-604: in scope before any call, as in the bundle
 vm.runInContext(scoped('src/letterboxd-match.js', 'LetterboxdMatch') + '\n' + scopedReplacing('src/letterboxd-identity.js', 'LetterboxdIdentity', 'const normTitle=LetterboxdMatch.normTitle;\n') + '\n' + scoped('src/domain/letterboxd-rated-admission.js', 'LetterboxdRatedAdmission'), ctx);
 for (const file of ['src/letterboxd-facts.js', 'src/letterboxd-rated-candidates.js', process.env.DIARY_IDENTITY_SRC || 'src/letterboxd-diary-identity.js']) run(file);
 installRawViewProjection(ctx); // AIR-558
@@ -647,6 +648,55 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
   finally {Facts.updateDiaryIdentity = original;}
   assert.equal(out.counts.bridged, 0, 'no trusted-bridge link after the window ran out between the intent and the link');
   assert.equal((await Facts.diaryLinks(env, ['LateC'])).get('LateC')?.tmdb ?? null, null);
+}
+
+// AIR-604 (ADR 0211 decision 5): a shared-cooldown skip is a transport stop that costs no attempt and whose retry time is the LATER of the local transport backoff and the shared cooldown end.
+{
+ const skipWith = until => async () => {throw Object.assign(new Error('upstream_cooldown'), {code: 'upstream_cooldown', until});};
+ reset(); await seed('Ck01', 3); site.set('Ck01', {status: 404});
+ const farUntil = NOW + 4 * 3600000;
+ out = await Identity.resolve(env, items(['Ck01', 'x']), opts({fetchImpl: skipWith(farUntil)}));
+ assert.deepEqual(net.calls, [], 'no request was sent');
+ assert.deepEqual([pending().Ck01.reason, pending().Ck01.attempts, pending().Ck01.streak, pending().Ck01.nextAttemptAt], ['upstream_cooldown', 0, 1, new Date(farUntil).toISOString()], 'no attempt charged; due at the cooldown end, later than the 15 min backoff');
+ assert.equal(out.outcomes.get('Ck01').retryAt, new Date(farUntil).toISOString());
+ reset(); await seed('Ck02', 3);
+ out = await Identity.resolve(env, items(['Ck02', 'x']), opts({fetchImpl: skipWith(NOW + 60000)}));
+ assert.equal(pending().Ck02.nextAttemptAt, new Date(NOW + 15 * 60000).toISOString(), 'a short cooldown never shortens the local backoff');
+ assert.equal(pending().Ck02.attempts, 0);
+}
+
+// AIR-604 (review of PR #1021, second round): a recognized blocking response stays a TRANSPORT stop whatever happened to its body. With coordination active, an oversized or unreadable HTTP 403 or 429
+// and a header challenge never charge the Diary/Watchlist identity attempt (they would otherwise be a definite `oversized`/`fetch_failed` answer and push an item to the six-attempt cap);
+// `off` (no coordinator on the fetch) keeps today's classification exactly.
+{
+ const U = await import('../src/upstream-cooldown.js');
+ const coordinated = base => {const f = async (url, init) => base(url, init); f.coordinator = {after: async (scope, response) => U.classifySignal(response)}; return f;};
+ const big = 'x'.repeat(3000001);
+ const unreadable = status => ({status, ok: false, headers: headersOf({}), async text() {throw new Error('read failed');}});
+ const cases = [
+  ['oversized 403', () => http(403, big), 'forbidden'],
+  ['oversized 429', () => http(429, big), 'rate_limited'],
+  ['unreadable 403', () => unreadable(403), 'forbidden'],
+  ['unreadable 429', () => unreadable(429), 'rate_limited'],
+  ['oversized header challenge on a 200', () => http(200, big, {'cf-mitigated': 'challenge'}), 'challenge'],
+  ['unreadable header challenge on a 200', () => ({status: 200, ok: true, headers: headersOf({'cf-mitigated': 'challenge'}), async text() {throw new Error('read failed');}}), 'challenge'],
+  ['body-only challenge on a 200', () => http(200, '<html><head><title>Just a moment...</title></head>cf-chl-opt</html>'), 'challenge'],
+ ];
+ for (const [label, reply, reason] of cases) {
+  reset(); await seed('Sg01', 3);
+  out = await Identity.resolve(env, items(['Sg01', 'x']), opts({fetchImpl: coordinated(async () => reply())}));
+  assert.deepEqual([pending().Sg01?.reason, pending().Sg01?.attempts, pending().Sg01?.streak], [reason, 0, 1], label + ': a transport stop, no attempt charged');
+  assert.equal(out.outcomes.get('Sg01').class, 'transport', label);
+  assert.equal(out.outcomes.get('Sg01').terminal, false, label);
+ }
+ // repeated blocks never reach the review cap: six oversized 403s still cost no attempt
+ reset(); await seed('Sg02', 3); let clock = NOW;
+ for (let i = 0; i < 7; i++) {out = await Identity.resolve(env, items(['Sg02', 'x']), {...opts({fetchImpl: coordinated(async () => http(403, big))}), clock: () => clock}); clock += 9 * 3600000;}
+ assert.equal(pending().Sg02.attempts, 0, 'seven blocked answers charged nothing'); assert.equal(pending().Sg02.reason, 'forbidden');
+ // off (no coordinator): today's classification, an oversized 403 is a definite answer
+ reset(); await seed('Sg03', 3);
+ out = await Identity.resolve(env, items(['Sg03', 'x']), opts({fetchImpl: async () => http(403, big)}));
+ assert.equal(pending().Sg03.reason, 'oversized', 'without coordination the oversized body is classified as today'); assert.equal(pending().Sg03.attempts, 1);
 }
 
 console.log('letterboxd-diary-identity: ok');

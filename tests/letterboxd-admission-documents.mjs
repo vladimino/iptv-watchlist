@@ -65,14 +65,14 @@ const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stac
 // ===== 2. the route per marker mode =====
 {
  const absent=path.join(root,'absent.sqlite');
- sqlite(absent,files.slice(0,files.indexOf('0045_letterboxd_admission_authority.sql')).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ sqlite(absent,files.slice(0,files.indexOf('0046_letterboxd_admission_authority.sql')).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
  assert.deepEqual((await Docs.documentRoute({DB:d1Standin(absent)},KEY)).d1,false,'migration absent: nothing is routed');
  assert.deepEqual((await Docs.documentRoute({},KEY)).d1,false,'no D1 binding: the legacy R2 path');
  assert.equal((await Docs.documentRoute({DB:d1Standin(fresh('r2'))},KEY)).d1,false,'r2: nothing is routed');
  assert.equal((await Docs.documentRoute({DB:d1Standin(fresh('r2'))},'letterboxd/imports/registry.json')).d1,false,'a key that is not a moved document is never routed');
  await assert.rejects(()=>Docs.documentRoute({DB:d1Standin(fresh('closed'))},KEY),code('letterboxd_admission_closed'));
  assert.equal((await Docs.documentRoute({DB:d1Standin(fresh('d1'))},KEY)).d1,true,'d1: routed');
- // schema version 45 with the marker table gone: unreadable, never read as `r2`
+ // schema version 46 with the marker table gone: unreadable, never read as `r2`
  const broken=fresh('d1');sqlite(broken,'DROP TABLE letterboxd_admission_authority');
  await assert.rejects(()=>Docs.documentRoute({DB:d1Standin(broken)},KEY),error=>/unavailable/.test(String(error.code)),'an unreadable marker is unavailable, never legacy');
 }

@@ -17,7 +17,7 @@
 //   migration was applied cannot commit after it (the statement never names the missing table, which would fail at prepare time).
 import {database,failed,one} from './film-person-authority.js';
 
-export const ADMISSION_AUTHORITY_SCHEMA=45;
+export const ADMISSION_AUTHORITY_SCHEMA=46;
 export const ADMISSION_MODES=Object.freeze(['r2','closed','d1']);
 const TABLE='letterboxd_admission_authority';
 
