@@ -1,7 +1,6 @@
 // AIR-605 (card C1; ADR 0211 as amended by ADR 0219). The PURE planner of the Catalog Enrichment Producer: no storage, no network, no clock but the `now` it is given.
 // DORMANT: nothing in the Worker imports it yet. It decides, from what was read, WHICH fields and credits may be written, which must wait and why, and what is visible (conflicts, hints, gaps); the producer
 // executes the answer through the existing fenced writers. Everything here is deterministic and tested offline (tests/catalog-enrichment-plan.mjs).
-import {digestOf} from './canonical-receipts.js';
 
 export const SOURCES=Object.freeze(['letterboxd','tmdb','wikidata']);
 export const CORE_FIELDS=Object.freeze(['year','runtime','synopsis','poster','url','genres']);
@@ -12,6 +11,12 @@ export const RUNTIME_TOLERANCE_MIN=5;
 export const CHUNK_SIZE=50; // the existing credits unit cap, kept as the chunk size (ADR 0219 decision 8)
 export const REPAIR_AFTER_FAILURES=6;
 const MINUTE=60000,HOUR=3600000;
+// SHA-256 of canonical JSON (object keys sorted, undefined dropped, no clocks): the planner imports nothing, so it stays outside the receipt modules' dormancy surface.
+const canonical=value=>Array.isArray(value)?'['+value.map(canonical).join(',')+']':plain(value)?'{'+Object.keys(value).filter(key=>value[key]!==undefined).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}':JSON.stringify(value??null);
+export async function digestOf(value){
+ const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonical(value)));
+ return [...new Uint8Array(bytes)].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+}
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 export const blank=value=>value===undefined||value===null||(typeof value==='string'&&value.trim()==='')||(Array.isArray(value)&&!value.length);
 
