@@ -203,6 +203,7 @@ const classes={
  'catalogPosterNegativesSave@src/discovery.js':'the poster negative index epg/catalog-poster-negatives.json (not a projector input), by compare-and-swap: the route, the weekly sweep and the admission seed, which runs inside the chunk that holds the lease',
  'writeCheckpoint@src/catalog-poster-weekly.js':'the weekly poster checkpoint epg/catalog-poster-weekly.json (not a projector input), by compare-and-swap; the daily cron entry only',
  'deliver@src/catalog-poster-weekly.js':'immutable catalog_posters events under events/items/ (not a projector input) and the outbox mark; the daily cron entry only',
+ 'putTickEvent@src/catalog-enrichment-store.js':'immutable catalog_enrichment run events under events/items/ by a create-only put (not a projector input); reached only from the end-of-run and reconcile delivery of the Catalog Enrichment outbox, never from Discovery or publication (the name is shared by the call graph, the module is not)',
  'putEvent@src/letterboxd-sync.js':'immutable slot Events (ratings, watchlist) under events/items/ by a create-only put (not a projector input); reached only from the Letterboxd Sync delivery, never from Discovery or publication (the name is matched, the call graph is not)',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
