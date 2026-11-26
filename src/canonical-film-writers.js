@@ -308,10 +308,9 @@ export async function writeFilmFacts(env,input){
  if(membership.present&&membership.mode==='sync')throw failed('film_person_membership_owned');
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
- // ADR 0217 decision 8d (AIR-671): a write that would CREATE `film:tmdb:<n>` is refused while any row of the movie id exists (any trust, any Film), so a plan made before an attach (or a Discovery admission) fails closed here
- // and never mints a duplicate. The same absence is asserted INSIDE the batch below, against a claim that lands between this read and the commit.
- const mint=SPELLED_TMDB.exec(id)&&!snapshot.film?SPELLED_TMDB.exec(id)[1]:null;
- if(mint!==null&&await one(database(env),"SELECT 1 AS present FROM film_external_id WHERE scheme='tmdb' AND value=?",[mint]).catch(error=>{throw error?.code?error:failed('film_person_unavailable',error);}))throw failed('film_person_owner_changed');
+ // ADR 0217 decision 8d (AIR-671): a write that would CREATE `film:tmdb:<n>` asserts, INSIDE the fenced batch below, that no row of the movie id exists (any trust, any Film), so a plan made before an attach (or a Discovery admission)
+ // fails the whole batch closed (`film_person_precondition`) and never mints a duplicate. The planning step of the producers (`bindFilmFactsOwner`) already moved such a plan to the trusted owner.
+ const mint=snapshot.film?null:SPELLED_TMDB.exec(id)?.[1]??null;
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
  // included) with `film_person_precondition`. Without the option nothing changes: the upsert creates the Film, as the EPG Film producer relies on.
  if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');

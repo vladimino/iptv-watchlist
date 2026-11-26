@@ -413,7 +413,7 @@ if(section('12')){
 }
 
 // 13. AIR-671 / ADR 0217 decision 8d (test 11): `film:tmdb:<n>` is a minting spelling, never proof of ownership. The producer resolves the trusted owner at planning; the writer refuses to mint while any row of the movie id exists,
-// at its read and again inside its batch. Both orders of attach and facts, a stale plan rolled back whole, one trusted owner, no duplicate `film:tmdb:<n>`, nothing attached by the facts writer.
+// inside its fenced batch. Both orders of attach and facts, a stale plan rolled back whole, one trusted owner, no duplicate `film:tmdb:<n>`, nothing attached by the facts writer.
 if(section('13')){
  const {bindFilmFactsOwner,resolveFilmFactsTarget}=writers;
  const {applyFilmFacts}=await import('../src/canonical-producer-adapters.js');
@@ -443,18 +443,18 @@ if(section('13')){
   const {file,env}=fresh();
   const stalePlan={...facts({expectedRevision:0,requestId:'stale-1'})};
   assert.equal(sqlite(file,attachSql()).status,0);
-  await assert.rejects(writeFilmFacts(env,stalePlan),code('film_person_owner_changed'));
+  await assert.rejects(writeFilmFacts(env,stalePlan),code('film_person_precondition'));
   assert.deepEqual(films(file),[LID]);assert.deepEqual(owners(file),[LID]);
   assert.equal(rows(file,"SELECT COUNT(*) c FROM film_metadata").at(0).c,0);
-  assert.equal(env.DB.calls.batches,0,'refused before the batch');
+  assert.equal(env.DB.calls.batches,1,'the one batch failed whole');
   for(const [trusted,conflicting] of [[0,0],[0,1]]){
    const held=fresh();
    assert.equal(sqlite(held.file,attachSql(trusted,conflicting)).status,0);
-   await assert.rejects(writeFilmFacts(held.env,facts({expectedRevision:0})),code('film_person_owner_changed'),'any trust blocks a mint');
+   await assert.rejects(writeFilmFacts(held.env,facts({expectedRevision:0})),code('film_person_precondition'),'any trust blocks a mint');
    assert.deepEqual(films(held.file),[LID]);
   }
  }
- // (c) The claim lands BETWEEN the writer's read and its batch: the in-batch absence predicate rolls the whole batch back (revision, receipt tail and every fact row included).
+ // (c) The claim lands BETWEEN the writer's read and its batch: the same in-batch predicate rolls the whole batch back (revision, receipt tail and every fact row included).
  {
   const state={file:null,fired:0};
   const {file,env}=fresh('open',{onBatch:async()=>{if(!state.fired++)assert.equal(sqlite(state.file,attachSql()).status,0);}});

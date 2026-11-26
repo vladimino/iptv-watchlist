@@ -37,7 +37,6 @@ const MUTANTS=[
  ['a reserved source is accepted',"||RESERVED.has(item.source)||seen.has(item.source)","||seen.has(item.source)",'8'],
  ['the effective localization is not materialised',"if(effective.tier==='automatic'){","if(false){",'8'],
  ['a mint is not asserted absent inside the batch',"if(mint!==null)statements.push([fenced.assertSql(\"EXISTS (SELECT 1 FROM film WHERE id=?) OR NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=?)\"),[id,mint]]);","",'13'],
- ['a mint is not refused at the writer read',"if(mint!==null&&await one(","if(false&&await one(",'13'],
  ['a held movie id is not refused at planning',"if(target.held){const error=failed('film_person_identity_held');","if(false){const error=failed('film_person_identity_held');",'13'],
  ['the trusted owner is not bound at planning',"return {id:owner||filmId,spelled:true,owner,held};","return {id:filmId,spelled:true,owner,held};",'13'],
 ];
