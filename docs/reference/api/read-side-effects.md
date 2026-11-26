@@ -45,7 +45,7 @@ No read writes storage in any scenario ([AIR-413](https://trello.com/c/orvuzDW5)
 
 | Baseline entry | Reads | Effects | Removed by |
 | --- | --- | --- | --- |
-| `tmdb-status-probe` | `GET /api/integrations/tmdb/status` | One outbound `GET https://api.themoviedb.org/3/movie/11` with the Worker secret; no storage write | none (registered outbound read) |
+| `tmdb-status-probe` | `GET /api/integrations/tmdb/status` | One outbound `GET https://api.themoviedb.org/3/movie/11` with the Worker secret; no storage write. AIR-604: it also reads the shared upstream cooldown (`peek`, a D1 `SELECT`; with an enforced active `tmdb` cooldown it answers `503 upstream_cooldown` without the request) and never writes it, a 429 included ([contract](../integrations/upstream-cooldown.md)) | none (registered outbound read) |
 
 AIR-374 P4 adds only SELECTs of the Film/Person marker tables to `GET /api/d1/*` and, at `open`, SELECTs of `tmdb_retirement_decision`, `film_external_id`, `film_redirect` and `film_rated_admission` to `GET /api/catalog/film/<tmdbId>` (and at `open` that route no longer reads the two R2 objects of the archive fallback). No writing read is added; the baseline above is unchanged and `tests/get-write-audit.mjs` passes unmodified.
 

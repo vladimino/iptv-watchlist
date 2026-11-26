@@ -4,6 +4,7 @@
 - [Letterboxd account export](letterboxd-export.md): CSV parsing rules, derived sets, the strict matching of export rows with stored films and identity from Letterboxd film pages.
 - [Letterboxd Diary viewing history](letterboxd-diary-history.md): viewing-id entries or per-film-and-day counts with honest lower bounds, page 1 of a migrated ratings run (`LETTERBOXD_DIARY_HISTORY` retired, ADR 0075), run state, coverage limits and the read API (ADR 0049).
 - [Letterboxd user facts](letterboxd-user-facts.md) (design, not implemented): watched, rating and watchlist as separate facts with provenance, the newer-observation merge rule, projections, baseline import protocol and D1 mapping.
+- [Shared upstream cooldown](upstream-cooldown.md) (AIR-604, delivered dormant): one durable cooldown per upstream scope (`tmdb`, `letterboxd`, `wikidata`), the `off` / `observe` / `enforce` mode row, the signals, the monotonic write and the caller inventory with each caller's not-now path.
 - [MCP contract](../api/mcp.md): owner-only Cloudflare Access, OAuth and Worker JSON-RPC.
 
 References describe contracts, not approval to fetch or change production data.

@@ -6,6 +6,8 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
+import {migrated, sql} from './prediction-d1-flow-lib.mjs';
+import {d1Standin} from './d1-standin.mjs';
 import * as W from '../src/catalog-poster-weekly.js';
 
 // ---------- pure: week arithmetic, validity, plan, projection ----------
@@ -98,6 +100,8 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 vm.runInContext(scoped('src/catalog-poster-weekly.js','CatalogPosterWeekly'),context);
+// AIR-604: the shared upstream cooldown module is in scope from the start, as in the bundle; this file's `env` has no DB, so it reads `off` everywhere except the section that adds one.
+vm.runInContext(scoped('src/upstream-cooldown.js','UpstreamCooldown'),context);
 for(const file of ['src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;
 const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
@@ -268,5 +272,19 @@ assert.ok(puts.every(k=>[CP,NEG,LIVE,COPY,LEASE].includes(k)||k.startsWith('even
  records.set(NEG,{garbage:true});puts=[];result=await seedOf({id:90,title:'T',poster_path:null});assert.equal(result.seeded,false);assert.equal(result.reason,'unreadable');assert.deepEqual(puts,[],'an unreadable index never blocks and is never repaired');
  const throwing={BUCKET:{async get(){throw new Error('r2 down');},async put(){throw new Error('r2 down');}}};
  result=await context.catalogPosterSeedNegative(throwing,{id:91,title:'T',poster_path:null});assert.equal(result.seeded,false,'an index failure never throws into the admission');
+}
+// AIR-604 (ADR 0211 decision 5): an enforced TMDB cooldown. The firing sends no TMDB request, waits for the cooldown end, and charges neither a retry attempt nor the rate-limit streak
+// (a real 429, section 7, still charges both). It writes no no-poster verdict.
+{
+ const file=migrated();sql(file,`INSERT INTO upstream_coordination (id, mode, revision, updated_at) VALUES (1, 'enforce', 1, ${Date.now()})`);
+ const until=Date.now()+1800*1000;// the module reads the real clock; the firing's scheduledTime is only a label
+ sql(file,`INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('tmdb', ${until}, 'rate_limited', NULL, 'seed', ${Date.now()})`);
+ seed(catalog());tmdb=TMDB();
+ const withDb={...env,DB:d1Standin(file)},waits=[];
+ await worker.scheduled({cron:'24 3 * * *',scheduledTime:Date.parse('2026-11-15T03:24:00Z')},withDb,{waitUntil(p){waits.push(p);}});await Promise.all(waits);
+ assert.deepEqual(fetches.filter(u=>u.includes('themoviedb')),[],'an active cooldown sends no TMDB request');
+ assert.equal(cp().status,'pending');assert.equal(cp().retryAttempts,0,'a cooldown skip charges no retry attempt');assert.equal(cp().rateLimitStreak,0,'and no rate-limit streak');
+ assert.equal(Date.parse(cp().nextRetryAt),new Date(until).getTime(),'the next firing waits for the cooldown end');
+ assert.equal(records.get(NEG)?.entries?.['1'],undefined,'a skip is never a no-poster verdict');
 }
 console.log('catalog-poster-weekly: week arithmetic, checkpoint validity, plan, the ordered monitor projection, the bootstrap sweep, idle = one read and no write, held and due verdicts, busy lease defers and resumes, 429 and 5xx without a no-poster verdict, retry exhaustion, outbox replay with frozen at, deferred-then-final, week supersession, full outbox and corrupt checkpoint, CAS race, exact cron routing, and the admission seed');
