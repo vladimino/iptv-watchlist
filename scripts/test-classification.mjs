@@ -352,6 +352,9 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "migration-0046-catalog-enrichment.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
