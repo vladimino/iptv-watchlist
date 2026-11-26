@@ -123,6 +123,27 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:
  assert.equal((await ask('301')).state,'retired','an unsuperseded retire decision retires the movie id');
  sqlite(file,decision('q2','restore','1'));
  assert.equal((await ask('301')).state,'found','an explicit restore lifts it');
+ {
+  // AIR-656: alias fallback, deterministic choice, omission, and a >200-credit cast that stays readable (partial, never refused).
+  const big=database('open');
+  const people=[['loc','Localized'],['alias-only',null],['two-alias',null],['none',null]];
+  sqlite(big,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:400',1,'tmdb:400','Cast','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:400','tmdb','400',1,0,NULL);`);
+  const ins=people.map(([k])=>`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/${k}','actor/${k}',1,'${T}');`).join('')
+   +`INSERT INTO person_dimension (person_id,dimension,status,value,updated_at) VALUES ('person:actor/loc','localization','provisional','Localized','${T}');`
+   +`INSERT INTO person_alias VALUES ('person:actor/loc','name','Zed Alias',NULL),('person:actor/alias-only','name','Only Alias',NULL),('person:actor/two-alias','name','Zeta',NULL),('person:actor/two-alias','name','Alpha',NULL);`
+   +`INSERT INTO film_person_credit VALUES ${people.map(([k],i)=>`('film:tmdb:400','person:actor/${k}','actor',${i})`).join(',')};`;
+  sqlite(big,ins);
+  let r=await reader.catalogCanonicalFilmFromD1({DB:d1Standin(big)},'400');
+  assert.deepEqual(r.film.actors.map(a=>a.name),['Localized','Only Alias','Alpha'],'localized wins, alias fallback, deterministic alias, nameless omitted, ordinal order');
+  assert.equal(r.film.creditsPartial,undefined);
+  const many=Array.from({length:260},(_,i)=>i);
+  sqlite(big,many.map(i=>`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/b${i}','actor/b${i}',1,'${T}');INSERT INTO person_alias VALUES ('person:actor/b${i}','name','B ${i}',NULL);INSERT INTO film_person_credit VALUES ('film:tmdb:400','person:actor/b${i}','actor',${100+i});`).join('')+"INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:director/d','director/d',1,'"+T+"');INSERT INTO person_alias VALUES ('person:director/d','name','The Director',NULL);INSERT INTO film_person_credit VALUES ('film:tmdb:400','person:director/d','director',0);");
+  r=await reader.catalogCanonicalFilmFromD1({DB:d1Standin(big)},'400');
+  assert.equal(r.state,'found','more than 200 credits is not a whole-film refusal');
+  assert.equal(r.film.creditsPartial,true,'honest partial completeness');
+  assert.deepEqual(r.film.directors.map(d=>d.name),['The Director'],'directors survive truncation');
+  assert.equal(r.film.actors.length,198,'199 actor slots, one nameless omitted');
+ }
  for(const bad of ['0','abc','1.5','007',301,null,'1234567890123'])await assert.rejects(()=>ask(bad),code('canonical_read_invalid'),'typed id only: '+String(bad));
  for(const state of STATES.filter(state=>state!=='open')){
   const seen=[],other={DB:standin(database(state),state,{onQuery:async text=>{seen.push(text);}})};
