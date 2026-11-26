@@ -159,7 +159,8 @@ export async function fetchLetterboxd(env,{lid,tmdbAnchor=null,coordinator=null,
   fields:{year:Number.isInteger(film.year)?film.year:(evidence.years[0]?Number(evidence.years[0]):null),runtime:Number.isInteger(film.runtime)&&film.runtime>0?film.runtime:null,synopsis:film.synopsis||null,poster:film.poster||null,url:landing.href,genres:Array.isArray(film.genres)?film.genres:[]},
   // an absent or malformed credits section is unreadable, never a complete empty set (a parser that reports no `creditsComplete` flag is read as complete)
   credits:{status:film.creditsComplete===false?'unreadable':'ok',items:film.creditsComplete===false?[]:[...person('director',film.directors),...person('actor',film.actors)]},
-  // The Letterboxd page carries no Russian title: the source row is an honest, complete absence until a parser decision says otherwise.
-  title:{status:'absent'},
+  // The film page exposes the film's own name and an UNTYPED list of alternative titles: no title carries a language. Absence of a typed Russian title cannot be verified from it, so this is UNSUPPORTED coverage, never a
+  // verified absence and never an inference from Cyrillic or an alias (a product choice, if one is wanted, is the owner's, with this evidence).
+  title:{status:'unsupported'},
  };
 }

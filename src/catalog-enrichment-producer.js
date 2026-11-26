@@ -204,6 +204,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   // a missing or malformed section is a REPAIRABLE failure: it backs off (1 h, 6 h, 24 h at the cap) and counts, never an immediate endless retry
   if(!title||title.status==='unreadable'){await putRow(env,ctx,{...Plan.afterOutcome(row,{type:'repairable',signature:'unreadable_translations',responseDigest:await sha({source,reason:'unreadable_translations'})},now),reason:'unreadable_translations'},{expectEpoch:row.refreshEpoch});continue;}
   if(title.status==='ambiguous'){await putRow(env,ctx,{...row,status:'needs_attention',reason:'ambiguous_translation',failureClass:'owner_required'},{expectEpoch:row.refreshEpoch});continue;}
+  // unsupported coverage (the Letterboxd page has no typed title): the source cannot supply this part, which is neither a failure nor a verified absence
+  if(title.status==='unsupported'){await putRow(env,ctx,{...row,status:'not_applicable',reason:'no_typed_title_in_source',failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
   if(title.status==='absent'){await putRow(env,ctx,{...row,status:'complete_with_gaps',reason:'no_russian_title',gaps:['no_russian_title'],failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
   const sourceVersion=await sha({source,anchor:row.anchor,title:title.value});
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},localization:{sources:[{source,value:title.value,sourceVersion,observedAt:now,provenance:{anchor:row.anchor}}]},requireExisting:true,

@@ -52,18 +52,18 @@ Every unit asserts, inside its own batch, the lease, the control generation and 
 
 ## Credits
 
-Every correctly identified credit of the verified source is kept, with no cap other than the chunk size. A Film has one credit namespace: the existing credits decide the source; both namespaces present means nothing is written and `credits_other_namespace` is listed; none means Letterboxd if anchored, otherwise TMDB. A Letterboxd credit without a real person slug is a gap (`name_only_credit`), never written. A part is complete only when every expected credit exists, judged by person identity. Persons are created first, one unit each, then the credits chunk; a Film spans as many runs as it needs.
+Every correctly identified credit of the verified source is kept, with no cap other than the chunk size. The enrichment path reads the Letterboxd credits through the shared page parser without its legacy ten-actor display cap, and a credits section that is absent or malformed is unreadable, never a complete empty set. A Film has one credit namespace: the existing credits decide the source; both namespaces present means nothing is written and `credits_other_namespace` is listed; none means Letterboxd if anchored, otherwise TMDB. A Letterboxd credit without a real person slug is a gap (`name_only_credit`), never written. A part is complete only when every expected credit exists, judged by person identity. The whole expected set is paged into durable chunk rows before the first unit, so a Film interrupted anywhere resumes every chunk from D1 and completing persisted units makes no upstream request. Persons are created first, one unit each, then the credits chunk; every unit asserts the anchor set, the Film plan epoch, the chunk row's own epoch, the lease and the control generation. A Film spans as many runs as it needs: before each group of units the drainer asks whether the remaining statement budget covers it plus the finalize-and-successor reserve, and the Workflow counts statements for the whole instance across its steps.
 
 ## Russian title
 
-Each applicable source writes its own `film_localization_source` row. For TMDB the title is selected from the translations of the same response: exactly one distinct non-blank `ru` title is the value, several are decided by region `RU`, otherwise the selection is ambiguous (an owner decision) and a missing or malformed section is unreadable (a repairable failure). The Letterboxd page carries no Russian title, so its row is a complete absence.
+Each applicable source writes its own `film_localization_source` row. For TMDB the title is selected from the translations of the same response: exactly one distinct non-blank `ru` title is the value, several are decided by region `RU`, otherwise the selection is ambiguous (an owner decision) and a missing or malformed section is unreadable (a repairable failure). The Letterboxd film page exposes the film's own name and an untyped list of alternative titles, none carrying a language. A missing typed Russian title cannot be verified from it, so Letterboxd localization is **unsupported coverage**: its row is `not_applicable` (`no_typed_title_in_source`), neither a failure nor a verified absence, and nothing is inferred from Cyrillic text or an alias. Source precedence and the TMDB and Wikidata rows are unchanged.
 
 ## Failures
 
 | Class | Examples | Treatment |
 | --- | --- | --- |
 | transport | 403, challenge, 429, 5xx, timeout, network, active cooldown | no failure consumed, `pending_since` set by the first one, backoff 15 minutes · 2^min(streak − 1, 5), at most 8 hours |
-| repairable | unparsable response, missing section, a 404 of an anchored entity | bounded retries, then `deferred_repair`, rechecked after 1, 6 and then every 24 hours, never terminal |
+| repairable | unparsable response, missing or malformed section (translations, credits), a 404 of an anchored entity | bounded retries with backoff, then `deferred_repair`, rechecked after 1, 6 and then every 24 hours, never terminal. A new code version and a successful response of the same source for another Film make the matching items runnable at once |
 | owner required | a verified disagreement, an ambiguous translation | stays with the owner |
 
 ## Control, signals and the run

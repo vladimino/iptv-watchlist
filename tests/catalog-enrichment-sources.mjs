@@ -114,7 +114,7 @@ const lb=(body,{status=200,redirect='https://letterboxd.com/film/the-matrix/',he
  assert.deepEqual(impl.calls,['https://boxd.it/abc','https://letterboxd.com/film/the-matrix/'],'boxd.it/<lid> and at most one redirect to the film page');
  assert.equal(a.fields.year,1999);assert.equal(a.fields.url,'https://letterboxd.com/film/the-matrix/');assert.deepEqual(a.fields.genres,['Sci-Fi']);
  assert.deepEqual(a.credits.items.map(item=>item.role+':'+(item.key??'NAME')+':'+!!item.nameOnly),['director:lana:false','actor:neo-actor:false','actor:NAME:true'],'a credit without a person slug is name-only, never keyed by its name');
- assert.deepEqual(a.title,{status:'absent'});
+ assert.deepEqual(a.title,{status:'unsupported'},'a Letterboxd page has no typed title: unsupported coverage, not a verified absence');
  // the contract, rule by rule: any failing rule on a 200 page is a disagreement (owner only), not a failure
  const rule=async (over,tmdbAnchor='603',extra={})=>X.fetchLetterboxd(env,{lid:'abc',tmdbAnchor,fetchImpl:lb(page(over),extra),tools});
  for(const [name,over,reason] of [['shortlink of another lid',{code:'zzz'},'shortlink_mismatch'],['canonical elsewhere',{canonical:'/film/other/'},'canonical_mismatch'],['another TMDB id',{tmdb:['604']},'tmdb_differs'],['no TMDB id',{tmdb:[]},'tmdb_missing'],['two TMDB ids',{tmdb:['603','604']},'tmdb_multiple'],['a tv entity',{type:'tv'},'tmdb_not_movie']]){
