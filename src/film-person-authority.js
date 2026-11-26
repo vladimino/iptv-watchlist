@@ -162,3 +162,15 @@ export async function transitionAuthority(env,{from,to,expectedGeneration}){
  }
  return readMarker(env);
 }
+
+// AIR-656. The one bounded credit selection of a Film, shared by the canonical film page (canonical-catalog-reader.js) and the dormant unified-Film display section
+// (the AIR-647 aggregate), so no second copy of this SQL exists for AIR-649 to reconcile. The schema has exactly two credit roles and a unique (film_id,role,ordinal) index
+// (film_person_credit_order): each role is one indexed range probe `film_id=? AND role=? ORDER BY ordinal LIMIT n`, so the work is bounded by the limits, never by the size
+// of the stored cast (a mixed role/ordinal ORDER BY would sort the whole Film range). Parameters: film_id, director limit, film_id, actor limit (limit = budget + 1, so the
+// caller can tell a complete role from a truncated one). Rows come back directors first, then actors, each in stored ordinal order, with the Person's usable name: the
+// localized/effective value (reviewed over provisional), else the lowest name alias of the SAME Person. A whitespace-only value is not a name and never hides a usable alias.
+// No name matching, no Person merge, no write.
+const CREDIT_USABLE=value=>`${value} IS NOT NULL AND trim(${value},' '||char(9)||char(10)||char(13))<>''`;
+export const CREDIT_NAME_SQL=person=>`COALESCE((SELECT d.value FROM person_dimension d WHERE d.person_id=${person} AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND ${CREDIT_USABLE('d.value')} ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1),(SELECT a.value FROM person_alias a WHERE a.person_id=${person} AND a.kind='name' AND ${CREDIT_USABLE('a.value')} ORDER BY a.value LIMIT 1))`;
+const CREDIT_PROBE=(role,rank)=>`SELECT ${rank} AS rank,c.role AS role,c.ordinal AS ordinal,c.person_id AS person_id,p.role_id AS role_id,${CREDIT_NAME_SQL('c.person_id')} AS name FROM (SELECT role,ordinal,person_id FROM film_person_credit WHERE film_id=? AND role='${role}' ORDER BY ordinal LIMIT ?) c INNER JOIN person p ON p.id=c.person_id`;
+export const CREDIT_SELECTION_SQL=`SELECT rank,role,ordinal,person_id,role_id,name FROM (${CREDIT_PROBE('director',0)} UNION ALL ${CREDIT_PROBE('actor',1)}) ORDER BY rank,ordinal`;

@@ -7,7 +7,7 @@
 //   a titles.json row; catalogReaderStill re-checks the marker after any read, so a move between the gate and the answer (to open or held) is refused.
 // - catalogCanonicalFilmFromD1 (AIR-475): the film route's canonical fallback at `open` when Discovery holds no record: the typed TMDB claim, the redirect table, the
 //   tmdb_retirement_decision ledger and the Film's own metadata, localization and credits; film_rated_admission (readAdmissions) only fills a missing title or year. The marker generation is read again after the reads, so a move mid-read is refused.
-import {database,failed,many,one,readAuthority,readSource} from './film-person-authority.js';
+import {CREDIT_SELECTION_SQL,database,failed,many,one,readAuthority,readSource} from './film-person-authority.js';
 
 export const ADMISSION_READ_CHUNK=80;
 
@@ -93,9 +93,10 @@ export async function catalogCanonicalFilmFromD1(env,tmdbId){
 }
 
 // AIR-656: a bounded, ordered display read. Past the cap the page is honestly partial (creditsPartial), never refused: cast size must not make a whole Film unavailable.
-const CREDIT_READ_CAP=200;
+const CREDIT_READ_CAP=200;// per role: a large director range never hides every actor
 const PAGE_FILM_SQL=`SELECT f.canonical_identity AS canonical_identity,f.original_title AS original_title,m.year AS year,m.runtime AS runtime,m.poster AS poster,m.url AS url,m.genres_json AS genres_json,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id=?`;
-const PAGE_CREDIT_SQL=`SELECT c.role AS role,p.role_id AS role_id,(SELECT d.value FROM person_dimension d WHERE d.person_id=p.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS name,(SELECT a.value FROM person_alias a WHERE a.person_id=p.id AND a.kind='name' AND a.value<>'' ORDER BY a.value LIMIT 1) AS alias_name FROM film_person_credit c INNER JOIN person p ON p.id=c.person_id WHERE c.film_id=? ORDER BY CASE c.role WHEN 'director' THEN 0 ELSE 1 END,c.role,c.ordinal,c.person_id LIMIT ?`;
+// The credit selection is the shared bounded one (film-person-authority.js): per-role indexed probes, no sort of the whole stored cast.
+const PAGE_CREDIT_SQL=CREDIT_SELECTION_SQL;
 // The full catalog entry of one owner Film (the shape of a Discovery film payload, no shows: the Worker adds shows only from the pinned EPG generation).
 async function canonicalFilmPage(env,db,owner,tmdbId){
  const identity='tmdb:'+tmdbId;
@@ -106,17 +107,21 @@ async function canonicalFilmPage(env,db,owner,tmdbId){
  if(row.canonical_identity!=null&&row.canonical_identity!==identity)return {state:'conflict'};
  const admission=(await readAdmissions(env,[owner])).get(owner)?.ratedAdmission??null;
  if(admission&&String(admission.tmdb)!==tmdbId)throw failed('canonical_read_unavailable');
- const credits=await many(db,PAGE_CREDIT_SQL,[owner,CREDIT_READ_CAP+1]);
- const creditsPartial=credits.length>CREDIT_READ_CAP;
- if(creditsPartial)credits.length=CREDIT_READ_CAP;
+ const read=await many(db,PAGE_CREDIT_SQL,[owner,CREDIT_READ_CAP+1,owner,CREDIT_READ_CAP+1]);
+ const credits=[];let creditsPartial=false;
+ for(const role of ['director','actor']){
+  const rows=read.filter(item=>item.role===role);
+  if(rows.length>CREDIT_READ_CAP)creditsPartial=true;
+  credits.push(...rows.slice(0,CREDIT_READ_CAP));
+ }
  let genres=[];
  try{const parsed=JSON.parse(row.genres_json||'[]');if(Array.isArray(parsed))genres=parsed.filter(genre=>typeof genre==='string'&&genre);}catch{throw failed('canonical_read_unavailable');}
  const text=value=>typeof value==='string'&&value?value:null,integer=value=>Number.isInteger(value)?value:null;
- // A stored person without a resolved name is omitted (the client lists names); the order is the stored ordinal.
- // The name is the localized/effective one (reviewed over provisional), else the deterministic name alias of the same Person (AIR-656); no name matching, no merge.
- const people=role=>credits.filter(item=>item.role===role&&(text(item.name)||text(item.alias_name))).map(item=>({id:String(item.role_id),name:text(item.name)??item.alias_name}));
+ // A stored person without a usable name (no localized value, no same-Person name alias) is omitted and counted (creditsUnnamed), never silently; the order is the stored ordinal.
+ const people=role=>credits.filter(item=>item.role===role&&text(item.name)).map(item=>({id:String(item.role_id),name:item.name}));
+ const creditsUnnamed=credits.filter(item=>!text(item.name)).length;
  const original=text(row.original_title);
- return {state:'found',film:{id:'tmdb_'+tmdbId,tmdbId,canonicalIdentity:identity,title:text(row.title)??text(admission?.title)??original,original,year:integer(row.year)??integer(admission?.year),runtime:integer(row.runtime),genres,poster:text(row.poster),url:typeof row.url==='string'&&row.url.startsWith('https://')?row.url:null,directors:people('director'),actors:people('actor'),shows:[],...(creditsPartial?{creditsPartial:true}:{})}};
+ return {state:'found',film:{id:'tmdb_'+tmdbId,tmdbId,canonicalIdentity:identity,title:text(row.title)??text(admission?.title)??original,original,year:integer(row.year)??integer(admission?.year),runtime:integer(row.runtime),genres,poster:text(row.poster),url:typeof row.url==='string'&&row.url.startsWith('https://')?row.url:null,directors:people('director'),actors:people('actor'),shows:[],...(creditsPartial?{creditsPartial:true}:{}),...(creditsUnnamed?{creditsUnnamed}:{})}};
 }
 
 // AIR-475. The verified identity bridge behind the film history: one stored spelling of a Film (a Letterboxd lid or tmdb_<n>) -> the storage ids its predictions can lie under.

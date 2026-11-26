@@ -10,7 +10,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
-const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
+const IMPORT='const {CREDIT_SELECTION_SQL,database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-canonical-footer-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};

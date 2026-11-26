@@ -21,7 +21,7 @@
 // published EPG d1/open, Watchlist d1 with open writes for the source): one statement per snapshot keeps the 40-statement budget. A missing table, a
 // malformed row or a refused marker makes the section `unavailable`, never a negative.
 import {createHash} from 'node:crypto';
-import {database} from './film-person-authority.js';
+import {CREDIT_SELECTION_SQL,database} from './film-person-authority.js';
 import {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT} from './film-aggregate-resolver.js';
 
@@ -507,11 +507,11 @@ export const DISPLAY_SQL="WITH RECURSIVE anc(id,parent,depth) AS (SELECT ?,NULL,
  +"(SELECT json_group_array(json_array(kind,source_key,identity_link,identity_state,localization,generation)) FROM (SELECT kind,source_key,identity_link,identity_state,CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.localization') END AS localization,generation FROM owner_review_entry INDEXED BY owner_review_entry_identity WHERE kind='film' AND identity_state='verified' AND identity_link IN (SELECT id FROM anc) LIMIT ?)) AS owner,"
  +'(SELECT json_group_array(json_array(source,value,source_version,provenance_json,observed_at)) FROM (SELECT source,value,source_version,provenance_json,observed_at FROM film_localization_source WHERE film_id=? ORDER BY source LIMIT ?)) AS sources,'
  +"(SELECT json_group_array(json_array(status,source,source_version,provenance_json,value,authority,updated_at)) FROM film_dimension WHERE film_id=? AND dimension='localization') AS dimension,"
- +'(SELECT json_group_array(json_array(person_id,role,ordinal)) FROM (SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? ORDER BY role DESC,ordinal LIMIT ?)) AS credits';
+ +'(SELECT json_group_array(json_array(person_id,role,ordinal,name)) FROM ('+CREDIT_SELECTION_SQL+')) AS credits';
 const METADATA_FIELDS=['year','runtime','synopsis','poster','url','genres'];
 async function displaySection(db,fence,resolution){
  const filmId=resolution.filmId;
- const params=[filmId,OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,filmId,filmId,OWNER_ENTRIES_MAX+1,filmId,LOCALIZATION_SOURCES_MAX+1,filmId,filmId,CREDITS_MAX+1];
+ const params=[filmId,OWNER_ANCESTORS_MAX+1,OWNER_ANCESTOR_DEPTH,OWNER_ANCESTORS_MAX+2,filmId,filmId,OWNER_ENTRIES_MAX+1,filmId,LOCALIZATION_SOURCES_MAX+1,filmId,filmId,CREDITS_MAX+1,filmId,CREDITS_MAX+1];
  const read=x=>({film:json(x.film),metadata:json(x.metadata),ancestors:list(x.ancestors).map(a=>({id:String(a[0]),parent:a[1]==null?null:String(a[1]),depth:Number(a[2])})).sort((l,r)=>l.depth-r.depth||(l.id<r.id?-1:l.id>r.id?1:0)),owner:list(x.owner).sort((l,r)=>JSON.stringify(l)<JSON.stringify(r)?-1:JSON.stringify(l)>JSON.stringify(r)?1:0),sources:list(x.sources),dimension:list(x.dimension),credits:list(x.credits)});
  const s=read(await row(db,DISPLAY_SQL,params));
  const metadata=s.metadata;
@@ -547,7 +547,7 @@ async function displaySection(db,fence,resolution){
   }
  }
  const truncated=s.credits.length>CREDITS_MAX;
- const credits={status:truncated?'partial':s.credits.length?'present':'unknown',items:s.credits.slice(0,CREDITS_MAX).map(c=>({personId:String(c[0]),role:String(c[1]),ordinal:Number(c[2])}))};
+ const credits={status:truncated?'partial':s.credits.length?'present':'unknown',items:s.credits.slice(0,CREDITS_MAX).map(c=>({personId:String(c[0]),role:String(c[1]),ordinal:Number(c[2]),name:typeof c[3]==='string'&&c[3]?c[3]:null}))};
  const statuses=[...Object.values(fields).map(f=>f.status),credits.status];
  const status=statuses.includes('conflict')?'conflict':statuses.every(x=>x==='present')?'present':'partial';
  const section={status,source:'d1:film_metadata',token,fields,credits,ancestry};
