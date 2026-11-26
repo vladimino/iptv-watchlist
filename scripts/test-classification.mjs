@@ -373,6 +373,9 @@ export const FILES={
  "catalog-enrichment-drain.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-settings.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
