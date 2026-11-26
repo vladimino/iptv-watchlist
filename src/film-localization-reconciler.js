@@ -1,7 +1,8 @@
 // AIR-663 / ADR 0218 decision 3 and stage 4 (D1, Accepted). The SEPARATE, bounded reconciler of a stale effective Film localization row: a Film whose stored `localization` row is no
 // longer the output of the existing resolver, with NO new source observation (a historical applied source receipt, an owner-only change in owner_review_entry, a legacy row).
-// DORMANT, like the other canonical writers: importing this module runs nothing and NOTHING in the Worker, the cron tick, a Workflow, an MCP tool, a route or a script imports it. It reaches
-// the database only when an explicit caller (the production operation of AIR-664, under its own owner GO) invokes it, and only after assertWritable (marker d1/open).
+// The MUTATION paths are DORMANT, like the other canonical writers: importing this module runs nothing and no Worker route, cron tick, Workflow or script calls them. AIR-683 bundles the module only
+// so that the owner-only MCP tool `film_localization_diagnose` can call the READ-ONLY `diagnoseLocalizationCohort`; no MCP tool, route or Workflow reaches apply, resume, recover or restore. They
+// reach the database only when an explicit caller (the production operation of AIR-664, under its own owner GO) invokes them, and only after assertWritable (marker d1/open).
 // - Same resolver, same precedence: the output is projectionOf() of the projection writer (resolveLocalization unchanged: owner > reviewed > automatic, fixed source order, then the newer
 //   observation, then the source name; the strong() guard and its SQL WHERE). No new source row is written except the lossless legacy candidate the projection writer already preserves.
 // - Same two fences: the Film revision CAS and the owner-review token (marker generation, every consumed owner row, the redirect closure), re-proved INSIDE the batch.
@@ -19,11 +20,11 @@
 //   D1-authoritative, and only while the Film is at exactly postRevision with the row still equal to postImage; otherwise it refuses and writes nothing (`localization_restore_moved`).
 //   It is not a general mutation API: a fabricated or incomplete token is refused before any receipt is reserved. The alternative is a forward correction through this same reconciler.
 // Person localization is out of scope (unchanged). No table, index or column changes.
-import {assertWritable,database,failed,many,readAuthority}from './film-person-authority.js';
-import {fenced,MUTATION_STATEMENT_CAP}from './canonical-mutations.js';
-import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf}from './canonical-receipts.js';
-import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken}from './film-localization-projection.js';
-import {LOCALIZATION_ROW,readFilmSnapshot}from './canonical-film-writers.js';
+import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
+import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf} from './canonical-receipts.js';
+import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken} from './film-localization-projection.js';
+import {LOCALIZATION_ROW,readFilmSnapshot} from './canonical-film-writers.js';
 
 export const RECONCILE_OPERATION='film_localization_reconcile';
 export const RECONCILE_ORIGIN='localization_reconciler';
@@ -275,6 +276,22 @@ async function filmPage(env,{after,limit}){
  catch(error){throw failed('film_person_unavailable',error);}
 }
 
+// The ONE read-only classification of a Film, shared by the dry run and the diagnosis: {state:'stale'|'held'|'absent'|'noop'|'unavailable', plan, revision, reason, code}. `unavailable` is an owner-evidence or
+// storage failure of THIS Film; any other failure (no code, or an unavailable database) is not a classification and propagates.
+async function classifyFilm(env,id,now){
+ const clock=clockOf(now);
+ try{
+  const {plan,revision}=await readReconcilePlan(env,id,{at:clock()});
+  if(plan.state==='write')return {state:'stale',plan,revision};
+  if(plan.state==='held')return {state:'held',reason:plan.reason};
+  if(plan.state==='absent')return {state:'absent'};
+  return {state:'noop'};
+ }catch(error){
+  if(!error?.code||error.code==='film_person_unavailable'&&!error.cause)throw error;
+  return {state:'unavailable',code:error.code};
+ }
+}
+
 // DRY RUN: read only. No receipt, no statement, no write; it never reads a state it cannot prove (a Film whose owner evidence is unavailable is `unavailable` with the code). Returns
 // {examined, cursor, hasMore, stale:[{id,revision,effective,preImage,postImage,changes}], held:[{id,reason}], noop, absent, unavailable:[{id,code}], wouldWrite}. `cursor` is the last examined id: pass it as
 // `after` for the next page. `wouldWrite` is capped by `writeCap`. A dry-run entry is a report, NOT a pre-image: only an apply intent is.
@@ -286,17 +303,94 @@ export async function dryRunLocalizationReconcile(env,{after,limit,writeCap,now}
  const ids=page.slice(0,examineCap),out={examined:0,cursor:ids.length?ids.at(-1):start,hasMore:page.length>examineCap,stale:[],held:[],noop:0,absent:0,unavailable:[],wouldWrite:0};
  for(const id of ids){
   out.examined++;
-  try{
-   const {plan,revision}=await readReconcilePlan(env,id,{at:clock()});
-   if(plan.state==='write'){out.stale.push({id,revision,effective:plan.effective,preImage:plan.preImage,postImage:plan.postImage,changes:plan.changes});if(out.wouldWrite<writes)out.wouldWrite++;}
-   else if(plan.state==='held')out.held.push({id,reason:plan.reason});
-   else if(plan.state==='absent')out.absent++;
-   else out.noop++;
-  }catch(error){
-   if(!error?.code||error.code==='film_person_unavailable'&&!error.cause)throw error;
-   out.unavailable.push({id,code:error.code});
-  }
+  const result=await classifyFilm(env,id,clock);
+  if(result.state==='stale'){out.stale.push({id,revision:result.revision,effective:result.plan.effective,preImage:result.plan.preImage,postImage:result.plan.postImage,changes:result.plan.changes});if(out.wouldWrite<writes)out.wouldWrite++;}
+  else if(result.state==='held')out.held.push({id,reason:result.reason});
+  else if(result.state==='absent')out.absent++;
+  else if(result.state==='unavailable')out.unavailable.push({id,code:result.code});
+  else out.noop++;
  }
+ return out;
+}
+
+// DIAGNOSE (AIR-683): the read-only census of the live cohort. Every Film is classified by the SAME function the dry run uses (`classifyFilm`, over readReconcilePlan: the AIR-663 resolver and planner,
+// owner precedence and merged ancestors included; never an SQL guess of an effective value). It records nothing, opens no receipt and writes nothing, and returns AGGREGATES only (counts, reasons, error
+// codes, bounded id lists; never a stored row, an image or a value).
+// RANGE, NOT CATALOG. A call reports the contiguous range of Films it examined after `after`. `complete` is true only for a call that started at the first Film (`fromStart`) AND reached the end of the
+// table (`reachedEnd`): a suffix that starts after every stale Film is a clean range, never a clean catalog. `zeroEligible` = `complete` && `rangeClean` and nothing else. A resumed call is never
+// `complete`; the caller (the Controller) sums contiguous ranges from the first Film to a `reachedEnd` range and claims zero only when every range is `rangeClean` with identical pins.
+// REAL LIMIT. D1 allows 1,000 queries per Worker invocation on Paid and counts a db.batch() as ONE query (https://developers.cloudflare.com/d1/platform/limits/, 20 Nov 2026). The planner needs about 12
+// queries per Film, so a call COUNTS its own D1 calls (every statement execution and every batch) and stops before the next Film when the count, the largest per-Film cost seen and the closing pin reads
+// would exceed the limit (`stopped: 'd1_query_budget'`, resume at `cursor`). It is a counted stop against the provider limit, not a product quota. The wall-time budget is a SOFT stop between Films
+// (`stopped: 'budget'`), not a hard request deadline. Both stops are NORMAL continuation; a failure is reported in `failure` and is never a continuation.
+// PINS. The Film/Person marker (state, generation, schema version, baseline) and the owner-review domain (mode, writes, generation) are read at the start and at the end and compared (`pinsStable`);
+// the start gate requires marker `open` and an owner-review domain `d1` with writes `open` or `held` (otherwise the call refuses, even for an empty table). Census of observations at the time each Film
+// was read, not a global snapshot.
+export const DIAGNOSE_BUDGET_DEFAULT_MS=20000;
+export const DIAGNOSE_BUDGET_MAX_MS=25000;
+export const DIAGNOSE_IDS_MAX=200;
+export const DIAGNOSE_D1_QUERY_LIMIT=1000;
+// Queries reserved for the closing pin reads (marker inventory, version, marker rows, owner-review row) with a margin, and the first-Film estimate before any Film has been measured.
+const DIAGNOSE_END_RESERVE=10,DIAGNOSE_FIRST_FILM_ESTIMATE=16;
+const bump=(map,key)=>{map[key]=(map[key]||0)+1;};
+const STATEMENT=Symbol('statement');
+// Counts every D1 execution of a call. A prepared statement counts when it is executed (first, all, run, raw); a batch counts once, as D1 does. Statements prepared here are unwrapped for batch.
+function countedEnv(env){
+ const db=database(env),counter={n:0};
+ if(!db)throw failed('film_person_unavailable');
+ const wrap=statement=>({[STATEMENT]:statement,bind:(...args)=>wrap(statement.bind(...args)),first:(...args)=>{counter.n++;return statement.first(...args);},all:(...args)=>{counter.n++;return statement.all(...args);},run:(...args)=>{counter.n++;return statement.run(...args);},raw:(...args)=>{counter.n++;return statement.raw(...args);}});
+ const wrapped={prepare:sql=>wrap(db.prepare(sql)),batch:statements=>{counter.n++;return db.batch(statements.map(item=>item?.[STATEMENT]??item));}};
+ return {env:typeof env.prepare==='function'?wrapped:{...env,DB:wrapped},counter};
+}
+async function readPins(env){
+ const filmPerson=await readAuthority(env);
+ const db=database(env);
+ let owner;
+ try{owner=await one(db,'SELECT mode,generation,writes FROM owner_review_authority WHERE id=1');}
+ catch(error){throw failed('localization_owner_unavailable',error);}
+ if(!owner)throw failed('localization_owner_unavailable');
+ return {filmPerson:{state:filmPerson.state,generation:filmPerson.generation,version:filmPerson.version,baseline:filmPerson.baseline},ownerReview:{mode:owner.mode,writes:owner.writes,generation:owner.generation}};
+}
+const pinsEqual=(first,second)=>JSON.stringify(first)===JSON.stringify(second);
+export async function diagnoseLocalizationCohort(env,{after,budgetMs,queryBudget,now,clock=Date.now}={}){
+ if(budgetMs!==undefined&&(!Number.isInteger(budgetMs)||budgetMs<1||budgetMs>DIAGNOSE_BUDGET_MAX_MS))throw failed('film_person_invalid');
+ if(queryBudget!==undefined&&(!Number.isInteger(queryBudget)||queryBudget<1||queryBudget>DIAGNOSE_D1_QUERY_LIMIT))throw failed('film_person_invalid');
+ const limit=queryBudget??DIAGNOSE_D1_QUERY_LIMIT,budget=budgetMs??DIAGNOSE_BUDGET_DEFAULT_MS,started=clock(),startCursor=cursorOf(after);
+ const {env:counted,counter}=countedEnv(env);
+ const first=await readPins(counted);
+ if(first.filmPerson.state!=='open'||first.ownerReview.mode!=='d1'||!['open','held'].includes(first.ownerReview.writes))throw failed(first.filmPerson.state!=='open'?'localization_authority_not_open':'localization_owner_unavailable');
+ const out={fromStart:startCursor==='',reachedEnd:false,complete:false,startedAfter:startCursor,cursor:startCursor,examined:0,stale:0,noop:0,absent:0,held:0,heldByReason:{},unavailable:0,unavailableByCode:{},staleIds:[],unavailableIds:[],staleIdsTruncated:false,unavailableIdsTruncated:false,stopped:null,failure:null,pins:{start:first,end:null},pinsStable:false,rangeClean:false,zeroEligible:false,d1Queries:0,d1QueryLimit:limit,maxQueriesPerFilm:0,elapsedMs:0};
+ let cursor=startCursor;
+ pages:for(;;){
+  let ids,more;
+  try{const page=await filmPage(counted,{after:cursor,limit:RECONCILE_EXAMINE_MAX});ids=page.slice(0,RECONCILE_EXAMINE_MAX);more=page.length>RECONCILE_EXAMINE_MAX;}
+  catch(error){out.failure=error?.code||'film_person_unavailable';break;}
+  for(const id of ids){
+   if(counter.n+Math.max(out.maxQueriesPerFilm,DIAGNOSE_FIRST_FILM_ESTIMATE)+DIAGNOSE_END_RESERVE>limit){out.stopped='d1_query_budget';break pages;}
+   if(clock()-started>=budget){out.stopped='budget';break pages;}
+   const before=counter.n;
+   let result;
+   try{result=await classifyFilm(counted,id,now);}
+   catch(error){out.failure=error?.code||'film_person_unavailable';break pages;}
+   out.maxQueriesPerFilm=Math.max(out.maxQueriesPerFilm,counter.n-before);
+   out.examined++;cursor=id;out.cursor=id;
+   if(result.state==='stale'){out.stale++;if(out.staleIds.length<DIAGNOSE_IDS_MAX)out.staleIds.push(id);else out.staleIdsTruncated=true;}
+   else if(result.state==='held'){out.held++;bump(out.heldByReason,result.reason);}
+   else if(result.state==='absent')out.absent++;
+   else if(result.state==='unavailable'){out.unavailable++;bump(out.unavailableByCode,result.code);if(out.unavailableIds.length<DIAGNOSE_IDS_MAX)out.unavailableIds.push(id);else out.unavailableIdsTruncated=true;}
+   else out.noop++;
+  }
+  if(!more){out.reachedEnd=true;break;}
+ }
+ try{
+  out.pins.end=await readPins(counted);
+  out.pinsStable=pinsEqual(first,out.pins.end);
+ }catch{out.pinsStable=false;}
+ out.d1Queries=counter.n;
+ out.complete=out.fromStart&&out.reachedEnd&&out.failure===null;
+ out.rangeClean=out.stale===0&&out.unavailable===0&&out.failure===null&&out.pinsStable;
+ out.zeroEligible=out.complete&&out.rangeClean;
+ out.elapsedMs=clock()-started;
  return out;
 }
 
