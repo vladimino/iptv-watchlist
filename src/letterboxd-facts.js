@@ -173,8 +173,11 @@ function recordRatingChange(record,incoming,effective){
    if(typeof LetterboxdAdmissionAuthority!=='undefined'&&(key==='letterboxd/admissions/verified-films.json'||(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)))){
     try{await LetterboxdAdmissionAuthority.guardLegacyWrite(env);}
     catch(error){
-     if(error&&error.code==='letterboxd_admission_closed')throw new FactsError('admission_closed','Admissions are closed');
-     if(error&&error.code==='letterboxd_admission_unavailable')throw new FactsError('admission_unavailable','The admission authority cannot be read');
+     // the admissions object keeps its delivered typed error; the moved import documents answer the typed Facts errors of the chunk handler (409 / 503)
+     if(key!=='letterboxd/admissions/verified-films.json'){
+      if(error&&error.code==='letterboxd_admission_closed')throw new FactsError('admission_closed','Admissions are closed');
+      if(error&&error.code==='letterboxd_admission_unavailable')throw new FactsError('admission_unavailable','The admission authority cannot be read');
+     }
      throw error;
     }
    }
