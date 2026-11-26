@@ -4,7 +4,7 @@
 // request id and content digest as a rootless write (receipt parity); no row without a root, for `already`, `not_proved`, `conflict`, a malformed root, a matching same_work row, a replay or the owner backfill;
 // absent / off / pending / on (insert only while pending or on, decided at COMMIT time, so a flip between preparing and committing is honest); a schema without the control tables (one commit-time guard, never nothing);
 // atomicity (a failed guard or a colliding row rolls the claim back; nothing is half written); a valid duplicate (same event or a different event with the same root) adds nothing; a different root is a different key;
-// retries (first committed attempt decides, a lost hand-over stays rootless); statement counts; rollback of the writer to `off` keeps history; and the dormant wiring (nothing flips a writer, no reader).
+// retries (first committed attempt decides, a lost hand-over stays rootless), and, through the REAL receipt protocol (section 13): a lost response after commit (rooted and rootless first commit, opposite hand-over on retry), a first rooted batch failed before commit and retried rootless or rooted once due, and the pre-0042 guard refusing a real receipted batch before the replan; statement counts; rollback of the writer to `off` keeps history; and the dormant wiring (nothing flips a writer, no reader).
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -371,4 +371,94 @@ for(const state of ['pending','on']){
  const claim=fs.readFileSync('src/canonical-letterboxd-claim.js','utf8');
  assert.ok(/export const LETTERBOXD_CLAIM_ACTIVATED=true;/.test(claim),'the claim producer gate is unchanged');
 }
+
+// ===== 13. the actual receipt protocol (review of PR #1022): an uncertain first attempt, a lost response and a pre-0042 guard refusal, through `applyLetterboxdClaim` and its real receipt =====
+// A D1 stand-in whose claim batch (the one that writes the Film external id) can be lost AFTER commit (the response never arrives), refused BEFORE commit, or preceded by a schema apply.
+const CLAIM_BATCH=statements=>statements.some(item=>/INSERT INTO film_external_id/.test(item.text));
+function receiptEnv(file){
+ const plan={loseAfterCommit:false,failBeforeCommit:false,beforeBatch:null,claimBatches:0};
+ const db=d1Standin(file,{onBatch:async statements=>{
+  if(!CLAIM_BATCH(statements))return;
+  plan.claimBatches++;
+  if(plan.beforeBatch){const hook=plan.beforeBatch;plan.beforeBatch=null;await hook();}
+  if(plan.failBeforeCommit){plan.failBeforeCommit=false;throw new Error('D1_ERROR: network connection lost before the batch');}
+ }});
+ const original=db.batch.bind(db);
+ db.batch=async statements=>{
+  const out=await original(statements);
+  if(plan.loseAfterCommit&&CLAIM_BATCH(statements)){plan.loseAfterCommit=false;throw new Error('D1_ERROR: network connection lost after the batch');}
+  return out;
+ };
+ return {env:{DB:db},plan};
+}
+const state=file=>JSON.stringify({claims:claims(file),rows:ledger(file).map(row=>[row.evidence_key,row.request_id,row.source_root]),receipts:receipts(file),revision:revision(file)});
+const LATER='2026-11-20T10:05:00.000Z';// past the receipt's attempt window (120 s): the receipt is due
+const first=(over={})=>({event:'link:AAA1:1',lid:'AAA1',tmdb:'1',now:()=>T,...over});
+const retry=(over={})=>({event:'link:AAA1:1',lid:'AAA1',tmdb:'1',now:()=>LATER,...over});
+
+// (a) The response of the first, atomic claim batch is LOST after it committed. The receipt tail was in that batch, so the receipt is already applied; the retry finds the claim and never writes again.
+//     Rooted first commit -> one row, and a retry with ANOTHER root or none leaves it; rootless first commit -> no row, and a retry WITH a root attributes none ("the first committed attempt decides").
+for(const [firstRoot,retryRoot,rows_] of [[ROOT_A,undefined,1],[ROOT_A,ROOT_B,1],[undefined,ROOT_A,0],[undefined,undefined,0]]){
+ const file=proved(),{env,plan}=receiptEnv(file);
+ await setState(env,'on');
+ plan.loseAfterCommit=true;
+ const lost=await attempt(()=>applyLetterboxdClaim(env,first({root:firstRoot})));
+ assert.notEqual(lost.state,'written','the caller did not see the commit');
+ assert.deepEqual(claims(file),['AAA1'],'the batch had committed');
+ assert.equal(ledger(file).length,rows_,'the row exists exactly when the first committed attempt was rooted');
+ assert.deepEqual(receipts(file).map(row=>row.state),['applied'],'the claim, the row and the receipt tail are one batch: the receipt is applied');
+ const settled=state(file);
+ const again=await applyLetterboxdClaim(env,retry({root:retryRoot}));
+ assert.equal(again.state,'already','the retry settles on the committed claim');
+ assert.equal(state(file),settled,'same applied receipt, same revision, '+rows_+' immutable evidence row(s): nothing new for the opposite hand-over');
+ assert.equal(plan.claimBatches,1,'no second claim batch');
+}
+
+// (b) The FIRST rooted batch fails before commit. Its receipt exists and stays pending; nothing of the claim or the row landed. Once the receipt is due, the retry runs the actual receipt retry path: with no hand-over the first
+//     actual commit is rootless (no row); with the hand-over of the same call it is rooted. The receipt, the request id and the revision are the same either way.
+for(const retryRoot of [undefined,ROOT_A]){
+ const file=proved(),{env,plan}=receiptEnv(file);
+ await setState(env,'on');
+ plan.failBeforeCommit=true;
+ const failed_=await attempt(()=>applyLetterboxdClaim(env,first({root:ROOT_A})));
+ assert.notEqual(failed_.state,'written');
+ assert.deepEqual(claims(file),[]);assert.equal(ledger(file).length,0);assert.equal(revision(file),0);
+ const [pending]=receipts(file);
+ assert.ok(pending&&pending.state!=='applied','the receipt exists and is not applied');
+ // Not yet due: the retry does not run a batch.
+ const early=await attempt(()=>applyLetterboxdClaim(env,first({now:()=>'2026-11-20T10:00:30.000Z',root:retryRoot})));
+ assert.notEqual(early.state,'written','a receipt that is not due is not replayed');
+ assert.equal(plan.claimBatches,1);
+ const done=await applyLetterboxdClaim(env,retry({root:retryRoot}));
+ assert.equal(done.state,'written');
+ assert.equal(done.requestId,pending.request_id,'the same receipt');
+ assert.deepEqual(receipts(file).map(row=>[row.request_id,row.state]),[[pending.request_id,'applied']]);
+ assert.deepEqual(claims(file),['AAA1']);
+ assert.equal(revision(file),1);
+ assert.equal(ledger(file).length,retryRoot?1:0,'the first ACTUAL commit decides: rootless without a hand-over, rooted with one');
+ if(retryRoot)assert.equal(ledger(file)[0].request_id,pending.request_id);
+}
+
+// (c) The schema apply race, with the real receipt: the batch was prepared on a schema without the control tables (the ONE commit-time guard), migration 0042 is applied before it commits. The guard refuses the batch:
+//     no applied receipt, no claim, no row, no revision move. After the writer is activated, the due receipt replans, now with the insert and the assertion, and commits claim, row and receipt together.
+for(const retryRoot of [ROOT_A,undefined]){
+ const file=proved(before),{env,plan}=receiptEnv(file);
+ plan.beforeBatch=async()=>{assert.equal(sqlite(file,read(WRITER_FILE)).status,0);};
+ const refused=await attempt(()=>applyLetterboxdClaim(env,first({root:ROOT_A})));
+ assert.notEqual(refused.state,'written');
+ assert.equal(one(file,"SELECT COUNT(*) FROM sqlite_master WHERE name='identity_evidence_writer'"),1,'0042 was applied before the commit');
+ assert.deepEqual(claims(file),[],'no claim');assert.equal(ledger(file).length,0,'no evidence row');assert.equal(revision(file),0,'no revision move');
+ assert.ok(receipts(file).every(row=>row.state!=='applied'),'no applied receipt before the replan');
+ const [pending]=receipts(file);
+ assert.ok(pending);
+ await setState(env,'on');
+ const done=await applyLetterboxdClaim(env,retry({root:retryRoot}));
+ assert.equal(done.state,'written');
+ assert.equal(done.requestId,pending.request_id,'the same receipt');
+ assert.deepEqual(receipts(file).map(row=>row.state),['applied']);
+ assert.deepEqual(claims(file),['AAA1']);
+ assert.equal(ledger(file).length,retryRoot?1:0,'the replan reads the schema again: rooted with the hand-over, rootless without');
+ assert.equal(plan.claimBatches,2,'one refused batch, one committed batch');
+}
+
 console.log('identity evidence claim bridge writer: ok');
