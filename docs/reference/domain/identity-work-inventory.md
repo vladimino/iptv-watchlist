@@ -80,9 +80,9 @@ Lane order is `film`, `epg_observation`, `watchlist_admission`, `letterboxd_rate
 | --- | --- | --- |
 | Canonical Film, `film_rated_admission` | D1 | Read; the only confirmation of a candidate's Film link |
 | Discovery observations and decisions | D1 | Read through the existing reader |
-| Unverified `rated-candidates.json` | R2, compare-and-swap | Read, one archive per request |
+| Unverified `rated-candidates.json` | R2, compare-and-swap at marker `r2`; a D1 Ratings document at marker `d1` ([ADR 0222](../../adr/0222-letterboxd-import-coordination-documents-in-d1.md)) | Read, one archive per request |
 | `letterboxd/admissions/verified-films.json` | R2 receipt | Evidence only; never confirms a link |
-| `letterboxd/imports/registry.json` | derived R2 projection | Read; written only by the existing candidate writers and the owner-confirmed backfill |
+| `letterboxd/imports/registry.json` | derived R2 projection | Read; written only by the existing candidate writers and the owner-confirmed backfill. At marker `d1` it is neither written nor read as authority (frozen history): the archive list and the candidate documents come from D1 |
 
 ## Owner page
 

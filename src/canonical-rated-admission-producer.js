@@ -5,6 +5,7 @@
 import {database,failed,many,one} from './film-person-authority.js';
 import {RETRY_POLICY,defineOperation,digestOf,operationRegistry,receiptedWrite} from './canonical-receipts.js';
 import {INLINE_RECONCILE_LIMIT,SOURCE_CHANGED,producerRequestId,producerRouteOpen,reconcileOwnOrigin} from './canonical-producer-adapters.js';
+import {admissionClosedError,admissionRoute,readAdmissionAuthority} from './letterboxd-admission-authority.js';
 import {RATED_RECEIPT_KEY,admitRatedFilm,advanceRetentionWatermark,readRetentionWatermark,retainFilm,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 
 export const RATED_ADMISSION_ORIGIN='rated_admission_retention';
@@ -87,6 +88,12 @@ export function retentionContent(input){
  return {id:input.id,watchlist:input.watchlist,observedAt:instant(input.observedAt),evidence:plain(input.evidence)?input.evidence:{}};
 }
 export async function admissionDigest(input){return digestOf({operation:FILM_ADMISSION_OPERATION,content:admissionContent(input)});}
+// AIR-602 / ADR 0207 decision 3: the request identity of an admission at the marker mode `d1` has NO clock and no R2 key in it: `{kind, movie id, code, evidence digest, title, year}`. The same source content
+// always gives the same digest, so a retry (a lost response, a restart) names the same request, and a title edit on the page is a new digest, hence a new request.
+export function admissionContentD1(input){
+ return {kind:input?.kind,tmdb:String(input?.tmdb??''),sourceCode:input?.sourceCode,evidence:input?.evidenceDigest,title:typeof input?.title==='string'&&input.title.trim()?input.title.trim():null,year:Number.isInteger(input?.year)?input.year:null};
+}
+export async function admissionDigestD1(input){return digestOf({operation:FILM_ADMISSION_OPERATION,d1:true,content:admissionContentD1(input)});}
 export async function retentionDigest(input){return digestOf({operation:FILM_RETENTION_OPERATION,id:input?.id,content:retentionContent(input)});}
 
 async function planAdmission(env,input){
@@ -172,10 +179,19 @@ export function ratedAdmissionOperations({replan=async()=>null,now}={}){
  ];
 }
 
+// AIR-602 / ADR 0207 decision 1: the LEGACY admission unit (R2 receipt entry -> receipted `film_admission`) runs only while the admission marker proves `r2` or proves the migration absent. Under `closed` it
+// refuses before its first effect (no plan, no receipt), at `d1` the new coordinator is the only admission path, and an unreadable marker is `letterboxd_admission_unavailable`. Retention units are not
+// fenced by this marker and keep running.
+async function requireLegacyAdmission(env){
+ const authority=await readAdmissionAuthority(env);
+ if(admissionRoute(authority)!=='legacy')throw admissionClosedError(authority.mode);
+}
+
 async function applyAdmission(env,{origin,event,input,replan,now,policy=RETRY_POLICY,routeOpen=false}={}){
  // AIR-532: a slice reads the marker ONCE (applyRatedAdmissionRetention) and passes `routeOpen`; a single call still reads it itself.
  const route=routeOpen===true||await producerRouteOpen(env);
  if(!route)return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
+ await requireLegacyAdmission(env);
  const plan=await planAdmission(env,input);
  if(plan.noop)return {state:'noop',receipt:false,requestId:null,id:plan.id};
  const digest=await admissionDigest(input);
@@ -314,6 +330,8 @@ export async function planRatedAdmissionIntent(env,{event,admissions=[],retentio
 
 export async function applyRatedAdmissionRetention(env,{event,admissions=[],retentions=[],intent:previousIntent=[],now,policy=RETRY_POLICY,limit=UNIT_CAP}={}){
  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
+ // A slice with admissions (new or carried) is refused as a whole BEFORE its plan under `closed` and `d1` (ADR 0207 decision 1); a retention-only slice is not fenced.
+ if((admissions||[]).length||(previousIntent||[]).some(unit=>unit?.operation===FILM_ADMISSION_OPERATION))await requireLegacyAdmission(env);
  const nowFn=clockOf(now);
  const origin=RATED_ADMISSION_ORIGIN;
  const cap=Math.min(Math.max(Number(limit)||UNIT_CAP,1),UNIT_CAP);
