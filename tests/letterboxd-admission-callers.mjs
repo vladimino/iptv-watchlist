@@ -670,6 +670,8 @@ const file=fresh('d1'),env=world(file);
 {
  reset();
  const GUARD='INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
+ // the shared Diary check document still holds the entries of the earlier scenarios; this one needs a queue that holds only its own id, whatever the sort order of the runtime
+ sqlite(file,"DELETE FROM ratings_document WHERE key='letterboxd/facts/scans/diary-identity.json'");
  await seed(env,'Wb1');
  const film={id:'Wb1',title:'TWb1',year:2003,url:'https://letterboxd.com/film/fixture-wb-2003/'};
  const r=await WatchlistD1.publishSnapshot(env,[film],{scanId:'sw2',observedAt:'2026-11-25T11:30:00.000Z',runId:'r-sw2',slotKey:'k'},{now:Date.parse('2026-11-25T11:30:00.000Z')});
