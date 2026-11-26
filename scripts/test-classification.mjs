@@ -355,6 +355,9 @@ export const FILES={
  "migration-0046-catalog-enrichment.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-plan.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
