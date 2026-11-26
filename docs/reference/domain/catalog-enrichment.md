@@ -16,6 +16,7 @@ It never creates, merges or redirects a Film. It never writes or changes a claim
 | `catalog-enrichment-sources.js` | One request round per applicable source behind the shared upstream cooldown, and the Letterboxd page agreement |
 | `catalog-enrichment-producer.js` | The step for one Film: anchor check, fetch, decision, units, state rows |
 | `catalog-enrichment-drain.js` | The resource-bounded queue drainer: one call is one run |
+| `catalog-enrichment-workflow.js` | The Workflow shell: the instance body, the run record, the kick, the parked wait and the reconcile |
 | `admin/settings.js` | The authenticated control and readback routes ([admin API](../api/admin.md#catalog-enrichment-control-apiadminsettings)) |
 
 ## Anchors and sources
@@ -73,6 +74,15 @@ Known work is made pending by the change that causes it: triggers on `film_exter
 
 A run acquires the lease, consumes the runnable signals, picks due Films (live before background, the background share measured in committed units) and ends only for a reason: `idle`, `parked` (with the earliest due time), `handover` (the statement budget), `paused`, `generation_moved`, `lease_held`, `yield` or `error_backoff`. The budgets are safety budgets, not throughput quotas; the defaults are constants in `catalog-enrichment-drain.js` and each run's outbox entry reports them.
 
+## The Workflow shell
+
+An instance of the Cloudflare Workflow `CatalogEnrichmentWorkflow` (binding `CATALOG_ENRICHMENT_WORKFLOW`) runs `drain` in steps. The **run record** is the `summary_json` of the `projection_run` row named `catalog_enrichment_run`: the live instance, its phase (`running`, `parked` or `retired`), its due time and the successor of a handover, moved by compare-and-swap. The drainer's own lease stays the authority for writing; the record only says whom to wake.
+
+- **No lost wakeup.** Parking and retiring first make the intent durable on the record and only then re-check for runnable work (a runnable signal or a due Film); work found cancels the intent. `kick` runs after a causal change commits: a `parked` instance gets a `kick` event, a `running` instance with a live owner needs none, a `retired` record or a missing owner creates the next instance, and a send that throws is read as "no live owner". A `running` record is believed only while the drainer lease is live or the record moved within two minutes, so a crashed instance never strands the work.
+- **Parked wait.** The instance waits for the `kick` event with the time to the earliest due retry as its timeout; a timeout throws, is caught and is the due-time wake.
+- **Handover.** At the statement budget the instance records a strictly newer successor, creates it (idempotent by id) and stops; the successor writes only after it acquires its own lease.
+- **Reconcile.** `reconcile` is the safety net for a lost kick, a path without the hook and a crash after a commit; it creates nothing when nothing is runnable. Its cron expression is not in `wrangler.jsonc`: the activation change delivers it. A deploy carries the binding and the dispatch, which do nothing while the control is not `active`.
+
 ## Not part of this contract yet
 
-The Workflow wrapper, the kick and the due-time wake of the run, the Monitor fact reader, the `/admin/settings` page, the scope bootstraps and the Discovery and Watchlist emitters are separate deliveries. Until the wrapper exists nothing calls the drainer.
+The Monitor fact reader, the `/admin/settings` page, the scope bootstraps, the Discovery and Watchlist emitters and a yield read from the real EPG publication phase (the drainer accepts an injected predicate) are separate deliveries.

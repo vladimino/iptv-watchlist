@@ -10,6 +10,7 @@ Operational reference for the [Catalog Enrichment Producer](../reference/domain/
 | Activate the control and enable a scope | Owner production operation. Not reachable from the admin route |
 | Pause, resume | Owner, through `POST /api/admin/settings/catalog-enrichment` |
 | Retry a blocked or deferred part | Owner, through the same route, on the rows the owner saw |
+| Deliver the reconcile cron expression (`CatalogEnrichmentRunner.CRON`) | Versioned configuration change under the activation operation; a deploy never adds it |
 | Change the upstream coordination mode | Separate owner operation; the producer works at every mode (an absent table or an unreadable mode is `off`) |
 
 ## Preflight before any activation
