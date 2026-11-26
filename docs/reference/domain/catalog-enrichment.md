@@ -74,6 +74,16 @@ Known work is made pending by the change that causes it: triggers on `film_exter
 
 A run acquires the lease, consumes the runnable signals, picks due Films (live before background, the background share measured in committed units) and ends only for a reason: `idle`, `parked` (with the earliest due time), `handover` (the statement budget), `paused`, `generation_moved`, `lease_held`, `yield` or `error_backoff`. The budgets are safety budgets, not throughput quotas; the defaults are constants in `catalog-enrichment-drain.js` and each run's outbox entry reports them.
 
+## Priority and fairness
+
+Eligibility is retained; priority is derived at pick time from authoritative facts, and **unknown is not false**. A state row carries the cohort of its Film: `live` when any retained membership is in a live scope (rated, Watchlist, Discovery), `history` when only the historical widening holds it. A pick examines at most a window of rows per cohort at the head of the state index (ordered by `retry_at`, then `due_since`, so a backed-off item is not in the window), and classifies exactly those Films:
+
+- `personal`: true for an authoritative Watchlist member or a verified rated admission; false only for a Film held solely by the Discovery scope that has neither; otherwise unknown. A missing Watchlist projection row is never read as a negative for a Film another scope holds.
+- `available`: true for a member of the pinned published EPG generation, false when that generation is readable and the Film is not in it, unknown when no generation is readable.
+- A positive fact makes the Film live whatever its cohort; a history-only Film without one is background; a Film of a live scope is live unless both facts are known false.
+
+Live Films are served oldest first. Background work progresses under sustained live arrivals in about one committed unit in eight; the share is measured in committed units over the recent runs recorded in the outbox, so a handover does not reset it, and a start that fails consumes none of it. These are engineering defaults in one module, not an approved quota.
+
 ## The Workflow shell
 
 An instance of the Cloudflare Workflow `CatalogEnrichmentWorkflow` (binding `CATALOG_ENRICHMENT_WORKFLOW`) runs `drain` in steps. The **run record** is the `summary_json` of the `projection_run` row named `catalog_enrichment_run`: the live instance, its phase (`running`, `parked` or `retired`), its due time and the successor of a handover, moved by compare-and-swap. The drainer's own lease stays the authority for writing; the record only says whom to wake.

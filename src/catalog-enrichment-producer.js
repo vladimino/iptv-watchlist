@@ -114,12 +114,15 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  if(filmRow.status==='identity_disagreement')return {state:'blocked',reason:'identity_disagreement'};
  // the rows of the applicable sources; a missing one is created due, a removed source becomes not_applicable (its earlier writes remain)
  const need=[];
+ // the cohort of a Film's rows follows its retained memberships: a Film in any live scope (rated, Watchlist, Discovery) is `live`; one held only by the historical widening is `history` (decision 5)
+ const memberScopes=(await many(db(env),'SELECT scope FROM catalog_enrichment_member WHERE film_id=?',[filmId])).map(row=>row.scope);
+ const cohort=memberScopes.length&&!memberScopes.some(scope=>['rated','c3b','discovery'].includes(scope))?'history':'live';
  for(const source of Plan.SOURCES){
   const isApplicable=applicable.includes(source);
   const parts=source==='wikidata'?['localization']:['core','credits','localization'];
   for(const part of parts){
    const row=byKey.get([part,source,0].join('|'));
-   if(isApplicable&&!row)need.push({filmId,part,source,slot:0,status:'due',planEpoch:0,refreshEpoch:0,anchor:source==='letterboxd'?context.anchors.letterboxd.value:context.anchors.tmdb.value,dueSince:now,cohort:'live'});
+   if(isApplicable&&!row)need.push({filmId,part,source,slot:0,status:'due',planEpoch:0,refreshEpoch:0,anchor:source==='letterboxd'?context.anchors.letterboxd.value:context.anchors.tmdb.value,dueSince:now,cohort});
    else if(!isApplicable&&row&&row.status!=='not_applicable')await putRow(env,ctx,{...row,status:'not_applicable',reason:'source_not_applicable'},{expectEpoch:row.refreshEpoch});
   }
  }

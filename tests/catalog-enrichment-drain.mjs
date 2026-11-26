@@ -198,4 +198,55 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  const woken=rows(w.file,"SELECT part,source,retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' ORDER BY part,source");
  assert.deepEqual(woken.map(row=>[row.part,row.source,row.retry_at]),[['core','letterboxd','2099-01-01T00:00:00.000Z'],['core','tmdb',null],['credits','tmdb',null]],'rows of an older code version are runnable at once; a row of the current version keeps its backoff');
 }
+// ---- priority end to end: authoritative facts, per-cohort bounded examination, mixed scopes, fairness across runs ----
+{
+ const w=world(0);
+ const addFilm=(n,scope,{rated=false}={})=>sqlite(w.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${n}',2,NULL,'K${n}','${T}');INSERT INTO film_external_id VALUES ('film:tmdb:${n}','tmdb','${n}',1,0,NULL);INSERT INTO catalog_enrichment_member VALUES ('film:tmdb:${n}','${scope}','${T}','k${n}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,cohort,due_since,updated_at) VALUES ('film:tmdb:${n}','film','*',0,'active','check_anchors','${scope==='c3a'?'history':'live'}','${T}','${T}');`+(rated?`INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:${n}','${n}','code${n}','${'a'.repeat(64)}','T',2000,'k','tmdb_${n}','${T}','q','${T}');`:''));
+ sqlite(w.file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('c3a',1,1,1,'${T}'),('discovery',1,1,1,'${T}');`);
+ const gen=rows(w.file,'SELECT generation FROM catalog_enrichment_control')[0].generation;
+ addFilm(301,'rated',{rated:true});   // personal (a verified rated admission)
+ addFilm(302,'discovery');            // discovery only: available in the pinned generation
+ addFilm(303,'discovery');            // discovery only: NOT in the pinned generation, no personal fact
+ addFilm(304,'c3a');                  // held only by the historical widening, no positive fact
+ addFilm(305,'rated');                // rated scope, no admission row: personal unknown
+ const classes=async()=>{const d=await D.dueFilms(w.env,{now:at0(1)});return {live:d.live.map(item=>item.filmId.slice(-3)).sort(),background:d.background.map(item=>item.filmId.slice(-3)).sort(),examined:d.examined};};
+ const at0=sec=>new Date(Date.parse(T)+sec*1000).toISOString();
+ // no readable pinned generation: availability is UNKNOWN, never false
+ let c=await classes();
+ assert.deepEqual(c.live,['301','302','303','305'],'unknown is not false: every Film of a live scope with an unknown fact is live');
+ assert.deepEqual(c.background,['304'],'a history-only Film with no positive fact is background');
+ // a readable pinned generation: 303 is now a KNOWN absence of both facts -> background; 302 is available -> live
+ sqlite(w.file,"INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run1','published','"+T+"','"+'b'.repeat(64)+"','"+T+"');INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run1','programme',0,'film:tmdb:302');UPDATE published_epg_authority SET mode='d1',cutover='open',programme_run_id='run1',generation=1;");
+ c=await classes();
+ assert.deepEqual(c.live,['301','302','305'],'available in the pinned generation, or personal, or unknown: live');
+ assert.deepEqual(c.background,['303','304'],'a retained Discovery Film that stopped airing (known absence of both) and a history-only Film are background');
+ // a positive live fact promotes a history Film whatever its cohort
+ sqlite(w.file,"INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run1','watchlist',0,'film:tmdb:304')");
+ c=await classes();
+ assert.ok(c.live.includes('304')&&!c.background.includes('304'),'a positive fact makes the Film live whatever its cohort');
+ // bounded examination: at most `window` rows per cohort, and a head that is backed off leaves the window by its retry_at
+ const heavy=world(0);
+ sqlite(heavy.file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',1,1,1,'${T}');`+Array.from({length:150},(_,i)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${1000+i}',2,NULL,'K','${T}');INSERT INTO catalog_enrichment_member VALUES ('film:tmdb:${1000+i}','discovery','${T}','k${i}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,cohort,retry_at,due_since,updated_at) VALUES ('film:tmdb:${1000+i}','core','tmdb',0,'due','live',${i<100?"'2099-01-01T00:00:00.000Z'":'NULL'},'${T}','${T}');`).join(''));
+ const d=await D.dueFilms(heavy.env,{now:at0(1),window:20});
+ assert.equal(d.examined.live,20,'a pick examines at most the window per cohort ('+d.examined.live+')');
+ assert.equal(d.live.length+d.background.length,20);
+ assert.ok([...d.live,...d.background].every(item=>Number(item.filmId.slice(-4))>=1100),'100 backed-off items ahead of the runnable ones never block them: they are not in the window');
+ // fairness: background work progresses under sustained live arrivals, measured in committed units ACROSS runs
+ const f=world(0);
+ sqlite(f.file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('c3a',1,1,1,'${T}');`);
+ const mk=(n,scope)=>sqlite(f.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${n}',2,NULL,'K${n}','${T}');INSERT INTO film_external_id VALUES ('film:tmdb:${n}','tmdb','${n}',1,0,NULL);INSERT INTO catalog_enrichment_member VALUES ('film:tmdb:${n}','${scope}','${T}','k${n}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,cohort,due_since,updated_at) VALUES ('film:tmdb:${n}','film','*',0,'active','check_anchors','${scope==='c3a'?'history':'live'}','${T}','${T}');`);
+ for(let i=0;i<8;i++)mk(400+i,'rated');
+ for(let i=0;i<3;i++)mk(500+i,'c3a');
+ const small={...D.BUDGET,statements:420,handoverAt:300,reserve:60,stepEstimate:40,unitEstimate:40};
+ const fup=upstream();
+ const order=[];let seen=new Set();
+ let last={stop:'handover'},guard=0;
+ while(last.stop==='handover'&&guard++<80){
+  last=await run(f,fup,{budget:small});
+  for(const r of rows(f.file,"SELECT film_id FROM film_metadata"))if(!seen.has(r.film_id)){seen.add(r.film_id);order.push(r.film_id.slice(-3));}
+ }
+ assert.equal(last.stop,'idle');assert.equal(order.length,11,'every Film finished');
+ const firstHistory=order.findIndex(id=>id.startsWith('5')),lastLive=order.map(id=>id.startsWith('4')).lastIndexOf(true);
+ assert.ok(firstHistory>=0&&firstHistory<lastLive,'background Films were served while live Films were still arriving, across handovers: '+order.join(','));
+}
 console.log('catalog enrichment drain: ok');

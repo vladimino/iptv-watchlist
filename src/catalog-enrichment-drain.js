@@ -41,18 +41,58 @@ export function countingEnv(env){
  return {env:{...(env&&env.DB?env:{}),DB:wrapped},counter};
 }
 
-// Due Films, oldest first by due_since within a class. A pick examines at most `window` rows at the head of the index per class; an item that failed or was backed off has its retry_at in the future, so it leaves the head
-// and cannot block independent work. Facts: personal (an authoritative Watchlist member) is known; availability in the pinned EPG generation is not read here and is UNKNOWN (null), which is never read as false.
+// The AUTHORITATIVE relevance facts of ADR 0219 decision 5, read for the Films one pick examined. UNKNOWN IS NOT FALSE: a fact that cannot be established is null, and a Film with a null fact is live.
+//  personal   true: an authoritative Watchlist member or a verified rated admission. false: a Film held ONLY by the Discovery scope that has neither. A missing Watchlist projection row is never read as a negative for a Film
+//             any other scope holds (the projection lags its authority by design).
+//  available  true: a member of the pinned PUBLISHED EPG generation; false: the pinned generation is readable and the Film is not in it; null: no readable pinned generation.
+export async function relevanceFacts(env,filmIds){
+ const handle=database(env);
+ const facts=new Map(filmIds.map(id=>[id,{personal:null,available:null,cohorts:new Set()}]));
+ if(!filmIds.length)return facts;
+ const json=JSON.stringify(filmIds);
+ const [watch,rated,scopes]=await Promise.all([
+  many(handle,'SELECT film_id FROM watchlist_film WHERE film_id IN (SELECT value FROM json_each(?))',[json]).catch(()=>[]),
+  many(handle,'SELECT film_id FROM film_rated_admission WHERE film_id IN (SELECT value FROM json_each(?))',[json]).catch(()=>[]),
+  many(handle,'SELECT film_id,scope FROM catalog_enrichment_member WHERE film_id IN (SELECT value FROM json_each(?))',[json]).catch(()=>[]),
+ ]);
+ const positive=new Set([...watch,...rated].map(row=>row.film_id));
+ const held=new Map();
+ for(const row of scopes){if(!held.has(row.film_id))held.set(row.film_id,new Set());held.get(row.film_id).add(row.scope);}
+ let members=null;
+ try{
+  const pinned=await one(handle,"SELECT programme_run_id FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id IS NOT NULL");
+  if(pinned)members=new Set((await many(handle,"SELECT DISTINCT film_id FROM published_epg_member WHERE programme_run_id=? AND kind IN ('programme','watchlist') AND film_id IN (SELECT value FROM json_each(?))",[pinned.programme_run_id,json])).map(row=>row.film_id));
+ }catch{members=null;}
+ for(const id of filmIds){
+  const fact=facts.get(id),scopeSet=held.get(id)||new Set();
+  for(const scope of scopeSet)fact.cohorts.add(scope==='c3a'?'history':'live');
+  if(!scopeSet.size)fact.cohorts.add('live');
+  fact.personal=positive.has(id)?true:(scopeSet.size&&[...scopeSet].every(scope=>scope==='discovery')?false:null);
+  fact.available=members?members.has(id):null;
+ }
+ return facts;
+}
+
+// Due Films. A pick EXAMINES at most `window` rows at the head of the state index PER COHORT (ordered by retry_at, then due_since: a backed-off or failing item has its retry_at in the future, so it leaves the head and cannot
+// block independent work), classifies exactly those Films by the authoritative facts above and applies the priority rule. -> {live, background, examined:{live,history}}, oldest first within a class.
 export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set()}){
  const handle=database(env);
- const heads=await many(handle,`SELECT s.film_id AS film_id,MIN(s.due_since) AS due_since,MIN(CASE WHEN s.part='film' THEN 0 ELSE 1 END) AS check_first FROM catalog_enrichment_state s WHERE s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement') AND ((s.part<>'film' AND s.status IN ('due','deferred_repair') AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT (s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))) OR (s.part='film' AND s.reason='check_anchors')) GROUP BY s.film_id ORDER BY MIN(s.due_since),s.film_id LIMIT ?`,[now,window*2]);
- const out={live:[],background:[]};
- for(const row of heads){
-  if(skip.has(row.film_id))continue;
-  const personal=!!await one(handle,'SELECT 1 AS x FROM watchlist_film WHERE film_id=?',[row.film_id]);
-  const cohorts=new Set(['live']);
-  const klass=priorityClass({cohorts,personal:personal?true:null,available:null});
-  out[klass].push({filmId:row.film_id,dueSince:row.due_since});
+ const base=`FROM catalog_enrichment_state s WHERE s.cohort=? AND s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement')`;
+ const examined={live:0,history:0},picked=new Map();
+ for(const cohort of ['live','history']){
+  const rows=await many(handle,`SELECT s.film_id AS film_id,s.due_since AS due_since,s.retry_at AS retry_at ${base} AND ((s.part<>'film' AND s.status IN ('due','deferred_repair') AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT (s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))) OR (s.part='film' AND s.reason='check_anchors')) ORDER BY s.retry_at,s.due_since,s.film_id LIMIT ?`,[cohort,now,window]);
+  examined[cohort]=rows.length;
+  for(const row of rows){
+   if(skip.has(row.film_id))continue;
+   const known=picked.get(row.film_id);
+   if(!known||row.due_since<known.dueSince)picked.set(row.film_id,{filmId:row.film_id,dueSince:row.due_since});
+  }
+ }
+ const facts=await relevanceFacts(handle,[...picked.keys()]);
+ const out={live:[],background:[],examined};
+ for(const entry of [...picked.values()].sort((a,b)=>a.dueSince<b.dueSince?-1:a.dueSince>b.dueSince?1:a.filmId<b.filmId?-1:1)){
+  const fact=facts.get(entry.filmId);
+  out[priorityClass({cohorts:fact.cohorts,personal:fact.personal,available:fact.available})].push({...entry,personal:fact.personal,available:fact.available});
  }
  return out;
 }
@@ -71,6 +111,9 @@ export async function earliestWake(env,{now}){
 // One run. opts: {runId, clock:()=>iso, tools, fetchImpl, coordinator, budget, shouldYield?:async()=>boolean, maxFilms?}. -> {stop, wakeAt?, counts}
 export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),tools,fetchImpl,coordinator=null,budget=BUDGET,shouldYield=null,maxFilms=Infinity}){
  const {env,counter}=countingEnv(rawEnv);
+ // The background share is measured in COMMITTED units across runs (a handover must not reset it): the recent runs' outbox entries are the baseline.
+ let baseLive=0,baseBackground=0;
+ try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
  const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0};
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed}});
  const control=await readControl(env);
@@ -115,7 +158,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     if(outcome.consumed){consumed++;counts.signals++;}
    }
    const due=await dueFilms(env,{now:clock(),skip});
-   const klass=nextClass({hasLive:due.live.length>0,hasBackground:due.background.length>0,committedLive:counts.committedLive,committedBackground:counts.committedBackground});
+   const klass=nextClass({hasLive:due.live.length>0,hasBackground:due.background.length>0,committedLive:baseLive+counts.committedLive,committedBackground:baseBackground+counts.committedBackground});
    if(!klass){
     if(consumed)continue; // new work may have become due by the signals just consumed
     const wakeAt=await earliestWake(env,{now:clock()});
