@@ -522,7 +522,9 @@ const appliedIn=list=>list.some(item=>/SET state='applied'/.test(item.text));
  walk('src');walk('scripts');
  // AIR-605: the Catalog Enrichment units (dormant, not bundled) are the first consumer of the protocol; any other importer is still refused.
  assert.deepEqual(importers,['src/catalog-enrichment-units.js'],'only the dormant Catalog Enrichment units import the operation key protocol');
- for(const file of ['build.mjs','package.json','wrangler.jsonc'])assert.ok(!fs.readFileSync(file,'utf8').includes('receipt-operation-key'),file+' does not bundle it');
+ // AIR-605: the protocol is bundled ONLY as the dependency of the dormant Catalog Enrichment drainer (one scope, ReceiptOperationKey); no other file names it.
+ for(const file of ['package.json','wrangler.jsonc'])assert.ok(!fs.readFileSync(file,'utf8').includes('receipt-operation-key'),file+' does not bundle it');
+ assert.equal((fs.readFileSync('build.mjs','utf8').match(/receipt-operation-key/g)||[]).length,1,'build.mjs scopes it exactly once, for the dormant Catalog Enrichment drainer');
  const source=fs.readFileSync('src/receipt-operation-key.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bfetch\(|BUCKET|R2|setTimeout|setInterval|cron|scheduled|Date\.now/i.test(source),'no network, R2, timer, schedule or wall clock');
  assert.ok(!/operation_key/.test(fs.readFileSync('src/canonical-mutations.js','utf8')),'the fenced writers are unchanged');
