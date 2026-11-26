@@ -358,6 +358,9 @@ export const FILES={
  "catalog-enrichment-plan.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-store.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
