@@ -192,6 +192,8 @@ export async function mutatePerson(env,input){
  const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
  const entities=[{kind:'person',id,expected}];
  const statements=head(gate,entities);
+ // ADR 0211 decision 3 (AIR-605): optional caller guards, the same bounded shape as mutateFilm's, asserted INSIDE the batch (an invalidated Film plan, a stale epoch, a lost lease or a moved control generation refuse the Person unit).
+ for(const guard of guardsOf(input.guards))statements.push([assertSql(guard.sql),guard.params]);
  if(input.presence==='existing')statements.push([assertSql('EXISTS (SELECT 1 FROM person WHERE id=?)'),[id]]);
  if(input.presence==='absent')statements.push([assertSql('NOT EXISTS (SELECT 1 FROM person WHERE id=?)'),[id]]);
  if(input.uniqueTrusted===true){

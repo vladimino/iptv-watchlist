@@ -520,7 +520,8 @@ const appliedIn=list=>list.some(item=>/SET state='applied'/.test(item.text));
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!=='src/receipt-operation-key.js'&&/(?:from|import\()\s*['"][^'"]*receipt-operation-key/.test(fs.readFileSync(full,'utf8')))importers.push(full);}};
  walk('src');walk('scripts');
- assert.deepEqual(importers,[],'no source or script imports the operation key protocol');
+ // AIR-605: the Catalog Enrichment units (dormant, not bundled) are the first consumer of the protocol; any other importer is still refused.
+ assert.deepEqual(importers,['src/catalog-enrichment-units.js'],'only the dormant Catalog Enrichment units import the operation key protocol');
  for(const file of ['build.mjs','package.json','wrangler.jsonc'])assert.ok(!fs.readFileSync(file,'utf8').includes('receipt-operation-key'),file+' does not bundle it');
  const source=fs.readFileSync('src/receipt-operation-key.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bfetch\(|BUCKET|R2|setTimeout|setInterval|cron|scheduled|Date\.now/i.test(source),'no network, R2, timer, schedule or wall clock');

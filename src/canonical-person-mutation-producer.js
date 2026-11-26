@@ -105,7 +105,7 @@ async function writeUnit(env,input,requestId,ctx,clock){
  const plan=await planPersonMutation(env,input);
  if(plan.absent)throw failed('film_person_reference');
  if(plan.noop)return {id:input.id,revision:plan.revision,already:true};
- return mutatePerson(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,presence:plan.action==='create'?'absent':'existing',uniqueTrusted:true,
+ return mutatePerson(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,...(Array.isArray(input.guards)&&input.guards.length?{guards:input.guards}:{}),presence:plan.action==='create'?'absent':'existing',uniqueTrusted:true,
   person:{roleId:plan.roleId,contractVersion:plan.contractVersion,externalIds:plan.externalIds.map(({scheme,value,trusted,conflicting,provenance})=>({scheme,value,trusted,conflicting,provenance})),aliases:plan.aliases},receiptMark:mark(ctx,clock)});
 }
 
