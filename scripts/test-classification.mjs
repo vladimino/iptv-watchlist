@@ -403,6 +403,9 @@ export const FILES={
  "catalog-enrichment-workflow.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-letterboxd-credits.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },

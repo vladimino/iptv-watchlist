@@ -145,7 +145,8 @@ export async function fetchLetterboxd(env,{lid,tmdbAnchor=null,coordinator=null,
  if(!tmdbAnchor&&evidence.tmdbIds.length)hints.push({kind:'page_tmdb_id',values:evidence.tmdbIds});
  if(!verdict.agreed)return {status:'disagreement',reason:verdict.reasons.join(','),reasons:verdict.reasons,httpStatus:response.status,hints,fields:{},credits:{status:'ok',items:[]},title:{status:'absent'},agreed:false};
  let film;
- try{film=tools.parseFilm(html,{});}catch{return failedAnswer('unparsable_page',{httpStatus:response.status});}
+ // every correctly identified credit: the shared parser without its legacy display cap (ADR 0219 decision 8)
+ try{film=tools.parseFilm(html,{},{actors:Infinity});}catch{return failedAnswer('unparsable_page',{httpStatus:response.status});}
  const name=value=>typeof value?.name==='string'?value.name:null;
  const person=(role,list)=>(list||[]).map(item=>{
   const slug=typeof item?.id==='string'&&item.id.startsWith(role+'/')?item.id.slice(role.length+1):null;
@@ -156,7 +157,8 @@ export async function fetchLetterboxd(env,{lid,tmdbAnchor=null,coordinator=null,
  return {
   status:'ok',httpStatus:response.status,agreed:true,hints,
   fields:{year:Number.isInteger(film.year)?film.year:(evidence.years[0]?Number(evidence.years[0]):null),runtime:Number.isInteger(film.runtime)&&film.runtime>0?film.runtime:null,synopsis:film.synopsis||null,poster:film.poster||null,url:landing.href,genres:Array.isArray(film.genres)?film.genres:[]},
-  credits:{status:'ok',items:[...person('director',film.directors),...person('actor',film.actors)]},
+  // an absent or malformed credits section is unreadable, never a complete empty set (a parser that reports no `creditsComplete` flag is read as complete)
+  credits:{status:film.creditsComplete===false?'unreadable':'ok',items:film.creditsComplete===false?[]:[...person('director',film.directors),...person('actor',film.actors)]},
   // The Letterboxd page carries no Russian title: the source row is an honest, complete absence until a parser decision says otherwise.
   title:{status:'absent'},
  };

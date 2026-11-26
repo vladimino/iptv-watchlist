@@ -354,14 +354,17 @@ function parseSynopsis(html){
  if(!description||/^watch .+ on letterboxd/i.test(description)||description.length>2500)return null;
  return description;
 }
-function parseFilm(html,base){
+// `options.actors` is the number of actors kept: 10 for the legacy Watchlist display record (the default, unchanged), `Infinity` for the Catalog Enrichment Producer, which keeps every correctly identified credit (ADR 0219 decision 8).
+function parseFilm(html,base,options={}){
  const raw=html.match(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/)?.[1];if(!raw)throw new Error('Film metadata missing');const meta=JSON.parse(raw.replace(/\/\*[\s\S]*?\*\//g,''));if(!meta.name)throw new Error('Film name missing');
  const alt=html.match(/Alternative Titles<\/span><\/h3>\s*<div[^>]*>\s*<p>([\s\S]*?)<\/p>/)?.[1]||'';
  const d=meta.duration?.match(/PT(?:(\d+)H)?(?:(\d+)M)?/);const runtime=d?(Number(d[1]||0)*60+Number(d[2]||0)):null;
  const people=(value,role)=>[...new Map((Array.isArray(value)?value:value?[value]:[]).filter(p=>p.name).map(p=>{const path=String(p.sameAs||p.url||'').match(new RegExp('/'+role+'/([a-z0-9-]+)/'));const name=decode(p.name);return [path?.[1]||name,{id:role+'/'+(path?.[1]||name),original:name,name}];})).values()];
- const directors=people(meta.director,'director'),actors=people(meta.actor,'actor').slice(0,10);
+ const actorLimit=options&&(options.actors===Infinity||Number.isInteger(options.actors))?options.actors:10;const directors=people(meta.director,'director'),actors=people(meta.actor,'actor').slice(0,actorLimit);
+ // A credits section is COMPLETE only when it is a list or an object; an absent or malformed section is not a complete empty set (it is unreadable for the producer, which never reads it as 'no credits').
+ const sectionOk=value=>value===undefined||Array.isArray(value)||(!!value&&typeof value==='object');const creditsComplete=sectionOk(meta.director)&&sectionOk(meta.actor)&&!(meta.director===undefined&&meta.actor===undefined);
  // tmdbLink is evidence for an owner-confirmed retirement (ADR 0057), never an identity: tmdbId stays the attribute number.
- return {...base,directors,actors,peopleVersion:1,tmdbId:html.match(/data-tmdb-id="(\d+)"/)?.[1]||null,tmdbLink:letterboxdTmdbLink(html),original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,synopsis:parseSynopsis(html),synopsisFetchedAt:new Date().toISOString(),metadataAt:new Date().toISOString()};
+ return {...base,directors,actors,creditsComplete,peopleVersion:1,tmdbId:html.match(/data-tmdb-id="(\d+)"/)?.[1]||null,tmdbLink:letterboxdTmdbLink(html),original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,synopsis:parseSynopsis(html),synopsisFetchedAt:new Date().toISOString(),metadataAt:new Date().toISOString()};
 }
 // The rated-archive identity step runs in a later script. These consts are not globals; the step calls this.
 function letterboxdPageTools(){return {parseFilm,attr,extractYear};}
