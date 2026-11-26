@@ -48,6 +48,8 @@ export async function scanWatchlist({fetchPage, parse, firstUrl, username, maxPa
 // The Letterboxd HTTP outcome of a failed fetch, by class only (no message is stored).
 export function classifyScanFailure(error) {
   if (error?.code === 'incomplete') return {outcome: 'incomplete', reason: error.reason || 'incomplete'};
+  // AIR-604 (ADR 0211 decision 5): an enforced shared Letterboxd cooldown sent no request. The existing non-charging `rate_limited` outcome, reason `upstream_cooldown`.
+  if (error?.code === 'upstream_cooldown') return {outcome: 'rate_limited', reason: 'upstream_cooldown'};
   // `getHTML` reports the HTTP status in its message ("Source HTTP 429: /path"); a typed `status` wins when present. Only the number is read, the message is never stored.
   const typed = Number.isInteger(error?.status) ? error.status : null;
   const parsed = /^Source HTTP (\d{3}):/.exec(String(error?.message || ''));

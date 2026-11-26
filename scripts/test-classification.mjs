@@ -352,6 +352,18 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "upstream-cooldown.mjs": {
+  "suite": "core"
+ },
+ "upstream-cooldown-callers.mjs": {
+  "suite": "core"
+ },
+ "removal-ratings-cooldown.mjs": {
+  "suite": "core"
+ },
+ "upstream-cooldown-metadata.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
@@ -519,6 +531,12 @@ export const FILES={
   "suite": "core"
  },
  "discovery-identity-revoke.mjs": {
+  "suite": "core"
+ },
+ "discovery-owner-evidence.mjs": {
+  "suite": "core"
+ },
+ "discovery-owner-evidence-schema.mjs": {
   "suite": "core"
  },
  "discovery-intent-migration-0027.mjs": {

@@ -436,6 +436,27 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(admitted.synopsis, 'A bounded invented synopsis.');
   assert.equal(admitted.directors[0].id, 'director/ada-queue');
   assert.equal(read(richKey).candidates.Ff1.enrichment, 'metadata');
+  // AIR-604 (ADR 0211 decision 5, review of PR #1021 P1-1): an enforced, active Wikidata cooldown. The localization step sends no Wikidata request, stores no localization, does NOT mark the enrichment
+  // `done` (the transient pause must defer the work, not lose it) and parks with the non-charging stop `upstream_cooldown`; once the cooldown has expired the same step completes the localization.
+  {
+    const {migrated, sql} = await import('./prediction-d1-flow-lib.mjs'), {d1Standin} = await import('./d1-standin.mjs');
+    const cool = migrated(1);
+    sql(cool, fs.readFileSync('migrations/0045_upstream_cooldown.sql', 'utf8').match(/CREATE TABLE[\s\S]*?\);/g).join('\n'));
+    sql(cool, "INSERT INTO upstream_coordination (id, mode, revision, updated_at) VALUES (1, 'enforce', 1, " + Date.now() + ")");
+    sql(cool, "INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('wikidata', " + (Date.now() + 3600000) + ", 'rate_limited', NULL, 'seed', " + Date.now() + ")");
+    const calls0 = net.calls.length;
+    net.handler = async url => {throw new Error('no request expected: ' + url);};
+    env.DB = d1Standin(cool);
+    step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: rich, accepted: true}});
+    assert.equal(step.body.enriched, false, JSON.stringify(step.body));
+    assert.equal(step.body.stop?.reason, 'upstream_cooldown', JSON.stringify(step.body));
+    assert.equal(net.calls.length, calls0, 'an active cooldown sends no Wikidata request');
+    assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900012.titleRu, undefined, 'no localization is stored');
+    assert.equal(read(richKey).candidates.Ff1.enrichment, 'metadata', 'the enrichment is not marked done');
+    sql(cool, "UPDATE upstream_cooldown SET until_at = " + (Date.now() - 1000) + " WHERE scope = 'wikidata'");
+    // the parked stop is cleared by the explicit resume of the next step (the existing `a stop waits` rule), which asks Wikidata (below)
+    delete env.DB;
+  }
   net.handler = async url => {
     const address = String(url);
     if (!address.startsWith('https://query.wikidata.org/')) throw new Error(address);
@@ -443,7 +464,7 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
     if (query.includes('?en')) return http(200, JSON.stringify({results: {bindings: []}}));
     return http(200, JSON.stringify({results: {bindings: [{tmdb: {value: '900012'}, film: {value: 'http://www.wikidata.org/entity/Q9'}, ru: {value: 'Обогащённый'}}]}}));
   };
-  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: rich, accepted: true}});
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: rich, accepted: true, resume: true}});
   assert.equal(step.body.enriched, true, JSON.stringify(step.body));
   assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900012.titleRu, 'Обогащённый');
   assert.equal(read(richKey).candidates.Ff1.enrichment, 'done');

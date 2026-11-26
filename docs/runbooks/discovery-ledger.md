@@ -120,6 +120,15 @@ A production write of up to 10 decisions; agents do not run it. [ADR 0181](../ad
 6. A partial result is valid. Replay finishes only children without a receipt and never adds keys.
 7. Do not start a chunk from this page. **Undo is per key** through the revoke page; code rollback does not revert D1 rows.
 
+## Owner evidence and a stuck owner intent (ADR 0215 decision 6, E2c)
+
+While the `discovery_owner` writer is `pending` or `on`, an owner write (assign, reject, revoke, replacement) commits its `film_identity_evidence` rows in the same batch as the decision history row and the intent receipt ([contract](../reference/domain/film-person.md)). Operationally:
+
+- **`conflict` with the intent still `approved`:** an eligible step could not yield a valid row (for example an issuance without `confirmedAt`) while the writer is active. Nothing was written; read the intent and its issuance, do not force the write. With the writer `off` the same step commits without a row.
+- **`unknown`:** the caller does not know the outcome, and this is **not** proof that nothing landed. `ownerDecision` reports `unknown` for any error of the batch, including a lost response after D1 applied it. Read the durable state first: the intent (`state`, `receipt_json`), the current decision and its history revisions, and, while the writer was active, the evidence rows of the intent key. A `receipt` means the whole step committed (decision, history, receipt and its evidence rows are one batch); a replay of the same key returns that receipt and writes no second row. An intent still `running` with no receipt and an unchanged decision and history means the batch rolled back whole (fence, held authority, a stale revision, a commit-time schema guard after a migration or activation, or a row of another identity already stored under the same evidence key). Never retry blindly and never delete a ledger row (the table is append-only); follow [One stuck observation](#one-stuck-observation). A mismatching row is a data question for the evidence owner.
+- A replay of a receipted intent returns its receipt and writes no second row.
+- Activation, drain and a break are owner-approved operations of [identity evidence writer activation](identity-evidence-writer-activation.md); this runbook authorizes none of them.
+
 ## Rollback
 
 - **R1 (stop archiving):** a code revert to a Worker that still reads `DISCOVERY_LEDGER_MODE`, with that binding restored to `frozen` (or absent while an archive exists). On the retired Worker a leftover `frozen` or `full` binding is ignored and the seal stays bounded ([ADR 0156](../adr/0156-retire-discovery-ledger-mode.md)). Nothing is rebuilt or deleted.

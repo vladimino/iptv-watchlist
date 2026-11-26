@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const USER='fixture';
 const records=new Map(),etags=new Map(),writes=[],requests=[];let revision=0,failState=false;
@@ -28,6 +29,8 @@ const ctx=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextE
   return respond(404,'');
  }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
+// AIR-604: the cooldown module is in scope from the start, as in the bundle (a function that ran before a global const existed would keep its lookup of the missing name).
+vm.runInContext(scoped('src/upstream-cooldown.js','UpstreamCooldown'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const D=vm.runInContext('LetterboxdDiary',ctx);
 const off={LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket};
@@ -261,5 +264,43 @@ assert.equal(blocked.stage,'complete');
 assert.equal(blocked.ratingsPipeline,'blocked');
 assert.equal(requests.length,0,'a blocked diary page is not requested by the commit');
 assert.equal(records.get('sync.json').ratingAttempt,undefined);
+
+// AIR-604 (ADR 0211 decision 5): the shared Letterboxd cooldown on the Diary page. An enforced cooldown reads no page and reports the existing non-charging `rate_limited` outcome;
+// a 429 of a sent request writes the cooldown; `off`, an absent schema and a missing module read the page as before.
+{
+ const {migrated,sql}=await import('./prediction-d1-flow-lib.mjs'),{d1Standin}=await import('./d1-standin.mjs');
+ const world=(mode,seedSeconds=null)=>{const file=migrated();if(mode)sql(file,`INSERT INTO upstream_coordination (id, mode, revision, updated_at) VALUES (1, '${mode}', 1, ${Date.now()})`);if(seedSeconds)sql(file,`INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('letterboxd', ${Date.now()+seedSeconds*1000}, 'rate_limited', NULL, 'seed', ${Date.now()})`);return {file,env:{...env,DB:d1Standin(file)}};};
+ const cool=file=>sql(file,'SELECT scope, reason, set_by FROM upstream_cooldown');
+ publish([{lid:'C1',slug:'c-1',date:day(0),stars:5}]);
+ // enforce + active cooldown: no page request, the existing rate_limited outcome, and no ratings attempt
+ let w=world('enforce',600);records.clear();etags.clear();requests.length=0;
+ let out=await D.syncHistory(w.env);
+ assert.equal(diaryRequests().length,0,'an active cooldown reads no page');
+ assert.equal(out.lastOutcome,'rate_limited');assert.match(String(out.stopReason),/^upstream_cooldown_page_1/);
+ // a 429 of a sent request writes the cooldown, as the Diary reports today
+ w=world('enforce');records.clear();etags.clear();requests.length=0;site.set(url(1),()=>respond(429,'',{'Retry-After':'60'}));
+ out=await D.syncHistory(w.env);
+ assert.equal(diaryRequests().length,1);assert.equal(out.lastOutcome,'rate_limited');assert.deepEqual(plain(cool(w.file)),[{scope:'letterboxd',reason:'rate_limited',set_by:'letterboxd-diary'}]);
+ // P1-2 of the review of PR #1021: a challenge page behind a 200 with no header, a challenge body behind another status, a header challenge: each writes the cooldown (the Diary also reports its
+ // existing `blocked` outcome for the page); an ordinary 404 or 5xx writes nothing
+ const challengePage='<html><head><title>Just a moment...</title></head><body>cf-chl-opt</body></html>';
+ for(const [label,reply,expected] of [['200 body challenge',()=>respond(200,challengePage),'challenge'],['503 body challenge',()=>respond(503,challengePage),'challenge'],['200 header challenge',()=>respond(200,'<html></html>',{'cf-mitigated':'challenge'}),'challenge'],['200 header challenge, body unreadable',()=>({ok:true,status:200,headers:new Headers({'cf-mitigated':'challenge'}),text:async()=>{throw new Error('read failed');}}),'challenge'],['200 platform-script challenge outside the parser marker',()=>respond(200,'<html><body><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></body></html>'),'challenge'],['403',()=>respond(403,''),'forbidden'],['404',()=>respond(404,''),null],['500',()=>respond(500,''),null]]){
+  w=world('enforce');records.clear();etags.clear();requests.length=0;site.set(url(1),reply);
+  out=await D.syncHistory(w.env);
+  assert.equal(plain(cool(w.file)).length,expected?1:0,label);
+  if(expected&&label.startsWith('200'))assert.equal(out.lastOutcome,'blocked',label+': a challenge behind a 200 is a blocked answer, never a Diary page');
+  if(expected&&label.startsWith('200'))assert.equal(out.counts.pages,0,label+': no page was counted');
+  if(expected)assert.equal(plain(cool(w.file))[0].reason,expected,label);
+ }
+ site.set(url(1),()=>respond(200,'<html></html>'));
+ publish([{lid:'C1',slug:'c-1',date:day(0),stars:5}]);
+ // a 404-free success writes nothing; off and an absent schema read the page
+ for(const [label,build] of [['off',()=>world('off',600)],['absent row',()=>world(null)],['absent schema',()=>({file:null,env:{...env,DB:d1Standin(migrated(44))}})]]){
+  const x=build();records.clear();etags.clear();requests.length=0;publish([{lid:'C1',slug:'c-1',date:day(0),stars:5}]);
+  out=await D.syncHistory(x.env);
+  assert.equal(diaryRequests().length,1,label+': the page is read as today');assert.notEqual(out.lastOutcome,'rate_limited',label);
+  if(x.file&&label==='off')assert.equal(plain(cool(x.file)).length,1,'off leaves the seeded row alone and writes none');
+ }
+}
 
 console.log('Letterboxd diary history (AIR-307, ADR 0075): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, unmigrated commit does not read Diary, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API with enabled true, and an EPG commit that does not read Diary passed');

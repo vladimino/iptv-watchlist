@@ -337,8 +337,13 @@ async function releaseDiscoveryLease(env,lease){
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return;const current=await object.json();if(current.id===lease.id)await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:object.etag}});}
 async function tmdbRequest(env,path,options={}){
  if(env.TMDB_REQUEST_INTERVAL_MS!==0)await new Promise(resolve=>setTimeout(resolve,200));
- const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)});
- if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
+ // AIR-604 (ADR 0211 decision 5): the shared TMDB cooldown. `off` (the default) and an unavailable state send exactly the request of today; an enforced cooldown skips the request and
+ // maps to the existing not-now path (`retryAt`), which charges no attempt; a 429, a challenge or a 403 of a sent request writes the cooldown (observe and enforce).
+ let response;
+ const coordination=upstreamCoordinator(env,'discovery'),request=['https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)}];
+ try{response=coordination?await coordination.fetch(fetch,...request,{scope:'tmdb'}):await fetch(...request);}
+ catch(error){if(error?.code==='upstream_cooldown'){const skipped=new Error('TMDB upstream cooldown');skipped.retryAt=new Date(error.until).toISOString();skipped.upstreamCooldown=true;throw skipped;}throw error;}
+ if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return coordinatedJson(coordination,'tmdb',response);
 }
 // AIR-503 / ADR 0158: the titles the movie authority itself gives one TMDB movie. This is movie provenance; an EPG title is never part of it.
 function movieAuthorityTitles(movie){
@@ -425,7 +430,7 @@ async function catalogPosterDetail(env,tmdbId){
  let lastError=null;
  for(let attempt=0;attempt<2;attempt++){
   try{return {movie:await tmdbRequest(env,'movie/'+tmdbId+'?language=ru-RU')};}
-  catch(error){lastError=error;if(error?.retryAt)return {error:String(error.message||error),retryAt:error.retryAt};}
+  catch(error){lastError=error;if(error?.retryAt)return {error:String(error.message||error),retryAt:error.retryAt,...(error.upstreamCooldown?{cooldown:true}:{})};}
  }
  return {error:String(lastError?.message||lastError||'TMDB request failed')};
 }
@@ -678,12 +683,12 @@ async function catalogPosterRun(env,body={},opts={}){
    queue=batch;
   }else{queue=part.actionable.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0);batch=queue.slice(0,limit);}
   const found=[];
-  let retryAt=null;
+  let retryAt=null,retryCooldown=false;
   for(const row of batch){
    const tmdbId=String(row.film.tmdbId),shown=catalogPosterDisplay(row.film);
    if(retryAt){outcomes.push({id:row.id,tmdbId,...shown,outcome:'not_attempted'});continue;}
    const detail=await catalogPosterDetail(env,tmdbId);
-   if(detail.retryAt){retryAt=detail.retryAt;outcomes.push({id:row.id,tmdbId,...shown,outcome:'rate_limited'});continue;}
+   if(detail.retryAt){retryAt=detail.retryAt;retryCooldown=detail.cooldown===true;outcomes.push({id:row.id,tmdbId,...shown,outcome:'rate_limited'});continue;}
    if(detail.error){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:detail.error});continue;}
    const movieId=catalogPosterMovieId(detail.movie);
    if(!movieId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:'TMDB detail has no movie id'});continue;}
@@ -745,7 +750,7 @@ async function catalogPosterRun(env,body={},opts={}){
   const payload={dryRun:false,enabled:true,...summary,recheck:recheckMode,requested:limit,processed:outcomes.filter(item=>item.outcome!=='not_attempted'&&item.outcome!=='not_eligible').length,hydrated:outcomes.filter(item=>item.outcome==='hydrated').length,outcomes,
    negatives:{persisted:negativeResult.durable&&negativeOutcomes.every(item=>item.negativeSaved===true),reason:negativeResult.reason,written:negativeResult.written},
    writes:writes.map(write=>({key:write.key,written:write.written,reason:write.reason,records:Object.values(write.status).filter(state=>state==='written').length})),
-   retryable:outcomes.filter(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome)).map(item=>item.id),generationChanged,leaseLost,retryAt,done,nextCursor,remainingAfterCursor:recheckMode?0:Math.max(0,queue.length-settled)};
+   retryable:outcomes.filter(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome)).map(item=>item.id),generationChanged,leaseLost,retryAt,...(retryCooldown?{cooldown:true}:{}),done,nextCursor,remainingAfterCursor:recheckMode?0:Math.max(0,queue.length-settled)};
   if(leaseLost)return json({...payload,error:'Resolver lease lost; see writes for the copies already written'},409);
   return json(payload);
  }finally{await releaseDiscoveryLease(env,lease);}

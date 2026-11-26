@@ -8,6 +8,6 @@ This section describes **currently implemented contracts**, not historical rollo
 - [API](api/README.md) — MCP, enrichment, prediction runner, diagnostics.
 - [Domain](domain/README.md) — Film/Person identity, scored acceptance, candidate discovery, the data health issue model and the derived taxonomy.
 - [Data](data/README.md) — staged D1 schema and R2 mapping.
-- [Integrations](integrations/README.md) — Letterboxd ratings, the account export and the proposed user-facts contract.
+- [Integrations](integrations/README.md) — Letterboxd ratings, the account export, the proposed user-facts contract and the shared upstream cooldown.
 
 For operator instructions see [runbooks](../runbooks/README.md). For historical audit evidence see [evidence](../evidence/README.md).
