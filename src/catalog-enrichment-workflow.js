@@ -8,7 +8,7 @@
 //     and a send that throws (the instance is not running) is read as "no live owner" and creates one. A lost kick is recovered by the reconcile.
 //   - A `waitForEvent` that times out THROWS and would fail the instance, so it is wrapped and the timeout is the due-time wake.
 //   - HANDOVER: at the statement budget the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor writes only after it acquires its own lease.
-import {drain,dueFilms} from './catalog-enrichment-drain.js';
+import {drain,dueFilms,BUDGET} from './catalog-enrichment-drain.js';
 import {readControl,runnableSignals} from './catalog-enrichment-store.js';
 
 export const RUN_PROJECTION='catalog_enrichment_run';
@@ -119,13 +119,21 @@ export async function run(env,payload,step,deps={}){
   void wakeAt;
  };
  let last='none';
+ // INSTANCE-level accounting: the statements every executed step issued (failed calls included) accumulate across the steps of this instance, so the instance hands over at its own budget instead of every step starting
+ // from zero; a replayed (cached) step issues nothing and adds nothing.
+ let spent=0;
+ const base=deps.budget||BUDGET;
  for(let round=0;round<MAX_ROUNDS;round++){
   const control=await readControl(env);
   if(control.state!=='active'){await settle(env,id,'retired');return {stop:control.state==='paused'?'paused':'not_active',rounds:round};}
-  const result=await doStep('drain-'+round,async()=>{
-   const out=await drain(env,{runId:id+'-'+round,clock,tools:deps.tools,fetchImpl:deps.fetchImpl,coordinator:deps.coordinator?deps.coordinator():null,...(deps.budget?{budget:deps.budget}:{}),...(deps.shouldYield?{shouldYield:deps.shouldYield}:{})});
+  // the remaining instance budget bounds this step; with less left than one step needs, the instance hands over without starting it
+  const remaining={...base,statements:base.statements-spent,handoverAt:base.handoverAt-spent};
+  const exhausted=remaining.handoverAt<=0||remaining.statements-remaining.reserve<(base.stepEstimate||150);
+  const result=exhausted?{stop:'handover',wakeAt:null,counts:{statements:0}}:await doStep('drain-'+round,async()=>{
+   const out=await drain(env,{runId:id+'-'+round,clock,tools:deps.tools,fetchImpl:deps.fetchImpl,coordinator:deps.coordinator?deps.coordinator():null,budget:remaining,...(deps.shouldYield?{shouldYield:deps.shouldYield}:{})});
    return {stop:out.stop,wakeAt:out.wakeAt||null,counts:out.counts};
   });
+  spent+=Number(result.counts?.statements)||0;
   last=result.stop;
   if(result.stop==='handover'){
    // the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor re-checks the runnable work in full

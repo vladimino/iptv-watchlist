@@ -58,7 +58,11 @@ const lockGuard=filmId=>({sql:"NOT EXISTS (SELECT 1 FROM film_dimension WHERE fi
 
 // ---- the step ----
 // Processes ONE Film. ctx: {leaseId, generation, now, tools, fetchImpl, coordinator, env}. -> {state:'not_active'|'absent'|'blocked'|'done', ...}
-export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetchImpl=fetch,coordinator=null}){
+// `budget` (optional): {canStart:()=>boolean}, the resource-bounded drainer's own answer to "does the remaining statement budget cover one more unit group plus the finalize-and-successor reserve". It is asked before EVERY unit
+// group of a Film (core, a localization row, each Person, each credits chunk): a Film spans as many steps and instances as it needs, progress is durable per unit, and nothing here caps credits or Films.
+export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetchImpl=fetch,coordinator=null,budget=null}){
+ const canStart=()=>!budget||budget.canStart();
+ const partial=report=>({state:'partial',report:{...report,partial:'budget'}});
  const control=await readControl(env);
  if(control.state!=='active'||control.generation!==generation)return {state:'not_active'};
  const ctx={leaseId,generation,now};
@@ -112,8 +116,10 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const rowOf=(part,source,slot=0)=>byKey.get([part,source,slot].join('|'));
  // The sources that have due work now. A row whose retry is in the future is not asked again; it counts as pending (transport) for the precedence rule.
  const dueRows=[...byKey.values()].filter(row=>row.part!=='film'&&applicable.includes(row.source)&&['due','deferred_repair'].includes(row.status)&&(!row.retryAt||row.retryAt<=now));
- const toFetch=[...new Set(dueRows.map(row=>row.source))];
- if(!toFetch.length)return {state:'idle'};
+ // A credits chunk row that already holds its persisted expected set is RESUMED from D1: completing persisted units never makes an upstream request.
+ const resumeRows=dueRows.filter(row=>row.part==='credits'&&row.expected&&Array.isArray(row.expected.items));
+ const toFetch=[...new Set(dueRows.filter(row=>!resumeRows.includes(row)).map(row=>row.source))];
+ if(!toFetch.length&&!resumeRows.length)return {state:'idle'};
  const lbAnchor=context.anchors.letterboxd,tmdbAnchor=context.anchors.tmdb;
  const answers={};
  await Promise.all(toFetch.map(async source=>{
@@ -168,6 +174,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const guards=[...writeFields.map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
   const metadata={updatedAt:now,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},metadata,...(sync?{sync:{metadataAt:now}}:{}),requireExisting:true,guards};
+  if(!canStart())return partial(report);
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.core(filmId),input,now:()=>now});
   report.units.push({part:'core',state:unit.state});
   if(['applied','noop','settled'].includes(unit.state)){
@@ -195,6 +202,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const sourceVersion=await sha({source,anchor:row.anchor,title:title.value});
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},localization:{sources:[{source,value:title.value,sourceVersion,observedAt:now,provenance:{anchor:row.anchor}}]},requireExisting:true,
    guards:[Plan.anchorSetGuard(filmId,context.anchors),Plan.epochGuard(filmId,{part:'localization',source,refreshEpoch:row.refreshEpoch,planEpoch:filmRow.planEpoch}),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)]};
+  if(!canStart())return partial(report);
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.localization(filmId,source),input,now:()=>now});
   report.units.push({part:'localization',source,state:unit.state});
   if(['applied','noop','settled'].includes(unit.state))await putRow(env,ctx,{...row,status:'complete',sourceVersion,failures:0,retryAt:null,pendingSince:null,reason:null},{expectEpoch:row.refreshEpoch});
@@ -205,24 +213,43 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  // the credit source is fixed by the first plan and never reopened for another source: the other applicable sources have no credits to give
  if(choice.source)for(const row of [...byKey.values()].filter(item=>item.part==='credits'&&item.source!==choice.source&&['due','deferred_repair'].includes(item.status)))await putRow(env,ctx,{...row,status:'not_applicable',reason:'other_credit_source',retryAt:null},{expectEpoch:row.refreshEpoch});
  if(creditsDue&&choice.gap){report.gaps.push(choice.gap);await putRow(env,ctx,{...rowOf('credits',choice.source||'letterboxd')||{filmId,part:'credits',source:'letterboxd',slot:0,dueSince:now,cohort:'live',planEpoch:0,refreshEpoch:0},status:'complete_with_gaps',reason:choice.gap,gaps:[choice.gap]});}
- else if(creditsDue&&choice.source&&answers[choice.source]?.status==='ok'&&answers[choice.source].credits.status==='ok'){
+ else if(creditsDue&&choice.source){
+  // The expected set comes from a FRESH complete response, or - when persisted chunk rows already hold it - from D1 alone (a resume makes no upstream request).
+  const fresh=answers[choice.source]?.status==='ok'&&answers[choice.source].credits.status==='ok'?answers[choice.source].credits.items:null;
+  const persisted=resumeRows.filter(row=>row.source===choice.source).sort((a,b)=>a.slot-b.slot);
+  let expected=null,chunks=null,digestOfSet=null;
+  if(fresh){
+   expected=Plan.expectedCredits(choice.source,fresh);
+   chunks=Plan.chunkCredits(expected.items);
+   digestOfSet=await Plan.expectedDigest(expected.items);
+  }else if(persisted.length){
+   chunks=persisted.map(row=>({slot:row.slot,items:row.expected.items.map(([personId,role])=>({personId,role,roleId:personId.slice('person:'.length)}))}));
+   expected={items:chunks.flatMap(chunk=>chunk.items),gaps:(persisted.find(row=>row.gaps)?.gaps)||[]};
+   digestOfSet=persisted[0].expected.digest;
+  }
   const lbOld=Plan.fallbackElapsed(pendingSince.letterboxd,now);
   const gateOpen=!hasLb||agreed||(choice.source!=='letterboxd'&&lbOld);
-  if(gateOpen){
-   const expected=Plan.expectedCredits(choice.source,answers[choice.source].credits.items);
-   const chunks=Plan.chunkCredits(expected.items);
+  if(expected&&gateOpen){
    const have=new Set((await many(db(env),'SELECT person_id,role FROM film_person_credit WHERE film_id=?',[filmId])).map(item=>item.person_id+'|'+item.role));
    const people=new Set((await many(db(env),`SELECT id FROM person WHERE id IN (SELECT value FROM json_each(?))`,[JSON.stringify(expected.items.map(item=>item.personId))])).map(item=>item.id));
-   const digestOfSet=await Plan.expectedDigest(expected.items);
    const base=rowOf('credits',choice.source)||{filmId,part:'credits',source:choice.source,slot:0,planEpoch:0,refreshEpoch:0,dueSince:now,cohort:'live'};
+   // The WHOLE expected set is paged into durable chunk rows BEFORE the first unit: an interrupted Film (a handover inside chunk 0, a pause, a crash) resumes every chunk from D1, never from a response it no longer has.
+   if(fresh)for(const chunk of chunks){
+    const stored=rowOf('credits',choice.source,chunk.slot);
+    if(stored&&stored.status==='complete'&&stored.expected?.digest===digestOfSet)continue;
+    await putRow(env,ctx,{...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null});
+   }
    let allDone=true;
    for(const chunk of chunks){
-    const slotRow={...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,items:chunk.items.map(item=>[item.personId,item.role])},refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
+    const slotRow={...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
     const missing=Plan.missingForChunk(chunk,{have,people});
-    if(!missing.credits.length){await putRow(env,ctx,{...slotRow,status:'complete',gaps:expected.gaps.length?expected.gaps:null,failures:0,retryAt:null,pendingSince:null});continue;}
+    if(!missing.credits.length){await putRow(env,ctx,{...slotRow,status:'complete',failures:0,retryAt:null,pendingSince:null});continue;}
+    // the chunk row (with the persisted expected set and its epoch) is durable BEFORE its first unit: an interrupted Film resumes from it
     await putRow(env,ctx,slotRow);
-    const guards=[Plan.anchorSetGuard(filmId,context.anchors),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
+    // every unit of the chunk asserts the anchor set, the Film's plan epoch and the chunk row's own epoch, the lease and the control generation
+    const guards=[Plan.anchorSetGuard(filmId,context.anchors),Plan.epochGuard(filmId,{part:'credits',source:choice.source,slot:chunk.slot,refreshEpoch:slotRow.refreshEpoch,planEpoch:filmRow.planEpoch}),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
     for(const personId of missing.persons){
+     if(!canStart())return partial(report);
      const item=chunk.items.find(entry=>entry.personId===personId);
      const unit=await runUnit(env,{kind:'person',unitKey:unitKeys.person(personId),input:{id:personId,at:now,person:{roleId:item.roleId,contractVersion:context.film.contractVersion},guards},now:()=>now});
      report.units.push({part:'person',state:unit.state});
@@ -230,9 +257,10 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
      else people.add(personId);
     }
     if(missing.persons.every(personId=>people.has(personId))){
+     if(!canStart())return partial(report);
      const unit=await runUnit(env,{kind:'credits',unitKey:unitKeys.credits(filmId,choice.source,chunk.slot),input:{id:filmId,at:now,credits:missing.credits.map(item=>({personId:item.personId,role:item.role})),guards},now:()=>now});
      report.units.push({part:'credits',slot:chunk.slot,state:unit.state});
-     if(['applied','noop','settled'].includes(unit.state)){for(const item of missing.credits)have.add(item.personId+'|'+item.role);await putRow(env,ctx,{...slotRow,status:'complete',gaps:expected.gaps.length?expected.gaps:null,failures:0,retryAt:null,pendingSince:null,film:{wroteCredits:true}});}
+     if(['applied','noop','settled'].includes(unit.state)){for(const item of missing.credits)have.add(item.personId+'|'+item.role);await putRow(env,ctx,{...slotRow,status:'complete',failures:0,retryAt:null,pendingSince:null,film:{wroteCredits:true}});}
      else allDone=false;
     }else allDone=false;
    }

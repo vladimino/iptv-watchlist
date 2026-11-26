@@ -33,13 +33,13 @@ function world(films=6,{active=true}={}){
  return {file,env:{DB:d1Standin(file)},ids};
 }
 const res=(status,body='',headers={})=>({status,ok:status>=200&&status<300,headers:{get:name=>headers[String(name).toLowerCase()]??null},text:async()=>body,body:null});
-const movie=id=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{name:'G'}],credits:{cast:[{id:id*10,name:'A',order:0}],crew:[{id:id*10+1,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'+id}}]}});
-function upstream({tmdb='ok',onCall=null}={}){
+const movie=(id,cast=1)=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{name:'G'}],credits:{cast:Array.from({length:cast},(_,i)=>({id:id*1000+i,name:'A'+i,order:i})),crew:[{id:id*10+1,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'+id}}]}});
+function upstream({tmdb='ok',onCall=null,cast=1}={}){
  const calls=[];
  const impl=async url=>{
   url=String(url);calls.push(url);
   if(onCall)await onCall(url,calls.length);
-  if(url.startsWith('https://api.themoviedb.org/')){const id=Number(/movie\/(\d+)/.exec(url)[1]);return tmdb==='transport'?res(503):res(200,JSON.stringify(movie(id)));}
+  if(url.startsWith('https://api.themoviedb.org/')){const id=Number(/movie\/(\d+)/.exec(url)[1]);return tmdb==='transport'?res(503):res(200,JSON.stringify(movie(id,cast)));}
   if(url.startsWith('https://query.wikidata.org/'))return res(200,JSON.stringify({results:{bindings:[]}}));
   throw new Error('unexpected '+url);
  };
@@ -83,7 +83,7 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  let guard=0,last=first;
  while(last.stop==='handover'&&guard++<20)last=await run(w,up,{budget:small});
  assert.equal(last.stop,'idle');assert.equal(metaCount(w.file),6,'successive runs finish every Film with no wait between them');
- assert.equal(new Set(up.calls.filter(url=>url.includes('themoviedb')).map(url=>url)).size,up.calls.filter(url=>url.includes('themoviedb')).length,'no Film was fetched twice across the handovers');
+ assert.deepEqual(rows(w.file,"SELECT operation_key,COUNT(*) AS n FROM canonical_write_receipt WHERE state='applied' GROUP BY operation_key HAVING COUNT(*)>1"),[],'no unit was applied twice across the handovers (no duplicate receipt, no duplicate write)');
  assert.ok(guard>=1);
 }
 
@@ -163,5 +163,30 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  assert.equal(JSON.parse(ticks(w.file).at(-1).counts_json).stop,'error_backoff');
  // the healthy path recovers the same Films afterwards
  assert.equal((await run(w,upstream())).stop,'idle');assert.equal(metaCount(w.file),4);
+}
+// ---- a large cast across handovers: the Film resumes from its persisted chunk rows, nothing is applied twice, and completing persisted units makes no upstream request ----
+{
+ const w=world(1);
+ const small={...D.BUDGET,statements:520,handoverAt:380,reserve:80,stepEstimate:40,unitEstimate:40};
+ const up=upstream({cast:140});
+ const first=await run(w,up,{budget:small});
+ assert.equal(first.stop,'handover','the Film does not fit one run: it is NEVER deferred for not fitting, it resumes');
+ const persisted=()=>rows(w.file,"SELECT slot,status,expected_json IS NOT NULL AS has FROM catalog_enrichment_state WHERE part='credits' ORDER BY slot");
+ let guard=0,last=first,fetchedWithRows=null;
+ while(last.stop==='handover'&&guard++<80){
+  if(fetchedWithRows===null&&persisted().some(row=>row.has)&&rows(w.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n<141)fetchedWithRows=up.calls.filter(url=>url.includes('themoviedb')).length;
+  last=await run(w,up,{budget:small});
+ }
+ assert.equal(last.stop,'idle');
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n,141,'every credit of a 141-credit Film (140 actors, one director), across several runs');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM person WHERE id LIKE 'person:tmdb_%'")[0].n,141);
+ assert.deepEqual(persisted().map(row=>row.slot),[0,1,2],'three persisted chunk rows of at most 50');
+ assert.ok(persisted().every(row=>row.status==='complete'));
+ assert.ok(guard>=2,'it really crossed several runs: '+guard);
+ assert.notEqual(fetchedWithRows,null,'a run ended between persisted chunks');
+ assert.equal(up.calls.filter(url=>url.includes('themoviedb')).length,fetchedWithRows,'once the chunk rows exist, completing the persisted units makes no upstream request');
+ assert.deepEqual(rows(w.file,"SELECT operation_key,COUNT(*) AS n FROM canonical_write_receipt WHERE state='applied' GROUP BY operation_key HAVING COUNT(*)>1"),[],'no duplicate receipt: no unit was applied twice');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE state IN ('pending','unknown')")[0].n,0,'no receipt left unresolved');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM film_person_credit WHERE role='actor'")[0].n,140);
 }
 console.log('catalog enrichment drain: ok');

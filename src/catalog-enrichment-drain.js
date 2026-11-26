@@ -12,7 +12,7 @@ import {processFilm} from './catalog-enrichment-producer.js';
 
 // Engineering-owned defaults (ADR 0219 decision 6), one module, reported in each run's outbox entry. The statement budget is the ADR 0094 guard, not a provider limit; a handover happens at HANDOVER_AT, half the documented
 // 10,000; a step starts only when the remaining budget covers its own work plus the finalize-and-successor reserve.
-export const BUDGET=Object.freeze({statements:6000,handoverAt:5000,reserve:1000,window:50,stepEstimate:150});
+export const BUDGET=Object.freeze({statements:6000,handoverAt:5000,reserve:1000,window:50,stepEstimate:150,unitEstimate:60});
 
 // A D1 binding that counts every statement it issues, failing calls included.
 export function countingEnv(env){
@@ -107,7 +107,9 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
    if(counts.films>=maxFilms)return finish('handover');
    const pick=due[klass][0];
    let step;
-   try{step=await processFilm(env,{filmId:pick.filmId,leaseId,generation,now:clock(),tools,fetchImpl,coordinator});}
+   // the unit-group gate: before EVERY group of units of a Film the producer asks whether the remaining budget covers it plus the finalize-and-successor reserve (no whole-Film-fit rule: a Film resumes from its persisted state)
+   const gate={canStart:()=>counter.statements+(budget.unitEstimate||60)+budget.reserve<=budget.statements&&counter.statements<budget.handoverAt};
+   try{step=await processFilm(env,{filmId:pick.filmId,leaseId,generation,now:clock(),tools,fetchImpl,coordinator,budget:gate});}
    catch(error){
     // Reactive yield (ADR 0219 decision 6): a storage or authority failure defers THIS Film for the rest of the run and the independent work continues; repeated failures back the whole run off. Never a crash.
     counts.errors++;skip.add(pick.filmId);counts.lastError=String(error?.code||'error').slice(0,80);
@@ -125,6 +127,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     counts.requests+=step.report.transport.length+step.report.failed.length;
    }
    if(['idle','blocked','not_admitted','absent','redirected'].includes(step.state)||(step.state==='done'&&!step.report.units.length))skip.add(pick.filmId);
+   if(step.state==='partial')return finish('handover'); // progress is durable per unit: the successor resumes this Film from D1, without a new upstream request
    // a Film that made no progress (blocked, a parked source, a replan that only settled a marker) leaves the head by its own retry_at or state; a replan is cheap and continues at once
    if(step.state==='absent'||step.state==='redirected'||step.state==='not_admitted')await handle.prepare("UPDATE catalog_enrichment_state SET reason=NULL WHERE film_id=? AND part='film' AND reason='check_anchors'").bind(pick.filmId).run().catch(()=>{});
   }
