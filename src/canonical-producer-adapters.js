@@ -20,7 +20,7 @@
 import {failed} from './film-person-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {RECONCILE_LIMIT_MAX,RETRY_POLICY,defineOperation,digestOf,receiptedWrite,reconcileReceipts,requestIdOf} from './canonical-receipts.js';
-import {planFilmFacts,readFilmSnapshot,writeFilmFacts} from './canonical-film-writers.js';
+import {bindFilmFactsOwner,planFilmFacts,readFilmSnapshot,writeFilmFacts} from './canonical-film-writers.js';
 
 // The receipts module's canonical digest and the writer's read-only snapshot of one Film, re-exported for the producer layers above this adapter (a producer digests its own source snapshot and reads the stored Film through them,
 // and imports neither the receipts module nor the writers).
@@ -83,9 +83,9 @@ const matches=(input,receipt,digest)=>plain(input)&&digest===receipt.contentDige
 // The registry spec of `film_facts`. replan(receipt) -> the writer input of the receipt's target (without requestId, expectedRevision and receiptMark), or null when the producer cannot re-plan it now.
 export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={}){
  if(typeof replan!=='function')throw failed('film_person_invalid');
- const planned=async receipt=>{
+ const planned=async (env,receipt)=>{
   let input=null;
-  try{input=await replan(receipt);}catch(error){if(READ_FAILURES.has(error?.code))throw error;input=null;}
+  try{input=await replan(receipt);if(input)input=await bindFilmFactsOwner(env,input);}catch(error){if(READ_FAILURES.has(error?.code))throw error;input=null;}
   if(!input)return null;
   return {input,ok:matches(input,receipt,await filmFactsDigest(input))};
  };
@@ -94,7 +94,7 @@ export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={})
   atomic:true,
   // Does the Film already hold every row of the planned facts? Content alone is never proof (the receipts module turns it into `needs_review`); an absent effect means the same request id may be retried.
   readback:async(env,target,receipt)=>{
-   const found=await planned(receipt);
+   const found=await planned(env,receipt);
    // A re-plan with another digest is a SOURCE THAT MOVED ON: a typed, terminal disposition (the receipts module abandons the receipt, same request id, never replays the old facts). No re-plan at all is transient:
    // it reads as an absent effect, so the receipts bounds (5 attempts, backoff, 7 days) apply and the replay below refuses until the producer can plan again.
    if(found&&!found.ok)return {disposition:'abandon',errorClass:SOURCE_CHANGED};
@@ -106,14 +106,14 @@ export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={})
   // The same request id, re-planned against the CURRENT revision the receipts module hands over, inside the same atomic batch. A source that moved on is never replayed: permanent refusal, the receipt is abandoned and the
   // next natural run makes a new request. No re-plan available: an unknown outcome that backs off (bounded by the attempts).
   replay:async(env,receipt,ctx)=>{
-   const found=await planned(receipt);
+   const found=await planned(env,receipt);
    if(!found)throw failed('producer_replan_unavailable');
    if(!found.ok)throw failed('film_person_invalid');
    return writeFilmFacts(env,{...found.input,requestId:receipt.requestId,expectedRevision:ctx.currentRevision,receiptMark:{requestId:ctx.requestId,attempt:ctx.attempt,now:now(),target:ctx.target}});
   },
   // Called only when the revision moved since planning: proceed when the facts would still change something, superseded when they would not (or the Film was redirected); no re-plan: repair.
   revalidate:async(env,receipt)=>{
-   const found=await planned(receipt);
+   const found=await planned(env,receipt);
    if(!found||!found.ok)return 'stale';
    const snapshot=await readFilmSnapshot(env,receipt.target.id);
    if(snapshot.redirect)return 'superseded';
@@ -142,9 +142,11 @@ export async function producerRouteOpen(env){
 //   {state:'noop', receipt:false}                                    the facts are already stored: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
 // A refusal of the writer is thrown after the receipt is marked (`film_person_fence` and `film_person_revision_conflict` leave it `failed`, retried by the SAME request id on a later call or inline reconcile).
-export async function applyFilmFacts(env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
+export async function applyFilmFacts(env,{origin,event,input:given,replan,now,policy=RETRY_POLICY}={}){
  const route=await writerRoute(env);
  if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
+ // ADR 0217 decision 8d: the target is the trusted owner of a prefixed movie id (or the id itself), resolved before the digest, the target and the request id exist.
+ const input=await bindFilmFactsOwner(env,given);
  const digest=await filmFactsDigest(input);
  const target={kind:'film',id:input.id};
  const requestId=await producerRequestId({origin,event,target,digest});

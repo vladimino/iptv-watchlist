@@ -23,6 +23,8 @@ export const FILM_FACTS_SOURCE_CAP=10;
 // Owner-approved order (11 Nov 2026) for the selection/overwrite of original_title ONLY, highest first; it is not a ranking of any other field. A value of an unlisted source can fill an empty field but never overwrite anything.
 export const TITLE_SOURCE_ORDER=Object.freeze(['owner','dictionary','tmdb','letterboxd','watchlist','epg','discovery']);
 const TMDB_IDENTITY=/^tmdb:[1-9]\d{0,11}$/;
+// ADR 0217 decision 8d: the spelling `film:tmdb:<n>` is a MINTING namespace, never proof of ownership.
+const SPELLED_TMDB=/^film:tmdb:([1-9]\d{0,11})$/;
 const SOURCE=/^[a-z][a-z0-9_]{0,39}$/;
 const RESERVED=new Set(['owner','dictionary','reviewed']);
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -79,6 +81,33 @@ const SOURCE_UPSERT='INSERT INTO film_localization_source (film_id,source,value,
 // source upsert are ONE implementation: the same resolver inputs, the same strong() guard and SQL WHERE, the same row equality.
 export const LOCALIZATION_ROW=Object.freeze({effective:(snapshot,written)=>effectiveLocalization(snapshot,written),params:(id,state)=>dimensionParams(id,state),upsert:()=>dimensionUpsert(),same:(stored,params)=>sameDimension(stored,params),strong:row=>strong(row),sourceUpsert:SOURCE_UPSERT,legacySourceInsert:SOURCE_UPSERT.replace(/ ON CONFLICT.*$/,' ON CONFLICT(film_id,source) DO NOTHING'),sourceCap:FILM_FACTS_SOURCE_CAP});
 
+
+// ADR 0217 decision 8d (AIR-671). Read-only, no gate. The Film a facts write for `id` must target. A prefixed `film:tmdb:<n>` id is only a spelling: every stored row of the typed
+// movie id (scheme `tmdb`, any trust) is read, and the Film that holds it as a trusted, non-conflicting external id is the owner (a LID-minted Film that was attached keeps its id and
+// is the survivor). Any other row for the movie id (untrusted or conflicting, on this or another Film, even beside a trusted owner) leaves the id `held`: ambiguous identity evidence,
+// nothing is written. An id of another spelling (a bare lid `film:<lid>`) is returned unchanged. No attach is ever made here.
+export async function resolveFilmFactsTarget(env,id){
+ const filmId=fenced.filmId(id);
+ const match=SPELLED_TMDB.exec(filmId);
+ if(!match)return {id:filmId,spelled:false,owner:null,held:null};
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ let claims;
+ try{claims=await many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[match[1]]);}
+ catch(error){if(error?.code)throw error;throw failed('film_person_unavailable',error);}
+ const owner=claims.find(row=>row.trusted===1&&row.conflicting===0)?.film_id??null;
+ const held=claims.some(row=>!(row.trusted===1&&row.conflicting===0&&row.film_id===owner))?'untrusted_or_conflicting_claim':null;
+ return {id:owner||filmId,spelled:true,owner,held};
+}
+
+// The producers' planning step: the writer input with its `id` bound to the trusted owner of a prefixed movie id, or the same input object when nothing changes. A held movie id is refused here
+// (`film_person_identity_held`), before any receipt exists. The target a receipt binds, the digest and the request id are all derived from the BOUND id; the writer asserts it again in its batch.
+export async function bindFilmFactsOwner(env,input){
+ if(!input||typeof input.id!=='string')return input;
+ const target=await resolveFilmFactsTarget(env,input.id);
+ if(target.held){const error=failed('film_person_identity_held');error.reason=target.held;throw error;}
+ return target.id===input.id?input:{...input,id:target.id};
+}
 
 // Reads the stored rows of ONE Film (read-only, no gate). The planner is pure over this snapshot.
 export async function readFilmSnapshot(env,id){
@@ -279,6 +308,10 @@ export async function writeFilmFacts(env,input){
  if(membership.present&&membership.mode==='sync')throw failed('film_person_membership_owned');
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
+ // ADR 0217 decision 8d (AIR-671): a write that would CREATE `film:tmdb:<n>` is refused while any row of the movie id exists (any trust, any Film), so a plan made before an attach (or a Discovery admission) fails closed here
+ // and never mints a duplicate. The same absence is asserted INSIDE the batch below, against a claim that lands between this read and the commit.
+ const mint=SPELLED_TMDB.exec(id)&&!snapshot.film?SPELLED_TMDB.exec(id)[1]:null;
+ if(mint!==null&&await one(database(env),"SELECT 1 AS present FROM film_external_id WHERE scheme='tmdb' AND value=?",[mint]).catch(error=>{throw error?.code?error:failed('film_person_unavailable',error);}))throw failed('film_person_owner_changed');
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
  // included) with `film_person_precondition`. Without the option nothing changes: the upsert creates the Film, as the EPG Film producer relies on.
  if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');
@@ -286,6 +319,7 @@ export async function writeFilmFacts(env,input){
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
+ if(mint!==null)statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM film WHERE id=?) OR NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=?)"),[id,mint]]);
  if(input.requireExisting===true)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
  if(membership.present)statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM watchlist_membership_authority WHERE id=1 AND mode='producer')"),[]]);
  // AIR-572: caller-supplied proof conditions (the Producer's Letterboxd claim / owner / redirect proof of this Film target), asserted INSIDE the same
