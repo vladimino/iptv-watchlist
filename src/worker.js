@@ -2793,12 +2793,16 @@ async function handleProducerChainOperatorTool(env,args){
  return CanonicalProducerChain.producerChainOperator({held:()=>CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD})(env,args);
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
+// AIR-605: the body of one Catalog Enrichment drainer instance. Dormant: with no control row in `active` it returns before any request or write.
+async function runCatalogEnrichmentWorkflow(env,payload,step){return CatalogEnrichmentRunner.run(env,payload,step,{tools:typeof letterboxdPageTools==='function'?letterboxdPageTools():undefined,fetchImpl:(url,init)=>fetch(url,init),coordinator:()=>UpstreamCooldown.createCoordinator(env,{caller:'catalog_enrichment'})});}
 export default {
 // AIR-308 (ADR 0155): the cron trigger does not call the D1 enrichment projector. D1_ENRICHMENT_WRITE is ignored.
 // AIR-580: the firing no longer calls the legacy Ratings executor's `ensure` (the Letterboxd Sync owns the Ratings phase, cron `:30`); the Workflow body and its binding stay until the owner-approved L3 slice.
 // AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; it creates instances only while the admission gate passes.
 // AIR-588 (ADR 0204): the hourly tick also runs the Prediction ordering writer, which rebuilds the queue only for ordering drift of its own generation and only while no start or commit holds the runner lease.
 async scheduled(controller,env,execution){const at=controller.scheduledTime||Date.now();
+// AIR-605: the Catalog Enrichment reconcile cron (dormant: the expression is not in wrangler.jsonc; the activation change delivers it, never a deploy). It wakes the drainer only while the control is active and work is runnable.
+if(typeof CatalogEnrichmentRunner!=='undefined'&&controller.cron===CatalogEnrichmentRunner.CRON){execution.waitUntil(Promise.resolve().then(()=>CatalogEnrichmentRunner.reconcile(env,{})).catch(()=>{}));return;}
 // AIR-534 (ADR 0174): the Discovery-only fast cron reconciles the Workflow and nothing else: no hourly report, no EPG, Ratings or Monitor.
 if(typeof CatalogPosterWeekly!=='undefined'&&controller.cron===CatalogPosterWeekly.CRON){execution.waitUntil(Promise.resolve().then(()=>CatalogPosterWeekly.run(env,{now:at})).catch(()=>{}));return;}
 // AIR-571 E: the Letterboxd Sync cron (dormant: the trigger is added by the activation step, never by a deploy). It runs `ensure` only: nothing of the hourly EPG, Ratings, Discovery or Monitor work.

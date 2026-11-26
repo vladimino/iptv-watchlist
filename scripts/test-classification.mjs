@@ -376,6 +376,9 @@ export const FILES={
  "catalog-enrichment-settings.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-workflow.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },

@@ -3,7 +3,7 @@
 //   anchors -> applicable sources -> (one request round per applicable source, in parallel) -> decideCore / localization / credits (pure planner) -> receipted units (fill-only, add-only, every guard inside the batch) -> state.
 // Every state write asserts the lease and the control generation; the units additionally assert the anchor set, the plan epoch and the metadata lock. A stale plan therefore writes nothing and is replanned.
 import {database,failed,many,one} from './film-person-authority.js';
-import * as Plan from './catalog-enrichment-plan.js';
+import {Plan} from './catalog-enrichment-plan.js';
 import {readControl} from './catalog-enrichment-store.js';
 import {runUnit as runUnitRaw,unitKeys} from './catalog-enrichment-units.js';
 import {fetchLetterboxd,fetchTmdb,fetchWikidata} from './catalog-enrichment-sources.js';

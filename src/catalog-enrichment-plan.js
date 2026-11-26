@@ -240,3 +240,6 @@ export function nextClass({hasLive,hasBackground,committedLive=0,committedBackgr
 export function examineWindow(rows,now,k=50){
  return rows.filter(row=>!row.retryAt||row.retryAt<=now).slice(0,k);
 }
+
+// One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
+export const Plan=Object.freeze({SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
