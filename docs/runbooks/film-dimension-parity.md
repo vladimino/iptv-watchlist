@@ -7,11 +7,11 @@ Stage 1 of [ADR 0218](../adr/0218-film-lifecycle-dimensions-revision.md) ([AIR-6
 | Part | Path | Role |
 | --- | --- | --- |
 | Pure classifier | `src/domain/film-dimension-parity.js` | derived facts and the class of one row; no I/O |
-| Page reader | `src/film-dimension-parity.js` | one bounded page of Films from a D1-shaped binding; SELECT only |
+| Page reader | `src/film-dimension-parity.js` | one bounded page of Films (or exactly the Films named by the option `ids`) from a D1-shaped binding; SELECT only |
 | Offline report | `scripts/film-dimension-parity.mjs` | pages through a private SQLite copy opened with `sqlite3 -readonly` |
 | Tests | `tests/film-dimension-parity.mjs` | real SQLite fixtures built from every migration |
 
-Nothing in the Worker imports these modules. No route, MCP tool, Workflow or cron calls them.
+Nothing in the Worker imports these modules. No route, MCP tool, Workflow or cron calls them. The only importer in `src` is the dormant stage-6 [retirement](film-dimension-retirement.md), which classifies the Films of an exact allowlist through the `ids` option.
 
 ## Classes
 
@@ -49,4 +49,4 @@ Measured on the SQLite stand-in with one row per dimension per Film, 25 November
 
 ## Not done here
 
-No live census, no retirement (stage 6), no projection reconciliation (stage 4), and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)). The import change of stage 2 is delivered separately ([AIR-661](https://trello.com/c/1Rv634jd); [D1 schema contract](../reference/data/d1-schema.md)): it keeps every `control` and `unknown_legacy` row this reader reports and every `stale_copy` metadata, fingerprint and prediction row, so a parity run before and after an offline import sees the same classes for them.
+No live census, no retirement run (the stage-6 code is dormant: [retirement runbook](film-dimension-retirement.md)), no projection reconciliation (stage 4), and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)). The import change of stage 2 is delivered separately ([AIR-661](https://trello.com/c/1Rv634jd); [D1 schema contract](../reference/data/d1-schema.md)): it keeps every `control` and `unknown_legacy` row this reader reports and every `stale_copy` metadata, fingerprint and prediction row, so a parity run before and after an offline import sees the same classes for them.
