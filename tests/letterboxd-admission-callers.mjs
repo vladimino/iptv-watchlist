@@ -35,13 +35,15 @@ const NOW=Date.parse('2026-11-25T12:00:00.000Z');
 let copies=0;
 // ADR 0222: at marker `d1` the import coordination documents (rated candidates, chunk intent / receipt / candidates result) are D1 Ratings documents behind a complete-import manifest; there is no R2 copy.
 const MANIFEST='letterboxd/imports/documents-manifest.json';
+// a complete import of an empty cohort: count, key list and digest agree
+const EMPTY_MANIFEST={schemaVersion:1,complete:true,count:0,keys:[],inventorySha256:createHash('sha256').update('[]').digest('hex')};
 const sqlText=text=>"'"+String(text).replace(/'/g,"''")+"'";
 const setDocD1=(file,key,value)=>{const body=JSON.stringify(value);sqlite(file,'DELETE FROM ratings_document WHERE key='+sqlText(key)+';INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('+sqlText(key)+',0,'+sqlText(body)+','+sqlText(createHash('sha256').update(body).digest('hex'))+','+sqlText(STAMP)+')');};
 const getDocD1=(file,key)=>{const found=rows(file,'SELECT body FROM ratings_document WHERE key='+sqlText(key)+' ORDER BY part');return found.length?JSON.parse(found.map(row=>row.body).join('')):null;};
 const dbFiles=new Set();
 const fresh=mode=>{
  const file=path.join(root,'c-'+(copies++)+'.sqlite');fs.copyFileSync(template,file);sqlite(file,OPEN);
- if(mode==='d1'){sqlite(file,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1;UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'");setDocD1(file,MANIFEST,{schemaVersion:1,complete:true});dbFiles.add(file);}
+ if(mode==='d1'){sqlite(file,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1;UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'");setDocD1(file,MANIFEST,EMPTY_MANIFEST);dbFiles.add(file);}
  return file;
 };
 
@@ -249,6 +251,49 @@ const file=fresh('d1'),env=world(file);
  assert.deepEqual([capped.state,capped.reason],['needs_review','source_unavailable'],JSON.stringify(capped));
  assert.equal(admissionRows(file).some(item=>item.source_code==='rc2'),false,'no admission from an intent whose source never answered');
 
+ // PR #1018 review (P1-2): EVERY terminal rated decision at d1 is one batch with the history assertion of the history its reconcile observed. The competitor lands immediately before the terminal document batch.
+ const moveBefore=(lid,fn)=>{let hit=0;return {count:()=>hit,env:{...env,DB:d1Standin(file,{onBatch:async list=>{
+  if(!hit&&list.some(item=>/ratings_document/.test(item.text)&&item.text.includes(KEY)&&/needs_review/.test(item.text))&&list.some(item=>new RegExp('admission:lid:'+lid).test(item.text))){hit++;fn();}
+ }})}};};
+ // (2b) the SIXTH source answer (the cap) is terminal: a competing attempt before that batch refuses it whole; the row stays admitting with its intent
+ reset();
+ seedRow(row('rc2b','900075','/film/fixture-rc-75/','Fixture RDB',2011,{sourceAttempts:5}));
+ const cap=moveBefore('rc2b',()=>hasPending('rc2b','late-2b',false));
+ const heldCap=await step(cap.env);
+ assert.equal(cap.count(),1,'the competitor landed before the terminal batch');
+ assert.deepEqual([heldCap.state,heldCap.reason],['admitting','in_flight'],JSON.stringify(heldCap));
+ assert.deepEqual([rowOf('rc2b').state,rowOf('rc2b').intendedTmdb],['admitting','900075'],'not terminal on a moved history, and the intent is kept');
+ // (2c) a PENDING row's terminal review (the page cannot be reviewed) reconciles first and is guarded the same way: the row stays pending
+ reset();
+ seedRow({...row('rc2c',null,null,'Fixture RDC',2011),state:'pending',intendedTmdb:null,filmPath:null});
+ const pend=moveBefore('rc2c',()=>hasPending('rc2c','late-2c',false));
+ const heldPending=await step(pend.env);
+ assert.equal(pend.count(),1,'the competitor landed before the terminal batch of the pending row');
+ assert.deepEqual([heldPending.state,heldPending.reason],['pending','in_flight'],JSON.stringify(heldPending));
+ assert.equal(rowOf('rc2c').state,'pending','a pending row is not made terminal on a superseded history');
+ // control: without the competitor the same pending row IS terminal (the review is a real outcome, not a refusal of the fence)
+ const terminalPending=await step();
+ assert.equal(terminalPending.state,'needs_review',JSON.stringify(terminalPending));
+ // (2d) a reservation that LOST A RACE (a rival admits the code for another Film between the plan and the writer batch): the typed conflict surfaces with its receipt still unresolved, so it is NOT terminal: the row
+ // keeps its intent; the next step reconciles the key and finalizes the conflict under the history assertion
+ reset();
+ seedRow({...row('rc2d',null,null,'Fixture RDD',2013),state:'pending',intendedTmdb:null,filmPath:null});add('rc2d','fixture-rc-2d-171','900171','Fixture RDD',2013);
+ let rival=0;
+ const racing2d={...env,DB:d1Standin(file,{onBatch:async list=>{
+  // the writer's own admission batch: the rival lands immediately before it
+  if(!rival&&list.some(item=>/INSERT INTO film_rated_admission/.test(item.text)&&item.text.includes('rc2d'))){
+   rival++;
+   sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,updated_at) VALUES ('film:tmdb:900172',1,'tmdb:900172','"+STAMP+"');INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:900172','900172','rc2d','"+'a'.repeat(64)+"','Rival',1970,'d1','tmdb_900172','"+STAMP+"','rival-2d','"+STAMP+"')");
+  }
+ }})};
+ const lost2d=await step(racing2d);
+ assert.equal(rival,1,'the rival landed between the plan and the admission');
+ assert.notEqual(lost2d.state,'needs_review','a conflict from a reservation that lost a race is not terminal: its receipt is unresolved');
+ assert.ok(['admitting','pending'].includes(rowOf('rc2d').state),JSON.stringify(rowOf('rc2d')));
+ const settled2d=await step();
+ assert.deepEqual([settled2d.state,settled2d.reason],['needs_review','historical_alias_conflict'],'the next step reconciles and finalizes the conflict under the history assertion: '+JSON.stringify(settled2d));
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film_rated_admission WHERE source_code='rc2d'")[0].n,1,'only the rival admission exists');
+
  // (3) an APPLIED attempt that matches the intent (a lost response): the row finishes WITHOUT a fetch and without fresh evidence
  reset();
  const lost=await D1.admitVerifiedFilm(env,{kind:'lid',lid:'rc3',receipt:{tmdb:'900073',archiveSha256:SHA,title:'Fixture RE',year:2010},evidence:{subject:{kind:'letterboxd_short_code',value:'rc3'},relation:'same_work',object:{kind:'tmdb_movie',value:'900073'},polarity:'asserts',route:'letterboxd_rated_archive',method:'page_check',sourceRoot:'b'.repeat(64),sourceRef:'archive-step:'+SHA.slice(0,12),sourceScope:SHA,observedAt:new Date(NOW).toISOString()},now:()=>new Date(NOW).toISOString()});
@@ -279,8 +324,9 @@ const file=fresh('d1'),env=world(file);
  assert.equal(p3c.outcome,'admitted');
  seedRow({...row('rc3c',null,null,'Fixture RK',2004),state:'pending',intendedTmdb:null,filmPath:null});add('rc3c','fixture-rc-85','900085','Fixture RK',2004);
  const realDb3=env.DB;
- const dyingEnv={...env,DB:{prepare:sql=>{if(/canonical_write_receipt/.test(sql))throw new Error('D1_ERROR: process died');return realDb3.prepare(sql);},batch:statements=>realDb3.batch(statements)}};
- await assert.rejects(()=>step(dyingEnv),error=>/film_person_unavailable|process died/.test(String(error?.message||error)),'the step dies at the first canonical call');
+ // the process dies at the first canonical call AFTER the claim (the step now reconciles the key BEFORE the claim, which must work): the obligation is durable by then
+ const dyingEnv={...env,DB:{prepare:sql=>{if(/canonical_write_receipt/.test(sql)&&getDocD1(file,KEY).candidates.rc3c?.state==='admitting')throw new Error('D1_ERROR: process died');return realDb3.prepare(sql);},batch:statements=>realDb3.batch(statements)}};
+ await assert.rejects(()=>step(dyingEnv),error=>/film_person_unavailable|process died/.test(String(error?.message||error)),'the step dies at the first canonical call after the claim');
  assert.equal(rowOf('rc3c').state,'admitting');assert.equal(rowOf('rc3c').evidenceDue,true,'the obligation was durable before the first effect');
  calls.length=0;
  const restarted3=await step();
@@ -406,6 +452,35 @@ const file=fresh('d1'),env=world(file);
   assert.equal((await Facts.diaryLinks(env,['Bz5'])).get('Bz5').tmdb,null,'but no fact record was written for it');
   assert.equal(admissionRows(file).filter(item=>item.source_code==='Bz5').length,1,'only the rival admission exists');
   assert.equal(evidence(file).filter(item=>item.subject_value==='Bz5').length,0,'no evidence row for the refused item');
+ }
+
+ // PR #1018 review (P1-1): the irreversible effects BEFORE the item's own admission (the inferred mark, the link, and for another code on the Film the facts) assert the operation history the verdict was computed
+ // against IN THEIR OWN BATCH. A competing attempt that appears under the key BEFORE the link/fact batch refuses that batch whole: nothing is linked or published, the chunk stops (409), no receipt, no claim.
+ {
+  const ADD=(lid,tmdb,title='Held',year=1981)=>D1.admitVerifiedFilm(env,{kind:'lid',lid,receipt:{tmdb,archiveSha256:'a'.repeat(64),title,year},now:()=>new Date(NOW).toISOString()});
+  const competitor=(lid,film)=>"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('late-"+lid+"','film_admission','rated_admission_retention','film','"+film+"','"+'7'.repeat(64)+"',0,2,'pending',1,'"+new Date(Date.now()-3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'admission:lid:"+lid+"')";
+  const factRecords=()=>rows(file,"SELECT key FROM ratings_document WHERE key LIKE 'letterboxd/facts/films/%' AND part=0").length;
+  const receiptDoc=(chunk)=>getDocD1(file,'letterboxd/imports/'+'a'.repeat(64)+'/chunks/'+chunk+'.receipt.json');
+  for(const [lid,tmdb,other,chunk] of [['Fz1','700041',true,41],['Fz2','700042',false,42]]){
+   // `other`: the movie already belongs to another code (the verdict is present_other_code and the link and the facts proceed); otherwise the pair is planned (admission after the link)
+   if(other)assert.equal((await ADD('Fo'+lid,tmdb)).outcome,'admitted');
+   let moved=0;
+   const watching={...env,DB:d1Standin(file,{onBatch:async list=>{
+    // the FIRST batch that writes the link or a fact record of this lid (the inferred mark, or the link): the competitor lands just before it
+    if(!moved&&list.some(item=>/ratings_document/.test(item.text)&&/letterboxd\/facts\/(links\.json|films\/)/.test(item.text))&&list.some(item=>new RegExp('admission:lid:'+lid).test(item.text))){moved++;sqlite(file,competitor(lid,'film:tmdb:'+tmdb));}
+   }})};
+   const before={links:(await Facts.diaryLinks(env,[lid])).get(lid)?.tmdb??null,records:factRecords(),admissions:admissionRows(file).length};
+   const response=await Facts.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body([item(lid,tmdb)],chunk))}),watching,'/api/letterboxd/baseline/commit');
+   const json=await response.json();
+   assert.equal(moved,1,lid+': the competitor landed before the link/fact batch');
+   assert.equal(response.status,409,lid+' '+JSON.stringify(json));assert.equal(json.code,'admission_not_settled');
+   assert.equal(await Facts.resolveAlias(env,'letterboxd:'+lid),null,lid+': no alias link was written on the superseded verdict');
+   assert.equal((await Facts.diaryLinks(env,[lid])).get(lid)?.tmdb??null,before.links,lid+': no link');
+   assert.equal(factRecords(),before.records,lid+': no fact record, no observation');
+   assert.equal(receiptDoc(chunk),null,lid+': no chunk receipt (so no claim either)');
+   assert.equal(admissionRows(file).length,before.admissions,lid+': no admission');
+   assert.equal(evidence(file).filter(entry=>entry.subject_value===lid).length,0,lid+': no evidence');
+  }
  }
 
  // a conflict verdict is fenced by the operation history: another attempt appears under the key before the chunk receipt is written -> the chunk stops (409), nothing is recorded; a LIVE attempt stops it before any verdict
@@ -690,6 +765,59 @@ const file=fresh('d1'),env=world(file);
  assert.equal(competed,1,'a competing attempt appeared between the Diary write and the ledger settlement');
  assert.equal(out.counts.rowChanged>=1,true,JSON.stringify(out.counts));
  assert.deepEqual([ledgerRow.state,ledgerRow.attempts],['pending',0],'the ledger refused the settlement: the row is unchanged and is read again');
+}
+
+// ===== P1-3 (PR #1018 review): every R2 write of the moved families is preceded by a FRESH marker read; a write routed to R2 earlier is refused after a close or a flip, never switched to D1 =====
+{
+ reset();
+ const SHAP='9'.repeat(64),REGISTRY_KEY='letterboxd/imports/registry.json',CAND='letterboxd/imports/'+SHAP+'/rated-candidates.json';
+ const markerMover=(f,nth,toD1=false)=>{let reads=0,moved=false;return {moved:()=>moved,env:{DB:d1Standin(f,{onQuery:async text=>{
+  if(!moved&&/FROM letterboxd_admission_authority/.test(text)&&++reads===nth){moved=true;sqlite(f,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1"+(toD1?";UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'":''));}
+ }}),BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'fixture-token'}};};
+ const rowsOf=code=>[{code,disposition:'pending',reason:null,rating:4,name:'Fixture '+code,year:2001,historicalTmdb:null}];
+ // the candidate document: the routing read is the first marker read, the guard right before the PUT the second
+ for(const toD1 of [false,true]){
+  const f=fresh('r2');
+  if(toD1)setDocD1(f,MANIFEST,EMPTY_MANIFEST);
+  r2.clear();puts.length=0;
+  const mover=markerMover(f,2,toD1);
+  await assert.rejects(()=>Candidates.registerCandidates(mover.env,{sha:SHAP,generatedAt:'2026-11-20T10:00:00.000Z',chunk:0,rows:rowsOf('lg1')}),error=>error.code==='letterboxd_admission_closed');
+  assert.equal(mover.moved(),true);
+  assert.deepEqual(puts.filter(key=>key===CAND),[],'no R2 put of the candidate document after the marker moved '+(toD1?'(d1)':'(closed)'));
+  assert.equal(rows(f,"SELECT COUNT(*) AS n FROM ratings_document WHERE key="+sqlText(CAND))[0].n,0,'and the write was not switched to D1');
+ }
+ // the registry projection is a legacy R2 write too: the marker moves after the candidate write and before the registry PUT -> the candidate document stands, the registry is not written
+ {
+  const f=fresh('r2');r2.clear();puts.length=0;
+  const mover=markerMover(f,3);
+  const saved=await Candidates.registerCandidates(mover.env,{sha:SHAP,generatedAt:'2026-11-20T10:00:00.000Z',chunk:0,rows:rowsOf('lg2')});
+  assert.equal(mover.moved(),true);assert.equal(saved.changed,true,'the primary write stands');
+  assert.ok(puts.includes(CAND),'the candidate document was written at r2');
+  assert.equal(puts.includes(REGISTRY_KEY),false,'the derived registry projection was refused by its own fresh guard');
+ }
+ // the inferred chunk intent (a chunk WITHOUT an admit item, which the closed check at the top does not cover): its R2 PUT is guarded too
+ {
+  const f=fresh('r2');r2.clear();puts.length=0;
+  // marker reads of this path: the replay read of the receipt (1), the route of the intent write (2), and the guard right before its PUT (3): the marker moves just before the guard
+  const mover=markerMover(f,3);
+  const response=await Facts.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({origin:{archiveSha256:SHAP,generatedAt:'2026-11-20T10:00:00.000Z',generatedAtSource:'archive_name'},chunk:7,items:[{lid:'lh1',facts:{watched:true},tmdb:'900190',identity:'inferred'}]})}),mover.env,'/api/letterboxd/baseline/commit');
+  assert.equal(mover.moved(),true);assert.equal(response.status,409,JSON.stringify(await response.json()));
+  assert.equal(puts.some(key=>key.includes('/chunks/7.')),false,'no R2 put of the chunk intent or receipt after the marker moved');
+  assert.equal(rows(f,"SELECT COUNT(*) AS n FROM ratings_document WHERE key LIKE '%/chunks/7.%'")[0].n,0,'and nothing was switched to D1');
+ }
+}
+
+// ===== PR #1018 review: the owned movie ids are read in keyset pages, complete however many Films are admitted (no 50,000 business cap) =====
+{
+ const f=fresh('d1'),big={DB:d1Standin(f)};
+ const N=12003;
+ sqlite(f,"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<"+N+") INSERT INTO film (id,contract_version,canonical_identity,updated_at) SELECT 'film:tmdb:'||(800000+i),1,'tmdb:'||(800000+i),'"+STAMP+"' FROM n;"
+  +"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<"+N+") INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) SELECT 'film:tmdb:'||(800000+i),''||(800000+i),'bulk'||i,'"+'a'.repeat(64)+"','T',1999,'d1','tmdb_'||(800000+i),'"+STAMP+"','bulk-'||i,'"+STAMP+"' FROM n;");
+ const all=await D1.admittedMovieIds(big);
+ assert.equal(all.length,N,'every admitted movie id, across three pages');
+ assert.equal(new Set(all).size,N);
+ const without=await D1.admittedMovieIds(big,{exceptCode:'bulk7'});
+ assert.equal(without.length,N-1);assert.equal(without.includes('800007'),false,'the admission of the excepted code is left out');
 }
 
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

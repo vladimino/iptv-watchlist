@@ -123,11 +123,13 @@ function recordRatingChange(record,incoming,effective){
  // ---- Storage. While the ratings marker is r2, every write is an R2 compare-and-swap.
  // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
  // The stored object as it is, for the compare-and-swap writers (the view index is not one of them: AIR-558).
- async function readRawJSON(env,key){
-  // ADR 0222: the chunk intent / receipt / candidates documents are D1 Ratings documents at marker `d1` (no R2 read, no fallback); at r2 this falls through to the R2 path below unchanged.
-  if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
-   const routed=await documentRouteOf(env,key);
-   if(routed.d1)return LetterboxdAdmissionDocuments.readDocument(env,key);
+ // `routed:false` reads the R2 object directly: a legacy compare-and-swap that already routed to R2 must never silently read a D1 document if the marker moved meanwhile (its fresh guard before the PUT refuses instead).
+ async function readRawJSON(env,key,{routed=true}={}){
+  // ADR 0222: the chunk intent / receipt / candidates documents are D1 Ratings documents at marker `d1` (no R2 read, no fallback); at r2 and under `closed` (R2 quiescent, still the record) this falls through to R2.
+  if(routed&&typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+   let route;
+   try{route=await LetterboxdAdmissionDocuments.readRoute(env,key);}catch{throw new FactsError('admission_unavailable','The admission authority cannot be read');}
+   if(route.d1)return LetterboxdAdmissionDocuments.readDocument(env,key);
   }
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
   const object=await env.BUCKET.get(key);let value=object?await object.json():null;
@@ -163,11 +165,19 @@ function recordRatingChange(record,incoming,effective){
   if(extra.length)throw new FactsError('atomic_unavailable','The document store cannot commit the write atomically');
   if(key===FACTS_KEYS.viewIndex)throw new FactsError('view_index_not_owned','The view index has no raw store; it is written only through the D1 ratings domain');
   for(let attempt=0;attempt<5;attempt++){
-   const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
+   const {value,etag}=await readRawJSON(env,key,{routed:false}),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
-   // AIR-602 / ADR 0207 decision 1: the one R2 object of the admission coordination is written only while the marker, read FRESH here, proves `r2` or proves the migration absent. The guard is the last
-   // awaited step before the PUT; `closed`, `d1` and an unreadable marker refuse. (A PUT already past this check cannot be recalled: the activation compares the object before the flip.)
-   if(key==='letterboxd/admissions/verified-films.json'&&typeof LetterboxdAdmissionAuthority!=='undefined')await LetterboxdAdmissionAuthority.guardLegacyWrite(env);
+   // AIR-602 / ADR 0207 decision 1 and ADR 0222 decision 7: every R2 object of the admission coordination (the admissions object and the moved import documents) is written only while the marker, read FRESH here,
+   // proves `r2` or proves the migration absent. The guard is the last awaited step before the PUT; `closed`, `d1` and an unreadable marker refuse (a write routed to R2 earlier is refused, never switched to D1).
+   // (A PUT already past this check cannot be recalled: the activation compares the objects before the flip.)
+   if(typeof LetterboxdAdmissionAuthority!=='undefined'&&(key==='letterboxd/admissions/verified-films.json'||(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)))){
+    try{await LetterboxdAdmissionAuthority.guardLegacyWrite(env);}
+    catch(error){
+     if(error&&error.code==='letterboxd_admission_closed')throw new FactsError('admission_closed','Admissions are closed');
+     if(error&&error.code==='letterboxd_admission_unavailable')throw new FactsError('admission_unavailable','The admission authority cannot be read');
+     throw error;
+    }
+   }
    const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}});
    if(saved!==null)return {value:next,changed:true};
   }
@@ -881,6 +891,10 @@ function recordRatingChange(record,incoming,effective){
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb};
    let admitted=null,d1Admission=null;
+   // PR #1018 review: at `d1` every irreversible effect of an `admit` item that runs before the item's own admission (the inferred mark, the link and, for another code on the Film, the facts) asserts the operation
+   // history the verdict was computed against IN ITS OWN BATCH. A moved history refuses that batch whole and the chunk stops before its receipt (re-send replans); nothing is linked or published on a superseded verdict.
+   let itemEnv=env;
+   const fenced=async effect=>{try{return await effect();}catch(error){if(error&&error.code==='ratings_domain_fence'&&itemEnv!==env)throw new FactsError('admission_not_settled','The operation history of '+item.lid+' moved before its link or facts: the chunk stops before its receipt');throw error;}};
    if(item.admit){
     // The authoritative link conflict is checked BEFORE the admission, so a code that already aliases another movie admits nothing.
     const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
@@ -894,6 +908,7 @@ function recordRatingChange(record,incoming,effective){
      const reconciled=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,settleOnly:true,now:()=>new Date().toISOString()});
      if(reconciled.outcome!=='needs_check')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+reconciled.outcome+'): the chunk stops before its receipt');
      const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
+     itemEnv={...env,admissionGuards:[reconciled.guard.statement]};
      if(plan.outcome==='conflict'||plan.outcome==='other_code')terminalGuards.push(reconciled.guard);
      if(plan.outcome==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'conflict'});continue;}
      if(plan.outcome==='held'||plan.outcome==='redirect')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
@@ -909,9 +924,9 @@ function recordRatingChange(record,incoming,effective){
    if(inferredIdentity){
     const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
     markedKey=plannedKey(linkIndex||{},links);
-    if(markedKey&&!(await markInferredPair(env,markedKey,links,inferredIdentity)))markedKey=null;
+    if(markedKey&&!(await fenced(()=>markInferredPair(itemEnv,markedKey,links,inferredIdentity))))markedKey=null;
    }
-   const factKey=inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await linkOrNote(env,links,inferredIdentity?{expectKey:markedKey}:undefined);
+   const factKey=inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await fenced(()=>linkOrNote(itemEnv,links,inferredIdentity?{expectKey:markedKey}:undefined));
    if(!factKey){
     // A writer linked the code between the check and the link: the entry this commit just created is withdrawn, never one it found.
     if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
@@ -925,6 +940,8 @@ function recordRatingChange(record,incoming,effective){
      conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'refused_after_link'});continue;
     }
     d1Admission=out;
+    // The item's own admission settled the history it observed (its receipt moved the fingerprint): the facts that follow depend on that admission, not on the pre-link verdict.
+    itemEnv=env;
    }
    if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
     const key='tmdb_'+item.tmdb;
@@ -935,7 +952,7 @@ function recordRatingChange(record,incoming,effective){
      CanonicalRatedAdmission.assertRatedAdmissionAccepted(canonical);
     }
    }
-   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:inferredIdentity});
+   const observations=await exportObservations(factKey,item,origin),floors=await floorsFor(env,item.lid,factKey),result=await fenced(()=>recordObservations(itemEnv,factKey,links,observations,{floors,identity:inferredIdentity}));
    tally(counts,result.outcomes);records.push(result.record);
    films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),...(d1Admission?{admission:d1Admission}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
   }

@@ -233,6 +233,9 @@ export const FILES={
  "letterboxd-archive-apply-d1.mjs": {
   "suite": "core"
  },
+ "letterboxd-archive-readers-d1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-admission-d1.mjs": {
   "suite": "core"
  },

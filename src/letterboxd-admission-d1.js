@@ -225,12 +225,20 @@ export async function admitVerifiedFilm(env,input={}){
 }
 
 // The movie ids that already have an admission, for the readers that used to read the R2 object (ADR 0207 decision 5: they read D1 at `d1`). Read only; `exceptCode` leaves out the admission of that code.
-// Bounded: the table holds one row per admitted Film, and a read past the bound is refused rather than answered with a partial set that would let a duplicate movie id through.
-export const ADMITTED_IDS_CAP=50000;
+// Keyset-paged by `film_id` (5,000 rows a page), so the answer is complete however many Films are admitted: there is no business cap on the set, only a hard safety stop on the number of pages (a read past it is
+// refused rather than answered with a partial set that would let a duplicate movie id through). The read is advisory: the writer batch's own keep-first constraints are the fence.
+export const ADMITTED_IDS_PAGE=5000;
+export const ADMITTED_IDS_MAX_PAGES=400;
 export async function admittedMovieIds(env,{exceptCode=null}={}){
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');
- const list=await many(db,'SELECT tmdb FROM film_rated_admission'+(exceptCode===null?'':' WHERE source_code<>?')+' LIMIT ?',exceptCode===null?[ADMITTED_IDS_CAP+1]:[exceptCode,ADMITTED_IDS_CAP+1]);
- if(list.length>ADMITTED_IDS_CAP)throw failed('admission_read_bounded');
- return list.map(row=>String(row.tmdb));
+ const ids=[];let after='';
+ for(let page=0;;page++){
+  if(page>=ADMITTED_IDS_MAX_PAGES)throw failed('admission_read_bounded');
+  const list=await many(db,'SELECT film_id,tmdb FROM film_rated_admission WHERE film_id>?'+(exceptCode===null?'':' AND source_code<>?')+' ORDER BY film_id LIMIT ?',exceptCode===null?[after,ADMITTED_IDS_PAGE]:[after,exceptCode,ADMITTED_IDS_PAGE]);
+  for(const row of list)ids.push(String(row.tmdb));
+  if(list.length<ADMITTED_IDS_PAGE)break;
+  after=list[list.length-1].film_id;
+ }
+ return ids;
 }

@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import {createHash} from 'node:crypto';
+import {createHash,webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import * as LetterboxdAdmissionAuthority from '../src/letterboxd-admission-authority.js';
@@ -36,9 +36,13 @@ const fresh=(mode='d1')=>{
 const setDoc=(file,key,value)=>{const body=JSON.stringify(value);sqlite(file,'DELETE FROM ratings_document WHERE key='+sqlText(key)+';INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('+sqlText(key)+',0,'+sqlText(body)+','+sqlText(createHash('sha256').update(body).digest('hex'))+','+sqlText(STAMP)+')');};
 const getDoc=(file,key)=>{const found=rows(file,'SELECT body FROM ratings_document WHERE key='+sqlText(key)+' ORDER BY part');return found.length?JSON.parse(found.map(row=>row.body).join('')):null;};
 const SHA='a'.repeat(64),SHB='b'.repeat(64);
+const sha256=text=>createHash('sha256').update(text).digest('hex');
+// a complete manifest over a key list: count, keys and digest agree
+const manifestOf=(keys=[])=>({schemaVersion:1,complete:true,count:keys.length,keys,inventorySha256:sha256(JSON.stringify(keys))});
+const EMPTY=manifestOf();
 const KEY='letterboxd/imports/'+SHA+'/rated-candidates.json',RECEIPT='letterboxd/imports/'+SHA+'/chunks/3.receipt.json',MANIFEST='letterboxd/imports/documents-manifest.json';
 
-const ctx=vm.createContext({RatingsD1,LetterboxdAdmissionAuthority,JSON,Object,Number,Promise,Error,Date,Map,Set,structuredClone});
+const ctx=vm.createContext({RatingsD1,LetterboxdAdmissionAuthority,JSON,Object,Number,Promise,Error,Date,Map,Set,structuredClone,TextEncoder,Uint8Array,crypto:webcrypto});
 vm.runInContext(scoped('src/letterboxd-admission-documents.js','LetterboxdAdmissionDocuments'),ctx);
 const Docs=vm.runInContext('LetterboxdAdmissionDocuments',ctx);
 // the adapter runs in a vm: compare its results through JSON (cross-realm deepStrictEqual)
@@ -83,13 +87,37 @@ const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stac
  await assert.rejects(()=>Docs.readDocument(env,KEY),code('admission_documents_not_imported'),'a partial import');
  setDoc(f,MANIFEST,{schemaVersion:2,complete:true});
  await assert.rejects(()=>Docs.readDocument(env,KEY),code('admission_documents_not_imported'),'an unknown manifest schema');
- setDoc(f,MANIFEST,{schemaVersion:1,complete:true});
+ setDoc(f,MANIFEST,EMPTY);
  assert.deepEqual(J(await Docs.readDocument(env,KEY)),{value:null,etag:null},'after a complete import an absent document is absent');
+ // PR #1018 review: the manifest is validated for consistency, and a key it lists that is missing is a damaged import, never new
+ const entry=key=>({key,etag:'e',bytes:2,sha256:sha256('{}')});
+ for(const [label,bad] of [
+  ['a count that disagrees',{...EMPTY,count:1}],
+  ['a digest that disagrees',{...EMPTY,inventorySha256:'0'.repeat(64)}],
+  ['no key list',{schemaVersion:1,complete:true,count:0,inventorySha256:sha256('[]')}],
+  ['a duplicate key',manifestOf([entry(KEY),entry(KEY)])],
+  ['the manifest itself listed',manifestOf([entry(MANIFEST)])],
+  ['a key that is not a moved document',manifestOf([entry('letterboxd/imports/registry.json')])],
+ ]){
+  setDoc(f,MANIFEST,bad);
+  await assert.rejects(()=>Docs.readDocument(env,KEY),code('admission_documents_inconsistent'),label);
+  await assert.rejects(()=>Docs.casDocument(env,KEY,{},d=>({...d,x:1})),code('admission_documents_inconsistent'),label+': no write');
+ }
+ assert.equal(getDoc(f,KEY),null,'nothing written under an inconsistent manifest');
+ setDoc(f,MANIFEST,manifestOf([entry(KEY)]));
+ await assert.rejects(()=>Docs.readDocument(env,KEY),code('admission_document_missing'),'listed by the import but missing in D1');
+ await assert.rejects(()=>Docs.casDocument(env,KEY,{},d=>({...d,x:1})),code('admission_document_missing'),'and it is never recreated as a new document');
+ assert.equal(getDoc(f,KEY),null);
+ assert.deepEqual(J(await Docs.readDocument(env,RECEIPT)),{value:null,etag:null},'a key the import did not list is genuinely absent');
+ const created=await Docs.casDocument(env,RECEIPT,{},d=>({...d,sealed:true}));
+ assert.equal(created.changed,true,'and a genuinely new post-cutover key can be created');
+ setDoc(f,KEY,{archiveSha256:SHA});
+ assert.equal((await Docs.readDocument(env,KEY)).value.archiveSha256,SHA,'the listed key present: read');
 }
 
 // ===== 4. writes: create, update, a stale revision retries, two concurrent writers both land =====
 {
- const f=fresh(),env={DB:d1Standin(f)};setDoc(f,MANIFEST,{schemaVersion:1,complete:true});
+ const f=fresh(),env={DB:d1Standin(f)};setDoc(f,MANIFEST,EMPTY);
  const made=await Docs.casDocument(env,KEY,{n:0},d=>({...d,n:d.n+1}));
  assert.deepEqual([made.changed,made.value.n],[true,1]);
  assert.deepEqual(getDoc(f,KEY),{n:1});
@@ -106,7 +134,7 @@ const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stac
 
 // ===== 5. a caller assertion: false refuses the WHOLE batch; true commits with the document =====
 {
- const f=fresh(),env={DB:d1Standin(f)};setDoc(f,MANIFEST,{schemaVersion:1,complete:true});
+ const f=fresh(),env={DB:d1Standin(f)};setDoc(f,MANIFEST,EMPTY);
  setDoc(f,RECEIPT,{state:'open'});
  const FALSE=['UPDATE ratings_domain_cas SET ok=CASE WHEN 0 THEN 1 ELSE 0 END WHERE id=1',[]];
  const TRUE=['UPDATE ratings_domain_cas SET ok=CASE WHEN 1 THEN 1 ELSE 0 END WHERE id=1',[]];
@@ -123,7 +151,7 @@ const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stac
 
 // ===== 6. the d1 assertion of the batch: the marker row is one-way (`d1` never changes mode or generation), so the assertion refuses a batch planned from any other read, and `closed` refuses before any write =====
 {
- const f=fresh(),setup={DB:d1Standin(f)};setDoc(f,MANIFEST,{schemaVersion:1,complete:true});
+ const f=fresh(),setup={DB:d1Standin(f)};setDoc(f,MANIFEST,EMPTY);
  setDoc(f,KEY,{n:1});
  const authority=(await Docs.documentRoute(setup,KEY)).authority;
  // a plan made from a read that is not the row now (an older generation) is refused by the batch's own assertion
@@ -134,14 +162,14 @@ const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stac
  const fresh1=await Docs.casDocument(setup,KEY,{n:0},d=>({...d,n:3}));
  assert.deepEqual([fresh1.changed,getDoc(f,KEY).n],[true,3],'a caller that reads the marker itself lands');
  // under `closed` (the pre-flip state of the same marker) the adapter refuses before any write
- const closed=fresh('closed');setDoc(closed,MANIFEST,{schemaVersion:1,complete:true});
+ const closed=fresh('closed');setDoc(closed,MANIFEST,EMPTY);
  await assert.rejects(()=>Docs.casDocument({DB:d1Standin(closed)},KEY,{},d=>({...d,n:1})),code('letterboxd_admission_closed'));
  assert.equal(getDoc(closed,KEY),null);
 }
 
 // ===== 7. the byte bound and the bounded listing =====
 {
- const f=fresh(),env={DB:d1Standin(f)};setDoc(f,MANIFEST,{schemaVersion:1,complete:true});
+ const f=fresh(),env={DB:d1Standin(f)};setDoc(f,MANIFEST,EMPTY);
  await assert.rejects(()=>Docs.casDocument(env,KEY,{},()=>({big:'x'.repeat(RatingsD1.ADMISSION_DOCUMENT_BYTES+1)})),code('admission_document_too_large'));
  assert.equal(getDoc(f,KEY),null,'nothing written');
  setDoc(f,KEY,{archiveSha256:SHA});setDoc(f,'letterboxd/imports/'+SHB+'/rated-candidates.json',{archiveSha256:SHB});setDoc(f,RECEIPT,{x:1});

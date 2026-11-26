@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import {createHash} from 'node:crypto';
+import {createHash,webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import * as LetterboxdAdmissionAuthority from '../src/letterboxd-admission-authority.js';
@@ -72,9 +72,22 @@ assert.equal(Importer.planImport(await Importer.inventory(makeBucket(cohort())))
  assert.deepEqual(blocked.blocked.map(item=>item.reason).sort(),['not_an_object','oversized','unparseable']);
  assert.equal(blocked.manifest,null,'a blocked plan has no manifest');
  await assert.rejects(()=>Importer.importDocuments(D1(fresh('closed')),blocked),code('import_blocked'));
- const many=Object.fromEntries(Array.from({length:Importer.MAX_KEYS+1},(_,i)=>['letterboxd/imports/z/'+i,'x']));
- const truncated=await Importer.inventory(makeBucket(many,{pageSize:1000}));
- assert.equal(truncated.truncated,true);assert.equal(Importer.planImport(truncated).blocked[0].reason,'inventory_truncated','a capped listing is never a complete cohort');
+ // PR #1018 review: raw objects (ZIP, HTML, the registry) are never counted against a limit: a bucket with far more of them than any key cap still lists completely
+ const raw=Object.fromEntries(Array.from({length:6200},(_,i)=>['letterboxd/imports/'+SHA+'/raw/'+i+'.html','x']));
+ const rawListing=await Importer.inventory(makeBucket({...cohort(),...raw},{pageSize:1000}));
+ assert.equal(rawListing.truncated,false,'6,200 raw objects do not truncate the listing');
+ assert.equal(rawListing.documents.length,4);assert.equal(rawListing.ignored,6202,'counted as ignored, never read');
+ assert.deepEqual(Importer.planImport(rawListing).blocked,[]);
+ // the only bound is the safety stop on list calls: past it the cohort is not provably complete and the plan is blocked
+ const pathological=Object.fromEntries(Array.from({length:Importer.MAX_LIST_PAGES+5},(_,i)=>['letterboxd/imports/z/'+i,'x']));
+ const stopped=await Importer.inventory(makeBucket(pathological,{pageSize:1}));
+ assert.equal(stopped.truncated,true);assert.equal(Importer.planImport(stopped).blocked[0].reason,'inventory_truncated','an unfinished listing is never a complete cohort');
+ // the manifest is one Ratings document: a cohort whose manifest would not fit the document bound is blocked (the concrete constraint, not an arbitrary count)
+ const huge=Importer.planImport({documents:Array.from({length:40000},(_,i)=>({key:'letterboxd/imports/'+SHA+'/chunks/'+i+'.receipt.json',etag:'e'+i,text:'{"a":1}'})),ignored:0,truncated:false});
+ assert.deepEqual(huge.blocked.map(item=>item.reason),['manifest_too_large']);assert.equal(huge.manifest,null);
+ // the byte bound counts BYTES: a document of multi-byte characters under the character count is still refused when its encoding exceeds the bound
+ const wide=Importer.planImport({documents:[{key:K1,etag:'e',text:JSON.stringify({pad:'я'.repeat(RatingsD1.ADMISSION_DOCUMENT_BYTES/2+10)})}],ignored:0,truncated:false});
+ assert.deepEqual(wide.blocked.map(item=>item.reason),['oversized'],'two-byte characters: 2,000,010 characters are more than 4,000,000 bytes');
 }
 
 // ===== 2. the import: closed only, documents first, the complete manifest last, idempotent =====
@@ -95,7 +108,7 @@ assert.equal(Importer.planImport(await Importer.inventory(makeBucket(cohort())))
  assert.deepEqual(getDoc(f,K1),JSON.parse(cohort()[K1]));
  // after the flip a d1 reader sees the documents, an absent key is absent, and the registry projection is not a document
  flip(f);
- const ctx=vm.createContext({RatingsD1,LetterboxdAdmissionAuthority,JSON,Object,Number,Promise,Error,Date,Map,Set,structuredClone});
+ const ctx=vm.createContext({RatingsD1,LetterboxdAdmissionAuthority,JSON,Object,Number,Promise,Error,Date,Map,Set,structuredClone,TextEncoder,Uint8Array,crypto:webcrypto});
  vm.runInContext(scoped('src/letterboxd-admission-documents.js','LetterboxdAdmissionDocuments'),ctx);
  const Docs=vm.runInContext('LetterboxdAdmissionDocuments',ctx);
  assert.equal(J(await Docs.readDocument(env,K2)).value.archiveSha256,SHB);

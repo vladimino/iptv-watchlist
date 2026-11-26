@@ -22,7 +22,9 @@ import {database} from './film-person-authority.js';
 export const IMPORT_PREFIX='letterboxd/imports/';
 export const MANIFEST_KEY='letterboxd/imports/documents-manifest.json';
 export const MANIFEST_SCHEMA=1;
-export const MAX_KEYS=5000;
+// The listing is paged (1,000 objects a page) and is NOT capped by the number of raw objects under the prefix (ZIP and HTML evidence are counted as ignored, never against a limit). It is complete or it is `truncated`:
+// the only bound is a hard safety stop on the number of list calls, so a pathological bucket cannot loop forever; hitting it blocks the plan (a partial cohort is never imported).
+export const MAX_LIST_PAGES=2000;
 const PAGE=1000;
 
 const sha256=text=>createHash('sha256').update(text).digest('hex');
@@ -30,18 +32,18 @@ function failed(code,detail){const error=new Error(code);error.code=code;if(deta
 
 // -> {documents:[{key,etag,text}], ignored, truncated}. `bucket` is read only here: `list` and `get`.
 export async function inventory(bucket){
- const documents=[];let ignored=0,cursor,seen=0,truncated=false;
+ const documents=[];let ignored=0,cursor,pages=0,truncated=false;
  for(;;){
+  if(pages>=MAX_LIST_PAGES){truncated=true;break;}
   const page=await bucket.list({prefix:IMPORT_PREFIX,limit:PAGE,...(cursor?{cursor}:{})});
+  pages++;
   for(const object of page.objects||[]){
-   seen++;
-   if(seen>MAX_KEYS){truncated=true;break;}
    if(object.key===MANIFEST_KEY||!admissionDocumentKey(object.key)){ignored++;continue;}
    const body=await bucket.get(object.key);
    if(!body){documents.push({key:object.key,etag:null,text:null,missing:true});continue;}
    documents.push({key:object.key,etag:body.etag??null,text:await body.text()});
   }
-  if(truncated||!page.truncated)break;
+  if(!page.truncated)break;
   cursor=page.cursor;
  }
  documents.sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
@@ -55,16 +57,18 @@ export function planImport(snapshot){
  for(const item of snapshot.documents){
   if(item.missing||item.text===null){blocked.push({key:item.key,reason:'vanished_during_inventory'});continue;}
   if(!admissionDocumentKey(item.key)){blocked.push({key:item.key,reason:'unknown_key'});continue;}
-  if(item.text.length>ADMISSION_DOCUMENT_BYTES){blocked.push({key:item.key,reason:'oversized'});continue;}
+  if(new TextEncoder().encode(item.text).length>ADMISSION_DOCUMENT_BYTES){blocked.push({key:item.key,reason:'oversized'});continue;}
   let value;try{value=JSON.parse(item.text);}catch{blocked.push({key:item.key,reason:'unparseable'});continue;}
   if(value===null||typeof value!=='object'||Array.isArray(value)){blocked.push({key:item.key,reason:'not_an_object'});continue;}
   // The D1 store holds the canonical JSON text of the value; the digest is of that text, so a re-serialization difference is never read as drift.
   const text=JSON.stringify(value);
-  documents.push({key:item.key,etag:item.etag,bytes:text.length,sha256:sha256(text),value});
+  documents.push({key:item.key,etag:item.etag,bytes:new TextEncoder().encode(text).length,sha256:sha256(text),value});
  }
  if(blocked.length)return {blocked,documents,manifest:null,manifestSha256:null};
  const keys=documents.map(({key,etag,bytes,sha256:digest})=>({key,etag,bytes,sha256:digest}));
  const manifest={schemaVersion:MANIFEST_SCHEMA,complete:true,count:keys.length,inventorySha256:sha256(JSON.stringify(keys)),keys};
+ // The manifest is itself one Ratings document, read by every d1 operation: it must fit the same bound (the real constraint on the cohort size, not an arbitrary count).
+ if(new TextEncoder().encode(JSON.stringify(manifest)).length>ADMISSION_DOCUMENT_BYTES){blocked.push({key:MANIFEST_KEY,reason:'manifest_too_large'});return {blocked,documents,manifest:null,manifestSha256:null};}
  return {blocked,documents,manifest,manifestSha256:sha256(JSON.stringify(manifest))};
 }
 
