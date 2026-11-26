@@ -135,10 +135,10 @@ export function effectStatements({signal,guard,at}){
   const scopes=SOURCE_SCOPES[signal.source]||[];
   return [
    [`INSERT OR IGNORE INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) SELECT ?,scope,?,? FROM catalog_enrichment_scope WHERE enabled=1 AND scope IN (${marks(scopes)}) AND ${G} ORDER BY CASE scope ${scopes.map((_,i)=>`WHEN ? THEN ${i}`).join(' ')} END LIMIT 1`,[filmId,at,[signal.kind,signal.subject,signal.source,signal.part].join('|'),...scopes,...params(),...scopes]],
-   [`INSERT OR IGNORE INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,plan_epoch) SELECT ?,'film','*',0,'active',?,?,0 WHERE ${G}`,[filmId,at,at,...params()]],
+   [`INSERT OR IGNORE INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,plan_epoch) SELECT ?,'film','*',0,'active','check_anchors',?,?,0 WHERE ${G}`,[filmId,at,at,...params()]],
   ];
  }
- const out=[[`UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at=?${signal.kind==='anchor_changed'?",status='active',reason=NULL":''} WHERE film_id=? AND part='film' AND source='*' AND ${G}`,[at,filmId,...params()]]];
+ const out=[[`UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at=?${signal.kind==='anchor_changed'?",status='active',reason='check_anchors'":''} WHERE film_id=? AND part='film' AND source='*' AND ${G}`,[at,filmId,...params()]]];
  const reopen=(where,extra=[])=>[`UPDATE catalog_enrichment_state SET refresh_epoch=refresh_epoch+1,status='due',failures=0,retry_at=NULL,updated_at=? WHERE film_id=? AND part<>'film' AND status IN ('complete','complete_with_gaps','needs_attention','deferred_repair','identity_disagreement','not_applicable','due') AND ${where} AND ${G}`,[at,filmId,...extra,...params()]];
  if(signal.kind==='anchor_changed')out.push(reopen("status<>'complete'"));
  else if(signal.kind==='protection_released')out.push(reopen('part=?',[signal.part==='metadata'?'core':signal.part]));

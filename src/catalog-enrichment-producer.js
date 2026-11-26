@@ -5,7 +5,7 @@
 import {database,failed,many,one} from './film-person-authority.js';
 import * as Plan from './catalog-enrichment-plan.js';
 import {readControl} from './catalog-enrichment-store.js';
-import {runUnit,unitKeys} from './catalog-enrichment-units.js';
+import {runUnit as runUnitRaw,unitKeys} from './catalog-enrichment-units.js';
 import {fetchLetterboxd,fetchTmdb,fetchWikidata} from './catalog-enrichment-sources.js';
 
 export const CODE_VERSION='c1-1';
@@ -15,6 +15,15 @@ const parse=text=>{if(text==null)return null;try{return JSON.parse(text);}catch{
 const json=value=>value==null?null:JSON.stringify(value);
 const guardSql=ctx=>{const lease=Plan.leaseGuard(ctx.leaseId,ctx.now),control=Plan.controlGuard(ctx.generation);return {sql:`${lease.sql} AND ${control.sql}`,params:[...lease.params,...control.params]};};
 const sha=value=>Plan.digestOf(value);
+// The refusals of a batch whose guards no longer hold (a stale plan) or whose authority fence moved: retryable by a replan, never a failure of the Film and never a crash of the run.
+export const STALE_CODES=new Set(['film_person_precondition','film_person_fence','film_person_revision_conflict','operation_key_moved','operation_key_in_flight','localization_inputs_moved']);
+async function runUnit(env,spec){
+ try{return await runUnitRaw(env,spec);}
+ catch(error){
+  if(STALE_CODES.has(error?.code))return {state:'stale',code:error.code};
+  throw error;
+ }
+}
 
 // ---- state rows ----
 const COLUMNS='film_id,part,source,slot,status,reason,cohort,anchor,source_version,refresh_epoch,plan_epoch,failures,transport_streak,failure_class,failure_signature,code_version,response_digest,pending_since,retry_at,due_since,expected_json,gaps_json,conflicts_json,hints_json,film_json,updated_at';
@@ -80,10 +89,13 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    }
    void superseded;
   }
-  filmRow={...filmRow,status:corrected?'active':filmRow.status,planEpoch:filmRow.planEpoch+1,film:next};
+  // the marker stays until the second pass has created or reopened the rows: a Film whose rows do not exist yet must stay in the queue
+  filmRow={...filmRow,status:corrected?'active':filmRow.status,reason:'check_anchors',planEpoch:filmRow.planEpoch+1,film:next};
   await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch-1});
   return {state:'replan',reason:corrected?'identity_corrected':'anchors_changed'};
  }
+ // the anchors are unchanged: the pending anchor-check marker of an admission or an anchor signal is settled
+ if(filmRow.reason==='check_anchors'){filmRow={...filmRow,reason:null};await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch});}
  if(filmRow.status==='identity_disagreement')return {state:'blocked',reason:'identity_disagreement'};
  // the rows of the applicable sources; a missing one is created due, a removed source becomes not_applicable (its earlier writes remain)
  const need=[];
