@@ -8,11 +8,17 @@
 import {database,many,one} from './film-person-authority.js';
 import {acquireLease,consumeSignal,readControl,releaseLease,renewLease,runnableSignals} from './catalog-enrichment-store.js';
 import {nextClass,priorityClass} from './catalog-enrichment-plan.js';
-import {processFilm} from './catalog-enrichment-producer.js';
+import {processFilm,CODE_VERSION} from './catalog-enrichment-producer.js';
 
 // Engineering-owned defaults (ADR 0219 decision 6), one module, reported in each run's outbox entry. The statement budget is the ADR 0094 guard, not a provider limit; a handover happens at HANDOVER_AT, half the documented
 // 10,000; a step starts only when the remaining budget covers its own work plus the finalize-and-successor reserve.
 export const BUDGET=Object.freeze({statements:6000,handoverAt:5000,reserve:1000,window:50,stepEstimate:150,unitEstimate:60});
+
+async function repairGuard(handle,leaseId,generation,now){
+ const lease=`EXISTS (SELECT 1 FROM projection_run WHERE projection='catalog_enrichment' AND lease_id=? AND lease_until>?) AND EXISTS (SELECT 1 FROM catalog_enrichment_control WHERE id=1 AND state='active' AND generation=?)`;
+ void handle;
+ return {sql:lease,params:[leaseId,now,generation]};
+}
 
 // A D1 binding that counts every statement it issues, failing calls included.
 export function countingEnv(env){
@@ -70,6 +76,11 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  const tickId=runId;
  const handle=database(env);
  try{await handle.prepare("INSERT INTO catalog_enrichment_tick (tick_id,started_at,state,counts_json) VALUES (?,?,'started','{}') ON CONFLICT(tick_id) DO NOTHING").bind(tickId,clock()).run();}catch{/* the outbox never blocks the work */}
+ // A NEW CODE VERSION is a repair event (ADR 0219 decision 7): a deploy is not a causal change the Worker can hook, so the first run of a new version makes every deferred repairable item runnable at once, whatever its old retry_at.
+ try{
+  const lease=(await repairGuard(handle,leaseId,generation,clock()));
+  await handle.prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>? AND ${lease.sql}`).bind(clock(),CODE_VERSION,...lease.params).run();
+ }catch{/* a repair wake never blocks the run */}
  let result;
  // Films this run processed without any progress (blocked, waiting, nothing due): not picked again in this run, so a deferred or blocked Film can never keep a run spinning.
  const skip=new Set();

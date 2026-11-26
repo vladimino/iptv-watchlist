@@ -18,7 +18,8 @@ const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),ki
 const fetch=async url=>{if(String(url)===TEAM+'/cdn-cgi/access/certs')return Response.json({keys:[publicJwk]});throw new Error('unexpected network '+url);};
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
 const adminError=(code,status)=>json({error:code},status);
-const context=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextEncoder,TextDecoder,AbortSignal,atob,crypto:webcrypto,fetch,console,json,adminError,ISSUE_CODES:[],CatalogEnrichmentStore:Store});
+const kicks=[];
+const context=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextEncoder,TextDecoder,AbortSignal,atob,crypto:webcrypto,fetch,console,json,adminError,ISSUE_CODES:[],CatalogEnrichmentStore:Store,CatalogEnrichmentRunner:{kick:async()=>{kicks.push('kick');return {kicked:true};}}});
 for(const file of ['src/mcp.js','src/admin/identity-owner-action.js','src/admin/settings.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 const route=vm.runInContext('adminSettingsRoute',context);
 
@@ -183,5 +184,27 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
  const paused=await call(env,WRITE,{payload:req({expectedRevision:control().revision})});assert.equal(paused.body.outcome,'applied');
  const chunk=await call(env,WRITE,{payload:retry({expectedRows:[{part:'credits',source:'tmdb',slot:1,status:'deferred_repair',updatedAt:T}]})});
  assert.equal(chunk.status,200);assert.equal(rows(file,"SELECT status FROM catalog_enrichment_state WHERE part='credits' AND slot=1")[0].status,'due','a credits chunk is retried by its own slot');
+}
+// ---- the wake after a successful owner action: a resume or a retry kicks the drainer, a pause or a refusal does not ----
+{
+ const {file,env}=world();activate(file);
+ kicks.length=0;
+ await call(env,WRITE,{payload:req()});
+ assert.equal(kicks.length,0,'a pause wakes nothing');
+ await call(env,WRITE,{payload:req({action:'resume',expectedRevision:2})});
+ assert.equal(kicks.length,0,'a rejected resume (stale revision) wakes nothing');
+ await call(env,WRITE,{payload:req({action:'resume',expectedRevision:3})});
+ assert.equal(kicks.length,1,'an applied resume kicks the drainer once, after the commit');
+ sql(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at) VALUES ('film:a','credits','tmdb',0,'deferred_repair','${T}','${T}');`);
+ await call(env,WRITE,{payload:{action:'retry',requestId:'req-00000009',filmId:'film:a',expectedRows:[{part:'credits',source:'tmdb',slot:0,status:'deferred_repair',updatedAt:T}]}});
+ assert.equal(kicks.length,2,'an applied retry kicks the drainer');
+ await call(env,WRITE,{payload:{action:'retry',requestId:'req-00000010',filmId:'film:a',expectedRows:[{part:'credits',source:'tmdb',slot:0,status:'deferred_repair',updatedAt:T}]}});
+ assert.equal(kicks.length,2,'a refused (stale) retry wakes nothing');
+ // a failing wake never changes the answer
+ const quiet=vm.runInContext('CatalogEnrichmentRunner',context);const original=quiet.kick;quiet.kick=async()=>{throw new Error('workflow down');};
+ const paused=await call(env,WRITE,{payload:req({expectedRevision:rows(file,'SELECT revision FROM catalog_enrichment_control')[0].revision})});
+ const resumed=await call(env,WRITE,{payload:req({action:'resume',expectedRevision:rows(file,'SELECT revision FROM catalog_enrichment_control')[0].revision})});
+ assert.deepEqual([paused.body.outcome,resumed.status,resumed.body.outcome],['applied',200,'applied'],'a wake that throws is swallowed: the owner action still answers applied');
+ quiet.kick=original;
 }
 console.log('catalog enrichment settings: ok');

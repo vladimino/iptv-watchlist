@@ -225,4 +225,32 @@ function file0(w){return w.file;}
  assert.equal(meta(locked.file),null,'an owner-locked metadata dimension is never written');
  assert.equal(result.state,'done');
 }
+// ---- unreadable sections back off; source recovery wakes the deferred repairable items of other Films ----
+{
+ const w=await world({lid:null});
+ await step(w,upstream({}));
+ const bad=upstream({tm:movie({translations:{}})});
+ await step(w,bad,at(11));
+ const row=PR.rowView(rows(w.file,"SELECT * FROM catalog_enrichment_state WHERE part='localization' AND source='tmdb'")[0]);
+ assert.deepEqual([row.status,row.failures,row.failureClass,row.reason],['due',1,'repairable','unreadable_translations'],'a malformed translation section is a counted repairable failure');
+ assert.ok(row.retryAt>at(11),'and it backs off: no immediate endless retry ('+row.retryAt+')');
+ const again=upstream({});
+ const quiet=await step(w,again,at(12));
+ assert.ok(!again.calls.some(url=>url.includes('themoviedb')),'nothing is asked again before the retry: '+quiet.state);
+ const noCredits=await world({lid:null});
+ await step(noCredits,upstream({}));
+ await step(noCredits,upstream({tm:movie({credits:undefined})}),at(11));
+ const credits=PR.rowView(rows(noCredits.file,"SELECT * FROM catalog_enrichment_state WHERE part='credits' AND source='tmdb'")[0]);
+ assert.deepEqual([credits.failures,credits.reason],[1,'unreadable_credits'],'an unreadable credits section is never read as an empty set');
+ assert.ok(credits.retryAt>at(11));
+ assert.deepEqual(credits.status,'due');assert.equal(rows(noCredits.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n,0);
+ // source recovery: a valid answer of tmdb for this Film wakes the deferred repairable tmdb items of another Film at once
+ const rec=await world({lid:null});
+ sqlite(rec.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:900',2,NULL,'O','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','tmdb',0,'deferred_repair','repairable',7,'2099-01-01T00:00:00.000Z','${T}','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','letterboxd',0,'deferred_repair','repairable',7,'2099-01-01T00:00:00.000Z','${T}','${T}'),('film:tmdb:900','localization','tmdb',0,'complete',NULL,0,NULL,'${T}','${T}');`);
+ await step(rec,upstream({}));
+ await step(rec,upstream({}),at(11));
+ assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='tmdb' AND part='core'")[0].retry_at,null,'a recovered source wakes its deferred items');
+ assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='letterboxd'")[0].retry_at,'2099-01-01T00:00:00.000Z','another source is not woken');
+ assert.equal(rows(rec.file,"SELECT status FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND part='localization'")[0].status,'complete','settled parts are untouched');
+}
 console.log('catalog enrichment producer: ok');

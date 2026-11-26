@@ -189,4 +189,12 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE state IN ('pending','unknown')")[0].n,0,'no receipt left unresolved');
  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM film_person_credit WHERE role='actor'")[0].n,140);
 }
+// ---- a new code version is a repair event: the first run wakes every deferred repairable item whatever its retry_at ----
+{
+ const w=world(1);
+ sqlite(w.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:900',2,NULL,'O','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,code_version,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','tmdb',0,'deferred_repair','repairable',7,'older','2099-01-01T00:00:00.000Z','${T}','${T}'),('film:tmdb:900','credits','tmdb',0,'deferred_repair','repairable',7,'older','2099-01-01T00:00:00.000Z','${T}','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,code_version,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','letterboxd',0,'deferred_repair','repairable',7,'${'c1-1'}','2099-01-01T00:00:00.000Z','${T}','${T}');`);
+ await run(w,upstream());
+ const woken=rows(w.file,"SELECT part,source,retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' ORDER BY part,source");
+ assert.deepEqual(woken.map(row=>[row.part,row.source,row.retry_at]),[['core','letterboxd','2099-01-01T00:00:00.000Z'],['core','tmdb',null],['credits','tmdb',null]],'rows of an older code version are runnable at once; a row of the current version keeps its backoff');
+}
 console.log('catalog enrichment drain: ok');

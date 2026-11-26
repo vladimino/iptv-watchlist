@@ -97,6 +97,12 @@ async function catalogEnrichmentRetry(env,input,by,at){
  return {status:200,body:{ok:true,outcome:'applied',action:'retry',requestId:input.requestId,filmId:input.filmId,retried:targets.map(row=>({part:row.part,source:row.source,slot:row.slot})),readback:after.map(item=>({part:item.part,source:item.source,slot:Number(item.slot),status:item.status,updatedAt:item.updated_at}))}};
 }
 
+// Best-effort wake AFTER a successful owner action commits (never inside a transaction, never blocking the answer): a resume or a retry makes work runnable, and an uncertain outcome is recovered by the same kick.
+async function catalogEnrichmentWake(env){
+ if(typeof CatalogEnrichmentRunner==='undefined')return null;
+ try{return await CatalogEnrichmentRunner.kick(env);}catch{return null;}
+}
+
 async function adminSettingsRoute(request,env,url){
  if(url.pathname==='/api/admin/settings'){
   if(request.method!=='GET'&&request.method!=='HEAD')return adminError('method_not_allowed',405);
@@ -115,7 +121,7 @@ async function adminSettingsRoute(request,env,url){
  if(input.error)return adminError(input.error,400);
  if(!env.DB)return adminError('unavailable',503);
  const at=new Date().toISOString(),by=access.by;
- if(input.action==='retry'){const outcome=await catalogEnrichmentRetry(env,input,by,at);return json(outcome.body,outcome.status);}
+ if(input.action==='retry'){const outcome=await catalogEnrichmentRetry(env,input,by,at);if(outcome.status===200||outcome.body?.outcome==='unknown')await catalogEnrichmentWake(env);return json(outcome.body,outcome.status);}
  if(typeof CatalogEnrichmentStore==='undefined')return adminError('control_unavailable',503);
  let result;
  try{result=await CatalogEnrichmentStore.changeControl(env,{action:input.action,expectedRevision:input.expectedRevision,by,at});}
@@ -123,7 +129,8 @@ async function adminSettingsRoute(request,env,url){
   if(error?.code==='catalog_enrichment_schema_missing')return adminError('schema_missing',503);
   return json({error:'storage_unavailable',outcome:'unknown',recovery:'Reload the state: the change may or may not have been stored.'},503);
  }
- if(result.outcome==='uncertain')return json({error:'readback_failed',outcome:'unknown',recovery:'Reload the state to see whether the change was stored.'},503);
+ if(result.outcome==='uncertain'){if(input.action==='resume')await catalogEnrichmentWake(env);return json({error:'readback_failed',outcome:'unknown',recovery:'Reload the state to see whether the change was stored.'},503);}
  if(result.outcome==='rejected')return json({ok:false,outcome:'rejected',action:input.action,requestId:input.requestId,control:result.control},409);
+ if(input.action==='resume')await catalogEnrichmentWake(env);
  return json({ok:true,outcome:'applied',action:input.action,requestId:input.requestId,control:result.control});
 }

@@ -139,6 +139,11 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    if(JSON.stringify(next)!==JSON.stringify(row)){await putRow(env,ctx,next,{expectEpoch:row.refreshEpoch});byKey.set(key(row),next);}
   }
  }
+ // SOURCE RECOVERY (ADR 0219 decision 7): a successful, valid response of a source makes that source's deferred repairable items of OTHER Films runnable at once, whatever their old retry_at; settled parts are untouched.
+ for(const [source,answer] of Object.entries(answers))if(answer.status==='ok'){
+  const guard=guardSql(ctx);
+  await db(env).prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE source=? AND status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND film_id<>? AND ${guard.sql}`).bind(now,source,filmId,...guard.params).run().catch(()=>{});
+ }
  // a page disagreement stops every source for this Film (decision 2): nothing is written
  const disagreement=Object.values(answers).find(answer=>answer.status==='disagreement');
  if(disagreement){
@@ -196,7 +201,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const answer=answers[source];
   if(!row||!answer||answer.status!=='ok'||!['due','deferred_repair'].includes(row.status))continue;
   const title=answer.title;
-  if(!title||title.status==='unreadable'){await putRow(env,ctx,{...row,status:'deferred_repair',reason:'unreadable_translations',failures:Math.max(row.failures,1)},{expectEpoch:row.refreshEpoch});continue;}
+  // a missing or malformed section is a REPAIRABLE failure: it backs off (1 h, 6 h, 24 h at the cap) and counts, never an immediate endless retry
+  if(!title||title.status==='unreadable'){await putRow(env,ctx,{...Plan.afterOutcome(row,{type:'repairable',signature:'unreadable_translations',responseDigest:await sha({source,reason:'unreadable_translations'})},now),reason:'unreadable_translations'},{expectEpoch:row.refreshEpoch});continue;}
   if(title.status==='ambiguous'){await putRow(env,ctx,{...row,status:'needs_attention',reason:'ambiguous_translation',failureClass:'owner_required'},{expectEpoch:row.refreshEpoch});continue;}
   if(title.status==='absent'){await putRow(env,ctx,{...row,status:'complete_with_gaps',reason:'no_russian_title',gaps:['no_russian_title'],failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
   const sourceVersion=await sha({source,anchor:row.anchor,title:title.value});
@@ -209,6 +215,10 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  }
  // ---- credits: one namespace per Film, the expected set paged into chunk rows, Persons first ----
  const creditsDue=dueRows.some(row=>row.part==='credits');
+ // a complete response whose credits section is unreadable is repairable too: it backs off and is rechecked, never read as "no credits"
+ {const source=['letterboxd','tmdb'].find(name=>answers[name]?.status==='ok'&&answers[name].credits?.status==='unreadable');
+  const row=source&&rowOf('credits',source);
+  if(row&&['due','deferred_repair'].includes(row.status))await putRow(env,ctx,{...Plan.afterOutcome(row,{type:'repairable',signature:'unreadable_credits',responseDigest:await sha({source,reason:'unreadable_credits'})},now),reason:'unreadable_credits'},{expectEpoch:row.refreshEpoch});}
  const choice=Plan.creditSource(context.credits.map(item=>item.person_id),applicable);
  // the credit source is fixed by the first plan and never reopened for another source: the other applicable sources have no credits to give
  if(choice.source)for(const row of [...byKey.values()].filter(item=>item.part==='credits'&&item.source!==choice.source&&['due','deferred_repair'].includes(item.status)))await putRow(env,ctx,{...row,status:'not_applicable',reason:'other_credit_source',retryAt:null},{expectEpoch:row.refreshEpoch});
