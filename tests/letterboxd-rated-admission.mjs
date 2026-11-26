@@ -1,6 +1,6 @@
 // Pure rated-archive classification (AIR-340). Synthetic rows only. No storage and no network.
 import assert from 'node:assert/strict';
-import {TMDB_STATES, admissionFilm, classifyArchive, detailTmdbState, pageTmdbState, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, retryFingerprint, splitPending, validatedRetryExpected} from '../src/domain/letterboxd-rated-admission.js';
+import {TMDB_STATES, admissionFilm, classifyArchive, pageTmdbObservation, tmdbCheckState, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, retryFingerprint, splitPending, validatedRetryExpected} from '../src/domain/letterboxd-rated-admission.js';
 import {transportStop} from '../src/letterboxd-identity.js';
 
 const rated = (code, extra = {}) => ({code, name: extra.name || 'Invented', year: extra.year ?? 2001, inRatings: true, rating: extra.rating ?? 4, ...extra});
@@ -93,56 +93,81 @@ assert.equal(planIdentityRetry({candidates: {'103U': {code: '103U', state: 'pend
 assert.equal(planIdentityRetry({candidates: {'103U': {code: '103U', state: 'pending', retryOf: 'shortlink_missing', observedAt: '2026-11-01T00:00:00.000Z', registeredAt: stamped.registeredAt}}}, {codes: ['103U'], expected: {'103U': expectOf(stamped)}}).outcomes[0].outcome, 'skipped_changed');
 assert.equal(validatedRetryExpected({candidates: retryRows}, ['103U'], {}).ok, false);
 
-// AIR-670 / ADR 0217 decision 3: the typed TMDB states and their outcomes. Synthetic pages only; pure.
+// AIR-670 / ADR 0217 decision 3: the typed TMDB states and their outcomes, pure controls. The chain from real fetch answers and the real page parser to the existing retry class is in tests/letterboxd-diary-identity.mjs.
 {
-  const page = (tmdbIds, tmdbTypes, extra = {}) => ({kind: 'page', tmdbIds, tmdbTypes, ...extra});
-  const html = '<html><body>invented</body></html>';
-  const state = (fetched, evidence) => pageTmdbState(fetched, evidence);
-  // a valid movie page is unchanged: exactly one id, a movie marker, a complete body
-  assert.deepEqual([state({html}, page(['900001'], ['movie'])).state, state({html}, page(['900001'], ['movie'])).tmdbId], ['tmdb_movie', '900001']);
-  assert.equal(state({html}, page(['900001'], ['movie'])).outcome, null);
-  assert.equal(state({html}, page(['900001'], ['tv'])).outcome, 'tmdb_not_movie');
-  // unreadable: malformed or truncated page, an unreadable type marker or id block, several ids, a non-numeric id. One attempt counted, never admitted
-  for (const [label, fetched, evidence] of [
-    ['truncated body', {html: '<html><body>cut'}, page(['900001'], ['movie'])],
-    ['empty body', {html: ''}, page(['900001'], ['movie'])],
-    ['oversized body', {stop: 'oversized'}, null],
-    ['unparsable page', {html}, {kind: 'unparsable_page'}],
-    ['no evidence', {html}, null],
-    ['no id block', {html}, page([], [])],
-    ['several ids', {html}, page(['900001', '900002'], ['movie'])],
-    ['non-numeric id', {html}, page(['abc'], ['movie'])],
-    ['id without marker', {html}, page(['900001'], [])],
-    ['unknown marker', {html}, page(['900001'], ['person'])],
-    ['two markers', {html}, page(['900001'], ['movie', 'tv'])],
-  ]) {
-    const out = state(fetched, evidence);
-    assert.deepEqual([out.state, out.outcome, out.charged, out.admits], ['tmdb_unreadable', 'page_unreadable', true, false], label);
-  }
-  // transport: no charge, no admission, whatever the page said
-  for (const stop of ['challenge', 'forbidden', 'rate_limited', 'timeout', 'upstream_cooldown']) {
-    const out = state({stop}, null);
-    assert.deepEqual([out.state, out.charged, out.admits, out.stop], ['tmdb_unavailable', false, false, stop], stop);
-  }
-  assert.equal(transportStop(200, new Headers(), '<html><title>Just a moment...</title></html>'), 'challenge', 'a challenge behind a 200 is the transport stop the follow step reports');
-  // TMDB document states: 404 is its own state with its own outcome, other non-200 and an unparseable document are tmdb_failed
+  const markup = (ids, types) => '<html><body ' + types.map(type => 'data-tmdb-type="' + type + '"').join(' ') + ' ' + ids.map(id => 'data-tmdb-id="' + id + '"').join(' ') + '></body></html>';
+  const evidenceOf = (ids, types) => ({kind: 'page', tmdbIds: ids, tmdbTypes: types, title: 'Invented Alpha', years: [2001]});
   const movie = {id: 900001, media_type: 'movie', title: 'Invented Alpha', release_date: '2001-06-01'};
-  const detail = result => detailTmdbState(result, '900001', 'Invented Alpha', 2001);
-  assert.equal(detail({detail: movie}).state, 'tmdb_movie');
-  assert.equal(detail({detail: movie}).admits, true);
-  assert.deepEqual([detail({review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}).state, detail({review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}).outcome, detail({review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}).charged], ['tmdb_missing', 'tmdb_contradiction', true]);
-  for (const result of [{review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_failed'}, {review: 'tmdb_fetch_failed', status: 400, state: 'tmdb_failed'}, {review: 'tmdb_fetch_failed', state: 'tmdb_failed'}, {review: 'tmdb_fetch_failed', status: 404}, null]) {
-    const out = detail(result);
-    assert.deepEqual([out.state, out.outcome, out.charged, out.admits], ['tmdb_failed', 'tmdb_fetch_failed', true, false], JSON.stringify(result));
+  const check = (ids, types, detail, extra = {}) => tmdbCheckState({fetched: {html: markup(ids, types)}, evidence: evidenceOf(ids, types), detail, ...extra});
+  // only the composition of the page AND an agreeing TMDB document admits; the page alone is the non-admitting `page_movie`
+  assert.deepEqual([pageTmdbObservation({html: markup(['900001'], ['movie'])}, evidenceOf(['900001'], ['movie'])).state, pageTmdbObservation({html: markup(['900001'], ['movie'])}, evidenceOf(['900001'], ['movie'])).admits], ['page_movie', false]);
+  assert.deepEqual([check(['900001'], ['movie'], undefined).state, check(['900001'], ['movie'], undefined).admits], ['page_movie', false], 'no TMDB document yet: not admitting');
+  assert.deepEqual([check(['900001'], ['movie'], {detail: movie}).state, check(['900001'], ['movie'], {detail: movie}).admits, check(['900001'], ['movie'], {detail: movie}).tmdbId], ['tmdb_movie', true, '900001']);
+  for (const [label, detail, state, outcome] of [
+    ['404', {review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'}, 'tmdb_missing', 'tmdb_contradiction'],
+    ['non-transport non-200', {review: 'tmdb_fetch_failed', status: 400}, 'tmdb_failed', 'tmdb_fetch_failed'],
+    ['unparseable document', {review: 'tmdb_fetch_failed'}, 'tmdb_failed', 'tmdb_fetch_failed'],
+    ['oversized document', {stop: 'oversized'}, 'tmdb_failed', 'tmdb_fetch_failed'],
+    ['tv document', {detail: {...movie, media_type: 'tv'}}, 'tmdb_tv', 'tmdb_not_movie'],
+    ['title mismatch', {detail: {...movie, title: 'Other'}}, 'tmdb_disagrees', 'detail_title_mismatch'],
+    ['id mismatch', {detail: {...movie, id: 8}}, 'tmdb_disagrees', 'detail_id_mismatch'],
+    ['no document', null, 'tmdb_failed', 'tmdb_fetch_failed'],
+  ]) {
+    const out = check(['900001'], ['movie'], detail);
+    assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], [state, outcome, 'definite', false], label);
   }
-  for (const result of [{stop: 'tmdb_unavailable', state: 'tmdb_unavailable'}, {stop: 'upstream_cooldown', until: 1, state: 'tmdb_unavailable'}, {stop: 'rate_limited', state: 'tmdb_unavailable'}]) {
-    const out = detail(result);
-    assert.deepEqual([out.state, out.charged, out.admits], ['tmdb_unavailable', false, false], JSON.stringify(result));
+  // the transport answers of TMDB keep their established class and their cooldown information
+  for (const [label, detail, outcome, extra] of [
+    ['5xx', {review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_unavailable'}, 'upstream_5xx', {}],
+    ['503', {review: 'tmdb_fetch_failed', status: 503}, 'upstream_5xx', {}],
+    ['429', {stop: 'rate_limited'}, 'rate_limited', {}],
+    ['network', {stop: 'fetch_failed', network: true}, 'network_error', {network: true}],
+    ['cooldown', {stop: 'upstream_cooldown', until: 99}, 'upstream_cooldown', {until: 99}],
+    ['no token', {stop: 'tmdb_unavailable'}, 'tmdb_unavailable', {}],
+  ]) {
+    const out = check(['900001'], ['movie'], detail);
+    assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], ['tmdb_unavailable', outcome, 'transport', false], label);
+    for (const [key, value] of Object.entries(extra)) assert.equal(out[key], value, label + ' keeps ' + key);
   }
-  assert.deepEqual([detail({detail: {...movie, title: 'Other'}}).state, detail({detail: {...movie, title: 'Other'}}).outcome], ['tmdb_disagrees', 'detail_title_mismatch'], 'the existing disagreement reason is kept');
-  assert.equal(detail({detail: {...movie, id: 8}}).outcome, 'detail_id_mismatch');
-  assert.equal(detail({detail: {...movie, media_type: 'tv'}}).state, 'tmdb_tv');
-  // only a movie that agrees admits, and no state is ever tmdb_none (the lid-only admission is a later delivery step)
+  // a TV marker needs no document; unreadable pages are never admitted and never `tmdb_none`
+  assert.deepEqual([check(['900001'], ['tv'], undefined).state, check(['900001'], ['tv'], undefined).outcome], ['tmdb_tv', 'tmdb_not_movie']);
+  for (const [label, fetched, evidence] of [
+    ['truncated body', {html: markup(['900001'], ['movie']).replace('</html>', '')}, evidenceOf(['900001'], ['movie'])],
+    ['empty body', {html: ''}, evidenceOf(['900001'], ['movie'])],
+    ['oversized body', {stop: 'oversized'}, null],
+    ['unparsable page', {html: markup(['900001'], ['movie'])}, {kind: 'unparsable_page'}],
+    ['no evidence', {html: markup(['900001'], ['movie'])}, null],
+    ['no id block', {html: markup([], [])}, evidenceOf([], [])],
+    ['several ids', {html: markup(['900001', '900002'], ['movie'])}, evidenceOf(['900001', '900002'], ['movie'])],
+    ['malformed id hidden by the parser', {html: markup(['900001', 'broken'], ['movie'])}, evidenceOf(['900001'], ['movie'])],
+    ['malformed id only', {html: markup(['broken'], ['movie'])}, evidenceOf([], ['movie'])],
+    ['id the parser did not see', {html: markup(['900001'], ['movie'])}, evidenceOf(['900002'], ['movie'])],
+    ['malformed type hidden by the parser', {html: markup(['900001'], ['movie', '?'])}, evidenceOf(['900001'], ['movie'])],
+    ['unreadable type only', {html: markup(['900001'], ['?'])}, evidenceOf(['900001'], [])],
+    ['uppercase type', {html: markup(['900001'], ['Movie'])}, evidenceOf(['900001'], [])],
+    ['no type marker', {html: markup(['900001'], [])}, evidenceOf(['900001'], [])],
+    ['unknown type', {html: markup(['900001'], ['person'])}, evidenceOf(['900001'], ['person'])],
+    ['two types', {html: markup(['900001'], ['movie', 'tv'])}, evidenceOf(['900001'], ['movie', 'tv'])],
+  ]) {
+    const out = tmdbCheckState({fetched, evidence, detail: {detail: movie}});
+    assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], ['tmdb_unreadable', 'page_unreadable', 'definite', false], label);
+  }
+  // the follow answers that are not a read page keep the classification the live check gives them
+  for (const [label, fetched, state, outcome, retryClass] of [
+    ['page 503', {review: 'fetch_failed', status: 503}, 'tmdb_unavailable', 'upstream_5xx', 'transport'],
+    ['page 404', {review: 'fetch_failed', status: 404}, 'page_not_read', 'not_found', 'gone'],
+    ['page 410', {review: 'fetch_failed', status: 410}, 'page_not_read', 'not_found', 'gone'],
+    ['page 418', {review: 'fetch_failed', status: 418}, 'page_not_read', 'fetch_failed', 'definite'],
+    ['blocked redirect', {review: 'blocked_redirect'}, 'page_not_read', 'blocked_redirect', 'definite'],
+    ['challenge', {stop: 'challenge'}, 'tmdb_unavailable', 'challenge', 'transport'],
+    ['network', {stop: 'fetch_failed', network: true}, 'tmdb_unavailable', 'network_error', 'transport'],
+    ['cooldown', {stop: 'upstream_cooldown', until: 7}, 'tmdb_unavailable', 'upstream_cooldown', 'transport'],
+  ]) {
+    const out = tmdbCheckState({fetched, evidence: null, detail: {detail: movie}});
+    assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], [state, outcome, retryClass, false], label);
+  }
+  assert.deepEqual([tmdbCheckState({fetched: {stop: 'upstream_cooldown', until: 7}}).until, tmdbCheckState({fetched: {stop: 'fetch_failed', network: true}}).network], [7, true]);
+  // only the composed `tmdb_movie` admits, and no state is ever tmdb_none (the lid-only admission is a later delivery step)
   assert.deepEqual(Object.entries(TMDB_STATES).filter(([, value]) => value.admits).map(([key]) => key), ['tmdb_movie']);
   assert.equal('tmdb_none' in TMDB_STATES, false);
 }

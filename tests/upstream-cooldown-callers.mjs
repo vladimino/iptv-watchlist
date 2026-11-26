@@ -327,7 +327,9 @@ const headers429 = seconds => ({status: 429, headers: {'Retry-After': String(sec
   const f = dbWith('off');
   const detailOf = async (make, token = 't') => {reset(); answer = make; context.env = {DB: d1Standin(f), ...(token ? {TMDB_API_READ_ACCESS_TOKEN: token} : {})}; context.net = run('fetch'); return plain(await run("LetterboxdRatedCandidates.movieDetail(env,'603',net)"));};
   assert.deepEqual(await detailOf(() => new Response('', {status: 404})), {review: 'tmdb_fetch_failed', status: 404, state: 'tmdb_missing'});
-  assert.deepEqual(await detailOf(() => new Response('', {status: 500})), {review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_failed'});
+  assert.deepEqual(await detailOf(() => new Response('', {status: 500})), {review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_unavailable'}, 'AIR-599: a TMDB 5xx stays a transport answer');
+  assert.deepEqual(await detailOf(() => new Response('', {status: 503})), {review: 'tmdb_fetch_failed', status: 503, state: 'tmdb_unavailable'});
+  assert.deepEqual(await detailOf(() => new Response('x'.repeat(1000001), {status: 200})), {stop: 'oversized', state: 'tmdb_failed'}, 'an oversized document is charged, not transport');
   assert.deepEqual(await detailOf(() => new Response('', {status: 401})), {review: 'tmdb_fetch_failed', status: 401, state: 'tmdb_failed'});
   assert.deepEqual(await detailOf(() => new Response('not json', {status: 200})), {review: 'tmdb_fetch_failed', state: 'tmdb_failed'});
   assert.deepEqual(await detailOf(() => new Response('', {status: 429})), {stop: 'rate_limited', state: 'tmdb_unavailable'}, 'a transport stop is no charge');

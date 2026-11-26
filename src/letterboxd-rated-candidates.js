@@ -261,16 +261,18 @@ const LetterboxdRatedCandidates = (() => {
   }
 
   // ADR 0217 decision 3 (AIR-670): every answer also carries its typed TMDB `state`, additively. `review`, `status` and `stop` are exactly as before, so the live callers (the Diary check, the Watchlist
-  // admission step) behave unchanged; the typed state is what the dormant lid-only path reads. A `404` is its own state `tmdb_missing`; any other non-200 and an unparseable document are `tmdb_failed`;
-  // a transport stop, a cooldown and a missing token are `tmdb_unavailable`. A usable document has no state here: whether it agrees is `movieDetailAgrees`.
+  // admission step) behave unchanged; the typed state is what the dormant lid-only path reads. A `404` is its own state `tmdb_missing`; any other non-200 below 500, an unparseable and an oversized document are `tmdb_failed`;
+  // a 5xx, a transport stop, a cooldown and a missing token are `tmdb_unavailable`. A usable document has no state here: whether it agrees is `movieDetailAgrees`.
   async function movieDetail(env, tmdb, fetchImpl) {
     if (!env || !env.TMDB_API_READ_ACCESS_TOKEN) return {stop: 'tmdb_unavailable', state: 'tmdb_unavailable'};
     const fetched = await boundedFetch(fetchImpl, 'https://api.themoviedb.org/3/movie/' + encodeURIComponent(tmdb) + '?language=en-US', {headers: {Authorization: 'Bearer ' + env.TMDB_API_READ_ACCESS_TOKEN, Accept: 'application/json'}}, DETAIL_MS, DETAIL_BYTES);
-    if (fetched.stop) return fetched.network ? {stop: fetched.stop, network: true, state: 'tmdb_unavailable'} : {stop: fetched.stop, ...(fetched.until !== undefined ? {until: fetched.until} : {}), state: 'tmdb_unavailable'};
+    const oversized = fetched.stop === 'oversized'; // a document over the cap is no transport stop: the classifier charges it, as a failed document
+    if (fetched.stop) return fetched.network ? {stop: fetched.stop, network: true, state: 'tmdb_unavailable'} : {stop: fetched.stop, ...(fetched.until !== undefined ? {until: fetched.until} : {}), state: oversized ? 'tmdb_failed' : 'tmdb_unavailable'};
     const body = fetched.text;
     const stop = LetterboxdIdentity.transportStop(fetched.response.status, fetched.response.headers, body);
     if (stop) return {stop, state: 'tmdb_unavailable'};
-    if (fetched.response.status !== 200) return {review: 'tmdb_fetch_failed', status: fetched.response.status, state: fetched.response.status === 404 ? 'tmdb_missing' : 'tmdb_failed'};
+    // AIR-599 keeps a TMDB 5xx a transport answer (`upstream_5xx`, no attempt), so its typed state is `tmdb_unavailable`, not `tmdb_failed`.
+    if (fetched.response.status !== 200) return {review: 'tmdb_fetch_failed', status: fetched.response.status, state: fetched.response.status === 404 ? 'tmdb_missing' : fetched.response.status >= 500 ? 'tmdb_unavailable' : 'tmdb_failed'};
     try {return {detail: JSON.parse(body)};} catch {return {review: 'tmdb_fetch_failed', state: 'tmdb_failed'};}
   }
 
