@@ -10,6 +10,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 import * as W from '../src/catalog-enrichment-workflow.js';
 import * as S from '../src/catalog-enrichment-store.js';
 import {BUDGET} from '../src/catalog-enrichment-drain.js';
+import {CODE_VERSION} from '../src/catalog-enrichment-producer.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-enrich-wf-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -100,6 +101,17 @@ const deps=(fetchImpl,extra={})=>({tools:{},fetchImpl,clock,...extra});
  assert.equal(W.CRON,'11-59/15 * * * *');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
  assert.ok(!wrangler.includes(W.CRON),'the reconcile cron is delivered by the activation change, not by a deploy');
+}
+
+// ---- a new code version is reachable by the reconcile even when every retry is in the future ----
+{
+ const w=world();
+ sqlite(w.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:900',2,NULL,'O','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,code_version,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','tmdb',0,'deferred_repair','repairable',7,'older','2099-01-01T00:00:00.000Z','${T}','${T}');`);
+ const out=await W.reconcile(w.env,{clock});
+ assert.deepEqual([out.reconciled,out.mode],[true,'created'],'only future retries of an older code version: the deploy itself starts the drainer that wakes them');
+ const current=world();
+ sqlite(current.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:900',2,NULL,'O','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,code_version,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','tmdb',0,'deferred_repair','repairable',7,'${CODE_VERSION}','2099-01-01T00:00:00.000Z','${T}','${T}');`);
+ assert.deepEqual(await W.reconcile(current.env,{clock}),{reconciled:true,created:false,reason:'nothing_runnable'},'the running version has nothing to wake: an attempted repair records the version and is no longer pending');
 }
 
 // ---- the instance body: idle after work, handover, parked, a park cancelled by late work, pause ----

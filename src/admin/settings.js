@@ -81,7 +81,7 @@ async function catalogEnrichmentRetry(env,input,by,at){
  const statements=[];
  for(const row of targets){
   if(row.part==='film')statements.push(db.prepare("UPDATE catalog_enrichment_state SET status='active',reason='check_anchors',plan_epoch=plan_epoch+1,updated_at=?,film_json=json_set(COALESCE(film_json,'{}'),'$.disagreement',json('null')) WHERE film_id=? AND part='film' AND source='*' AND status=? AND updated_at=?").bind(at,input.filmId,row.status,row.updatedAt));
-  else statements.push(db.prepare("UPDATE catalog_enrichment_state SET status='due',reason=NULL,failures=0,transport_streak=0,failure_class=NULL,pending_since=NULL,retry_at=NULL,refresh_epoch=refresh_epoch+1,updated_at=? WHERE film_id=? AND part=? AND source=? AND slot=? AND status=? AND updated_at=?").bind(at,input.filmId,row.part,row.source,row.slot,row.status,row.updatedAt));
+  else statements.push(db.prepare("UPDATE catalog_enrichment_state SET status='due',reason=NULL,failures=0,transport_streak=0,failure_class=NULL,pending_since=NULL,retry_at=NULL,expected_json=CASE WHEN part='credits' THEN NULL ELSE expected_json END,refresh_epoch=refresh_epoch+1,updated_at=? WHERE film_id=? AND part=? AND source=? AND slot=? AND status=? AND updated_at=?").bind(at,input.filmId,row.part,row.source,row.slot,row.status,row.updatedAt));
  }
  // every selected part's Film also raises its plan epoch, so every batch of an older plan fails even with unchanged anchors
  if(!targets.some(row=>row.part==='film'))statements.push(db.prepare("UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at=? WHERE film_id=? AND part='film' AND source='*'").bind(at,input.filmId));

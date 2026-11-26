@@ -102,7 +102,7 @@ const parseFilm=html=>{
  if(!ld)throw new Error('Film metadata missing');
  const meta=JSON.parse(ld[1]);
  const person=(list,role)=>(list||[]).map(item=>{const slug=/\/(?:actor|director)\/([a-z0-9-]+)\//.exec(item.url||'')?.[1];return {id:role+'/'+(slug||item.name),original:item.name,name:item.name};});
- return {original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};
+ return {creditsComplete:true,original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};
 };
 const tools={parseFilm,attr,extractYear};
 const page=({code='abc',canonical='/film/the-matrix/',tmdb=['603'],type='movie',shortlink=true,actors=[{name:'Neo Actor',url:'/actor/neo-actor/'},{name:'No Link'}]}={})=>`<html><head>${shortlink?`<link rel="shortlink" href="https://boxd.it/${code}">`:''}${canonical?`<link rel="canonical" href="https://letterboxd.com${canonical}">`:''}<meta property="og:title" content="The Matrix (1999)"><script type="application/ld+json">${JSON.stringify({name:'The Matrix',year:1999,runtime:136,description:'lb synopsis',image:'https://img/p.jpg',genre:['Sci-Fi'],director:[{name:'Lana',url:'/director/lana/'}],actor:actors})}</script></head><body>${tmdb.map(id=>`<div data-tmdb-id="${id}" data-tmdb-type="${type}"></div>`).join('')}</body></html>`;

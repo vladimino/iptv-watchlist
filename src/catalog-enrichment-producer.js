@@ -8,7 +8,9 @@ import {readControl} from './catalog-enrichment-store.js';
 import {runUnit as runUnitRaw,unitKeys} from './catalog-enrichment-units.js';
 import {fetchLetterboxd,fetchTmdb,fetchWikidata} from './catalog-enrichment-sources.js';
 
-export const CODE_VERSION='c1-1';
+export const CODE_VERSION='c1-2';
+export const REPAIR_WAKE_LIMIT=20;
+export const REPAIR_WAKE_MIN_AGE_MS=15*60000;
 const CORE_FIELDS=Plan.CORE_FIELDS;
 const db=env=>{const handle=database(env);if(!handle)throw failed('film_person_unavailable');return handle;};
 const parse=text=>{if(text==null)return null;try{return JSON.parse(text);}catch{return null;}};
@@ -31,13 +33,22 @@ export const rowView=row=>row&&{filmId:row.film_id,part:row.part,source:row.sour
 export async function readRows(env,filmId){return (await many(db(env),`SELECT ${COLUMNS} FROM catalog_enrichment_state WHERE film_id=?`,[filmId])).map(rowView);}
 const key=row=>[row.part,row.source,row.slot??0].join('|');
 // Insert a missing row or update the one the plan read, guarded by lease and control; an update is also matched on the row's `refresh_epoch` (an older plan changes nothing).
-async function putRow(env,ctx,row,{expectEpoch=null}={}){
+function rowStatement(ctx,row,{expectEpoch=null}={}){
  const guard=guardSql(ctx);
- const values=[row.filmId,row.part,row.source,row.slot??0,row.status,row.reason??null,row.cohort||'live',row.anchor??null,row.sourceVersion??null,row.refreshEpoch??0,row.planEpoch??0,row.failures??0,row.transportStreak??0,row.failureClass??null,row.failureSignature??null,row.codeVersion??CODE_VERSION,row.responseDigest??null,row.pendingSince??null,row.retryAt??null,row.dueSince||ctx.now,json(row.expected),json(row.gaps),json(row.conflicts),json(row.hints),json(row.film),ctx.now];
+ const values=[row.filmId,row.part,row.source,row.slot??0,row.status,row.reason??null,row.cohort||'live',row.anchor??null,row.sourceVersion??null,row.refreshEpoch??0,row.planEpoch??0,row.failures??0,row.transportStreak??0,row.failureClass??null,row.failureSignature??null,CODE_VERSION,row.responseDigest??null,row.pendingSince??null,row.retryAt??null,row.dueSince||ctx.now,json(row.expected),json(row.gaps),json(row.conflicts),json(row.hints),json(row.film),ctx.now];
  const update='status=excluded.status,reason=excluded.reason,anchor=excluded.anchor,source_version=excluded.source_version,refresh_epoch=excluded.refresh_epoch,plan_epoch=excluded.plan_epoch,failures=excluded.failures,transport_streak=excluded.transport_streak,failure_class=excluded.failure_class,failure_signature=excluded.failure_signature,code_version=excluded.code_version,response_digest=excluded.response_digest,pending_since=excluded.pending_since,retry_at=excluded.retry_at,expected_json=excluded.expected_json,gaps_json=excluded.gaps_json,conflicts_json=excluded.conflicts_json,hints_json=excluded.hints_json,film_json=excluded.film_json,updated_at=excluded.updated_at';
  const epoch=expectEpoch===null?'':row.part==='film'?` AND catalog_enrichment_state.plan_epoch=?`:` AND catalog_enrichment_state.refresh_epoch=?`;
  const statement=`INSERT INTO catalog_enrichment_state (${COLUMNS}) SELECT ${values.map(()=>'?').join(',')} WHERE ${guard.sql} ON CONFLICT(film_id,part,source,slot) DO UPDATE SET ${update} WHERE ${guard.sql}${epoch}`;
- await db(env).prepare(statement).bind(...values,...guard.params,...guard.params,...(expectEpoch===null?[]:[expectEpoch])).run();
+ return [statement,[...values,...guard.params,...guard.params,...(expectEpoch===null?[]:[expectEpoch])]];
+}
+async function putRow(env,ctx,row,options){
+ const [statement,params]=rowStatement(ctx,row,options);
+ await db(env).prepare(statement).bind(...params).run();
+}
+// ATOMIC publication of several rows: one D1 batch is one transaction, so a published plan is wholly there or wholly absent (never a prefix).
+async function putRowsAtomic(env,ctx,rows,extra=[]){
+ const handle=db(env);
+ await handle.batch([...rows.map(row=>rowStatement(ctx,row)),...extra].map(([statement,params])=>handle.prepare(statement).bind(...params)));
 }
 
 // ---- reading what a plan needs ----
@@ -117,7 +128,19 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  // The sources that have due work now. A row whose retry is in the future is not asked again; it counts as pending (transport) for the precedence rule.
  const dueRows=[...byKey.values()].filter(row=>row.part!=='film'&&applicable.includes(row.source)&&['due','deferred_repair'].includes(row.status)&&(!row.retryAt||row.retryAt<=now));
  // A credits chunk row that already holds its persisted expected set is RESUMED from D1: completing persisted units never makes an upstream request.
- const resumeRows=dueRows.filter(row=>row.part==='credits'&&row.expected&&Array.isArray(row.expected.items));
+ // A PUBLISHED credits plan: every slot 0..total-1 of ONE source holds the same expected-set digest and the same total. A partial or mixed set of chunk rows (a crash, an old slot) is NOT a plan and is never resumed:
+ // it is replaced by a fresh fetch. Only the due rows of a published plan are resumed from D1.
+ const publishedPlan=source=>{
+  const rows=[...byKey.values()].filter(row=>row.part==='credits'&&row.source===source&&row.status!=='not_applicable'&&row.expected&&Array.isArray(row.expected.items));
+  if(!rows.length)return null;
+  const total=rows[0].expected.total,digest=rows[0].expected.digest;
+  if(!Number.isInteger(total)||total<1||rows.length!==total||!rows.every(row=>row.expected.total===total&&row.expected.digest===digest))return null;
+  const slots=new Set(rows.map(row=>row.slot));
+  for(let i=0;i<total;i++)if(!slots.has(i))return null;
+  return {total,digest,rows:rows.sort((a,b)=>a.slot-b.slot)};
+ };
+ const plans=Object.fromEntries(Plan.SOURCES.map(source=>[source,publishedPlan(source)]));
+ const resumeRows=dueRows.filter(row=>row.part==='credits'&&plans[row.source]&&plans[row.source].rows.includes(row));
  const toFetch=[...new Set(dueRows.filter(row=>!resumeRows.includes(row)).map(row=>row.source))];
  if(!toFetch.length&&!resumeRows.length)return {state:'idle'};
  const lbAnchor=context.anchors.letterboxd,tmdbAnchor=context.anchors.tmdb;
@@ -133,16 +156,22 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const outcome=answer.status==='ok'?{type:'success'}:answer.status==='transport'?{type:'transport',cooldownUntil:answer.cooldownUntil}:answer.status==='disagreement'?{type:'owner_required'}:{type:'repairable',signature:answer.reason,responseDigest:await sha({source,reason:answer.reason,status:answer.httpStatus??null})};
   if(answer.status==='transport')report.transport.push({source,reason:answer.reason});
   if(answer.status==='failed')report.failed.push({source,reason:answer.reason});
+  // Success is classified PER APPLICABLE PART: a 200 whose translations or credits section is unreadable is not a recovery of that part, so its counter is preserved here and incremented by the section-specific outcome below
+  // (repeated identical malformed responses therefore reach quarantine instead of sitting at one failure).
+  const sectionOk=row=>answer.status!=='ok'||(row.part==='localization'?!(answer.title&&answer.title.status==='unreadable'):row.part==='credits'?answer.credits?.status!=='unreadable':true);
   for(const row of rows){
+   if(!sectionOk(row))continue;
    const next=Plan.afterOutcome(row,outcome,now);
    if(answer.status==='disagreement')next.status='due'; // the Film row carries the disagreement; the part rows stay due until the owner retries
    if(JSON.stringify(next)!==JSON.stringify(row)){await putRow(env,ctx,next,{expectEpoch:row.refreshEpoch});byKey.set(key(row),next);}
   }
  }
- // SOURCE RECOVERY (ADR 0219 decision 7): a successful, valid response of a source makes that source's deferred repairable items of OTHER Films runnable at once, whatever their old retry_at; settled parts are untouched.
+ // SOURCE RECOVERY (ADR 0219 decision 7), classified per part and BOUNDED: a valid section of a source wakes only the deferred repairable items of THAT part and source in other Films, at most REPAIR_WAKE_LIMIT per success, and
+ // only items whose last attempt is older than REPAIR_WAKE_MIN_AGE_MS, so repeated unrelated successes cannot create a hot loop; settled parts are untouched.
  for(const [source,answer] of Object.entries(answers))if(answer.status==='ok'){
-  const guard=guardSql(ctx);
-  await db(env).prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE source=? AND status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND film_id<>? AND ${guard.sql}`).bind(now,source,filmId,...guard.params).run().catch(()=>{});
+  const valid={core:true,localization:!(answer.title&&answer.title.status==='unreadable'),credits:answer.credits?.status==='ok'};
+  const guard=guardSql(ctx),cutoff=new Date(Date.parse(now)-REPAIR_WAKE_MIN_AGE_MS).toISOString();
+  for(const part of Object.keys(valid))if(valid[part])await db(env).prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE rowid IN (SELECT rowid FROM catalog_enrichment_state WHERE part=? AND source=? AND status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND retry_at>? AND film_id<>? AND updated_at<=? ORDER BY updated_at LIMIT ?) AND ${guard.sql}`).bind(now,part,source,now,filmId,cutoff,REPAIR_WAKE_LIMIT,...guard.params).run().catch(()=>{});
  }
  // a page disagreement stops every source for this Film (decision 2): nothing is written
  const disagreement=Object.values(answers).find(answer=>answer.status==='disagreement');
@@ -228,16 +257,17 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  else if(creditsDue&&choice.source){
   // The expected set comes from a FRESH complete response, or - when persisted chunk rows already hold it - from D1 alone (a resume makes no upstream request).
   const fresh=answers[choice.source]?.status==='ok'&&answers[choice.source].credits.status==='ok'?answers[choice.source].credits.items:null;
-  const persisted=resumeRows.filter(row=>row.source===choice.source).sort((a,b)=>a.slot-b.slot);
+  const persisted=plans[choice.source]?resumeRows.filter(row=>row.source===choice.source).sort((a,b)=>a.slot-b.slot):[];
   let expected=null,chunks=null,digestOfSet=null;
   if(fresh){
    expected=Plan.expectedCredits(choice.source,fresh);
    chunks=Plan.chunkCredits(expected.items);
    digestOfSet=await Plan.expectedDigest(expected.items);
   }else if(persisted.length){
-   chunks=persisted.map(row=>({slot:row.slot,items:row.expected.items.map(([personId,role])=>({personId,role,roleId:personId.slice('person:'.length)}))}));
-   expected={items:chunks.flatMap(chunk=>chunk.items),gaps:(persisted.find(row=>row.gaps)?.gaps)||[]};
-   digestOfSet=persisted[0].expected.digest;
+   const planRows=plans[choice.source].rows;
+   chunks=planRows.map(row=>({slot:row.slot,items:row.expected.items.map(([personId,role])=>({personId,role,roleId:personId.slice('person:'.length)}))}));
+   expected={items:chunks.flatMap(chunk=>chunk.items),gaps:(planRows.find(row=>row.gaps)?.gaps)||[]};
+   digestOfSet=plans[choice.source].digest;
   }
   const lbOld=Plan.fallbackElapsed(pendingSince.letterboxd,now);
   const gateOpen=!hasLb||agreed||(choice.source!=='letterboxd'&&lbOld);
@@ -245,15 +275,19 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    const have=new Set((await many(db(env),'SELECT person_id,role FROM film_person_credit WHERE film_id=?',[filmId])).map(item=>item.person_id+'|'+item.role));
    const people=new Set((await many(db(env),`SELECT id FROM person WHERE id IN (SELECT value FROM json_each(?))`,[JSON.stringify(expected.items.map(item=>item.personId))])).map(item=>item.id));
    const base=rowOf('credits',choice.source)||{filmId,part:'credits',source:choice.source,slot:0,planEpoch:0,refreshEpoch:0,dueSince:now,cohort:'live'};
-   // The WHOLE expected set is paged into durable chunk rows BEFORE the first unit: an interrupted Film (a handover inside chunk 0, a pause, a crash) resumes every chunk from D1, never from a response it no longer has.
-   if(fresh)for(const chunk of chunks){
-    const stored=rowOf('credits',choice.source,chunk.slot);
-    if(stored&&stored.status==='complete'&&stored.expected?.digest===digestOfSet)continue;
-    await putRow(env,ctx,{...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null});
+   // The WHOLE expected set is published as durable chunk rows BEFORE the first unit, in ONE atomic batch together with the supersession of every old slot of another plan: a crash can never leave a prefix, and an old
+   // slot can never be mixed into a new plan or silently omitted (the explicit completeness invariant is `total` slots with one digest, checked on resume).
+   if(fresh){
+    const stale=chunks.some(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return !(stored&&stored.status==='complete'&&stored.expected?.digest===digestOfSet&&stored.expected?.total===chunks.length);});
+    if(stale){
+     const guard=guardSql(ctx);
+     const rowsOut=chunks.map(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return {...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null};});
+     await putRowsAtomic(env,ctx,rowsOut,[[`UPDATE catalog_enrichment_state SET status='not_applicable',reason='superseded_plan',expected_json=NULL,updated_at=? WHERE film_id=? AND part='credits' AND source=? AND slot>=? AND ${guard.sql}`,[now,filmId,choice.source,chunks.length,...guard.params]]]);
+    }
    }
    let allDone=true;
    for(const chunk of chunks){
-    const slotRow={...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
+    const slotRow={...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
     const missing=Plan.missingForChunk(chunk,{have,people});
     if(!missing.credits.length){await putRow(env,ctx,{...slotRow,status:'complete',failures:0,retryAt:null,pendingSince:null});continue;}
     // the chunk row (with the persisted expected set and its epoch) is durable BEFORE its first unit: an interrupted Film resumes from it

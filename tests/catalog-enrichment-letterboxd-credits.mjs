@@ -56,7 +56,15 @@ const fetchFilm=html=>fetchLetterboxd({},{lid:'abc',tmdbAnchor:'603',fetchImpl:u
  const bad=await fetchFilm(page({malformed:{actor:'Keanu Reeves'}}));
  assert.equal(bad.credits.status,'unreadable','a malformed section is unreadable');
  const oneSide=await fetchFilm(page({omit:['actor']}));
- assert.equal(oneSide.credits.status,'ok','one present section is read; the other is a genuine absence');
+ assert.deepEqual([oneSide.credits.status,oneSide.credits.items.length],['unreadable',0],'an omitted role is not proven to be an absence: incomplete, never a complete set');
+ const noDirector=await fetchFilm(page({omit:['director'],actors:[person('actor',1)]}));
+ assert.equal(noDirector.credits.status,'unreadable');
+ for(const [name,actors] of [['a null entry',[person('actor',1),null]],['an entry without a name',[person('actor',1),{'@type':'Person',url:'https://letterboxd.com/actor/x/'}]],['a blank name',[person('actor',1),{name:'  '}]],['a number',[person('actor',1),7]]]){
+  const answer=await fetchFilm(page({actors}));
+  assert.equal(answer.credits.status,'unreadable',name+': a malformed entry is never silently filtered into a complete set');
+ }
+ const single=await fetchFilm(page({actors:person('actor',1)}));
+ assert.equal(single.credits.status,'ok','a single object (not a list) is a valid section');
 }
 // the legacy display record is unchanged: ten actors by default
 {
@@ -65,5 +73,6 @@ const fetchFilm=html=>fetchLetterboxd({},{lid:'abc',tmdbAnchor:'603',fetchImpl:u
  assert.equal(tools.parseFilm(html,{},{actors:Infinity}).actors.length,25);
  assert.equal(tools.parseFilm(html,{},{actors:3}).actors.length,3);
  assert.equal(tools.parseFilm(html,{}).creditsComplete,true);
+ assert.equal(tools.parseFilm(page({omit:['actor']}),{}).creditsComplete,false,'the shared parser flags an omitted role as incomplete');
 }
 console.log('catalog enrichment letterboxd credits: ok');

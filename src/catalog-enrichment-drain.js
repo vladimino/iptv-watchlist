@@ -56,6 +56,12 @@ export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set()}){
  }
  return out;
 }
+// A new code version is a repair event: deferred repairable items of an OLDER version are pending a wake even while their retry is in the future. The reconcile counts this as runnable work, so a deploy alone starts the
+// drainer that performs the wake; an item attempted by the running version records that version and is no longer pending.
+export async function repairPending(env){
+ const row=await one(database(env),"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>?",[CODE_VERSION]);
+ return Number(row?.n??0)>0;
+}
 // The earliest time a deferred item becomes runnable again, or null: the due time of a parked run.
 export async function earliestWake(env,{now}){
  const row=await one(database(env),`SELECT MIN(s.retry_at) AS at FROM catalog_enrichment_state s WHERE s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND s.retry_at>?`,[now]);

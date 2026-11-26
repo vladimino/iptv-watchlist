@@ -41,7 +41,7 @@ async function world({lid='abc',tmdb='603',control=true}={}){
 const res=(status,body='',headers={})=>({status,ok:status>=200&&status<300,headers:{get:name=>headers[String(name).toLowerCase()]??null},text:async()=>body,body:null});
 const attr=(tag,name)=>new RegExp(name+'="([^"]*)"').exec(tag)?.[1]??'';
 const extractYear=text=>/\((\d{4})\)/.exec(String(text))?.[1]?Number(/\((\d{4})\)/.exec(String(text))[1]):null;
-const parseFilm=html=>{const ld=/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html);if(!ld)throw new Error('Film metadata missing');const meta=JSON.parse(ld[1]);const person=(list,role)=>(list||[]).map(item=>{const slug=/\/(?:actor|director)\/([a-z0-9-]+)\//.exec(item.url||'')?.[1];return {id:role+'/'+(slug||item.name),original:item.name,name:item.name};});return {original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};};
+const parseFilm=html=>{const ld=/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html);if(!ld)throw new Error('Film metadata missing');const meta=JSON.parse(ld[1]);const person=(list,role)=>(list||[]).map(item=>{const slug=/\/(?:actor|director)\/([a-z0-9-]+)\//.exec(item.url||'')?.[1];return {id:role+'/'+(slug||item.name),original:item.name,name:item.name};});return {creditsComplete:true,original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};};
 const tools={parseFilm,attr,extractYear};
 const lbPage=({tmdb=['603'],actors=[{name:'Neo',url:'/actor/neo/'},{name:'Trinity',url:'/actor/trinity/'}],year=1999,runtime=136,synopsis='lb synopsis'}={})=>`<html><head><link rel="shortlink" href="https://boxd.it/abc"><link rel="canonical" href="https://letterboxd.com/film/the-matrix/"><meta property="og:title" content="The Matrix (1999)"><script type="application/ld+json">${JSON.stringify({name:'The Matrix',year,runtime,description:synopsis,image:'https://img/lb.jpg',genre:['Sci-Fi'],director:[{name:'Lana',url:'/director/lana/'}],actor:actors})}</script></head><body>${tmdb.map(id=>`<div data-tmdb-id="${id}" data-tmdb-type="movie"></div>`).join('')}</body></html>`;
 const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'tm synopsis',poster_path:'/p.jpg',genres:[{name:'Action'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
@@ -244,13 +244,99 @@ function file0(w){return w.file;}
  assert.deepEqual([credits.failures,credits.reason],[1,'unreadable_credits'],'an unreadable credits section is never read as an empty set');
  assert.ok(credits.retryAt>at(11));
  assert.deepEqual(credits.status,'due');assert.equal(rows(noCredits.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n,0);
- // source recovery: a valid answer of tmdb for this Film wakes the deferred repairable tmdb items of another Film at once
+ // source recovery: per part, bounded. A valid section wakes only the deferred repairable items of THAT part and source in other Films, and only items whose last attempt is old enough.
  const rec=await world({lid:null});
- sqlite(rec.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:900',2,NULL,'O','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','tmdb',0,'deferred_repair','repairable',7,'2099-01-01T00:00:00.000Z','${T}','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,retry_at,due_since,updated_at) VALUES ('film:tmdb:900','core','letterboxd',0,'deferred_repair','repairable',7,'2099-01-01T00:00:00.000Z','${T}','${T}'),('film:tmdb:900','localization','tmdb',0,'complete',NULL,0,NULL,'${T}','${T}');`);
+ const OLD='2026-11-26T08:00:00.000Z',FAR='2099-01-01T00:00:00.000Z';
+ sqlite(rec.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:900',2,NULL,'O','${T}');INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,failure_class,failures,retry_at,due_since,updated_at) VALUES
+  ('film:tmdb:900','core','tmdb',0,'deferred_repair','repairable',7,'${FAR}','${T}','${OLD}'),
+  ('film:tmdb:900','localization','tmdb',0,'deferred_repair','repairable',7,'${FAR}','${T}','${OLD}'),
+  ('film:tmdb:900','credits','tmdb',0,'deferred_repair','repairable',7,'${FAR}','${T}','${at(5)}'),
+  ('film:tmdb:900','core','letterboxd',0,'deferred_repair','repairable',7,'${FAR}','${T}','${OLD}');`);
  await step(rec,upstream({}));
- await step(rec,upstream({}),at(11));
- assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='tmdb' AND part='core'")[0].retry_at,null,'a recovered source wakes its deferred items');
- assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='letterboxd'")[0].retry_at,'2099-01-01T00:00:00.000Z','another source is not woken');
- assert.equal(rows(rec.file,"SELECT status FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND part='localization'")[0].status,'complete','settled parts are untouched');
+ // this Film's translations are UNREADABLE: its core and credits are valid, its localization is not
+ await step(rec,upstream({tm:movie({translations:{}})}),at(11));
+ const retry=part=>rows(rec.file,`SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='tmdb' AND part='${part}'`)[0].retry_at;
+ assert.equal(retry('core'),null,'a valid core section wakes the deferred core items of other Films');
+ assert.equal(retry('localization'),FAR,'an UNRELATED section does not wake it: this response\'s translations were unreadable');
+ assert.equal(retry('credits'),FAR,'the bound: an item attempted a moment ago is not woken, so repeated successes cannot hot-loop it');
+ assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='letterboxd'")[0].retry_at,FAR,'another source is not woken');
+ // repeated identical malformed responses reach quarantine, and a good response recovers the part
+ const rep=await world({lid:null});
+ await step(rep,upstream({}));
+ for(let i=0;i<6;i++){
+  sqlite(rep.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='localization' AND source='tmdb'");
+  await step(rep,upstream({tm:movie({translations:{}})}),at(20+i));
+ }
+ const quarantined=PR.rowView(rows(rep.file,"SELECT * FROM catalog_enrichment_state WHERE part='localization' AND source='tmdb'")[0]);
+ assert.deepEqual([quarantined.status,quarantined.failures,quarantined.failureClass],['deferred_repair',6,'repairable'],'six identical malformed translations reach quarantine, they do not stay at one failure');
+ assert.ok(quarantined.retryAt>at(25),'with a backoff');
+ assert.equal(quarantined.codeVersion,PR.CODE_VERSION,'the attempt records the running code version');
+ sqlite(rep.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='localization' AND source='tmdb'");
+ await step(rep,upstream({}),at(40));
+ const recovered=PR.rowView(rows(rep.file,"SELECT * FROM catalog_enrichment_state WHERE part='localization' AND source='tmdb'")[0]);
+ assert.deepEqual([recovered.status,recovered.failures],['complete',0],'a good response recovers the part and clears its counter');
+ // the same for an unreadable credits section
+ const cr=await world({lid:null});
+ await step(cr,upstream({}));
+ for(let i=0;i<6;i++){sqlite(cr.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='credits' AND source='tmdb'");await step(cr,upstream({tm:movie({credits:undefined})}),at(20+i));}
+ assert.deepEqual(rows(cr.file,"SELECT status,failures FROM catalog_enrichment_state WHERE part='credits' AND source='tmdb'"),[{status:'deferred_repair',failures:6}]);
+}
+// ---- the persisted credits plan has an explicit completeness invariant ----
+{
+ const cast=n=>Array.from({length:n},(_,i)=>({id:5000+i,name:'N'+i,order:i}));
+ const big=movie({credits:{cast:cast(140),crew:[{id:1,name:'D',job:'Director'}]}});
+ const tmdbCalls=up=>up.calls.filter(url=>url.includes('themoviedb')).length;
+ const plan=file=>rows(file,"SELECT slot,status,json_extract(expected_json,'$.total') AS total,json_extract(expected_json,'$.digest') AS digest FROM catalog_enrichment_state WHERE part='credits' AND source='tmdb' AND status<>'not_applicable' ORDER BY slot");
+ // a plan is published atomically: after a budget stop inside chunk 0 EVERY chunk row exists with one digest and the total
+ const w=await world({lid:null});
+ await step(w,upstream({}));
+ let units=0;
+ const first=upstream({tm:big});
+ const stopped=await step(w,first,at(11),{budget:{canStart:()=>++units<=3}});
+ assert.equal(stopped.state,'partial');
+ const published=plan(w.file);
+ assert.deepEqual(published.map(row=>row.slot),[0,1,2],'the whole plan is published before the first Person unit');
+ assert.ok(published.every(row=>row.total===3&&row.digest===published[0].digest),'one digest and the total on every slot');
+ assert.ok(rows(w.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n<141);
+ // a PREFIX is not a plan: with slots 1 and 2 missing the part is never resumed from slot 0 alone and never reported complete; it is refetched and republished
+ sqlite(w.file,"DELETE FROM catalog_enrichment_state WHERE part='credits' AND source='tmdb' AND slot>0");
+ const before=tmdbCalls(first);
+ const healed=await step(w,first,at(12));
+ assert.ok(tmdbCalls(first)>before,'a partial prefix is not resumed: the source is fetched again');
+ assert.equal(healed.report.creditsComplete,true);
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n,141,'every credit, not the persisted prefix');
+ assert.deepEqual(plan(w.file).map(row=>row.slot),[0,1,2]);
+ // a source_changed re-arm during partial progress invalidates the old plan: it is refetched, never resumed
+ const x=await world({lid:null});
+ await step(x,upstream({}));
+ let n2=0;
+ const upX=upstream({tm:big});
+ await step(x,upX,at(11),{budget:{canStart:()=>++n2<=3}});
+ assert.equal(plan(x.file).length,3);
+ const generation=rows(x.file,'SELECT generation FROM catalog_enrichment_control')[0].generation;
+ sqlite(x.file,`INSERT INTO enrichment_signal (kind,subject,source,part,version,state,cause_digest,armed_at) VALUES ('source_changed','${FILM}','tmdb','credits',1,'pending','${'9'.repeat(64)}','${at(12)}');`);
+ const [signal]=(await S.runnableSignals(x.env,{now:at(13)})).filter(item=>item.kind==='source_changed');
+ assert.equal((await S.consumeSignal(x.env,{signal,generation,leaseId:x.leaseId,now:at(13)})).consumed,true);
+ assert.equal(rows(x.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE part='credits' AND expected_json IS NOT NULL").n??rows(x.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE part='credits' AND expected_json IS NOT NULL")[0].n,0,'the re-arm cleared every persisted plan of the part');
+ const callsBefore=tmdbCalls(upX);
+ const redone=await step(x,upX,at(14));
+ assert.ok(tmdbCalls(upX)>callsBefore,'the changed source is fetched before anything resumes');
+ assert.equal(redone.report.creditsComplete,true);
+ // a plan of a different size replaces the old one: the old slots beyond the new total are superseded, never mixed in
+ const y=await world({lid:null});
+ await step(y,upstream({}));
+ await step(y,upstream({tm:big}),at(11));
+ assert.equal(plan(y.file).length,3);
+ sqlite(y.file,"UPDATE catalog_enrichment_state SET status='due',expected_json=NULL WHERE part='credits'");
+ await step(y,upstream({tm:movie({credits:{cast:cast(20),crew:[]}})}),at(12));
+ assert.deepEqual(plan(y.file).map(row=>row.slot),[0],'a smaller plan replaces the old one');
+ assert.equal(rows(y.file,"SELECT status FROM catalog_enrichment_state WHERE part='credits' AND slot=2")[0].status,'not_applicable','old slots of another plan are superseded');
+ // more than 200 ACTUAL stored credits, end to end
+ const z=await world({lid:null});
+ await step(z,upstream({}));
+ const huge=await step(z,upstream({tm:movie({credits:{cast:cast(230),crew:[{id:1,name:'D',job:'Director'}]}})}),at(11));
+ assert.equal(huge.report.creditsComplete,true);
+ assert.equal(rows(z.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n,231,'231 credits stored for one Film: no 200-credit storage cap');
+ assert.deepEqual(plan(z.file).map(row=>row.slot),[0,1,2,3,4],'five chunks of at most 50');
 }
 console.log('catalog enrichment producer: ok');
