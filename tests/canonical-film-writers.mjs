@@ -412,102 +412,70 @@ if(section('12')){
  void file;
 }
 
-// 13. AIR-671 / ADR 0217 decision 8d (test 11): `film:tmdb:<n>` is a minting spelling, never proof of ownership. The producer resolves the trusted owner at planning; the writer refuses to mint while any row of the movie id exists,
-// inside its fenced batch. Both orders of attach and facts, a stale plan rolled back whole, one trusted owner, no duplicate `film:tmdb:<n>`, nothing attached by the facts writer.
+// 13. AIR-671 / ADR 0217 decision 8d (test 11), WRITER side. The writer takes an EXPLICIT Film target and never resolves a movie reference (that is the source boundary: tests/canonical-producer-movie-ref.mjs). What it owns is the
+// mint fence: a write that would CREATE `film:tmdb:<n>` asserts, inside its fenced batch, that no row of the movie id exists on any Film, any trust. A plan made before a claim landed fails the whole batch closed
+// (`film_person_precondition`), receipt and revision included. The competing claim below is a clearly labelled FIXTURE (written by SQL): the actual attach belongs to AIR-675 and is not exercised here.
 if(section('13')){
- const {bindFilmFactsOwner,resolveFilmFactsTarget}=writers;
  const {applyFilmFacts}=await import('../src/canonical-producer-adapters.js');
  const LID='film:lbx1';
  const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',BASELINE="INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:00.000Z');";
- const sealed=()=>{const handle=fresh();assert.equal(sqlite(handle.file,BASELINE).status,0);return handle;};
- const attachSql=(trusted=1,conflicting=0,film=LID)=>`INSERT OR IGNORE INTO film (id,contract_version,updated_at) VALUES ('${film}',1,'${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('${film}','tmdb','603',${trusted},${conflicting});`;
+ const claimSql=(trusted=1,conflicting=0,film=LID)=>`INSERT OR IGNORE INTO film (id,contract_version,updated_at) VALUES ('${film}',1,'${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('${film}','tmdb','603',${trusted},${conflicting});`;
+ const filmIds=file=>rows(file,'SELECT id FROM film ORDER BY id').map(row=>row.id);
  const owners=file=>rows(file,"SELECT film_id FROM film_external_id WHERE scheme='tmdb' AND value='603' AND trusted=1 AND conflicting=0").map(row=>row.film_id);
- const films=file=>rows(file,'SELECT id FROM film ORDER BY id').map(row=>row.id);
  const {id:_i,expectedRevision:_e,requestId:_r,...bare}=facts();
- // (a) The resolution is read-only and never attaches: no claim keeps the spelled id, a trusted owner wins, a held movie id is named, another spelling is untouched.
- {
+ // (a) A plan made BEFORE the claim (the Film does not exist): the claim lands, the stale plan fails the batch whole. Any trust blocks a mint.
+ for(const [trusted,conflicting] of [[1,0],[0,0],[0,1]]){
   const {file,env}=fresh();
-  assert.deepEqual(await resolveFilmFactsTarget(env,ID),{id:ID,spelled:true,owner:null,held:null});
-  assert.deepEqual(await resolveFilmFactsTarget(env,'film:abc'),{id:'film:abc',spelled:false,owner:null,held:null});
-  assert.deepEqual(await resolveFilmFactsTarget(env,'film:tmdb:0603'),{id:'film:tmdb:0603',spelled:false,owner:null,held:null},'not a movie id spelling');
-  assert.equal(env.DB.calls.batches,0);
-  assert.equal(sqlite(file,attachSql()).status,0);
-  assert.deepEqual(await resolveFilmFactsTarget(env,ID),{id:LID,spelled:true,owner:LID,held:null});
-  assert.equal((await bindFilmFactsOwner(env,{id:ID,x:1})).id,LID);
-  const same={id:LID};assert.equal(await bindFilmFactsOwner(env,same),same,'an unchanged id returns the same input');
-  assert.equal(env.DB.calls.batches,0);
-  assert.deepEqual(films(file),[LID],'resolution wrote nothing');
- }
- // (b) A plan made BEFORE the attach (the Film does not exist, no claim): the attach lands, the old plan fails at the writer's read and writes nothing; one owner, no duplicate.
- {
-  const {file,env}=fresh();
-  const stalePlan={...facts({expectedRevision:0,requestId:'stale-1'})};
-  assert.equal(sqlite(file,attachSql()).status,0);
-  await assert.rejects(writeFilmFacts(env,stalePlan),code('film_person_precondition'));
-  assert.deepEqual(films(file),[LID]);assert.deepEqual(owners(file),[LID]);
-  assert.equal(rows(file,"SELECT COUNT(*) c FROM film_metadata").at(0).c,0);
-  assert.equal(env.DB.calls.batches,1,'the one batch failed whole');
-  for(const [trusted,conflicting] of [[0,0],[0,1]]){
-   const held=fresh();
-   assert.equal(sqlite(held.file,attachSql(trusted,conflicting)).status,0);
-   await assert.rejects(writeFilmFacts(held.env,facts({expectedRevision:0})),code('film_person_precondition'),'any trust blocks a mint');
-   assert.deepEqual(films(held.file),[LID]);
-  }
- }
- // (c) The claim lands BETWEEN the writer's read and its batch: the same in-batch predicate rolls the whole batch back (revision, receipt tail and every fact row included).
- {
-  const state={file:null,fired:0};
-  const {file,env}=fresh('open',{onBatch:async()=>{if(!state.fired++)assert.equal(sqlite(state.file,attachSql()).status,0);}});
-  state.file=file;
-  await assert.rejects(writeFilmFacts(env,facts({expectedRevision:0,requestId:'race-1'})),error=>!!error.code,'the batch fails closed');
-  assert.equal(state.fired,1,'the claim landed after the read, before the batch');
-  assert.deepEqual(films(file),[LID],'no film:tmdb:603 was minted');
-  assert.deepEqual(owners(file),[LID]);
+  const stale=facts({expectedRevision:0,requestId:'stale-1'});
+  assert.equal(sqlite(file,claimSql(trusted,conflicting)).status,0);
+  await assert.rejects(writeFilmFacts(env,stale),code('film_person_precondition'),'trusted='+trusted+' conflicting='+conflicting);
+  assert.deepEqual(filmIds(file),[LID],'no film:tmdb:603 was minted');
   for(const table of ['film_metadata','film_sync_state','watchlist_film','film_dimension'])assert.equal(rows(file,'SELECT COUNT(*) c FROM '+table)[0].c,0,table+' rolled back');
   assert.equal(rows(file,"SELECT COUNT(*) c FROM canonical_revision WHERE id='film:tmdb:603'")[0].c,0,'no revision');
  }
- // (d) Order 1, attach first, then the producer: the facts land on the survivor (the LID-minted Film keeps its id); no second Film; the receipt targets the survivor.
+ // (b) The claim lands BETWEEN the writer's own read and its batch (nothing to see at the read): the same predicate rolls the whole batch back.
  {
-  const {file,env}=sealed();
-  assert.equal(sqlite(file,attachSql()).status,0);
-  const out=await applyFilmFacts(env,{origin:'epg_film',event:'run-1',input:{...bare,id:ID}});
-  assert.equal(out.state,'applied');
-  assert.deepEqual(films(file),[LID],'one Film, no film:tmdb:603');
-  assert.deepEqual(owners(file),[LID]);
-  assert.equal(rows(file,"SELECT COUNT(*) c FROM film_metadata WHERE film_id=?".replace('?',"'"+LID+"'"))[0].c,1,'the survivor holds the facts');
-  assert.equal(rows(file,"SELECT canonical_identity FROM film WHERE id='"+LID+"'")[0].canonical_identity,'tmdb:603');
-  const again=await applyFilmFacts(env,{origin:'epg_film',event:'run-1',input:{...bare,id:ID}});
-  assert.ok(['noop','applied'].includes(again.state));
-  assert.deepEqual(films(file),[LID],'a replay mints nothing');
+  const state={file:null,fired:0};
+  const {file,env}=fresh('open',{onBatch:async()=>{if(!state.fired++)assert.equal(sqlite(state.file,claimSql()).status,0);}});
+  state.file=file;
+  await assert.rejects(writeFilmFacts(env,facts({expectedRevision:0,requestId:'race-1'})),code('film_person_precondition'));
+  assert.equal(state.fired,1,'the claim landed after the read, before the batch');
+  assert.deepEqual(filmIds(file),[LID]);assert.deepEqual(owners(file),[LID]);
+  for(const table of ['film_metadata','film_sync_state','watchlist_film','film_dimension'])assert.equal(rows(file,'SELECT COUNT(*) c FROM '+table)[0].c,0,table+' rolled back');
  }
- // (e) Order 2, the producer first (no owner yet), then the attach: one Film `film:tmdb:603` exists and a later facts write for the spelled id stays on it. The facts writer never attaches or claims.
+ // (c) With a REAL receipt (applyFilmFacts, atomic): the same race leaves no applied receipt and no row; the receipt of the target is `failed` with the typed class.
  {
-  const {file,env}=sealed();
-  const first=await applyFilmFacts(env,{origin:'epg_film',event:'run-1',input:{...bare,id:ID}});
-  assert.equal(first.state,'applied');
-  assert.deepEqual(films(file),[ID]);
-  assert.equal(rows(file,'SELECT COUNT(*) c FROM film_external_id')[0].c,0,'the facts writer wrote no external id');
-  const second=await applyFilmFacts(env,{origin:'epg_film',event:'run-2',input:{...bare,id:ID,sync:{metadataAt:T2,synopsisFetchedAt:T2,peopleNamesVersion:3,peopleLocalizedAt:T2}}});
-  assert.ok(['applied','noop'].includes(second.state));
-  assert.deepEqual(films(file),[ID],'no second Film');
+  const state={file:null,fired:0};
+  const {file,env}=fresh('open',{onBatch:async statements=>{if(statements.some(item=>/INSERT INTO film \(/.test(item.text))&&!state.fired++)assert.equal(sqlite(state.file,claimSql()).status,0);}});
+  state.file=file;
+  assert.equal(sqlite(file,BASELINE).status,0);
+  await assert.rejects(applyFilmFacts(env,{origin:'epg',event:'run-1',input:{...bare,id:ID},now:()=>T}),code('film_person_precondition'));
+  assert.equal(state.fired,1);
+  assert.deepEqual(filmIds(file),[LID],'nothing minted');
+  const receipts=rows(file,"SELECT state,error_class FROM canonical_write_receipt WHERE target_id='film:tmdb:603'");
+  assert.equal(receipts.length,1);assert.deepEqual([receipts[0].state,receipts[0].error_class],['failed','film_person_precondition']);
+  assert.equal(rows(file,"SELECT COUNT(*) c FROM canonical_write_receipt WHERE state='applied'")[0].c,0,'no applied receipt');
  }
- // (f) A held movie id is refused at planning, before any receipt, batch or row.
+ // (d) Control and non-regression: an unclaimed movie id mints once (the facts writer writes no external id); an EXISTING `film:tmdb:603` (facts first) is written again whatever claims exist elsewhere
+ // (the target is explicit and exists: no mint); a bare lid target is not touched by the predicate.
  {
-  const {file,env}=sealed();
-  assert.equal(sqlite(file,attachSql(0,0)).status,0);
-  const receiptsBefore=rows(file,"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%receipt%'").length;
-  await assert.rejects(applyFilmFacts(env,{origin:'epg_film',event:'run-1',input:{...bare,id:ID}}),error=>error.code==='film_person_identity_held'&&error.reason==='untrusted_or_conflicting_claim');
-  assert.equal(env.DB.calls.batches,0);assert.deepEqual(films(file),[LID]);assert.ok(receiptsBefore>=0);
-  const mixed=fresh();
-  assert.equal(sqlite(mixed.file,attachSql()+"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:other',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:other','tmdb','603',0,0);").status,0);
-  assert.equal((await resolveFilmFactsTarget(mixed.env,ID)).held,'untrusted_or_conflicting_claim','an untrusted claim beside a trusted owner also holds');
-  await assert.rejects(bindFilmFactsOwner(mixed.env,{id:ID}),error=>error.code==='film_person_identity_held'&&error.reason==='untrusted_or_conflicting_claim','binding refuses a held movie id');
+  const {file,env}=fresh();
+  const first=await writeFilmFacts(env,facts({expectedRevision:0,requestId:'mint-1'}));
+  assert.equal(first.written,true);assert.deepEqual(filmIds(file),[ID]);assert.equal(rows(file,'SELECT COUNT(*) c FROM film_external_id')[0].c,0);
+  assert.equal(sqlite(file,claimSql()).status,0);
+  const again=await writeFilmFacts(env,facts({expectedRevision:1,requestId:'again-1',film:{contractVersion:1,originalTitle:'The Matrix (2)',source:'tmdb'},metadata:{...META,runtime:99,updatedAt:T2}}));
+  assert.equal(again.written,true,'an existing explicit target is not a mint');
+  assert.deepEqual(filmIds(file),[ID,LID].sort());
  }
- // (g) A bare lid id and an existing Film are not touched by the new predicate (sections 1 to 12 cover the write itself).
  {
   const {env}=fresh();
   const out=await writeFilmFacts(env,facts({id:'film:abc',expectedRevision:0,film:{contractVersion:1}}));
   assert.equal(out.written,true);
+ }
+ // (e) Static: the writer resolves no movie reference and writes no external id.
+ {
+  const text=fs.readFileSync('src/canonical-film-writers.js','utf8').replace(/\/\/.*$/gm,'');
+  assert.ok(!/resolveFilmFactsTarget|bindFilmFactsOwner/.test(text),'no movie reference is resolved inside the writer');
  }
 }
 

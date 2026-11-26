@@ -82,33 +82,6 @@ const SOURCE_UPSERT='INSERT INTO film_localization_source (film_id,source,value,
 export const LOCALIZATION_ROW=Object.freeze({effective:(snapshot,written)=>effectiveLocalization(snapshot,written),params:(id,state)=>dimensionParams(id,state),upsert:()=>dimensionUpsert(),same:(stored,params)=>sameDimension(stored,params),strong:row=>strong(row),sourceUpsert:SOURCE_UPSERT,legacySourceInsert:SOURCE_UPSERT.replace(/ ON CONFLICT.*$/,' ON CONFLICT(film_id,source) DO NOTHING'),sourceCap:FILM_FACTS_SOURCE_CAP});
 
 
-// ADR 0217 decision 8d (AIR-671). Read-only, no gate. The Film a facts write for `id` must target. A prefixed `film:tmdb:<n>` id is only a spelling: every stored row of the typed
-// movie id (scheme `tmdb`, any trust) is read, and the Film that holds it as a trusted, non-conflicting external id is the owner (a LID-minted Film that was attached keeps its id and
-// is the survivor). Any other row for the movie id (untrusted or conflicting, on this or another Film, even beside a trusted owner) leaves the id `held`: ambiguous identity evidence,
-// nothing is written. An id of another spelling (a bare lid `film:<lid>`) is returned unchanged. No attach is ever made here.
-export async function resolveFilmFactsTarget(env,id){
- const filmId=fenced.filmId(id);
- const match=SPELLED_TMDB.exec(filmId);
- if(!match)return {id:filmId,spelled:false,owner:null,held:null};
- const db=database(env);
- if(!db)throw failed('film_person_unavailable');
- let claims;
- try{claims=await many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[match[1]]);}
- catch(error){if(error?.code)throw error;throw failed('film_person_unavailable',error);}
- const owner=claims.find(row=>row.trusted===1&&row.conflicting===0)?.film_id??null;
- const held=claims.some(row=>!(row.trusted===1&&row.conflicting===0&&row.film_id===owner))?'untrusted_or_conflicting_claim':null;
- return {id:owner||filmId,spelled:true,owner,held};
-}
-
-// The producers' planning step: the writer input with its `id` bound to the trusted owner of a prefixed movie id, or the same input object when nothing changes. A held movie id is refused here
-// (`film_person_identity_held`), before any receipt exists. The target a receipt binds, the digest and the request id are all derived from the BOUND id; the writer asserts it again in its batch.
-export async function bindFilmFactsOwner(env,input){
- if(!input||typeof input.id!=='string')return input;
- const target=await resolveFilmFactsTarget(env,input.id);
- if(target.held){const error=failed('film_person_identity_held');error.reason=target.held;throw error;}
- return target.id===input.id?input:{...input,id:target.id};
-}
-
 // Reads the stored rows of ONE Film (read-only, no gate). The planner is pure over this snapshot.
 export async function readFilmSnapshot(env,id){
  const db=database(env);
@@ -309,7 +282,8 @@ export async function writeFilmFacts(env,input){
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
  // ADR 0217 decision 8d (AIR-671): a write that would CREATE `film:tmdb:<n>` asserts, INSIDE the fenced batch below, that no row of the movie id exists (any trust, any Film), so a plan made before an attach (or a Discovery admission)
- // fails the whole batch closed (`film_person_precondition`) and never mints a duplicate. The planning step of the producers (`bindFilmFactsOwner`) already moved such a plan to the trusted owner.
+ // fails the whole batch closed (`film_person_precondition`) and never mints a duplicate. The writer takes an EXPLICIT Film target and never resolves a movie reference: that is done at the source boundary
+ // (`resolveSourceIdentities`, which also puts the exact owner proof into `guards`, asserted in this same batch).
  const mint=snapshot.film?null:SPELLED_TMDB.exec(id)?.[1]??null;
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
  // included) with `film_person_precondition`. Without the option nothing changes: the upsert creates the Film, as the EPG Film producer relies on.

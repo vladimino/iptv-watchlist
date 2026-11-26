@@ -100,6 +100,10 @@ function idsOf(document,members,resolved){return sourceIdsOf(document,members).m
 export const IDENTITY_LOOKUP_CAP=1000;
 export const IDENTITY_CHUNK=200;
 const DIRECT=/^(film:|tmdb_|tmdb:)/;
+// ADR 0217 decision 8d (AIR-671). A TYPED MOVIE REFERENCE of a source (`tmdb_<n>`, `tmdb:<n>`) is an external claim, not a Film key: the Film that holds the movie id today is resolved from `film_external_id`, like a Letterboxd id. An explicit
+// canonical Film id (`film:...`) is a permanent entity key and is never reinterpreted, whatever its spelling.
+const MOVIE_REF=/^(?:tmdb_|tmdb:)([1-9]\d{0,11})$/;
+export const movieOf=raw=>MOVIE_REF.exec(String(raw??''))?.[1]??null;
 export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map()}={}){
  // `via` is the provenance of the decision; `guardsOf` turns it into write-time proofs.
  const follow=(id,via)=>{
@@ -107,6 +111,16 @@ export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map
   const next=redirects.get(id);
   return redirects.has(next)?{refused:'producer_identity_redirect_chain'}:{target:next,via,owner:id,redirected:true};
  };
+  // A typed movie reference: the one trusted, non-conflicting `tmdb` claim names the Film (a LID-minted Film that was attached keeps its id and is the survivor); any other row of the movie id, of any trust, on any Film, holds the id
+ // as ambiguous identity evidence and nothing is written. No row at all: the movie id is unclaimed and the target is its own minting spelling `film:tmdb:<n>`, whose absence of competing claims is asserted at the write.
+ const movie=movieOf(raw);
+ if(movie!==null){
+  const rows=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
+  const found=[...new Set(rows.map(row=>row.film_id))];
+  if(found.length>1||(found.length===1&&claims.length>rows.length)||(found.length===0&&claims.length>0))return {refused:'producer_identity_ambiguous'};
+  const decided=found.length===1?follow(found[0],'movie_claim'):follow('film:tmdb:'+movie,'movie_unclaimed');
+  return decided.refused?decided:{...decided,movie};
+ }
  if(DIRECT.test(raw))return follow(canonicalFilmId(raw),'direct');
  const clean=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
  const other=claims.length-clean.length;
@@ -126,6 +140,16 @@ export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map
 export function guardsOf(raw,decision){
  const out=[];
  if(!decision||!decision.target)return out;
+ // A typed movie reference (ADR 0217 decision 8d): the exact owner proof, asserted INSIDE the fenced batch of every write to the target (replay included). `movie_claim`: the owner still holds the movie id as its one trusted,
+ // non-conflicting claim and no other row of the movie id exists on any Film. `movie_unclaimed`: no Film other than the target (or the redirect owner it was followed from) holds any row of the movie id.
+ if(decision.movie!==undefined){
+  if(decision.via==='movie_claim'){
+   out.push({sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0)",params:[decision.owner,decision.movie]});
+   out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))",params:[decision.movie,decision.owner]});
+  }else out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND film_id<>? AND film_id<>?)",params:[decision.movie,decision.owner,decision.target]});
+  if(decision.redirected)out.push({sql:'EXISTS (SELECT 1 FROM film_redirect WHERE from_id=? AND to_film_id=?)',params:[decision.owner,decision.target]});
+  return out;
+ }
  if(decision.via==='claim')out.push({sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='letterboxd' AND value=? AND trusted=1 AND conflicting=0)",params:[decision.owner,raw]});
  if(decision.via==='claim'||decision.via==='own')out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=? AND film_id<>? AND film_id<>?)",params:[raw,decision.owner,decision.target]});
  if(decision.redirected)out.push({sql:'EXISTS (SELECT 1 FROM film_redirect WHERE from_id=? AND to_film_id=?)',params:[decision.owner,decision.target]});
@@ -146,10 +170,21 @@ export async function resolveSourceIdentities(env,rawIds){
 export async function resolveSourceIdentitiesEach(env,rawIds){
  const unique=[...new Set(rawIds.filter(Boolean))];
  const lids=unique.filter(id=>!DIRECT.test(id));
- if(lids.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
+ const movies=unique.filter(id=>movieOf(id)!==null);
+ if(lids.length+movies.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
  const claims=new Map(),films=new Set(),redirects=new Map();
  const db=database(env);
  try{
+  // The typed movie references: ALL rows of each movie id, of any trust (the resolution must see an untrusted or conflicting claim, not ignore it). One statement per chunk.
+  for(let i=0;i<movies.length;i+=IDENTITY_CHUNK){
+   const chunk=JSON.stringify([...new Set(movies.slice(i,i+IDENTITY_CHUNK).map(movieOf))]);
+   const byMovie=new Map();
+   for(const row of await many(db,"SELECT film_id,value,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value IN (SELECT value FROM json_each(?))",[chunk])){
+    if(!byMovie.has(row.value))byMovie.set(row.value,[]);
+    byMovie.get(row.value).push(row);
+   }
+   for(const id of movies.slice(i,i+IDENTITY_CHUNK))claims.set(id,byMovie.get(movieOf(id))||[]);
+  }
   for(let i=0;i<lids.length;i+=IDENTITY_CHUNK){
    const chunk=JSON.stringify(lids.slice(i,i+IDENTITY_CHUNK));
    for(const row of await many(db,"SELECT film_id,value,trusted,conflicting FROM film_external_id WHERE scheme='letterboxd' AND value IN (SELECT value FROM json_each(?))",[chunk])){
@@ -160,7 +195,8 @@ export async function resolveSourceIdentitiesEach(env,rawIds){
   }
   const targets=new Set();
   for(const id of unique){
-   if(DIRECT.test(id))targets.add(canonicalFilmId(id));
+   if(movieOf(id)!==null){targets.add('film:tmdb:'+movieOf(id));for(const row of claims.get(id)||[])targets.add(row.film_id);}
+   else if(DIRECT.test(id))targets.add(canonicalFilmId(id));
    else for(const row of claims.get(id)||[])targets.add(row.film_id);
   }
   for(const id of lids)targets.add('film:'+id);

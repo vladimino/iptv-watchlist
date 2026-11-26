@@ -454,39 +454,4 @@ if(section('11')){
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the adapter holds no SQL of its own');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('producer-adapters'),'the Worker does not name it');
 }
-// 14. AIR-671 / ADR 0217 decision 8d: a prefixed movie id is a minting spelling, not proof of ownership. The adapter binds the trusted owner BEFORE the digest, the target and the request id exist, and a re-plan is bound the same way.
-if(section('14')){
- const LID='film:lbx1';
- const claim=(trusted,conflicting)=>"INSERT INTO film (id,contract_version,updated_at) VALUES ('"+LID+"',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+LID+"','tmdb','603',"+trusted+","+conflicting+");";
- const filmIds=file=>rows(file,'SELECT id FROM film ORDER BY id').map(row=>row.id);
- // the attached survivor receives the facts; no film:tmdb:603 is minted; the receipt targets the survivor
- const file=database('open');
- assert.equal(sqlite(file,claim(1,0)).status,0);
- const env=envOf(file);
- const done=await apply(env);
- assert.equal(done.state,'applied');
- assert.deepEqual(filmIds(file),[LID]);
- assert.deepEqual(receipts(file).map(row=>row.target_id),[LID]);
- assert.equal(title(file,LID),'Title A');
- assert.equal(done.requestId,await producerRequestId({origin:'epg',event:'run-1',target:{kind:'film',id:LID},digest:await filmFactsDigest({...facts(),id:LID})}),'the request id is derived from the bound id');
- // a re-plan of the spelled id (the producer's own source) settles against the survivor, not against a new Film
- const spec=filmFactsOperation({replan:async()=>facts(),now:()=>T});
- const seen=await spec.readback(env,{kind:'film',id:LID},{requestId:done.requestId,contentDigest:await filmFactsDigest({...facts(),id:LID})});
- assert.equal(seen.digest,await filmFactsDigest({...facts(),id:LID}),'the re-plan is bound to the owner and the facts are present');
- const moved=await spec.readback(env,{kind:'film',id:LID},{requestId:done.requestId,contentDigest:await filmFactsDigest(facts())});
- assert.equal(moved.disposition,'abandon','a digest of the spelled id no longer matches the bound plan');
- // no owner: the spelled id is the target (nothing changes for the common case)
- const plain=database('open');
- const first=await apply(envOf(plain));
- assert.equal(first.state,'applied');assert.deepEqual(filmIds(plain),[FILM]);
- // any untrusted or conflicting claim holds the movie id: refused at planning, before a receipt, a batch or a row
- for(const [trusted,conflicting] of [[0,0],[0,1]]){
-  const heldFile=database('open');
-  assert.equal(sqlite(heldFile,claim(trusted,conflicting)).status,0);
-  const heldEnv=envOf(heldFile);
-  await assert.rejects(apply(heldEnv),error=>error.code==='film_person_identity_held');
-  assert.equal(heldEnv.DB.calls.batches,0);assert.equal(receipts(heldFile).length,0);assert.deepEqual(filmIds(heldFile),[LID]);
- }
-}
-
 console.log('canonical-producer-adapters: ok');
