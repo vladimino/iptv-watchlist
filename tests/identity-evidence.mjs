@@ -531,11 +531,13 @@ const insert=(over={})=>{const row={...BASE,...over};return 'INSERT INTO film_id
  const mentions=sources.filter(name=>fs.readFileSync(name,'utf8').includes('film_identity_evidence'));
  assert.deepEqual(mentions,['src/identity-evidence-import.js','src/identity-evidence-writer.js','src/identity-evidence.js'],'no other module reads or writes the table (ADR 0213 decision 8: no reader); the dormant import path of card ER (AIR-639) is the third');
  const importers=sources.filter(name=>/from\s+['"]\.{1,2}\/(?:[\w-]+\/)*identity-evidence\.js['"]/.test(fs.readFileSync(name,'utf8')));
- assert.deepEqual(importers,['src/discovery-owner-evidence.js','src/identity-evidence-import.js','src/identity-evidence-writer.js'],'only the writer-control (card EC), the import (card ER) and the Discovery owner writer (card E2c, dormant by its control row) import the model: no route, Workflow, cron or producer calls it');
+ assert.deepEqual(importers,['src/discovery-owner-evidence.js','src/film-admission.js','src/identity-evidence-import.js','src/identity-evidence-writer.js','src/letterboxd-admission-d1.js'],'only the writer-control (card EC), the import (card ER), the Discovery owner writer (card E2c, dormant by its control row) and the d1 admission path of card A1 (AIR-602: the admission writer appends the row to its own batch, the coordinator records the evidence-only row) import the model: no route, Workflow, cron or other producer calls it');
  // AIR-618 (card E2b): the claim unit's bridge row rides in the claim's own batch, so the two ledger modules are scoped into the Worker bundle (dormant: no control row means no row); the import path is not.
  const build=fs.readFileSync('build.mjs','utf8');
  const scopes=fs.readFileSync('scripts/bundle-scope.mjs','utf8');
- assert.ok(build.includes('scopedIdentityEvidence()')&&scopes.includes("'src/identity-evidence.js','IdentityEvidence'")&&scopes.includes("'src/identity-evidence-writer.js','IdentityEvidenceWriter'"),'the Worker bundle scopes the ledger helper and the writer control (E2a Discovery write, E2b claim unit)');
+ assert.ok(build.includes('scopedIdentityEvidence()')&&scopes.includes("'src/identity-evidence.js','IdentityEvidence'")&&scopes.includes("'src/identity-evidence-writer.js','IdentityEvidenceWriter'"),'the Worker bundle scopes the ledger helper and the writer control (E2a Discovery write, E2b claim unit, A1 d1 admission path)');
  assert.ok(!build.includes('identity-evidence-import'),'the Worker bundle does not include the import path');
+ // AIR-602: card A1 uses the helper for the d1 admission path. It stays dormant: that path runs only at the marker mode `d1` (a separate owner activation), and the Worker itself never names it.
+ assert.ok(!/IdentityEvidence/.test(fs.readFileSync('src/worker.js','utf8')),'no Worker route, cron or Workflow names it');
 }
 console.log('identity evidence ledger: ok');

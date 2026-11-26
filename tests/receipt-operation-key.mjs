@@ -520,8 +520,10 @@ const appliedIn=list=>list.some(item=>/SET state='applied'/.test(item.text));
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!=='src/receipt-operation-key.js'&&/(?:from|import\()\s*['"][^'"]*receipt-operation-key/.test(fs.readFileSync(full,'utf8')))importers.push(full);}};
  walk('src');walk('scripts');
- assert.deepEqual(importers,[],'no source or script imports the operation key protocol');
- for(const file of ['build.mjs','package.json','wrangler.jsonc'])assert.ok(!fs.readFileSync(file,'utf8').includes('receipt-operation-key'),file+' does not bundle it');
+ assert.deepEqual(importers.map(item=>String(item).replace(/\\/g,'/')),['src/letterboxd-admission-d1.js'],'only the d1 admission coordinator of card A1 (AIR-602) imports the operation key protocol');
+ // AIR-602: card A1 bundles the protocol for that coordinator, which runs only at the marker mode `d1` (a separate owner activation). The Worker itself never names it.
+ assert.ok(/scopedImports\('src\/receipt-operation-key\.js','ReceiptOperationKey'/.test(fs.readFileSync('build.mjs','utf8')),'the Worker bundle scopes it for the d1 admission coordinator');
+ for(const file of ['package.json','wrangler.jsonc','src/worker.js'])assert.ok(!/receipt-operation-key|ReceiptOperationKey/.test(fs.readFileSync(file,'utf8')),file+' does not name it');
  const source=fs.readFileSync('src/receipt-operation-key.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bfetch\(|BUCKET|R2|setTimeout|setInterval|cron|scheduled|Date\.now/i.test(source),'no network, R2, timer, schedule or wall clock');
  assert.ok(!/operation_key/.test(fs.readFileSync('src/canonical-mutations.js','utf8')),'the fenced writers are unchanged');

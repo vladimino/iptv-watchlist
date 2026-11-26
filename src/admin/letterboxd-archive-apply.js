@@ -111,6 +111,13 @@ async function lbaChunkReceipt(env,sha,chunk){
  return lbaObject(env,lbaImportObject(sha,chunk,'candidates'));
 }
 async function lbaObject(env,key){
+ // ADR 0222: at marker `d1` the chunk intent / receipt / candidates documents are D1 Ratings documents (no R2 read, no fallback); an unreadable or closed marker is unavailable storage.
+ if(typeof LetterboxdAdmissionDocuments!=='undefined'&&LetterboxdAdmissionDocuments.isAdmissionDocumentKey(key)){
+  try{
+   const routed=await LetterboxdAdmissionDocuments.readRoute(env,key);
+   if(routed.d1){const document=await LetterboxdAdmissionDocuments.readDocument(env,key);return {value:document.value,etag:document.etag};}
+  }catch{return {value:undefined,etag:null};}
+ }
  try{const object=await env.BUCKET.get(key);return object?{value:await object.json(),etag:object.etag??null}:{value:null,etag:null};}
  catch{return {value:undefined,etag:null};}
 }
@@ -200,6 +207,8 @@ async function lbaIdentityStep(request,env,url){
  try{
   const result=await LetterboxdRatedCandidates.identityStep(env,{sha:body.archiveSha256,resume:body.resume===true,code:typeof body.code==='string'?body.code:null});
   if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
+  if(result.error==='admission_closed')return lbaRefuse('admission_closed',409);
+  if(result.error==='admission_unavailable')return json({error:'admission_unavailable'},503);
   if(result.error==='storage_unavailable')return json({error:'storage_unavailable'},503);
   if(result.error)return lbaRefuse('invalid_request',400);
   return json({mode:'identity',writes:result.writes===true,verified:result.verified===true,enriched:result.enriched===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':result.enriched?'enriched':'pending'),reason:result.reason||null,reasons:result.reasons||(result.reason?[result.reason]:[]),reasonKind:result.reasonKind||null,persisted:result.persisted||'none',tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.verified===true?result.rating||null:null,phase:result.phase||null});
@@ -466,7 +475,18 @@ async function lbaCommitCandidates(env,origin,chunk,plan){
  const registered=await LetterboxdRatedCandidates.registerCandidates(env,{sha:origin.sha256,generatedAt:origin.generatedAt,chunk,rows:plan.batch.rows});
  const added=new Set(registered.added);
  const body={schemaVersion:1,kind:'candidates',archiveSha256:origin.sha256,chunk,itemsHash:plan.planHash,origin,codes:plan.batch.rows.map(row=>row.code),registered:registered.added,kept:registered.kept,committedAt:new Date().toISOString()};
- const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ let saved;
+ const routed=typeof LetterboxdAdmissionDocuments!=='undefined'?await LetterboxdAdmissionDocuments.documentRoute(env,key).catch(error=>{if(error&&error.code==='letterboxd_admission_closed')throw new LetterboxdFacts.FactsError('admission_closed','Admissions are closed');throw new Error('storage_unavailable');}):{d1:false};
+ // At `d1` the write-once result is a D1 document written with the compare-and-swap of an absent document; an existing one answers null exactly as the R2 `etagDoesNotMatch` put does.
+ if(routed.d1){const written=await LetterboxdAdmissionDocuments.casDocument(env,key,null,current=>current?null:body,{authority:routed.authority});saved=written.changed===true?{}:null;}
+ else{
+  // ADR 0222 decision 7: the R2 PUT of the write-once result is the last step after a FRESH legacy-marker read; a write routed to R2 earlier that is now past a close or a flip is refused, never switched to D1.
+  if(typeof LetterboxdAdmissionAuthority!=='undefined'){
+   try{await LetterboxdAdmissionAuthority.guardLegacyWrite(env);}
+   catch(error){throw new LetterboxdFacts.FactsError(error&&error.code==='letterboxd_admission_closed'?'admission_closed':'admission_unavailable','The admission authority refuses this write');}
+  }
+  saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ }
  if(saved===null){
   const again=await lbaObject(env,key);
   if(again.value&&again.value.itemsHash===plan.planHash)return {replay:true,chunk,entries:lbaCandidateEntries(plan.batch.rows,null),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};

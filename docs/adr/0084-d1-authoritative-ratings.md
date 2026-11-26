@@ -7,6 +7,7 @@
 **Related work:** [AIR-318](https://trello.com/c/slj7UjN5), [ADR 0023](0023-letterboxd-user-facts.md), [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md), [ADR 0075](0075-retire-letterboxd-diary-history-switch.md), [ADR 0077](0077-retire-removal-rating-lookup-switch.md), [ADR 0078](0078-d1-authoritative-prediction-domain.md), [ADR 0079](0079-d1-authoritative-published-epg.md)  
 **Supersedes:** [ADR 0002](0002-cloudflare-worker-r2-authority.md) in part, for the mutable ratings documents named below, and only while `ratings_domain_authority.mode` is `d1` and `cutover` is `open`. [ADR 0023](0023-letterboxd-user-facts.md) remains the fact model. [ADR 0081](0081-d1-authoritative-owner-reviews.md) stays the owner-review reader: version 9 or later without all three owner-review tables fails closed. This record does not change that reader or `0009`.  
 **Superseded by:** in part [ADR 0162](0162-d1-only-authority-retire-rollback-toolchain.md): the `r2` mode, the held reader fallback to R2 and the load, activate, release, seal and revert procedures are retired; the tables, fences, view projection and authority decision stay
+**Amended by:** [ADR 0222](0222-letterboxd-import-coordination-documents-in-d1.md) (26 Nov 2026): decision 1's document list gains the Letterboxd import coordination documents, reachable only under marker `d1` of `letterboxd_admission_authority`. The text below is unchanged historical record.  
 
 ## Context
 
