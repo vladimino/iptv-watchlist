@@ -71,6 +71,8 @@ function ownerValue(field,value){
 // ---- reading (ONE Film). null = the control table does not exist (today's behaviour). ----
 const ANCHOR_SQL=`SELECT e.scheme,e.value,e.trusted,e.conflicting,EXISTS (SELECT 1 FROM film_external_id o WHERE o.scheme=e.scheme AND o.value=e.value AND o.trusted=1 AND o.film_id<>e.film_id) AS other_owner,EXISTS (SELECT 1 FROM tmdb_retirement_decision r WHERE e.scheme='tmdb' AND r.film_id=e.film_id AND r.movie_id=e.value AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq)) AS retired FROM film_external_id e WHERE e.film_id=? AND e.scheme IN ('tmdb','letterboxd') AND e.trusted=1`;
 const ANCHOR_SQL_NO_RETIREMENT=`SELECT e.scheme,e.value,e.trusted,e.conflicting,EXISTS (SELECT 1 FROM film_external_id o WHERE o.scheme=e.scheme AND o.value=e.value AND o.trusted=1 AND o.film_id<>e.film_id) AS other_owner,0 AS retired FROM film_external_id e WHERE e.film_id=? AND e.scheme IN ('tmdb','letterboxd') AND e.trusted=1`;
+// AIR-693: the schema version whose CHECKs hold a verified two-letter tag other than ru/en (migration 0053). Below it the writer persists such a tag as UNKNOWN (NULL), exactly as before, instead of failing the batch.
+export const OTHER_LANGUAGE_SCHEMA=53;
 const FIELD_COLUMNS='field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,language,language_basis,observed_at,checked_at,value_digest,write_key,written_revision,updated_at';
 export async function readProvenance(db,filmId){
  let control;
@@ -81,15 +83,16 @@ export async function readProvenance(db,filmId){
  const out={mode:control.mode,revision:Number(control.revision),fields:{},anchors:null,disagreement:false,disagreementTable:false};
  if(control.mode==='off')return out;
  try{
-  const [rows,anchorRows,state]=await Promise.all([
+  const [rows,anchorRows,otherLanguage,state]=await Promise.all([
    many(db,`SELECT ${FIELD_COLUMNS} FROM film_metadata_field WHERE film_id=?`,[filmId]),
    many(db,ANCHOR_SQL,[filmId]).catch(error=>{if(noTable(error))return many(db,ANCHOR_SQL_NO_RETIREMENT,[filmId]);throw error;}),
+   one(db,'SELECT version FROM schema_contract WHERE id=1').then(row=>Number(row?.version)>=OTHER_LANGUAGE_SCHEMA),
    one(db,"SELECT 1 AS present FROM catalog_enrichment_state WHERE film_id=? AND part='film' AND source='*' AND status='identity_disagreement'",[filmId]).then(row=>({table:true,present:!!row})).catch(error=>{if(noTable(error))return {table:false,present:false};throw error;}),
   ]);
   for(const row of rows)out.fields[row.field]=row;
   const computed=computeAnchors(anchorRows.map(row=>({scheme:row.scheme,value:row.value,trusted:row.trusted,conflicting:row.conflicting,otherOwner:!!row.other_owner,retired:!!row.retired})));
   out.anchors={computed,digest:sha256Hex(canonicalJson({anchors:computed.digestRows}))};
-  out.disagreement=state.present;out.disagreementTable=state.table;
+  out.disagreement=state.present;out.disagreementTable=state.table;out.otherLanguage=otherLanguage;
  }catch(error){throw failed('film_person_unavailable',error);}
  return out;
 }
@@ -106,7 +109,10 @@ function standing(row,value,digest,dimLocked){
  return row.agreement==='unconfirmed'?{name:'unconfirmed',rank:2,bound,mismatch,row}:{name:'confirmed',rank:4,bound,mismatch,row};
 }
 // ADR 0224: for synopsis and poster ONLY, language quality is compared before provider precedence at equal confidence (Russian 2, English 1, unknown 0; an assumed English counts as English). Every other field has no language, so its order is unchanged.
+// AIR-693: a verified tag of any OTHER language (a normalized two-letter tag) ranks below Russian and English, with the unknown language (ru 2, en 1, anything else 0); the order of ADR 0224 is unchanged.
 const LANGUAGE_RANK=Object.freeze({ru:2,en:1});
+// A normalized two-letter lowercase language tag, the shape migration 0053 accepts.
+export const LANGUAGE_TAG=/^[a-z]{2}$/;
 export const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
 // The evidence basis is only the LAST tie-break (explicit over assumed, for the very same source, value and time), so it never changes which source, freshness or confidence wins and never raises identity confidence.
 const BASIS_RANK=Object.freeze({explicit:1,assumed:0});
@@ -118,7 +124,7 @@ export const confidenceOf=standing;
 export function languageOf(field,item){
  const language=item?.language??null,basis=item?.languageBasis??null;
  if(language===null&&basis===null)return {language:null,languageBasis:null};
- if(!['ru','en'].includes(language)||!['explicit','assumed'].includes(basis)||!LANGUAGE_FIELDS.includes(field))throw failed('film_person_invalid');
+ if(typeof language!=='string'||!LANGUAGE_TAG.test(language)||!['explicit','assumed'].includes(basis)||!LANGUAGE_FIELDS.includes(field))throw failed('film_person_invalid');
  if(basis==='assumed'&&!(field==='synopsis'&&item.source==='letterboxd'&&language==='en'))throw failed('film_person_invalid');
  return {language,languageBasis:basis};
 }
@@ -160,7 +166,7 @@ export function planMetadataProvenance(snapshot,input,at){
  const revision=(Number.isInteger(input.expectedRevision)?input.expectedRevision:snapshot.revision)+1,writeKey=String(input.requestId).slice(0,200);
  const row=snapshot.metadata,digest=prov.anchors.digest,computed=prov.anchors.computed;
  const dimLocked=!!snapshot.dimensions.metadata&&(snapshot.dimensions.metadata.status==='reviewed'||snapshot.dimensions.metadata.authority==='owner');
- const out={effective:{...meta},post:[],pre:[],changes:[],skipped:[],rejected:[],guards:[],counts:emptyCounts(),owner,declared:Object.keys(declared).length>0,fences:{anchor:false},lockedEmpty:false};
+ const out={effective:{...meta},post:[],pre:[],changes:[],skipped:[],rejected:[],guards:[],counts:emptyCounts(),owner,declared:Object.keys(declared).length>0,fences:{anchor:false},lockedEmpty:false,languageUnsupported:[]};
  // ADR 0214 decision 9: an owner action the rules refuse is REJECTED (no effect, no command record, no revision), never a skipped no-op; the caller (planFilmFacts) throws film_metadata_rejected.
  const reject=(field,reason)=>{out.rejected.push({field,reason});out.skipped.push({field,reason});};
  const history=(field,reason,old,next)=>{out.post.push(historyStatement(id,field,reason,old,next,writeKey,atIso));out.counts.history++;};
@@ -254,7 +260,9 @@ export function planMetadataProvenance(snapshot,input,at){
   const agreement=computed.letterboxd?(decl.agreedAnchorDigest===digest?'confirmed':'unconfirmed'):'not_required';
   if(agreement==='unconfirmed')out.counts.agreement_stale++;
   const observedAt=instant(decl.observedAt),vDigest=valueDigest(incoming);
-  const lang=languageOf(field,decl);
+  let lang=languageOf(field,decl);
+  // a verified other-language tag is persisted only where the schema can hold it (0053); before that it is unknown, never an invented ru or en
+  if(lang.language&&!['ru','en'].includes(lang.language)&&!prov.otherLanguage){lang={language:null,languageBasis:null};out.languageUnsupported.push(field);}
   const vRank=rankOf(agreement==='unconfirmed'?2:4,decl.source,observedAt,vDigest,lang.language,lang.languageBasis);
   const sRank=rankOf(stand.rank,stand.row?.source,stand.row?.observed_at,stand.row?.value_digest,sLang,sBasis);
   const next={tier:'automatic',source:decl.source,origin:'catalog_enrichment',anchorScheme:decl.anchor.scheme,anchorValue:decl.anchor.value,anchorDigest:digest,agreement,language:lang.language,languageBasis:lang.languageBasis,observedAt,checkedAt:atIso};
