@@ -1242,6 +1242,25 @@ const file=fresh('d1'),env=world(file);
  assert.notEqual(out15.verified,true,JSON.stringify(out15));
  assert.deepEqual([hasRecord('lq15'),viewRows('lq15')],[false,0],'no record or projection while the lid maps to another key');
 
+ // R16. REPLACEMENT BEFORE THE CLAIM: a recovering LID-only row (intent A) is read and its source checked; before the claim CAS another writer replaces it with intent B. The CAS sees B, which is not the original:
+ // `claim_changed`: B is not reviewed, charged or settled on the old observer's behalf.
+ fresh2();
+ setDocD1(file,KEY,doc('lq16',{state:'admitting',kind:'lid_only',intendedTmdb:null,filmPath:'/film/lid-only-1999/',proofDigest:'a'.repeat(64),enrichment:'pending'}));addPage('lq16','lid-only-1999');
+ let swapped16=false;
+ const out16=await stepWith(hooked({onBatch:texts=>{if(!swapped16&&texts.some(t=>/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t)&&/rated-candidates\.json/.test(t))){swapped16=true;const d=getDocD1(file,KEY);d.candidates.lq16={...d.candidates.lq16,proofDigest:'b'.repeat(64)};setDocD1(file,KEY,d);}}}));
+ assert.equal(swapped16,true,'the replacement landed before the claim CAS');
+ assert.notEqual(rowOf('lq16').state,'needs_review',JSON.stringify(out16));
+ assert.deepEqual([rowOf('lq16').state,rowOf('lq16').proofDigest,rowOf('lq16').sourceAttempts??0],['admitting','b'.repeat(64),0],'the replacement is neither reviewed nor charged');
+ assert.equal(lidRows('lq16').length,0);
+
+ // R17. CONTROL, the reverse direction on an UNCHANGED row: a LID-only intent row meets a page that now names a movie. The row is still the original and the source really changed: `source_changed`.
+ fresh2();
+ add('lq17','mismatch-r17-2001','900917','Mismatch R17',2001);
+ setDocD1(file,KEY,doc('lq17',{state:'admitting',kind:'lid_only',intendedTmdb:null,filmPath:'/film/mismatch-r17-2001/',proofDigest:'a'.repeat(64),enrichment:'pending',name:'Mismatch R17',year:2001}));
+ const out17=await stepWith(world(file));
+ assert.equal(rowOf('lq17').state,'needs_review',JSON.stringify(out17));assert.equal(rowOf('lq17').reason,'source_changed');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film_rated_admission WHERE source_code='lq17'")[0].n,0,'the LID-only intent never lets the movie be admitted');
+
  // R3. A Ratings alias to a MOVIE appears after the admission and before the facts link: reviewed (`ratings_tmdb_link`), never a TMDB-linked record reported as the lid's own.
  fresh2();setDocD1(file,KEY,doc('lq3'));addPage('lq3','lid-only-1999');
  let armed3=false,fired3=false;

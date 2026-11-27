@@ -313,12 +313,16 @@ const LetterboxdRatedCandidates = (() => {
       reasonKind: result.reasonKind || (reasons.length ? LetterboxdIdentity.reasonKind(reasons) : null),
     };
   }
+  // The ORIGINAL candidate (the row a step READ before it decided anything), compared exactly: state, kind, intended identity, path, proof digest, the observation and the movie. A disposition that rests on the original row's
+  // intent or source writes only while the current row still equals it; a row replaced meanwhile is `claim_changed`, never reviewed, charged or settled on the old observer's behalf.
+  const ORIGINAL_KEYS = ['state', 'kind', 'intendedTmdb', 'filmPath', 'proofDigest', 'rating', 'observedAt', 'tmdb'];
+  const sameOriginal = (row, original) => !!row && !!original && ORIGINAL_KEYS.every(name => (row[name] ?? null) === (original[name] ?? null));
   async function markReview(env, key, code, reason, claim, extra, {guard = null} = {}) {
     const payload = reviewReasons(reason, extra);
     const saved = await casDoc(env, key, null, current => {
       const row = current.candidates[code];
       if (!row || row.state === 'verified' || row.state === 'removed') return null;
-      if (claim && !(claim.lidOnly ? sameLidIntent(row, claim.filmPath, claim.proofDigest, claim.item) : sameClaim(row, claim.tmdb, claim.filmPath))) return null;
+      if (claim && !(claim.original ? sameOriginal(row, claim.original) : claim.lidOnly ? sameLidIntent(row, claim.filmPath, claim.proofDigest, claim.item) : sameClaim(row, claim.tmdb, claim.filmPath))) return null;
       current.candidates[code] = {...row, state: 'needs_review', reason: payload.reason, reasons: payload.reasons, reasonKind: payload.reasonKind, intendedTmdb: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
@@ -328,7 +332,7 @@ const LetterboxdRatedCandidates = (() => {
   // AIR-602 (review of PR #1018), at `d1`: an `admitting` row whose source cannot be reacquired NOW stays `admitting` (retried); each such answer costs one attempt and the sixth makes the row `needs_review`
   // (ADR 0207 decision 3 table, rated step). Nothing is marked for review on a first transport-like answer, and nothing is admitted from the stored intent.
   const SOURCE_ATTEMPT_CAP = 6;
-  async function retryAdmitting(env, key, code, reason, guard = null) {
+  async function retryAdmitting(env, key, code, reason, guard = null, original = null) {
     // PR #1018 review: the charge and the disposition are ONE compare-and-swap. A source answer that is not the cap only counts an attempt (unguarded: nothing terminal happens); the answer that REACHES the cap writes the
     // counter and the terminal `needs_review` together, in the same batch as the history assertion the step's reconcile observed, so a refused terminal outcome leaves no stale charge and the row keeps its intent.
     const payload = reviewReasons('source_unavailable');
@@ -336,12 +340,12 @@ const LetterboxdRatedCandidates = (() => {
       const peek = await readDoc(env, key);
       if (peek.value === undefined) throw new Error('storage_unavailable');
       const seen = peek.value && peek.value.candidates && peek.value.candidates[code];
-      if (!seen || seen.state !== 'admitting') return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: false};
+      if (!seen || seen.state !== 'admitting' || (original && !sameOriginal(seen, original))) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'source_unavailable', phase: 'identity', writes: false};
       const capping = (Number.isInteger(seen.sourceAttempts) ? seen.sourceAttempts : 0) + 1 >= SOURCE_ATTEMPT_CAP;
       let attempts = 0, terminal = false, moved = false;
       const saved = await casDoc(env, key, null, current => {
         const row = current.candidates[code];
-        if (!row || row.state !== 'admitting') return null;
+        if (!row || row.state !== 'admitting' || (original && !sameOriginal(row, original))) return null;
         attempts = (Number.isInteger(row.sourceAttempts) ? row.sourceAttempts : 0) + 1;
         const counted = {...row, sourceAttempts: attempts, sourceReason: String(reason).slice(0, 60)};
         if (attempts >= SOURCE_ATTEMPT_CAP) {
@@ -431,6 +435,8 @@ const LetterboxdRatedCandidates = (() => {
         return null;
       }
       if (row.state === 'admitting') {
+        // A LID-only original (the reverse mismatch): a row replaced meanwhile is `claim_changed`, never reviewed by this attempt. The legacy TMDB protocol is unchanged.
+        if (item.kind === 'lid_only' && !sameOriginal(row, item)) {outcome = 'claim_changed'; return null;}
         outcome = row.intendedTmdb === String(tmdb) && row.filmPath === film.filmPath ? 'held' : 'intent_conflict';
         return null;
       }
@@ -449,7 +455,7 @@ const LetterboxdRatedCandidates = (() => {
       return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), filmId: film.filmId, phase: 'identity'};
     }
     // At `d1` a recovering row whose reacquired movie or page path differs from its intent is a CHANGED source (not a stale intent_conflict): needs_review `source_changed`, behind the history guard.
-    if (atD1 && outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
+    if (atD1 && outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null, item.kind === 'lid_only' ? {original: item} : undefined);
     if (outcome !== 'claimed' && outcome !== 'held') return refusedClaim(code, outcome);
     const held = await readClaim(env, key, code, tmdb, film.filmPath);
     if (!held.ok) return refusedClaim(code, held.reason);
@@ -526,8 +532,8 @@ const LetterboxdRatedCandidates = (() => {
       if (row.state === 'removed' || row.state === 'needs_review') {outcome = row.state; return null;}
       if (row.state === 'verified') {outcome = row.kind === 'lid_only' && row.tmdb == null && row.filmPath === filmPath && row.proofDigest === proofDigest && row.rating === item.rating && row.observedAt === item.observedAt ? 'already' : 'verified_conflict'; return null;}
       if (row.state === 'admitting') {
-        // The same proof and path with ANOTHER observation is a REPLACED row (never reviewed by this attempt); another proof or path is a real mismatched intent (`source_changed`).
-        outcome = sameLidIntent(row, filmPath, proofDigest, item) ? 'held' : (row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath && row.proofDigest === proofDigest) ? 'claim_changed' : 'intent_conflict';
+        // The row this attempt READ, unchanged, with a changed source is a real mismatched intent (`source_changed`); a row that is not the original any more was REPLACED meanwhile: never reviewed by this attempt.
+        outcome = sameLidIntent(row, filmPath, proofDigest, item) ? 'held' : sameOriginal(row, item) ? 'intent_conflict' : 'claim_changed';
         return null;
       }
       if (row.state !== 'pending') {outcome = 'claim_changed'; return null;}
@@ -538,7 +544,7 @@ const LetterboxdRatedCandidates = (() => {
       outcome = 'claimed';
       return current;
     });
-    if (outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
+    if (outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null, {original: item});
     if (outcome !== 'claimed' && outcome !== 'held' && outcome !== 'already') return refusedClaim(code, outcome);
     const heldNow = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (outcome === 'already' ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest && row.rating === item.rating && row.observedAt === item.observedAt ? {ok: true} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest, item) ? {ok: true} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
     const held = await heldNow();
@@ -570,7 +576,7 @@ const LetterboxdRatedCandidates = (() => {
     }
     if (admitted.outcome === 'held' && admitted.reason === 'ratings_tmdb_link') {
       // The Ratings link of the lid names a movie the page does not: counted like any unreacquirable source (six attempts, then review).
-      const kept = await retryAdmitting(env, key, code, 'ratings_tmdb_link', recover.guard || null);
+      const kept = await retryAdmitting(env, key, code, 'ratings_tmdb_link', recover.guard || null, {state: 'admitting', kind: 'lid_only', intendedTmdb: null, filmPath, proofDigest, rating: item.rating, observedAt: item.observedAt, tmdb: item.tmdb ?? null});
       return {...kept, fetched: true};
     }
     if (admitted.outcome !== 'admitted_lid_only' && admitted.outcome !== 'present_lid_only') {
@@ -915,6 +921,8 @@ const LetterboxdRatedCandidates = (() => {
     let recoverGuard = null;
     const lidOnlyRow = atD1 && item.state === 'admitting' && item.kind === 'lid_only' && item.intendedTmdb == null;
     const recovering = atD1 && item.state === 'admitting' && (!!item.intendedTmdb || lidOnlyRow);
+    // A recovering LID-only row's early dispositions (terminal review, retry charge, source change) rest on the ORIGINAL row read here: they write only while the current row still equals it (a replaced row is `claim_changed`).
+    const originalClaim = lidOnlyRow ? {original: item} : undefined;
     // PR #1018 review: EVERY row that can reach a terminal decision at `d1` reconciles the key first (a pending row too), so each terminal write below carries the history assertion of the history it observed.
     if (atD1 && (recovering || item.state === 'pending')) {
       // AIR-673: a recovering lid-only row reconciles the SAME common key through the `lid_only` kind (its intent carries no movie).
@@ -940,7 +948,8 @@ const LetterboxdRatedCandidates = (() => {
     }
     // A terminal review of this step: at `d1` ONE batch with the history assertion (`recoverGuard`); a moved history leaves the row as it was (never terminal on a superseded history). At r2 `recoverGuard` is null.
     const terminal = async (reason, fetched, extra) => {
-      const review = await markReview(env, key, code, reason, null, extra, {guard: recoverGuard});
+      const review = await markReview(env, key, code, reason, originalClaim || null, extra, {guard: recoverGuard});
+      if (originalClaim && !review.refused && !review.changed) return withWrites({pending: true, fetched, verified: false, code, state: item.state, reason: 'claim_changed', phase: 'identity'}, false, 'none');
       if (review.refused) return withWrites({pending: true, fetched, verified: false, code, state: item.state, reason: 'in_flight', phase: 'identity'}, false, 'none');
       return withWrites({pending: true, fetched, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     };
@@ -953,7 +962,7 @@ const LetterboxdRatedCandidates = (() => {
       return withWrites({pending: true, fetched: false, stop: stopped, code, verified: false, phase: 'identity'}, parked.changed === true, parked.changed ? 'stop' : 'none');
     }
     if (page.review && recovering) {
-      const kept = await retryAdmitting(env, key, code, page.review, recoverGuard);
+      const kept = await retryAdmitting(env, key, code, page.review, recoverGuard, lidOnlyRow ? item : null);
       return withWrites(kept, kept.writes === true, kept.writes ? 'review' : 'none');
     }
     if (page.review) return terminal(page.review, true);
@@ -972,7 +981,7 @@ const LetterboxdRatedCandidates = (() => {
       }
     }
     if (recovering && (!decision || decision.decision !== 'accepted' || !decision.tmdbId)) {
-      const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard);
+      const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard, originalClaim);
       return withWrites(changed, changed.writes === true, changed.writes ? 'review' : 'none');
     }
     if (!decision || decision.decision !== 'accepted' || !decision.tmdbId) {
@@ -988,11 +997,11 @@ const LetterboxdRatedCandidates = (() => {
     }
     const agree = detail.review ? {ok: false, reason: detail.review} : LetterboxdRatedAdmission.movieDetailAgrees(detail.detail, decision.tmdbId, evidence.title || item.name, (evidence.years && evidence.years[0]) || item.year);
     if (recovering && detail.review) {
-      const kept = await retryAdmitting(env, key, code, detail.review, recoverGuard);
+      const kept = await retryAdmitting(env, key, code, detail.review, recoverGuard, lidOnlyRow ? item : null);
       return withWrites(kept, kept.writes === true, kept.writes ? 'review' : 'none');
     }
     if (recovering && !agree.ok) {
-      const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard);
+      const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard, originalClaim);
       return withWrites(changed, changed.writes === true, changed.writes ? 'review' : 'none');
     }
     if (!agree.ok || (item.historicalTmdb && item.historicalTmdb !== String(decision.tmdbId))) {
