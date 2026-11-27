@@ -81,9 +81,11 @@ async function catalogEnrichmentRetry(env,input,by,at){
  // THE WHOLE REQUEST IS ONE COMPARE-AND-SWAP. The first statement of the batch asserts, inside the same transaction as the effects, that EVERY selected row (targets and not) still has the status and updated_at the owner saw; the
  // existing batch fence (`film_person_cas`, a CHECK that fails the whole batch) turns a moved row into a rollback of everything, so a competing tick or retry between the read above and this batch can neither reset the other targets
  // nor advance the Film epoch for a request that was refused.
- const whole=selected.map(()=>'EXISTS (SELECT 1 FROM catalog_enrichment_state WHERE film_id=? AND part=? AND source=? AND slot=? AND status=? AND updated_at=?)').join(' AND ');
- const wholeParams=selected.flatMap(row=>[input.filmId,row.part,row.source,row.slot,row.status,row.updatedAt]);
- const statements=[db.prepare('INSERT INTO film_person_cas (id,ok) VALUES (1,(SELECT CASE WHEN EXISTS (SELECT 1 FROM film_person_cas WHERE id=1) AND ('+whole+') THEN 1 ELSE 0 END)) ON CONFLICT(id) DO UPDATE SET ok=excluded.ok').bind(...wholeParams)];
+ // ONE assertion over a bound JSON array (two parameters whatever the size of the request, so the supported 60 rows stay far below the 100 variables D1 allows per statement): no selected row may lack a stored row with the status
+ // and updated_at the owner saw.
+ const seen=JSON.stringify(selected.map(row=>({part:row.part,source:row.source,slot:row.slot,status:row.status,updatedAt:row.updatedAt})));
+ const whole="NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM catalog_enrichment_state s WHERE s.film_id=? AND s.part=json_extract(j.value,'$.part') AND s.source=json_extract(j.value,'$.source') AND s.slot=json_extract(j.value,'$.slot') AND s.status=json_extract(j.value,'$.status') AND s.updated_at=json_extract(j.value,'$.updatedAt')))";
+ const statements=[db.prepare('INSERT INTO film_person_cas (id,ok) VALUES (1,(SELECT CASE WHEN EXISTS (SELECT 1 FROM film_person_cas WHERE id=1) AND ('+whole+') THEN 1 ELSE 0 END)) ON CONFLICT(id) DO UPDATE SET ok=excluded.ok').bind(seen,input.filmId)];
  // every effect is correlated to THIS request: the Film row carries the request id (`ownerRetry`) and the request's timestamp, so a readback can tell this request's commit from anybody else's
  const mark="film_json=json_set(COALESCE(film_json,'{}'),'$.ownerRetry',?)";
  for(const row of targets){
@@ -92,32 +94,35 @@ async function catalogEnrichmentRetry(env,input,by,at){
  }
  // every selected part's Film also raises its plan epoch (inside the asserted transaction), so every batch of an older plan fails even with unchanged anchors
  if(!targets.some(row=>row.part==='film'))statements.push(db.prepare("UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at=?,"+mark+" WHERE film_id=? AND part='film' AND source='*'").bind(at,input.requestId,input.filmId));
+
+ // THREE kinds of evidence, never one guess. COMMIT evidence: this request's own marker on the Film row, or one of its targets carrying this request's own timestamp. ROLLBACK evidence: a failed assertion (the database refused the
+ // whole batch), or, after a failure whose answer was lost, every selected row still exactly as the owner saw it. Anything else is UNKNOWN: a later tick or retry may have overwritten the evidence, so the absence of a marker proves nothing.
+ const commitEvidence=list=>{
+  const film=list.find(item=>item.part==='film');
+  if(film&&film.owner_retry===input.requestId)return true;
+  return targets.some(row=>row.part!=='film'&&list.some(item=>item.part===row.part&&item.source===row.source&&Number(item.slot)===Number(row.slot)&&item.updated_at===at));
+ };
+ const untouched=list=>selected.every(row=>list.some(item=>item.part===row.part&&item.source===row.source&&Number(item.slot)===Number(row.slot)&&item.status===row.status&&item.updated_at===row.updatedAt));
  const readState=async()=>(await db.prepare('SELECT part,source,slot,status,updated_at,refresh_epoch,plan_epoch,json_extract(film_json,\'$.ownerRetry\') AS owner_retry FROM catalog_enrichment_state WHERE film_id=?').bind(input.filmId).all()).results||[];
  const view=list=>list.map(item=>({part:item.part,source:item.source,slot:Number(item.slot),status:item.status,updatedAt:item.updated_at}));
- // the Film row carries this request's marker; a Film without a state row (not a state this producer creates) falls back to every target having this request's own timestamp
- const committedByThisRequest=list=>{
-  const film=list.find(item=>item.part==='film');
-  if(film)return film.owner_retry===input.requestId&&film.updated_at===at;
-  return targets.every(row=>list.some(item=>item.part===row.part&&item.source===row.source&&Number(item.slot)===Number(row.slot)&&item.updated_at===at));
- };
  let batchError=null;
  try{await db.batch(statements);}catch(error){batchError=error;}
  if(batchError){
-  // a moved row fails the assertion and the batch rolls back whole: nothing of this request was stored
+  // a moved row fails the assertion and the batch rolls back whole: confirmed rollback, nothing of this request was stored
   if(/CHECK constraint failed/i.test(String(batchError?.message||batchError))){
    let current=null;try{current=await readState();}catch{/* the refusal does not depend on the read */}
    return {status:409,body:{error:'stale_rows',outcome:'rejected',filmId:input.filmId,...(current?{current:view(current)}:{})}};
   }
-  // any other failure: whether the batch committed is decided by the database, and this request's own marker says which
-  let after;try{after=await readState();}catch{return {status:503,body:{error:'storage_unavailable',outcome:'unknown',recovery:'Reload the state: the retry may or may not have been stored.'}};}
-  if(!committedByThisRequest(after))return {status:503,body:{error:'storage_unavailable',outcome:'rejected',recovery:'The retry was not stored; reload the state and try again.',filmId:input.filmId,current:view(after)}};
+  // any other failure: the answer was lost, so the commit is decided by the evidence above, and only by it
+  let lost;try{lost=await readState();}catch{return {status:503,body:{error:'storage_unavailable',outcome:'unknown',recovery:'Reload the state: the retry may or may not have been stored.'}};}
+  if(commitEvidence(lost))return {status:200,body:{ok:true,outcome:'applied',action:'retry',requestId:input.requestId,filmId:input.filmId,retried:targets.map(row=>({part:row.part,source:row.source,slot:row.slot})),readback:view(lost),note:'the answer of the write was lost; this request\'s own marker proves it committed'}};
+  if(untouched(lost))return {status:503,body:{error:'storage_unavailable',outcome:'rejected',recovery:'The retry was not stored (every selected row is as you saw it); try again.',filmId:input.filmId,current:view(lost)}};
+  return {status:503,body:{error:'storage_unavailable',outcome:'unknown',recovery:'The retry may or may not have been stored and the rows have since changed: reload the state.',filmId:input.filmId,current:view(lost)}};
  }
- let after;
- try{after=await readState();}
- catch{return {status:503,body:{error:'readback_failed',outcome:'unknown',recovery:'Reload the state to see whether the retry was stored.'}};}
- // the batch committed or this request's marker is there: the outcome is `applied` for THIS request, whatever another request did to the rows since
- if(!committedByThisRequest(after))return {status:409,body:{error:'rows_changed',outcome:'rejected',filmId:input.filmId,current:view(after)}};
- return {status:200,body:{ok:true,outcome:'applied',action:'retry',requestId:input.requestId,filmId:input.filmId,retried:targets.map(row=>({part:row.part,source:row.source,slot:row.slot})),readback:view(after)}};
+ // the batch RETURNED: the whole request committed, and that fact is never re-decided by what another writer did afterwards. The readback only shows the current state, which may already be newer than this request's own effects.
+ let after=null;
+ try{after=await readState();}catch{/* the commit is known; only the readback is unavailable */}
+ return {status:200,body:{ok:true,outcome:'applied',action:'retry',requestId:input.requestId,filmId:input.filmId,retried:targets.map(row=>({part:row.part,source:row.source,slot:row.slot})),readback:after?view(after):null,...(after?{}:{readbackUnavailable:true})}};
 }
 
 // Best-effort wake AFTER a successful owner action commits (never inside a transaction, never blocking the answer): a resume or a retry makes work runnable, and an uncertain outcome is recovered by the same kick.

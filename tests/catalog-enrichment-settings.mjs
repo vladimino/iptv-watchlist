@@ -260,6 +260,79 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
   void file;
  }
 }
+
+// ---- the D1 variable limit and the truthful commit classification of the owner retry ----
+{
+ const T1='2026-11-26T10:05:00.000Z';
+ const build=(rowsCount,{maxBinds=null}={})=>{
+  const file=migrated();
+  sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:a',2,NULL,'A','${T}');`);
+  activate(file);
+  sql(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,plan_epoch,due_since,updated_at) VALUES ('film:a','film','*',0,'active',3,'${T}','${T}');`+Array.from({length:rowsCount},(_,i)=>`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,refresh_epoch,due_since,updated_at) VALUES ('film:a','credits','tmdb',${i},'deferred_repair','y',2,'${T}','${T}');`).join(''));
+  return file;
+ };
+ const slots=n=>Array.from({length:n},(_,i)=>({part:'credits',source:'tmdb',slot:i,status:'deferred_repair',updatedAt:T}));
+ const withDb=(file,wrap,{maxBinds=null}={})=>{const base=d1Standin(file,maxBinds?{maxBinds}:{});return baseEnv({DB:wrap?wrap(base):base});};
+ const stateOf=file=>rows(file,"SELECT part,slot,status,refresh_epoch,plan_epoch,updated_at FROM catalog_enrichment_state ORDER BY part,slot");
+
+ // 1. the largest supported request (60 rows) against the D1 variable-limit stand-in: it applies, and a moved token late in the set refuses the whole request
+ {
+  const file=build(60);
+  const env=withDb(file,null,{maxBinds:100});
+  const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000lim1',filmId:'film:a',expectedRows:slots(60)}});
+  assert.deepEqual([out.status,out.body.outcome],[200,'applied'],'60 selected rows pass the 100-variable limit: '+JSON.stringify(out.body));
+  assert.equal(stateOf(file).filter(row=>row.part==='credits'&&row.status==='due'&&row.refresh_epoch===3).length,60,'every row was retried');
+  // a token that moved late in the set (row 59) after the first read
+  const file2=build(60);
+  let fired=false;
+  const env2=withDb(file2,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async list=>{if(!fired){fired=true;sql(file2,`UPDATE catalog_enrichment_state SET updated_at='${T1}' WHERE part='credits' AND slot=59`);}return target.batch(list);};return target[prop];}}),{maxBinds:100});
+  const refused=await call(env2,WRITE,{payload:{action:'retry',requestId:'req-0000lim2',filmId:'film:a',expectedRows:slots(60)}});
+  assert.deepEqual([refused.status,refused.body.outcome],[409,'rejected']);
+  assert.equal(stateOf(file2).filter(row=>row.part==='credits'&&row.status==='deferred_repair'&&row.refresh_epoch===2).length,60,'not one of the 60 targets was reset');
+  assert.equal(stateOf(file2).find(row=>row.part==='film').plan_epoch,3,'and the Film epoch did not move');
+ }
+ // 2. a competing write AFTER the batch committed and BEFORE the readback: the request is `applied` (the commit is known), whatever the rows say now
+ {
+  const file=build(2);
+  const env=withDb(file,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async list=>{const r=await target.batch(list);sql(file,`UPDATE catalog_enrichment_state SET updated_at='${T1}',film_json='{"ownerRetry":"someone-else"}' WHERE part='film';UPDATE catalog_enrichment_state SET updated_at='${T1}',status='deferred_repair' WHERE part='credits'`);return r;};return target[prop];}}));
+  const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000cmt1',filmId:'film:a',expectedRows:slots(2)}});
+  assert.deepEqual([out.status,out.body.outcome],[200,'applied'],'a commit that is known stays applied after a later writer moved the rows: '+JSON.stringify(out.body));
+  assert.ok(out.body.readback.some(row=>row.updatedAt===T1),'the readback shows the current (newer) state');
+ }
+ // 3. the batch's answer is LOST and the evidence has been overwritten: unknown, never rejected
+ {
+  const file=build(2);
+  const env=withDb(file,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async list=>{await target.batch(list);sql(file,`UPDATE catalog_enrichment_state SET updated_at='${T1}',film_json='{"ownerRetry":"someone-else"}' WHERE part='film';UPDATE catalog_enrichment_state SET updated_at='${T1}',status='deferred_repair' WHERE part='credits'`);throw new Error('network connection lost');};return target[prop];}}));
+  const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000cmt2',filmId:'film:a',expectedRows:slots(2)}});
+  assert.equal(out.body.outcome,'unknown','a lost answer with overwritten evidence proves neither commit nor rollback: '+JSON.stringify(out.body));
+  assert.equal(out.status,503);
+ }
+ // 4. the answer is lost and the rows are exactly as the owner saw them: confirmed not stored
+ {
+  const file=build(2);
+  const env=withDb(file,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async()=>{throw new Error('network connection lost');};return target[prop];}}));
+  const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000cmt3',filmId:'film:a',expectedRows:slots(2)}});
+  assert.deepEqual([out.status,out.body.outcome],[503,'rejected'],'every selected row is as the owner saw it: the retry was not stored');
+ }
+ // 5. the answer is lost but this request's own marker is there (nothing moved afterwards): applied
+ {
+  const file=build(2);
+  const env=withDb(file,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async list=>{await target.batch(list);throw new Error('network connection lost');};return target[prop];}}));
+  const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000cmt4',filmId:'film:a',expectedRows:slots(2)}});
+  assert.deepEqual([out.status,out.body.outcome],[200,'applied']);
+ }
+ // 6. the commit is known but the readback itself is unavailable: still applied
+ {
+  const file=build(2);
+  let batched=false;
+  const env=withDb(file,base=>new Proxy(base,{get(target,prop){
+   if(prop==='batch')return async list=>{const r=await target.batch(list);batched=true;return r;};
+   if(prop==='prepare')return sqlText=>{if(batched&&/FROM catalog_enrichment_state WHERE film_id=\?/.test(sqlText))throw new Error('read failed');return target.prepare(sqlText);};
+   return target[prop];}}));
+  const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000cmt5',filmId:'film:a',expectedRows:slots(2)}});
+  assert.deepEqual([out.status,out.body.outcome,out.body.readback],[200,'applied',null],'a known commit is not downgraded by an unreadable readback');
+ }
+}
 // ---- the wake after a successful owner action: a resume or a retry kicks the drainer, a pause or a refusal does not ----
 {
  const {file,env}=world();activate(file);
