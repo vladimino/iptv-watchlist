@@ -138,7 +138,7 @@ const fieldRow=(filmId,field,row,value,writeKey,revision,at)=>[FIELD_UPSERT,[fil
 // the writer's per-field outcome counts (ADR 0214 decision 13), summed per step and then per run
 export function addCounts(total,add){
  if(!add||typeof add!=='object')return total;
- for(const key of ['fills','adoptions','replacements','agreed','source_absent','same_rank_conflict','agreement_stale','provenance_mismatch','history','owner_actions'])total[key]=(total[key]||0)+(Number(add[key])||0);
+ for(const key of ['offered','fills','adoptions','replacements','agreed','source_absent','superseded_kept','same_rank_conflict','agreement_stale','provenance_mismatch','history','owner_actions','upgrades_waiting'])total[key]=(total[key]||0)+(Number(add[key])||0);
  total.refusals=total.refusals||{};
  for(const [key,value] of Object.entries(add.refusals||{}))total.refusals[key]=(total.refusals[key]||0)+(Number(value)||0);
  return total;

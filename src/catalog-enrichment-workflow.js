@@ -8,7 +8,7 @@
 //     and a send that throws (the instance is not running) is read as "no live owner" and creates one. A lost kick is recovered by the reconcile.
 //   - A `waitForEvent` that times out THROWS and would fail the instance, so it is wrapped and the timeout is the due-time wake.
 //   - HANDOVER: at the statement budget the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor writes only after it acquires its own lease.
-import {drain,dueFilms,BUDGET,repairPending,languageUpgradePending,DEFER_MINUTES,countingEnv} from './catalog-enrichment-drain.js';
+import {drain,dueFilms,BUDGET,repairPending,DEFER_MINUTES,countingEnv} from './catalog-enrichment-drain.js';
 import {readControl,runnableSignals,deliverTicks} from './catalog-enrichment-store.js';
 
 export const RUN_PROJECTION='catalog_enrichment_run';
@@ -65,7 +65,6 @@ async function sendKick(env,id,now){
 export async function hasRunnable(env,{now}){
  if((await runnableSignals(env,{now,limit:1})).length)return true;
  if(await repairPending(env))return true; // a new code version has deferred items waiting for their wake
- if(await languageUpgradePending(env))return true; // enforce permits a marked language upgrade: the drainer performs the bounded reopen
  const due=await dueFilms(env,{now});
  // a stream that stopped at its page budget without finding anything may still hide runnable work: that is "maybe runnable", and the run it starts laps the range
  return due.live.length+due.background.length>0||due.incomplete;

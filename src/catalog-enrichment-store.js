@@ -103,18 +103,24 @@ export function emitStatement({kind,subject,source='',part='',digest=null,cause=
  return [`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) VALUES (?,?,?,?,1,0,'pending',?,?,?,0) ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest OR excluded.cause_digest IS NULL`,[kind,subject,source,part,digest,cause,at]];
 }
 
+export async function provenanceEnforcing(handle){
+ try{const row=await one(handle,'SELECT mode FROM film_metadata_provenance_control WHERE id=1');return row?.mode==='enforce';}
+ catch(error){if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return false;throw error;}
+}
 // ---- runnable signals ----
 // A signal is runnable when it is pending, its scope is enabled (an `admitted` signal) or some enabled membership of its Film exists (the others), it is RESOLVED (its Film exists) and its retry is due. Held (disabled
 // scope), unresolved and backed-off signals are not runnable, so they cannot keep a run spinning or cancel a park. -> [{kind, subject, source, part, version, filmId}]
 export async function runnableSignals(env,{now,limit=50}){
  instant(now);
  const handle=db(env);
+ // ADR 0224 (AIR-633): a `language_upgrade` signal stays pending, and held, until the provenance mode is `enforce` (schema absent reads as not enforcing)
+ const enforcing=await provenanceEnforcing(handle);
  // Eligibility is decided in SQL BEFORE the window: a signal whose source has no enabled scope is not a candidate, so held heads can never fill the LIMIT and hide runnable signals behind them.
  const sources=Object.keys(SOURCE_SCOPES).filter(source=>(SOURCE_SCOPES[source]||[]).length);
  const eligible=[...sources.map(source=>`(s.source=? AND s.part='' AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope IN (${marks(SOURCE_SCOPES[source])})))`),...PART_SCOPES.map(()=>"(s.part=? AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope=?))")].join(' OR ')||'0';
  const eligibleParams=[...sources.flatMap(source=>[source,...SOURCE_SCOPES[source]]),...PART_SCOPES.flatMap(scope=>[scope,scope])];
  const admitted=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,e.film_id AS film_id FROM enrichment_signal s JOIN film_external_id e ON e.scheme='tmdb' AND e.value=substr(s.subject,6) AND e.trusted=1 AND e.conflicting=0 WHERE s.kind='admitted' AND s.state='pending' AND s.acked_version<s.version AND s.subject LIKE 'tmdb:%' AND (s.retry_at IS NULL OR s.retry_at<=?) AND (${eligible}) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) ORDER BY s.armed_at LIMIT ?`,[now,...eligibleParams,limit]);
- const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=s.subject) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,limit]);
+ const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND (s.cause_ref IS NOT 'language_upgrade' OR ?=1) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=s.subject) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,enforcing?1:0,limit]);
 
  return [...admitted,...others].map(row=>({kind:row.kind,subject:row.subject,source:row.source,part:row.part,version:Number(row.version),digest:row.digest??null,filmId:row.film_id}));
 }
@@ -244,7 +250,7 @@ const whole=value=>{const n=Number(value);return Number.isInteger(n)&&n>=0?n:nul
 const SOURCES=['letterboxd','tmdb','wikidata'];
 export const tickEventKey=event=>'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
 // ADR 0214 decision 13 (AIR-633): the per-field outcome counts of a run, whole numbers only. Counts, never a value, a Film id or a field text.
-const PROVENANCE_KEYS=['fills','adoptions','replacements','agreed','source_absent','same_rank_conflict','agreement_stale','provenance_mismatch','history','owner_actions'];
+const PROVENANCE_KEYS=['offered','fills','adoptions','replacements','agreed','source_absent','superseded_kept','same_rank_conflict','agreement_stale','provenance_mismatch','history','owner_actions','upgrades_waiting'];
 export function provenanceCounts(value){
  if(!value||typeof value!=='object')return null;
  const out={};
@@ -269,7 +275,7 @@ export function tickEvent(row){
  return {id:row.tick_id,type:EVENT_TYPE,at:new Date(endedMs).toISOString(),outcome:row.state,stop,
   startedAt:isTime(row.started_at)?new Date(startedMs).toISOString():null,durationMs:isTime(row.started_at)&&endedMs>=startedMs?endedMs-startedMs:null,
   counts:{films:whole(counts.films),signals:whole(counts.signals),units:whole(counts.units),steps:whole(counts.steps),statements:whole(counts.statements),failedStatements:whole(counts.failedStatements),
-   committedLive:whole(counts.committedLive),committedBackground:whole(counts.committedBackground),yields:whole(counts.yields),deferred:whole(counts.deferred),errors:whole(counts.errors),disagreements:whole(counts.disagreements),...(whole(counts.upgradesReopened)!==null?{upgradesReopened:whole(counts.upgradesReopened)}:{})},
+   committedLive:whole(counts.committedLive),committedBackground:whole(counts.committedBackground),yields:whole(counts.yields),deferred:whole(counts.deferred),errors:whole(counts.errors),disagreements:whole(counts.disagreements)},
   ...(provenanceCounts(counts.provenance)?{provenance:provenanceCounts(counts.provenance)}:{}),
   bySource};
 }

@@ -158,11 +158,11 @@ export function decideCore(input){
 }
 
 // ---- replacement planning (ADR 0214 decisions 5, 10 and 12; ADR 0224; AIR-633 PV2) ----
-// The planner only DECIDES WHICH FIELDS ARE WORTH OFFERING to the one canonical writer: the writer's comparator (confidence, then language quality for synopsis and poster, then source precedence, freshness, digest) remains the single
-// authority that replaces, adopts or refuses. Offering a field the comparator then refuses is harmless (it is counted as a refusal); NOT offering a reachable upgrade is the defect this closes (a comparator unreachable behind a blank guard).
-// `provenance` (optional): {mode:'off'|'hold'|'enforce', fields:{field->{name:'owner'|'confirmed'|'superseded'|'unconfirmed'|'unknown', language:'ru'|'en'|null}}}; absent or mode `off` reads every stored value as unknown-language.
+// The planner only DECIDES WHAT TO OFFER the one canonical writer on a due fetch; the writer's comparator (confidence, then language quality for synopsis and poster, then source precedence, freshness, digest) and its language guards
+// (P3-A, no downgrade) remain the single authority that replaces, adopts or refuses, and every outcome is counted there. The planner therefore adds NO second rank policy: any observed value of an applicable source is offered for a
+// nonblank field (an equal value too, so adoption and the `agreed` audit are reachable), except where the observation is unconfirmed (an unconfirmed observation never replaces a different nonblank value).
+// `provenance` (optional): {mode:'off'|'hold'|'enforce', fields:{field->{name, source, language}}}; absent or mode `off` reads every stored value as unknown-language.
 export const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
-const REPLACEABLE=Object.freeze(['unknown','superseded','unconfirmed']);
 const LANGUAGE_RANK=Object.freeze({ru:2,en:1});
 const same=(a,b)=>canonical(a??null)===canonical(b??null);
 // The language of one observed field. The shared Russian-first projection (AIR-684) supplies `answer.meta[field]={language,languageBasis}`; until it does, the only language known is the owner-approved P4-B default (a freshly observed
@@ -174,47 +174,47 @@ export function observedLanguage(source,field,answer){
  if(field==='synopsis'&&source==='letterboxd')return {language:'en',languageBasis:'assumed'};
  return {language:null,languageBasis:null};
 }
-// -> {offers:{field->{source,value,mode:'replace'|'adopt',language,languageBasis}}, pending:[{field,source,reason}]}
-// enforce: every eligible replacement or adoption is offered. hold: only an equal value (adoption) is offered, a different one is `pending` (it is replaceable once enforce permits it). off or schema absent: nothing is offered; a
-// Russian upgrade of a different nonblank synopsis or poster is `pending`, which is the durable marker that reopens the part when enforce becomes permissible.
+// -> {offers:{field->{source,value,mode:'replace'|'adopt'|'absent',language,languageBasis}}, pending:[{field,source,reason}], fillOverrides:{field->{source,value}}, supersededKept:[field]}
+// enforce: every observation of a nonblank field is offered (an answered source with a verified absence is offered as a null declaration, so `source_absent` is counted by the writer; a superseded value with no observation is listed as
+// `supersededKept`). hold: only an equal value (an adoption) is offered, a different one is `pending`. off or schema absent: nothing is offered; a Russian upgrade of a different nonblank synopsis or poster is `pending`, which is the
+// durable evidence that makes the Film's core part runnable again once enforce permits it.
 export function planReplacements(input){
- const out={offers:{},pending:[],fillOverrides:{}};
+ const out={offers:{},pending:[],fillOverrides:{},supersededKept:[]};
  const {provenance,applicable,hasLetterboxdAnchor,agreed,stored,answers,locked,fills={}}=input;
  if(locked)return out;
  const mode=provenance?.mode||'off';
  const confirmed=!hasLetterboxdAnchor||!!agreed; // an unconfirmed observation never replaces a different nonblank value (ADR 0214 decision 5)
  if(!confirmed)return out;
+ const valuesOf=field=>CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],...observedLanguage(source,field,answers[source])}));
  for(const field of CORE_FIELDS){
+  const isLanguage=LANGUAGE_FIELDS.includes(field);
   if(blank(stored[field])){
    // a blank is filled by decideCore in source order. For synopsis and poster a Russian observation of ANOTHER source is better than that fill (ADR 0224): enforce fills the Russian value directly; off and hold fill as before and leave the
-   // durable marker that makes the Russian value an upgrade once enforce permits it.
+   // durable evidence that makes the Russian value an upgrade once enforce permits it.
    const fill=fills[field];
-   if(!fill||!LANGUAGE_FIELDS.includes(field))continue;
-   const russian=CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],...observedLanguage(source,field,answers[source])})).find(item=>item.language==='ru');
+   if(!fill||!isLanguage)continue;
+   const russian=valuesOf(field).find(item=>item.language==='ru');
    if(!russian||same(fill.value,russian.value)||observedLanguage(fill.source,field,answers[fill.source]).language==='ru')continue;
    if(mode==='enforce')out.fillOverrides[field]={source:russian.source,value:russian.value};
-   else out.pending.push({field,source:russian.source,reason:'language_upgrade'});
+   else out.pending.push({field,source:russian.source,reason:'language_upgrade',value:russian.value});
    continue;
   }
-  const standing=provenance?.fields?.[field]||{name:'unknown',language:null};
-  if(standing.name==='owner')continue;
-  const seen=[];
-  for(const source of CORE_ORDER){
-   const state=fieldState(source,field,{applicable,answers});
-   if(state==='value')seen.push({source,value:answers[source].fields[field],...observedLanguage(source,field,answers[source])});
-   else if((state==='pending'||state==='failed')&&!LANGUAGE_FIELDS.includes(field))break; // an earlier source still owes its answer: precedence decides first
+  const standing=provenance?.fields?.[field]||{name:'unknown',language:null,source:null};
+  const seen=valuesOf(field);
+  if(!seen.length){
+   if(mode!=='enforce')continue;
+   if(standing.name==='superseded')out.supersededKept.push(field);
+   // a source that answered and verifiably has no value, which is the very source that attributed the stored value: the writer counts it as `source_absent` and keeps the value (a blank never clears)
+   if(standing.source&&answers[standing.source]?.status==='ok'&&fieldState(standing.source,field,{applicable,answers})==='absent')out.offers[field]={source:standing.source,value:null,mode:'absent',language:null,languageBasis:null};
+   continue;
   }
-  if(!seen.length)continue;
   // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order
-  const pick=LANGUAGE_FIELDS.includes(field)?[...seen].sort((a,b)=>(LANGUAGE_RANK[b.language]||0)-(LANGUAGE_RANK[a.language]||0))[0]:seen[0];
-  const equal=same(stored[field],pick.value),isLanguage=LANGUAGE_FIELDS.includes(field);
+  const pick=isLanguage?[...seen].sort((a,b)=>(LANGUAGE_RANK[b.language]||0)-(LANGUAGE_RANK[a.language]||0))[0]:seen[0];
+  const equal=same(stored[field],pick.value);
   const upgrade=isLanguage&&pick.language==='ru'&&standing.language!=='ru'; // P3-A: a confirmed Russian value may replace an eligible unknown or English one
-  const replaceable=REPLACEABLE.includes(standing.name);
-  if(!upgrade&&!replaceable)continue;
-  if(isLanguage&&!equal&&pick.language!=='ru'&&standing.language!=='en')continue; // P3-A: English or unknown never replaces a different nonblank unknown-language value
   if(mode==='enforce'){out.offers[field]={source:pick.source,value:pick.value,mode:equal?'adopt':'replace',language:pick.language,languageBasis:pick.languageBasis};continue;}
   if(equal){if(mode==='hold')out.offers[field]={source:pick.source,value:pick.value,mode:'adopt',language:pick.language,languageBasis:pick.languageBasis};continue;}
-  if(mode==='hold'||upgrade)out.pending.push({field,source:pick.source,reason:upgrade?'language_upgrade':'replacement'});
+  if(upgrade)out.pending.push({field,source:pick.source,reason:'language_upgrade',value:pick.value});
  }
  return out;
 }

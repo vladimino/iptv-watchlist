@@ -54,7 +54,7 @@ function kindOf(env,kind,input,{now}){
  const replan=async()=>input;
  if(kind==='facts')return {
   operation:FILM_FACTS,target:{kind:'film',id:input.id},digest:()=>filmFactsDigest(input),
-  plan:async requestId=>{const plan=await prePlanFilmFacts(env,{input,requestId:requestId||'preplan'});return {absent:false,noop:plan.noop,revision:plan.expectedRevision};},
+  plan:async requestId=>{const plan=await prePlanFilmFacts(env,{input,requestId:requestId||'preplan'});return {absent:false,noop:plan.noop,revision:plan.expectedRevision,counts:plan.counts};},
   spec:filmFactsOperation({replan,now:clock}),
   run:(env,ctx,requestId)=>writeFilmFacts(env,{...input,requestId,expectedRevision:ctx.currentRevision,receiptMark:{requestId:ctx.requestId,attempt:ctx.attempt,now:clock(),target:ctx.target}}),
  };
@@ -97,7 +97,7 @@ export async function runUnit(env,{kind,unitKey,input,now,policy}){
    decide:async()=>{
     const plan=await pieces.plan(null);
     if(plan.absent)return {kind:'none',result:{state:'absent'}};
-    if(plan.noop)return {kind:'none',result:{state:'noop'}};
+    if(plan.noop)return {kind:'none',result:{state:'noop',...(plan.counts?{provenance:plan.counts}:{})}};
     return {kind:'reserve',request:{operation:pieces.operation,target:pieces.target,expectedRevision:plan.revision,digest,source:digest},
      write:{atomic:true,readback:pieces.spec.readback,revalidate:pieces.spec.revalidate,run:ctx=>pieces.run(env,ctx,ctx.requestId,digest)}};
    },

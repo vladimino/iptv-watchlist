@@ -74,7 +74,7 @@ export async function prePlanFilmFacts(env,{input,requestId}){
  const plan=planFilmFacts(snapshot,{...input,requestId});
  // A producer that never creates a Film (`requireExisting:true`, ADR 0127) refuses a missing one before any receipt exists; the writer asserts it again inside its batch.
  if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');
- return {noop:plan.noop,expectedRevision:snapshot.revision,changes:plan.changes,skipped:plan.skipped,redirect:snapshot.redirect};
+ return {noop:plan.noop,expectedRevision:snapshot.revision,changes:plan.changes,skipped:plan.skipped,redirect:snapshot.redirect,...(plan.counts?{counts:plan.counts}:{})};
 }
 
 // The digest binds the target id (and the content), so equality with the receipt's digest is the whole check.
