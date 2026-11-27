@@ -166,7 +166,7 @@ export function planMetadataProvenance(snapshot,input,at){
  const revision=(Number.isInteger(input.expectedRevision)?input.expectedRevision:snapshot.revision)+1,writeKey=String(input.requestId).slice(0,200);
  const row=snapshot.metadata,digest=prov.anchors.digest,computed=prov.anchors.computed;
  const dimLocked=!!snapshot.dimensions.metadata&&(snapshot.dimensions.metadata.status==='reviewed'||snapshot.dimensions.metadata.authority==='owner');
- const out={effective:{...meta},post:[],pre:[],changes:[],skipped:[],rejected:[],guards:[],counts:emptyCounts(),owner,declared:Object.keys(declared).length>0,fences:{anchor:false},lockedEmpty:false,languageUnsupported:[]};
+ const out={effective:{...meta},post:[],pre:[],changes:[],skipped:[],rejected:[],guards:[],counts:emptyCounts(),owner,declared:Object.keys(declared).length>0,fences:{anchor:false},lockedEmpty:false};
  // ADR 0214 decision 9: an owner action the rules refuse is REJECTED (no effect, no command record, no revision), never a skipped no-op; the caller (planFilmFacts) throws film_metadata_rejected.
  const reject=(field,reason)=>{out.rejected.push({field,reason});out.skipped.push({field,reason});};
  const history=(field,reason,old,next)=>{out.post.push(historyStatement(id,field,reason,old,next,writeKey,atIso));out.counts.history++;};
@@ -262,7 +262,7 @@ export function planMetadataProvenance(snapshot,input,at){
   const observedAt=instant(decl.observedAt),vDigest=valueDigest(incoming);
   let lang=languageOf(field,decl);
   // a verified other-language tag is persisted only where the schema can hold it (0053); before that it is unknown, never an invented ru or en
-  if(lang.language&&!['ru','en'].includes(lang.language)&&!prov.otherLanguage){lang={language:null,languageBasis:null};out.languageUnsupported.push(field);}
+  if(lang.language&&!['ru','en'].includes(lang.language)&&!prov.otherLanguage)lang={language:null,languageBasis:null};
   const vRank=rankOf(agreement==='unconfirmed'?2:4,decl.source,observedAt,vDigest,lang.language,lang.languageBasis);
   const sRank=rankOf(stand.rank,stand.row?.source,stand.row?.observed_at,stand.row?.value_digest,sLang,sBasis);
   const next={tier:'automatic',source:decl.source,origin:'catalog_enrichment',anchorScheme:decl.anchor.scheme,anchorValue:decl.anchor.value,anchorDigest:digest,agreement,language:lang.language,languageBasis:lang.languageBasis,observedAt,checkedAt:atIso};
@@ -283,6 +283,8 @@ export function planMetadataProvenance(snapshot,input,at){
   if(mode==='hold'){out.skipped.push({field,reason:'hold_fill_only'});out.counts.refusals.hold++;continue;}
   // ADR 0224 (P3-A): for synopsis and poster, a verified Russian value is never downgraded to an English or unknown-language one, and a genuinely unknown-language nonblank value is replaced only by a confirmed Russian observation (a missing lineage alone never lets English or unknown replace it)
   if(LANGUAGE_FIELDS.includes(field)&&lang.language!=='ru'&&(sLang==='ru'||!sLang)){out.skipped.push({field,reason:'language_kept'});out.counts.refusals.language_kept++;continue;}
+  // ADR 0224 (P1-A, AIR-693): a poster that is neither Russian nor English (another language, a neutral or an unknown one) is a last resort for a BLANK field only; it never replaces an existing usable poster, a previously verified other-language one included, whatever its confidence or freshness
+  if(field==='poster'&&lang.language!=='ru'&&lang.language!=='en'){out.skipped.push({field,reason:'language_kept'});out.counts.refusals.language_kept++;continue;}
   if(vRank[0]===4&&compare(vRank,sRank)>0){
    if(vRank[0]===sRank[0]&&vRank[1]===sRank[1]&&vRank[2]===sRank[2]&&vRank[3]===sRank[3])out.counts.same_rank_conflict++;
    history(field,'replaced',old,{valueDigest:vDigest,tier:'automatic',source:decl.source,language:lang.language,languageBasis:lang.languageBasis,anchorDigest:digest});

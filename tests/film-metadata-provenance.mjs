@@ -1065,6 +1065,36 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
   const rel=history(f.file).find(item=>item.reason==='owner_release');
   assert.deepEqual([rel.new_language,rel.new_language_basis],['fr','explicit']);
  }
+ // P1-A: a poster that is neither ru nor en never replaces an existing usable poster, however fresh (review of 8ec1c5e2)
+ {
+  const w=await world();
+  await declare(w.env,{poster:'/fr.jpg'},{source:'tmdb',languages:{poster:FR}});
+  const other=await declare(w.env,{poster:'/fr2.jpg'},{source:'tmdb',at:T1,observedAt:T1,languages:{poster:FR}});
+  assert.deepEqual(other.skipped.map(item=>item.reason),['language_kept'],'fr does not replace fr');
+  const neutral=await declare(w.env,{poster:'/neutral.jpg'},{source:'tmdb',at:T2,observedAt:T2});
+  assert.deepEqual(neutral.skipped.map(item=>item.reason),['language_kept'],'a neutral or unknown poster does not replace fr');
+  assert.equal(meta(w.file).poster,'/fr.jpg');assert.deepEqual(lang(field(w.file,'poster')),['fr','explicit']);
+  assert.equal(history(w.file).length,0,'nothing was replaced');
+  // after an anchor change the stored row is superseded; the fallback still does not replace the usable poster
+  exec(w.file,"UPDATE film_metadata_field SET anchor_digest='"+'b'.repeat(64)+"' WHERE field='poster'");
+  assert.equal((await readFilmSnapshot(w.env,ID)).provenance.fields.poster.anchor_digest,'b'.repeat(64));
+  const after=await declare(w.env,{poster:'/fallback.jpg'},{source:'tmdb',at:T2,observedAt:T2});
+  assert.deepEqual(after.skipped.map(item=>item.reason),['language_kept'],'a confirmed fallback does not replace a superseded usable poster');
+  // a verified English or Russian poster still upgrades it
+  const en=await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',at:T3,observedAt:T3,languages:{poster:EN}});
+  assert.equal(meta(w.file).poster,'/en.jpg',JSON.stringify(en.skipped));
+ }
+ {
+  // an existing English poster is kept against a fresher neutral fallback; the same value is still adopted and a blank is still filled
+  const w=await world();
+  await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',languages:{poster:EN}});
+  const n=await declare(w.env,{poster:'/neutral.jpg'},{source:'tmdb',at:T1,observedAt:T1});
+  assert.deepEqual(n.skipped.map(item=>item.reason),['language_kept']);assert.equal(meta(w.file).poster,'/en.jpg');
+  const same=await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',at:T2,observedAt:T2,languages:{poster:EN}});
+  assert.equal(same.skipped.length,0);
+  const ru=await declare(w.env,{poster:'/ru.jpg'},{source:'tmdb',at:T3,observedAt:T3,languages:{poster:RU}});
+  assert.equal(meta(w.file).poster,'/ru.jpg',JSON.stringify(ru.skipped));
+ }
  // a revert restores the language of the history row it names
  {
   const w=await world();
