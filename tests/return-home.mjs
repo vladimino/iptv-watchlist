@@ -93,7 +93,7 @@ const R = vm.runInContext('ReturnHome', helperContext);
 
 // 6. Markup: the same link in the same place on every page, no competing old buttons, nav and footer links carry the target.
 {
-  const pages = {'public/admin.html': 'admin', 'public/admin-letterboxd.html': 'letterboxd', 'public/admin-limbo.html': 'limbo', 'public/admin-identity.html': 'identity', 'public/admin-posters.html': 'posters', 'public/admin-actions.html': 'actions'};
+  const pages = {'public/admin.html': 'admin', 'public/admin-letterboxd.html': 'letterboxd', 'public/admin-limbo.html': 'limbo', 'public/admin-identity.html': 'identity', 'public/admin-posters.html': 'posters', 'public/admin-settings.html': 'settings', 'public/admin-actions.html': 'actions'};
   const index = fs.readFileSync('public/index.html', 'utf8');
   const linkMarkup = '<a class="return-home" data-return-home href="/">На главную</a>';
   for (const [file, name] of Object.entries(pages)) {
@@ -106,10 +106,10 @@ const R = vm.runInContext('ReturnHome', helperContext);
     assert.doesNotMatch(html, /К программе|К списку|К фильмам/, name + ': no competing old button');
     assert.ok(html.indexOf('src="/return-home.js"') > 0 && html.indexOf('src="/return-home.js"') < html.search(/src="\/admin[^"]*\.js"/), name + ': the helper loads before the page script');
   }
-  for (const file of ['public/admin.html', 'public/admin-letterboxd.html', 'public/admin-limbo.html', 'public/admin-identity.html', 'public/admin-posters.html', 'public/admin-channels.html']) {
+  for (const file of ['public/admin.html', 'public/admin-letterboxd.html', 'public/admin-limbo.html', 'public/admin-identity.html', 'public/admin-posters.html', 'public/admin-channels.html', 'public/admin-settings.html']) {
     const nav = fs.readFileSync(file, 'utf8').match(/<nav class="admin-views"[\s\S]*?<\/nav>/)[0];
     const anchors = nav.match(/<a [^>]*>/g);
-    assert.equal(anchors.length, 7, file);
+    assert.equal(anchors.length, 8, file);
     for (const anchor of anchors) assert.match(anchor, /data-return-carry/, file + ': ' + anchor + ' keeps the target through the sections');
   }
   assert.match(fs.readFileSync('public/admin-actions.html', 'utf8'), /<a class="admin-home" href="\/admin" data-return-carry>К данным<\/a>/);

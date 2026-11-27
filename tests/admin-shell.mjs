@@ -81,7 +81,7 @@ const limboHtml = fs.readFileSync('public/admin-limbo.html', 'utf8');
 const letterboxdHtml = fs.readFileSync('public/admin-letterboxd.html', 'utf8');
 const postersHtml = fs.readFileSync('public/admin-posters.html', 'utf8');
 const identityHtml = fs.readFileSync('public/admin-identity.html', 'utf8');
-const expectedNav = [['/admin', 'Каталог'], ['/admin/health', 'Здоровье данных'], ['/admin/letterboxd', 'Архив Letterboxd'], ['/admin/limb', 'Лимб'], ['/admin/identity', 'Идентификация'], ['/admin/posters', 'Постеры'], ['/admin/channels', 'Каналы']];
+const expectedNav = [['/admin', 'Каталог'], ['/admin/health', 'Здоровье данных'], ['/admin/letterboxd', 'Архив Letterboxd'], ['/admin/limb', 'Лимб'], ['/admin/identity', 'Идентификация'], ['/admin/posters', 'Постеры'], ['/admin/channels', 'Каналы'], ['/admin/settings', 'Настройки']];
 for (const [name, source] of [['admin', html], ['letterboxd', letterboxdHtml], ['limb', limboHtml], ['identity', identityHtml], ['posters', postersHtml]]) {
   const nav = source.match(/<nav class="admin-views"[^>]*>[\s\S]*?<\/nav>/);
   assert.ok(nav, name);

@@ -71,6 +71,9 @@ export const FILES={
  "admin-channels-page.mjs": {
   "suite": "core"
  },
+ "admin-settings-page.mjs": {
+  "suite": "core"
+ },
  "admin-posters-api.mjs": {
   "suite": "core"
  },

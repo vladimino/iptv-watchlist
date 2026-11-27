@@ -34,7 +34,7 @@ export const SAMPLES=['/api/enrichment/pipeline/status?view=operational','/api/e
 // A query a route needs to reach its real code (without it the route answers 400).
 export const QUERY={'/api/enrichment/history':'?filmId=w1','/api/letterboxd/diary':'?filmId=w1'};
 // Static pages: assets, never storage.
-export const PAGES=['/','/admin','/admin/health','/admin/limb','/admin/limbo','/admin/identity','/admin/posters','/admin/channels','/admin/letterboxd','/admin/actions','/events','/film/w1','/styles.css','/app.js','/admin.js','/return-home.js','/status-footer.js'];
+export const PAGES=['/','/admin','/admin/health','/admin/limb','/admin/limbo','/admin/identity','/admin/posters','/admin/channels','/admin/settings','/admin/letterboxd','/admin/actions','/events','/film/w1','/styles.css','/app.js','/admin.js','/return-home.js','/status-footer.js'];
 // MCP: every tool in tools/list is one of these. A read tool is called with these arguments in every scenario; a write tool is never called (it writes by contract).
 export const MCP_READ_TOOLS={
  probe_read:{},probe_echo:{arguments:{text:'audit'}},feature_flags:{},epg_status:{},epg_pipeline_status:{},enrichment_schema:{},enrichment_profile:{},enrichment_runner:{},enrichment_queue:{},enrichment_status:{},
