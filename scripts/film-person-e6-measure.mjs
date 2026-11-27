@@ -28,8 +28,8 @@ export const CAPS=Object.freeze({
 // The cost of one applyFilmFacts unit in D1 round trips (a `first()/all()/run()` is one, a `batch()` is one: ADR 0106), measured on the sqlite stand-in with the route gate open and the receipt tables empty.
 // tests/film-person-e6-measure.mjs asserts these numbers against the code, so a change of the adapter fails that test until the numbers and the runbook are updated.
 export const UNIT_COST=Object.freeze({
- noop:Object.freeze({queries:12,batches:0,roundTrips:12}),
- applied:Object.freeze({queries:31,batches:2,roundTrips:33}),
+ noop:Object.freeze({queries:13,batches:0,roundTrips:13}),
+ applied:Object.freeze({queries:33,batches:2,roundTrips:35}),
 });
 export const SAFETY_DEFAULT=0.5;
 
