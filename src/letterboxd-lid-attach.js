@@ -17,7 +17,7 @@ import {assertWritable,database,failed,many,one,readAuthority} from './film-pers
 import {fenced} from './canonical-mutations.js';
 import {RETRY_POLICY,digestOf} from './canonical-receipts.js';
 import {currentTargetOf,keyedRequestIdOf,runOperationKey} from './receipt-operation-key.js';
-import {hasLidAdmissionTable} from './film-admission.js';
+import {hasLidAdmissionTable,ratingsDocumentFence} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,authorityAssertion,d1BatchCondition,readAdmissionAuthority} from './letterboxd-admission-authority.js';
 import {evidenceInsertStatement,ownEvidenceRowCondition,planIdentityEvidence} from './identity-evidence.js';
@@ -262,16 +262,35 @@ export async function linkAttachedIntent(env,{intent,ports,now}={}){
  }
  const after=await readIntent(env,intent.requestId);
  if(after&&after.state==='settled'&&after.outcome==='attached'&&after.linkState===out?.state){
-  const projection=out.state==='linked'?await completeProjection(ports,{lid:intent.lid,tmdb:intent.proof.tmdb}):null;
+  const projection=out.state==='linked'?await completeProjection(env,ports,{intent:after}):null;
   return result(out.state,{intentRequestId:intent.requestId,...(out.factKey?{factKey:out.factKey}:{}),...(owner.ok?{}:{reason:owner.reason}),...(projection?{projection}:{})});
  }
  return owed('intent_not_settled');
 }
-// The second half of a Diary-first link (the fact record of the lid's key gains the movie id and projects both aliases): idempotent, run after the atomic settlement and again on a repeat of a settled `linked` intent whose record does not
-// carry the movie yet. Its failure never un-settles the intent: it is reported as `projection: 'pending'` and the same requestId repeats it.
-async function completeProjection(ports,{lid,tmdb,pendingOnly=false}){
+// The second half of a Diary-first link (the fact record of the lid's key gains the movie id and projects both aliases) is an identity EFFECT and is fenced like the link (review of PR #1043): the guards are read NOW from current state and
+// ride in the Ratings batches of the record and the projection with the exact links observation the effect itself makes (`guardsFor(fence)`): the Film/Person and admission markers, the COMPLETE ownership predicates of both claims, the exact settled
+// intent (`linked`, its revision) and the document fence. A proved correction (the claim was reassigned, a redirect or a retirement now applies) or a marker that left `d1` writes nothing (`blocked`): the formerly valid alias batch is not undone, the
+// obsolete movie id is just never put on a record. Idempotent; its failure never un-settles the intent (`pending`), and the same requestId repeats it.
+async function completionGuards(env,intent){
+ let authority,filmGate;
+ try{authority=await readAdmissionAuthority(env);if(admissionRoute(authority)!=='d1')return {ok:false,reason:'admission_not_d1'};filmGate=assertWritable(await readAuthority(env));}
+ catch(error){return {ok:false,reason:typeof error?.code==='string'?error.code:'unavailable'};}
+ const owner=await readOwnership(env,intent);
+ if(!owner.ok)return {ok:false,reason:owner.reason||'ownership_changed'};
+ const cond=ownershipCondition({id:owner.id,lid:intent.lid,tmdb:intent.proof.tmdb});
+ const markers=d1BatchCondition(authority);
+ const statements=[
+  ratingsAssertion("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?) AND ("+markers.sql+')',[filmGate.generation,...markers.params]),
+  ratingsAssertion(cond.sql,cond.params),
+  ratingsAssertion("EXISTS (SELECT 1 FROM lid_recheck_intent WHERE request_id=? AND state='settled' AND outcome='attached' AND link_state='linked' AND revision=?)",[intent.requestId,intent.revision]),
+ ];
+ return {ok:true,guardsFor:fence=>{const [sql,params]=ratingsDocumentFence(fence);return [...statements,ratingsAssertion(sql,params)];}};
+}
+async function completeProjection(env,ports,{intent,pendingOnly=false}){
  if(!ports||typeof ports.complete!=='function')return null;
- try{const done=await ports.complete({lid,tmdb,pendingOnly});return done?.state==='conflict'?'conflict':done?.state==='absent'?'pending':'done';}
+ const prepared=await completionGuards(env,intent);
+ if(!prepared.ok)return 'blocked';
+ try{const done=await ports.complete({lid:intent.lid,tmdb:intent.proof.tmdb,guardsFor:prepared.guardsFor,pendingOnly});return done?.state==='conflict'?'conflict':done?.state==='absent'?'pending':'done';}
  catch{return 'pending';}
 }
 
@@ -291,7 +310,7 @@ export async function lidRecheck(env,input={}){
  let intent=await readIntent(env,requestId);
  if(intent&&intent.lid!==lid)return result('request_conflict',{requestId});
  // A settled intent is answered by readback only: no gate, no fetch, no canonical or intent write. The one possible effect is the idempotent completion of the Diary-first record when a settled `linked` intent finds it still without the movie.
- if(intent&&intent.state==='settled')return readbackWithProjection(intent,input);
+ if(intent&&intent.state==='settled')return readbackWithProjection(env,intent,input);
  // The Ratings link is owed after an attach: the link step has its own fences (markers, ownership, ratings domain), and turning the writer off later must not strand it.
  if(intent&&intent.outcome==='attached')return resumeLink(env,{intent,input});
  await attachGates(env);
@@ -406,10 +425,11 @@ export async function lidRecheck(env,input={}){
  }
 }
 
-async function readbackWithProjection(intent,input){
+async function readbackWithProjection(env,intent,input){
  const out=readbackResult(intent,{replay:true});
  if(intent.outcome==='attached'&&intent.linkState==='linked'&&intent.proof){
-  const projection=await completeProjection(input.ports,{lid:intent.lid,tmdb:intent.proof.tmdb,pendingOnly:true});
+  // The completion is an effect: it is guarded by CURRENT state first (a correction or a closed domain writes nothing), never run on the strength of an old settled request.
+  const projection=await completeProjection(env,input.ports,{intent,pendingOnly:true});
   if(projection&&projection!=='done')out.projection=projection;
  }
  return out;

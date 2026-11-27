@@ -75,6 +75,7 @@ const Facts=vm.runInContext('LetterboxdFacts',ctx);
 const LINKS='letterboxd/facts/links.json';
 const sqlText=text=>"'"+String(text).replace(/'/g,"''")+"'";
 const setLinks=(file,value)=>{const body=JSON.stringify(value);sqlite(file,'DELETE FROM ratings_document WHERE key='+sqlText(LINKS)+';INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('+sqlText(LINKS)+',0,'+sqlText(body)+','+sqlText(createHash('sha256').update(body).digest('hex'))+",'2026-11-27T09:00:00.000Z')");};
+const setDocRaw=(file,key,value)=>{const body=JSON.stringify(value);sqlite(file,'DELETE FROM ratings_document WHERE key='+sqlText(key)+';INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('+sqlText(key)+',0,'+sqlText(body)+','+sqlText(createHash('sha256').update(body).digest('hex'))+",'2026-11-27T09:00:00.000Z')");};
 const getLinks=file=>{const found=rows(file,'SELECT body FROM ratings_document WHERE key='+sqlText(LINKS)+' ORDER BY part');return found.length?JSON.parse(found.map(row=>row.body).join('')):null;};
 const linkPort=env=>({link:args=>Facts.linkAttachedPair(env,args)});
 
@@ -598,5 +599,82 @@ const NOLINK=()=>({link:async()=>{const e=new Error('write_contention');e.code='
  const two=await attached();setLinks(two.file,{'letterboxd:Ab1':'k1','letterboxd:Other':'k1'});
  const refused=await runOnce(two.file);
  assert.equal(refused.outcome,'alias_conflict',JSON.stringify(refused));assert.deepEqual(getLinks(two.file),{'letterboxd:Ab1':'k1','letterboxd:Other':'k1'});
+}
+
+// ===== 8c (third review of PR #1043): the record and view completion is an identity effect, fenced like the link =====
+{
+ const Fx=vm.runInContext('LetterboxdFacts',ctx);
+ // a Diary-first record whose completion has NOT run yet (the settled alias batch landed, the completion failed or was never reached)
+ const prepare=async()=>{
+  const file=fresh();await mint(file);const env=envOf(file);
+  await Fx.applyDiaryEvidence(env,[{lid:'Ab1',watchedDate:'2026-11-15',rating:4,ratingState:'rated',sourceRef:'diary:viewing:1'}]);
+  const down={...linkPort(env),complete:async()=>{throw new Error('completion down');}};
+  const first=await lidRecheck(env,{lid:'Ab1',requestId:'req-1',reacquire:async()=>found(),ports:down,now:clock()});
+  assert.deepEqual([first.outcome,first.projection],['linked','pending'],JSON.stringify(first));
+  return {file,env,real:{...linkPort(env),complete:args=>Fx.completeAttachedLink(env,args)}};
+ };
+ const recordDoc=file=>{const r=rows(file,'SELECT body FROM ratings_document WHERE key='+sqlText('letterboxd/facts/films/lb-Ab1.json')+' ORDER BY part');return r.length?JSON.parse(r.map(x=>x.body).join('')):null;};
+ const viewIds=file=>rows(file,'SELECT alias_id FROM ratings_view ORDER BY alias_id').map(r=>r.alias_id);
+ const replay=(env,ports)=>lidRecheck(env,{lid:'Ab1',requestId:'req-1',ports,now:clock()});
+
+ // (a) a PROVED CORRECTION after the settlement: the claim was reassigned, then the settled request is replayed: nothing is written (no obsolete movie id on the record, no view row of it)
+ {
+  const {file,env,real}=await prepare();
+  const before=JSON.stringify([recordDoc(file),viewIds(file)]);
+  sqlite(file,"UPDATE film_external_id SET trusted=0 WHERE scheme='tmdb' AND value='603'");
+  const out=await replay(env,real);
+  assert.deepEqual([out.outcome,out.projection],['linked','blocked'],JSON.stringify(out));
+  assert.equal(JSON.stringify([recordDoc(file),viewIds(file)]),before,'no stale identity and no stale view row after a correction');
+  assert.equal(recordDoc(file).links.tmdb??null,null);
+  // a retirement and a merge are corrections too
+  const r=await prepare();sqlite(r.file,RETIRE);const retired=await replay(r.env,r.real);assert.equal(retired.projection,'blocked');assert.equal(recordDoc(r.file).links.tmdb??null,null);
+  const m=await prepare();sqlite(m.file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:603',1,NULL,'Survivor','2026-11-27T09:50:00.000Z');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:Ab1','film:tmdb:603','2026-11-27T09:50:00.000Z')");
+  assert.equal((await replay(m.env,m.real)).projection,'blocked');assert.equal(recordDoc(m.file).links.tmdb??null,null);
+ }
+ // (b) the alias REMAPPED between the observation and the record write: the batch carries the document fence of THAT observation, so it is refused whole; the replay then sees the new mapping and writes nothing
+ {
+  const {file,env,real}=await prepare();
+  let remapped=false;
+  const hooked=envOf(file,{onBatch:async list=>{if(!remapped&&list.some(item=>/letterboxd\/facts\/films\/lb-Ab1/.test(item.text))){remapped=true;setLinks(file,{'letterboxd:Ab1':'lb-Ab1','tmdb:603':'tmdb-other'});}}});
+  const out=await replay(hooked,{...linkPort(hooked),complete:args=>Fx.completeAttachedLink(hooked,args)});
+  assert.equal(remapped,true);
+  assert.deepEqual([out.outcome,out.projection],['linked','pending'],JSON.stringify(out));
+  assert.equal(recordDoc(file).links.tmdb??null,null,'the stale observation wrote no movie id');
+  assert.deepEqual(viewIds(file),['Ab1'],'and no view row of the movie');
+  const next=await replay(env,real);
+  assert.equal(next.projection,'pending','after the remap the pair is not the lid key mapping any more: nothing is written');
+  assert.equal(recordDoc(file).links.tmdb??null,null);
+ }
+ // (c) a closed or not-authoritative Ratings domain: no write at all, the legacy store included
+ {
+  const {file,env,real}=await prepare();
+  sqlite(file,"UPDATE ratings_domain_authority SET cutover='held', generation=generation+1");
+  const out=await replay(env,real);
+  assert.equal(out.projection,'pending',JSON.stringify(out));assert.equal(recordDoc(file).links.tmdb??null,null);
+  assert.equal(r2.size,0,'the legacy R2 stand-in was not written either');
+ }
+ // (d) the record moved (a redirect): never followed, a conflict, nothing written
+ {
+  const {file,env,real}=await prepare();
+  const doc=recordDoc(file);setDocRaw(file,'letterboxd/facts/films/lb-Ab1.json',{...doc,redirectTo:'lb-Other'});
+  const out=await replay(env,real);
+  assert.equal(out.projection,'conflict',JSON.stringify(out));assert.equal(recordDoc(file).redirectTo,'lb-Other');
+ }
+ // (e) a replay with the guards intact completes the record AND both view rows
+ {
+  const {file,env,real}=await prepare();
+  const out=await replay(env,real);
+  assert.equal(out.projection,undefined,JSON.stringify(out));
+  assert.equal(recordDoc(file).links.tmdb,'603');assert.deepEqual(viewIds(file),['Ab1','tmdb_603']);
+  // (f) the INTERRUPTED record-to-view boundary: the record carries the movie but a view row is missing (a crash between the two): the replay checks the ACTUAL rows and repairs them under the same guards
+  sqlite(file,"DELETE FROM ratings_view WHERE alias_id='tmdb_603'");
+  assert.deepEqual(viewIds(file),['Ab1']);
+  const repaired=await replay(env,real);
+  assert.equal(repaired.projection,undefined,JSON.stringify(repaired));
+  assert.deepEqual(rows(file,'SELECT alias_id,actual_rating FROM ratings_view ORDER BY alias_id'),[{alias_id:'Ab1',actual_rating:4},{alias_id:'tmdb_603',actual_rating:4}],'the missing movie view row is back, with the rating');
+  // and a fully complete pair writes nothing on a further replay
+  const snap=JSON.stringify([recordDoc(file),rows(file,'SELECT * FROM ratings_view ORDER BY alias_id')]);
+  await replay(env,real);assert.equal(JSON.stringify([recordDoc(file),rows(file,'SELECT * FROM ratings_view ORDER BY alias_id')]),snap);
+ }
 }
 console.log('Lid TMDB attach (AIR-675, tests 9, 10, 11 and 16 and the fenced Ratings link) passed.');
