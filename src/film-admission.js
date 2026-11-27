@@ -212,6 +212,7 @@ export const lidOnlyFilmId=lid=>{if(typeof lid!=='string'||!LID_CODE.test(lid))t
 export async function hasLidAdmissionTable(db){return !!(await one(db,"SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='film_lid_admission'"));}
 // The `links.json` document the caller read: its parts and etag (ADR 0217 decision 5b, "the Ratings link document itself"). The epoch alone is a lease fence, not a version of this document. {key, parts, etag}; an absent
 // document is `parts: 0`. -> one [sql, params] boolean: the part count and the single etag of the stored parts still equal what was read.
+export const LINKS_DOCUMENT_KEY='letterboxd/facts/links.json';
 export function ratingsDocumentFence(fence){
  if(!plain(fence)||typeof fence.key!=='string'||!fence.key||!Number.isInteger(fence.parts)||fence.parts<0)throw failed('film_person_invalid');
  if(fence.parts===0)return ['(SELECT COUNT(*) FROM ratings_document WHERE key=?)=0',[fence.key]];
@@ -240,6 +241,11 @@ export async function admitLidOnlyFilm(env,input){
  if(!LID_ONLY_ROUTES.includes(input.route))throw failed('film_person_invalid');
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
  if(input.filmId!==undefined&&input.filmId!==id)throw failed('admission_target_changed');
+ // ADR 0217 decisions 5b and 5c: BOTH fences are mandatory in every new admission, never optional. The exact `links.json` document the caller read (an absent document is `parts: 0`) and the exact owned receipt of
+ // the common lid key. A proof alone, or a call without a receipt mark, mints nothing.
+ const mark=input.receiptMark;
+ if(!mark||typeof mark!=='object'||mark.requestId!==input.requestId||!Number.isInteger(mark.attempt)||mark.attempt<1)throw failed('film_person_invalid');
+ if(!input.linksFence||typeof input.linksFence!=='object'||input.linksFence.key!==LINKS_DOCUMENT_KEY)throw failed('film_person_invalid');
  const proof=await checkedLidOnlyProof(lid,input.proof);
  const gate=fenced.bindLetterboxdFence(env,assertWritable(await readAuthority(env)));
  // The marker is read FRESH at the write. Only `d1` admits a lid-only Film: `closed` and `r2` (and an absent marker) refuse before the first effect (decision 5).
@@ -268,7 +274,9 @@ export async function admitLidOnlyFilm(env,input){
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=?)"),[lid]]);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=?) AND NOT EXISTS (SELECT 1 FROM film_rated_admission WHERE source_code=?)'),[lid,lid]]);
- if(input.linksFence!==undefined&&input.linksFence!==null){const [sql,params]=ratingsDocumentFence(input.linksFence);statements.push([fenced.assertSql(sql),params]);}
+ {const [sql,params]=ratingsDocumentFence(input.linksFence);statements.push([fenced.assertSql(sql),params]);}
+ // The exact owned receipt of the COMMON lid key: pending, this request id, this attempt (the applied tail below then settles exactly that one receipt).
+ statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM canonical_write_receipt WHERE request_id=? AND origin='rated_admission_retention' AND operation_key=? AND state='pending' AND attempts=?)"),[requestId,'admission:lid:'+lid,mark.attempt]]);
  statements.push(["INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,1,NULL,?,?)",[id,proof.title,at]]);
  statements.push(["INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,'letterboxd',?,1,0,?)",[id,lid,stable({source:input.route,adr:'0217',evidence:proof.proofDigest})]]);
  statements.push(["INSERT INTO film_lid_admission (lid,film_id,route,admitted_at,receipt_key,proof_version,final_url,slug,canonical_path,shortlink,type_marker,id_block_outcome,completeness_outcome,title,year,proof_digest,checked_at,redirect_status,page_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

@@ -612,6 +612,27 @@ const file=fresh('d1'),env=world(file);
   assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz2').length,1);
  }
 
+ // (2b) review P1-2: the receipt is still PENDING but its window EXPIRES before an effect batch is built (between the mark and the link, or before the mark): the deadline is enforced at the effect, so nothing late lands.
+ // Receipts cannot be edited (triggers), so the clock of the Worker code is skewed: the attempt keeps its `pending` receipt, only time passes.
+ {
+  const RealDate=ctx.Date;let skewMs=0;
+  ctx.Date=class extends RealDate{constructor(...args){if(args.length)super(...args);else super(RealDate.now()+skewMs);}static now(){return RealDate.now()+skewMs;}};
+  try{
+   // `at`: the batch that, once it ran, lets the window expire (a batch's guard is built BEFORE it runs): the reservation (so the FIRST effect batch is late) or the first effect batch (so the SECOND is late)
+   for(const [lid,at,chunk] of [['Oy1','reserve',21],['Oy2','effect',22]]){
+    let expired=0;
+    const out=await commit(watch(async list=>{if(!expired&&kindOf(list)===at){expired++;skewMs=3*3600000;}}),body([item(lid,'7200'+chunk)],chunk));
+    skewMs=0;
+    assert.equal(expired,1,lid+': the window expired while the receipt was still pending');
+    assert.deepEqual([out.status,out.json.code],[409,'admission_not_settled'],lid+' '+JSON.stringify(out.json));
+    assert.equal(await Facts.resolveAlias(env,'letterboxd:'+lid),null,lid+': no late link');
+    assert.equal(admissionRows(file).filter(entry=>entry.source_code===lid).length,0,lid+': no admission');
+    assert.equal(lidReceipts(lid).some(entry=>entry.state==='applied'),false,lid+': never applied');
+    assert.equal(lidReceipts(lid).length,1,lid+': one receipt, which the next attempt supersedes');
+   }
+  }finally{ctx.Date=RealDate;}
+ }
+
  // (3) the code is linked elsewhere AFTER the reservation: the link finds the conflict, the attempt is not settled, nothing is admitted, no chunk receipt
  {
   let moved=0;
@@ -641,7 +662,7 @@ const file=fresh('d1'),env=world(file);
 
  // (5) competing lid-only and inferred attempts, both orders: never two Films for one lid, never an automatic attach
  {
-  const lidOnly=(lid)=>D1.admitVerifiedLidOnly(env,{lid,route:'ratings_diary',reacquire:async()=>({ok:true,proof:await proofOf(lid)}),now:()=>new Date(NOW).toISOString()});
+  const lidOnly=(lid)=>D1.admitVerifiedLidOnly(env,{lid,route:'ratings_diary',reacquire:async()=>{const doc=rows(file,"SELECT COUNT(*) AS n,MIN(etag) AS etag FROM ratings_document WHERE key='letterboxd/facts/links.json'")[0];return {ok:true,proof:await proofOf(lid),links:{fence:{key:'letterboxd/facts/links.json',parts:doc.n,etag:doc.etag},tmdbAlias:null}};},now:()=>new Date(NOW).toISOString()});
   // lid-only first: the inferred import is a conflict with no link and no fact
   assert.equal((await lidOnly('Oz5')).outcome,'admitted_lid_only');
   const blocked=await commit(env,body([item('Oz5','710005')],5));
@@ -653,8 +674,11 @@ const file=fresh('d1'),env=world(file);
   // inferred first: the lid-only attempt sees the durable admission and stops
   const admitted=await commit(env,body([item('Oz6','710006')],6));
   assert.equal(admitted.json.entries[0].admission,'admitted');
+  // the rated admission holds the code, but no trusted `letterboxd` claim of the lid exists yet (the claim unit settles later): ownership is incomplete, so the lid-only attempt FAILS CLOSED (non-terminal), never `present`
   const stop=await lidOnly('Oz6');
-  assert.equal(stop.outcome,'present',JSON.stringify(stop));
+  assert.deepEqual([stop.outcome,stop.reason,stop.terminal],['held','ownership_incomplete',false],JSON.stringify(stop));
+  sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:710006','letterboxd','Oz6',1,0,'{}')");
+  assert.equal((await lidOnly('Oz6')).outcome,'present','with the complete ownership it is present');
   assert.deepEqual(films('Oz6').map(entry=>entry.id),['film:tmdb:710006'],'one Film, the TMDB one');
  }
 }

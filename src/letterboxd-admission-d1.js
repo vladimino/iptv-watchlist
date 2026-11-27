@@ -184,8 +184,10 @@ export async function admitVerifiedFilm(env,input={}){
      // AIR-672 / ADR 0217 decision 5b: the caller's pre-canonical effects (the inferred import's mark and link) run INSIDE this owned execution, after the reservation. `statement` is the assertion of the exact currently
      // owned pending attempt, for the caller to add to each of its own batches (Ratings `admissionGuards`); an expired or abandoned attempt can therefore never land a late effect.
      if(typeof input.beforeCanonical==='function'){
-      const owned=ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey,requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock()});
-      await input.beforeCanonical({requestId:ctx2.requestId,attempt:ctx2.attempt,operationKey,statement:[fenced.assertSql(owned.sql),owned.params]});
+      // The deadline is enforced AT THE EFFECT: `statement` is a function that the Ratings carrier calls every time it builds a batch, so each pre-canonical batch compares the receipt's window with the time it is built at,
+      // never with a time frozen when the hook started (a pending attempt that expires between the mark and the link cannot land the link).
+      const statement=()=>{const owned=ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey,requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock()});return [fenced.assertSql(owned.sql),owned.params];};
+      await input.beforeCanonical({requestId:ctx2.requestId,attempt:ctx2.attempt,operationKey,statement});
      }
      return admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
       receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence:a.evidence});
@@ -287,22 +289,29 @@ export async function planLidOnlyD1(env,{lid}){
   one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]),
  ]);
  const followed=async from=>{let at=from;for(let hop=0;hop<8;hop++){const next=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[at]);if(!next)return {id:at,redirected:hop>0};at=next.to_film_id;}return {id:at,redirected:true,loop:true};};
+ // Complete, non-conflicting ownership (ADR 0217 5b): exactly one trusted, non-conflicting `letterboxd` claim of the lid, on the very Film the proof row names; that Film exists; no redirect leaves it. An unresolved redirect
+ // is non-terminal (`redirect`, case 9) and a loop fails closed; anything else incomplete is an owner-review conflict. Never a success.
  if(row){
-  const target=await followed(row.film_id);
   const owner=claims.find(claim=>claim.trusted===1&&claim.conflicting===0);
-  if(claims.length!==1||!owner||owner.film_id!==row.film_id)return {outcome:'conflict',id:target.id,reason:'ownership_incomplete'};
-  return {outcome:'present_lid_only',id:target.id,redirected:target.redirected};
+  if(claims.length!==1||!owner||owner.film_id!==row.film_id)return {outcome:'conflict',id:row.film_id,reason:'ownership_incomplete'};
+  const target=await followed(row.film_id);
+  if(target.loop)return {outcome:'conflict',id:row.film_id,reason:'redirect_loop'};
+  if(target.redirected)return {outcome:'redirect',id:target.id};
+  if(!await one(db,'SELECT id FROM film WHERE id=?',[row.film_id]))return {outcome:'conflict',id:row.film_id,reason:'film_missing'};
+  return {outcome:'present_lid_only',id:row.film_id};
  }
  if(claims.length){
   const owner=claims.find(claim=>claim.trusted===1&&claim.conflicting===0);
   if(claims.length===1&&owner){
    const target=await followed(owner.film_id);
+   if(target.loop)return {outcome:'conflict',id:owner.film_id,reason:'redirect_loop'};
    if(target.redirected)return {outcome:'redirect',id:target.id};
    return {outcome:'present',id:target.id};
   }
   return {outcome:'conflict',reason:'lid_claim_conflict'};
  }
- if(rated)return {outcome:'present',id:rated.film_id};
+ // A rated admission holds the code but NO trusted `letterboxd` claim of the lid exists yet (the claim unit settles later): ownership is incomplete, so this fails closed and is retried, never reported as present.
+ if(rated)return {outcome:'held',id:rated.film_id,reason:'ownership_incomplete'};
  if(redirect)return {outcome:'redirect',id:redirect.to_film_id};
  if(film)return {outcome:'conflict',id,reason:'film_id_taken'};
  return {outcome:'admit',id,revision:await revisionOf(db,id)};
@@ -382,6 +391,9 @@ export async function admitVerifiedLidOnly(env,input={}){
   if(a.links?.tmdbAlias)return {kind:'none',result:result('held',{reason:'ratings_tmdb_link'})};
   const proofDigest=a.proof?.proofDigest;
   if(typeof proofDigest!=='string')throw failed('admission_not_verified');
+  // ADR 0217 5b: a POSITIVE observation of the Ratings link document is mandatory: the exact `links.json` parts the caller read (zero parts for a proven absent document) and the answer to "does the lid's fact key carry a
+  // TMDB alias" (`tmdbAlias`, null for none). A caller that did not read it cannot admit. Nothing is reserved yet.
+  if(!a.links||!a.links.fence||a.links.tmdbAlias===undefined){const error=failed('admission_not_verified');error.reason='links_observation_missing';throw error;}
   const digest=await lidOnlyReceiptDigest({lid,proofDigest});
   const target={kind:'film',id:plan.id};
   return {kind:'reserve',
@@ -389,7 +401,7 @@ export async function admitVerifiedLidOnly(env,input={}){
    write:{
     atomic:true,
     run:ctx2=>admitLidOnlyFilm(env,{lid,route:input.route,proof:a.proof,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
-     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},linksFence:a.links?.fence??null}),
+     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},linksFence:a.links.fence}),
     readback:async()=>{const snap=await planLidOnlyD1(env,{lid});return {digest:snap.outcome==='present_lid_only'?digest:null,revision:await revisionOf(db,plan.id)};},
     revalidate:async()=>{const snap=await planLidOnlyD1(env,{lid});return snap.outcome==='admit'?'proceed':snap.outcome==='present_lid_only'?'superseded':'stale';},
    }};

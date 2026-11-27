@@ -44,8 +44,11 @@ const proofOf=async(lid='Ab1',over={})=>{
  proof.proofDigest=await lidOnlyProofDigest(proof);
  return proof;
 };
-const checker=async(lid='Ab1',extra={},over={})=>{const calls={n:0};const proof=await proofOf(lid,over);return {calls,reacquire:async()=>{calls.n++;return {ok:true,proof,...extra};}};};
+const LINKS_KEY='letterboxd/facts/links.json';
+const NO_LINKS={fence:{key:LINKS_KEY,parts:0,etag:null},tmdbAlias:null};
+const checker=async(lid='Ab1',extra={},over={})=>{const calls={n:0};const proof=await proofOf(lid,over);return {calls,reacquire:async()=>{calls.n++;return {ok:true,proof,links:NO_LINKS,...extra};}};};
 const run=async(file,lid='Ab1',{route='watchlist_admission',now=clock(),extra={},over={},options,...rest}={})=>{const c=await checker(lid,extra,over);const out=await admitVerifiedLidOnly(envOf(file,options),{lid,route,reacquire:c.reacquire,now,...rest});return {out,calls:c.calls};};
+const MARK={requestId:'r-bad',attempt:1,now:'2026-11-25T12:00:00.000Z',target:{kind:'film',id:'film:lb:Ab1'}};
 const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('"+id+"','film_admission','"+RATED_ADMISSION_ORIGIN+"','film','"+target+"','"+sha('7')+"',0,2,'pending',1,'"+next+"','"+STAMP+"','"+STAMP+"',NULL,'"+key+"')");
 
 // ===== 1. a valid page: one Film, one trusted claim, one immutable proof row, one receipt =====
@@ -113,10 +116,10 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  const goodProof0=await proofOf('Ab1');
  for(const [label,over] of [['digest',{proofDigest:sha('0')}],['title',{title:'Other'}],['shortlink',{shortlink:'Zz9'}],['id block',{idBlockOutcome:'present'}],['complete',{completenessOutcome:'truncated'}],['status',{pageStatus:404}],['url',{finalUrl:'http://letterboxd.com/film/some-short-1999/'}]]){
   const proof={...goodProof0,...over};
-  await assert.rejects(()=>admitLidOnlyFilm(envOf(file),{lid:'Ab1',route:'watchlist_admission',proof,expectedRevision:0,at:STAMP,requestId:'r-bad'}),code('admission_not_verified'),label);
+  await assert.rejects(()=>admitLidOnlyFilm(envOf(file),{lid:'Ab1',route:'watchlist_admission',proof,expectedRevision:0,at:STAMP,requestId:'r-bad',receiptMark:MARK,linksFence:NO_LINKS.fence}),code('admission_not_verified'),label);
  }
  const goodProof=await proofOf('Ab1');
- await assert.rejects(()=>admitLidOnlyFilm(envOf(file),{lid:'Ab1',route:'discovery',proof:goodProof,expectedRevision:0,at:STAMP,requestId:'r-bad'}),code('film_person_invalid'),'only the three verifying routes');
+ await assert.rejects(()=>admitLidOnlyFilm(envOf(file),{lid:'Ab1',route:'discovery',proof:goodProof,expectedRevision:0,at:STAMP,requestId:'r-bad',receiptMark:MARK,linksFence:NO_LINKS.fence}),code('film_person_invalid'),'only the three verifying routes');
  assert.equal(snapshot(file),before);
 }
 
@@ -153,7 +156,10 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  // the rated archive row holds the code: the same answer
  const g=fresh();
  await admitVerifiedFilm(envOf(g),{kind:'lid',lid:'Cd2',receipt:{tmdb:'604',archiveSha256:sha('e'),title:'Other',year:2000,filmPath:'/film/other/'},evidence:null,now:clock()});
- assert.equal((await run(g,'Cd2',{now:clock(1000)})).out.outcome,'present');
+ const noClaim=(await run(g,'Cd2',{now:clock(1000)})).out;
+ assert.deepEqual([noClaim.outcome,noClaim.reason,noClaim.terminal],['held','ownership_incomplete',false],'a rated admission without a trusted letterboxd claim is incomplete ownership: fail closed');
+ sqlite(g,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:604','letterboxd','Cd2',1,0,'{}')");
+ assert.equal((await run(g,'Cd2',{now:clock(2000)})).out.outcome,'present','with the complete ownership it is present');
 }
 
 // ===== 7 (claims) and 5b: another claim of the lid, of any trust, blocks the admission (owner review) =====
@@ -253,7 +259,10 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  // the TMDB-proved Diary admission first: the lid-only attempt sees the durable rows and stops (present)
  const tmdb=await admitVerifiedFilm(envOf(file),{kind:'lid',lid:'Ab1',receipt:{tmdb:'603',archiveSha256:sha('e'),title:'The Matrix',year:1999,filmPath:'/film/the-matrix/'},evidence:null,now:clock()});
  assert.equal(tmdb.outcome,'admitted');
- assert.equal((await run(file,'Ab1',{now:clock(1000)})).out.outcome,'present');
+ // the TMDB admission has not got its trusted letterboxd claim yet (the claim unit settles later): incomplete ownership, fail closed
+ assert.equal((await run(file,'Ab1',{now:clock(1000)})).out.outcome,'held');
+ sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:603','letterboxd','Ab1',1,0,'{}')");
+ assert.equal((await run(file,'Ab1',{now:clock(2000)})).out.outcome,'present');
  assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film WHERE id LIKE 'film:lb:%'")[0].n,0);
  // the lid-only Film first: the TMDB-proved kinds never attach and never duplicate (the table of decision 5b)
  const g=fresh();
@@ -283,19 +292,19 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  // unchanged: lands
  const g=fresh();
  doc(g,2,sha('1'));
- assert.equal((await run(g,'Ab1',{extra:{links:{fence}}})).out.outcome,'admitted_lid_only','the fence holds');
+ assert.equal((await run(g,'Ab1',{extra:{links:{fence,tmdbAlias:null}}})).out.outcome,'admitted_lid_only','the fence holds');
  // the etag moved
  const h=fresh();
  for(let part=0;part<2;part++)sqlite(h,"INSERT INTO ratings_document (key,part,body,etag"+(cols.includes('updated_at')?',updated_at':'')+") VALUES ('letterboxd/facts/links.json',"+part+",'{}','"+sha('2')+"'"+(cols.includes('updated_at')?",'"+STAMP+"'":'')+")");
  const before=snapshot(h);
- const moved=await run(h,'Ab1',{extra:{links:{fence}}}).catch(error=>({error}));
+ const moved=await run(h,'Ab1',{extra:{links:{fence,tmdbAlias:null}}}).catch(error=>({error}));
  assert.ok(moved.error||moved.out.outcome!=='admitted_lid_only','a moved etag fails the batch');
  assert.equal(rows(h,'SELECT COUNT(*) AS n FROM film_lid_admission')[0].n,0,'no canonical write');
  assert.equal(rows(h,'SELECT COUNT(*) AS n FROM film').length,1);void before;
  // the part count moved; an absent document read as parts 0 that now exists
  const i=fresh();
  sqlite(i,"INSERT INTO ratings_document (key,part,body,etag"+(cols.includes('updated_at')?',updated_at':'')+") VALUES ('letterboxd/facts/links.json',0,'{}','"+sha('1')+"'"+(cols.includes('updated_at')?",'"+STAMP+"'":'')+")");
- const grown=await run(i,'Ab1',{extra:{links:{fence:{key:'letterboxd/facts/links.json',parts:0,etag:null}}}}).catch(error=>({error}));
+ const grown=await run(i,'Ab1',{extra:{links:{fence:{key:'letterboxd/facts/links.json',parts:0,etag:null},tmdbAlias:null}}}).catch(error=>({error}));
  assert.ok(grown.error||grown.out.outcome!=='admitted_lid_only');assert.equal(rows(i,'SELECT COUNT(*) AS n FROM film_lid_admission')[0].n,0);
  assert.throws(()=>ratingsDocumentFence({key:'',parts:1,etag:'x'}),code('film_person_invalid'));
  assert.throws(()=>ratingsDocumentFence({key:'k',parts:1}),code('film_person_invalid'));
@@ -325,10 +334,86 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  assert.throws(()=>ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey:'admission:lid:Ab1',requestId:'x',attempt:0,now}),code('film_person_invalid'));
 }
 
+// ===== review P1-1: BOTH fences are mandatory; a proof alone mints nothing =====
+{
+ const file=fresh();const before=snapshot(file);
+ // no observation of the Ratings link document: refused before any reservation, nothing written
+ const none=await checker('Ab1',{links:undefined});
+ await assert.rejects(()=>admitVerifiedLidOnly(envOf(file),{lid:'Ab1',route:'watchlist_admission',reacquire:async()=>({ok:true,proof:await proofOf('Ab1')}),now:clock()}),error=>error.code==='admission_not_verified'&&error.reason==='links_observation_missing','no links observation');
+ await assert.rejects(()=>admitVerifiedLidOnly(envOf(file),{lid:'Ab1',route:'watchlist_admission',reacquire:async()=>({ok:true,proof:await proofOf('Ab1'),links:{fence:NO_LINKS.fence}}),now:clock()}),error=>error.reason==='links_observation_missing','the TMDB alias answer is part of the observation');
+ await assert.rejects(()=>admitVerifiedLidOnly(envOf(file),{lid:'Ab1',route:'watchlist_admission',reacquire:async()=>({ok:true,proof:await proofOf('Ab1'),links:{tmdbAlias:null}}),now:clock()}),error=>error.reason==='links_observation_missing','and so is the fence');
+ void none;
+ assert.equal(snapshot(file),before,'nothing reserved, nothing written');
+ // the writer itself, called directly with a valid proof
+ const proof=await proofOf('Ab1');
+ const direct=over=>admitLidOnlyFilm(envOf(file),{lid:'Ab1',route:'watchlist_admission',proof,expectedRevision:0,at:STAMP,requestId:'r-direct',receiptMark:{requestId:'r-direct',attempt:1,now:STAMP,target:{kind:'film',id:'film:lb:Ab1'}},linksFence:NO_LINKS.fence,...over});
+ await assert.rejects(()=>direct({receiptMark:undefined}),code('film_person_invalid'),'no receipt mark: no owned receipt');
+ await assert.rejects(()=>direct({linksFence:undefined}),code('film_person_invalid'),'no links fence');
+ await assert.rejects(()=>direct({linksFence:{key:'letterboxd/facts/other.json',parts:0,etag:null}}),code('film_person_invalid'),'a wrong document key');
+ await assert.rejects(()=>direct({receiptMark:{requestId:'someone-else',attempt:1,now:STAMP,target:{kind:'film',id:'film:lb:Ab1'}}}),code('film_person_invalid'),'a mark of another request');
+ assert.equal(snapshot(file),before);
+ // a mark with NO receipt behind it, a receipt of ANOTHER key, a non-pending receipt and another attempt number: the batch fails whole
+ const attempt=(id,key,state='pending',attempts=1)=>{sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,settled_at,operation_key) VALUES ('"+id+"','film_admission','"+RATED_ADMISSION_ORIGIN+"','film','film:lb:Ab1','"+sha('7')+"',0,2,'pending',"+attempts+",'"+new Date(T0+3600000).toISOString()+"','"+STAMP+"','"+STAMP+"',NULL,'"+key+"')");if(state==='abandoned')sqlite(file,"UPDATE canonical_write_receipt SET state='abandoned',error_class='superseded_by_retry',next_attempt_at=NULL,updated_at='"+STAMP+"',settled_at='"+STAMP+"' WHERE request_id='"+id+"'");};
+ const mark=id=>({requestId:id,attempt:1,now:STAMP,target:{kind:'film',id:'film:lb:Ab1'}});
+ const landed=()=>rows(file,'SELECT COUNT(*) AS n FROM film_lid_admission')[0].n;
+ await assert.rejects(()=>direct({requestId:'ghost',receiptMark:mark('ghost')}),code('film_person_precondition'),'no receipt at all');
+ attempt('other-key','admission:lid:Zz9');
+ await assert.rejects(()=>direct({requestId:'other-key',receiptMark:mark('other-key')}),code('film_person_precondition'),'a pending receipt of ANOTHER key is not the owned receipt of the common lid key');
+ assert.equal(landed(),0);
+ attempt('abandoned-1','admission:lid:Ab1','abandoned');
+ await assert.rejects(()=>direct({requestId:'abandoned-1',receiptMark:mark('abandoned-1')}),code('film_person_precondition'),'an abandoned receipt owns nothing');
+ attempt('pend-1','admission:lid:Ab1','pending',1);
+ await assert.rejects(()=>direct({requestId:'pend-1',receiptMark:{...mark('pend-1'),attempt:2}}),code('film_person_precondition'),'another attempt number');
+ assert.equal(landed(),0);assert.equal(rows(file,'SELECT COUNT(*) AS n FROM film')[0].n,0,'nothing was minted');
+ // control: the exact owned pending receipt of the common key admits
+ const ok=await direct({requestId:'pend-1',receiptMark:mark('pend-1')});
+ assert.equal(ok.admitted,true);assert.equal(landed(),1);
+ // an actual TMDB link on the lid's fact key stops the attempt, with valid evidence otherwise
+ const g=fresh();const beforeG=snapshot(g);
+ const alias=await run(g,'Ab1',{extra:{links:{fence:NO_LINKS.fence,tmdbAlias:'603'}}});
+ assert.deepEqual([alias.out.outcome,alias.out.reason],['held','ratings_tmdb_link']);assert.equal(snapshot(g),beforeG);
+}
+
+// ===== review P1-3: present / replay report success only for COMPLETE ownership =====
+{
+ const file=fresh();
+ assert.equal((await run(file)).out.outcome,'admitted_lid_only');
+ const replay=(offset)=>run(file,'Ab1',{now:clock(offset)});
+ assert.equal((await replay(1000)).out.outcome,'present_lid_only','positive control: complete ownership');
+ // the owning Film is a redirect source: not a success, non-terminal, no write
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:t1',1,'"+STAMP+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:Ab1','film:t1','"+STAMP+"')");
+ const before=snapshot(file);
+ const red=await replay(2000);
+ assert.deepEqual([red.out.outcome,red.out.terminal,red.out.id],['redirect',false,'film:t1'],JSON.stringify(red.out));assert.equal(red.calls.n,0);assert.equal(snapshot(file),before);
+ const plan=await planLidOnlyD1(envOf(file),{lid:'Ab1'});assert.equal(plan.outcome,'redirect');
+ // a redirect loop fails closed
+ sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:t1','film:lb:Ab1','"+STAMP+"')");
+ const loopPlan=await planLidOnlyD1(envOf(file),{lid:'Ab1'});
+ assert.deepEqual([loopPlan.outcome,loopPlan.reason],['conflict','redirect_loop'],'the planner fails closed on a loop');
+ const loop=await replay(3000);
+ assert.ok(['redirect','conflict'].includes(loop.out.outcome),'the coordinator never reports success on a loop: '+loop.out.outcome);
+ // the trusted claim moved to another Film than the proof row names, or a second row of the lid appeared
+ const g=fresh();await run(g);
+ sqlite(g,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:x',1,'"+STAMP+"');UPDATE film_external_id SET film_id='film:x' WHERE scheme='letterboxd' AND value='Ab1'");
+ const moved=await run(g,'Ab1',{now:clock(1000)});
+ assert.deepEqual([moved.out.outcome,moved.out.reason],['conflict','ownership_incomplete']);
+ const h=fresh();await run(h);
+ sqlite(h,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:x',1,'"+STAMP+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:x','letterboxd','Ab1',0,0,'{}')");
+ assert.equal((await run(h,'Ab1',{now:clock(1000)})).out.reason,'ownership_incomplete','a second row of the lid, of any trust');
+ const i=fresh();await run(i);
+ sqlite(i,"UPDATE film_external_id SET trusted=0 WHERE scheme='letterboxd' AND value='Ab1'");
+ assert.equal((await run(i,'Ab1',{now:clock(1000)})).out.reason,'ownership_incomplete','the claim is no longer trusted');
+ // an APPLIED receipt is settled only on complete ownership: the validator uses the same plan
+ const j=fresh();await run(j);
+ sqlite(j,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:t2',1,'"+STAMP+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:Ab1','film:t2','"+STAMP+"')");
+ const afterRedirect=await run(j,'Ab1',{now:clock(5000)});
+ assert.notEqual(afterRedirect.out.outcome,'present_lid_only','an applied receipt whose Film is a redirect source is not reported as present_lid_only');
+}
+
 // ===== 16. statement count: the lid-only batch within the cap =====
 {
  const file=fresh();let counted=0;
- const out=await run(file,'Ab1',{options:{onBatch:async statements=>{if(statements.some(item=>/INSERT INTO film_lid_admission/.test(item.text||'')))counted=statements.length;}},extra:{links:{fence:{key:'letterboxd/facts/links.json',parts:0,etag:null}}}});
+ const out=await run(file,'Ab1',{options:{onBatch:async statements=>{if(statements.some(item=>/INSERT INTO film_lid_admission/.test(item.text||'')))counted=statements.length;}},extra:{links:{fence:{key:'letterboxd/facts/links.json',parts:0,etag:null},tmdbAlias:null}}});
  assert.equal(out.out.outcome,'admitted_lid_only');
  assert.ok(counted>=12&&counted<=17,'the lid-only canonical batch has '+counted+' statements (ADR 0217 estimate 12 to 15)');
  assert.ok(counted<=40&&counted<=MUTATION_STATEMENT_CAP,'within the ADR cap 40 and the writer cap '+MUTATION_STATEMENT_CAP);
