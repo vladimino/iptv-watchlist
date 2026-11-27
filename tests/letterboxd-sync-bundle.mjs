@@ -240,6 +240,19 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
  // 5. the backlog at its real bound stays backlog_full
  await run('LetterboxdFacts.updateDiaryIdentity(__env,{backlogAdd:'+JSON.stringify(Object.fromEntries(Array.from({length:2000},(_,i)=>['full'+i,{slug:null,queuedAt:iso,attempts:0}])))+'})');
  seen=await judge();assert.equal(seen.check.backlogFull,true);assert.deepEqual(seen.keys,['letterboxd_identity_backlog_full']);
+ // 6. one snapshot (review of PR #1041): the document is read ONCE, so capacity and backlog come from the same version. An atomic transition (200 held, empty backlog) -> (199 held, one requeued id) that lands
+ // between two reads would combine into 200 held + 1 waiting, a refusal neither committed state has.
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{backlogRemove:'+JSON.stringify(Array.from({length:2000},(_,i)=>'full'+i))+'})');
+ assert.deepEqual([(await judge()).check.backlog,(await judge()).check.capHeld],[0,200],'the starting version: full document, nothing waiting');
+ await run(`(()=>{const F=LetterboxdFacts,identity=F.readDiaryIdentity,backlog=F.readDiaryBacklog;globalThis.__reads=[];
+  const move=()=>F.updateDiaryIdentity(__env,{set:{held0:${JSON.stringify(entry('owner_dismissed'))}},backlogAdd:{late:{slug:null,queuedAt:${JSON.stringify(iso)},attempts:0}}});
+  F.readDiaryIdentity=async env=>{__reads.push('identity');return identity(env);};
+  F.readDiaryBacklog=async env=>{__reads.push('backlog');await move();return backlog(env);};
+  globalThis.__undo=()=>{F.readDiaryIdentity=identity;F.readDiaryBacklog=backlog;};})()`);
+ const snap=await judge();const reads=[...await run('__reads')];await run('__undo()');
+ assert.deepEqual(reads,['identity'],'the document is read once and the backlog is its own field');
+ assert.deepEqual([snap.check.capHeld,snap.check.backlog,snap.check.capFull],[200,0,false]);assert.deepEqual(snap.keys,[],'no refusal is built from two versions');
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{set:{held0:'+JSON.stringify(entry('deferred'))+'},backlogRemove:["late"]})');
  // restore the document for the slots below
  await run('LetterboxdFacts.updateDiaryIdentity(__env,{clear:'+JSON.stringify(Object.keys(held))+',backlogRemove:'+JSON.stringify(Array.from({length:2000},(_,i)=>'full'+i))+'})');
  assert.deepEqual([(await judge()).check.backlog,(await judge()).check.capHeld],[0,0]);

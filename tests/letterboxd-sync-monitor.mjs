@@ -57,6 +57,16 @@ for(const bad of [null,undefined,{error:true}]){const r=Policy.evaluateLetterbox
  plan=Policy.planAlerts(late,plan.state,NOW+60000);assert.equal(plan.sends[0].kind,'alert');
  const recovered=Policy.planAlerts([],plan.state,NOW+120000);assert.equal(recovered.sends[0].kind,'recovery');assert.equal(recovered.sends[0].stream,'letterboxd');
 }
+// 6b. AIR-691: the already open `letterboxd_identity_cap_refused` incident recovers through the shared planner once the corrected policy no longer reports it, with the backlog still non-empty.
+{
+ const H=3600000,at=hours=>new Date(NOW-hours*H).toISOString();
+ const check=extra=>model({identityCheck:{lastCheckAt:at(2),work:14,oldestWorkAt:at(2),atCap:0,backlog:14,capHeld:3,capacity:200,capFull:false,backlogFull:false,ledgerUnreadable:false,overdue:0,overdueUnknown:0,...extra}});
+ const open=Policy.evaluateLetterboxd(check({capHeld:200,capFull:true}),NOW);assert.deepEqual(keys(open),['letterboxd_identity_cap_refused']);
+ let plan=Policy.planAlerts(open.issues,null,NOW);plan=Policy.planAlerts(open.issues,plan.state,NOW+60000);assert.deepEqual(plan.sends.map(s=>[s.kind,s.key]),[['alert','letterboxd_identity_cap_refused']],'the incident is open and sent');
+ const healthy=Policy.evaluateLetterboxd(check(),NOW+H);assert.deepEqual(keys(healthy),[],'the backlog is still non-empty but there is room');
+ const recovered=Policy.planAlerts(healthy.issues,plan.state,NOW+H);assert.deepEqual(recovered.sends.map(s=>[s.kind,s.key]),[['recovery','letterboxd_identity_cap_refused']],'one recovery, no new alert');
+ const again=Policy.planAlerts(healthy.issues,recovered.state,NOW+2*H);assert.equal(again.sends.length,0,'no repeated recovery');
+}
 // 7. The monitor wiring supplies the model only for an active executor and never without a database.
 {
  const text=fs.readFileSync('src/monitor.js','utf8');

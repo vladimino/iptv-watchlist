@@ -65,9 +65,10 @@ const Monitor=(()=>{
  // AIR-599 / ADR 0207 decision 4b: ONE fact reader of the shared Letterboxd check (both callers), read only: the newest real check that got an answer, the due Diary entries, the backlog (a cap refusal only when the document has no free place for it: `capFull`; at its bound: `backlog_full`), the due ledger rows and the ledger rows pending longer than 14 days. A missing `lastCheckAt` falls back to the newest charged
  // check of the entries; with neither, the age is unknown and not reported as stale.
  const identityCheckFacts=async(env,now)=>{
-  if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdDiaryIdentity==='undefined'||typeof LetterboxdFacts.readDiaryBacklog!=='function')return null;
+  if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdDiaryIdentity==='undefined'||typeof LetterboxdFacts.readDiaryIdentity!=='function')return null;
   try{
-   const [doc,backlog]=await Promise.all([LetterboxdFacts.readDiaryIdentity(env),LetterboxdFacts.readDiaryBacklog(env).then(read=>read.doc)]);
+   // ONE read of the shared document (ADR 0221 decision 1): its entries and its backlog are one snapshot, so the capacity and the waiting ids are judged from the same committed version.
+   const doc=await LetterboxdFacts.readDiaryIdentity(env),backlog={ids:doc.backlog||{}};
    const D=LetterboxdDiaryIdentity,cap=D.MAX_ATTEMPTS;
    const entries=Object.values(doc.films||{}).filter(Boolean).filter(entry=>entry.reason!=='owner_dismissed');
    // Work still owed an answer: an entry below the cap that is due now, or retained after a transport or not-now outcome (its retry time may be in the future: it is waiting, not done).
