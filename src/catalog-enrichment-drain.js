@@ -125,7 +125,10 @@ export async function deferFilm(env,{filmId,leaseId,generation,now}){
 // The earliest time a deferred item becomes runnable again, or null: the due time of a parked run.
 export async function earliestWake(env,{now}){
  const row=await one(database(env),`SELECT MIN(s.retry_at) AS at FROM catalog_enrichment_state s WHERE s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND s.retry_at>?`,[now]);
- return row?.at??null;
+ // A backed-off SIGNAL (a failed consume retries hourly) is a due-time too: the park wakes for it, so a pending signal never waits for the cron alone. Over-waking on a signal whose scope is off is harmless (the re-check finds nothing runnable).
+ const sig=await one(database(env),"SELECT MIN(retry_at) AS at FROM enrichment_signal WHERE state='pending' AND acked_version<version AND retry_at IS NOT NULL");
+ const times=[row?.at,sig?.at].filter(Boolean).sort();
+ return times[0]??null;
 }
 
 // One run. opts: {runId, clock:()=>iso, tools, fetchImpl, coordinator, budget, shouldYield?:async()=>boolean, maxFilms?}. -> {stop, wakeAt?, counts}

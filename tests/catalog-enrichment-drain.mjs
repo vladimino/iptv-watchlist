@@ -295,4 +295,15 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  sqlite(w.file,"UPDATE catalog_enrichment_state SET retry_at=NULL");
  assert.equal((await run(w,upstream())).stop,'idle');assert.equal(metaCount(w.file),2);
 }
+
+// ---- a backed-off signal is a due time: the run parks for it instead of going idle until the cron ----
+{
+ const w=world(1);
+ sqlite(w.file,"UPDATE enrichment_signal SET retry_at='2099-01-01T00:00:00.000Z',last_error='boom',attempts=1");
+ const held=await run(w,upstream());
+ assert.equal(held.stop,'parked','a pending signal in back-off is not idle');
+ assert.equal(held.wakeAt,'2099-01-01T00:00:00.000Z','the park wakes at the signal retry time');
+ sqlite(w.file,"UPDATE enrichment_signal SET retry_at=NULL");
+ assert.equal((await run(w,upstream())).counts.signals,1,'at its due time the signal is consumed');
+}
 console.log('catalog enrichment drain: ok');
