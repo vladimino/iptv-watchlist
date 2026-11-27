@@ -151,8 +151,14 @@ export function effectStatements({signal,guard,at}){
    [`INSERT OR IGNORE INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,plan_epoch) SELECT ?,'film','*',0,'active','check_anchors',?,?,0 WHERE ${G}`,[filmId,at,at,...params()]],
   ];
  }
- const out=[[`UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at=?${signal.kind==='anchor_changed'?",status='active',reason='check_anchors'":''} WHERE film_id=? AND part='film' AND source='*' AND ${G}`,[at,filmId,...params()]]];
- const reopen=(where,extra=[])=>[`UPDATE catalog_enrichment_state SET refresh_epoch=refresh_epoch+1,status='due',failures=0,retry_at=NULL,reason=CASE WHEN reason='owner_blocked' THEN NULL ELSE reason END,expected_json=CASE WHEN part='credits' THEN NULL ELSE expected_json END,updated_at=? WHERE film_id=? AND part<>'film' AND status IN ('complete','complete_with_gaps','needs_attention','deferred_repair','identity_disagreement','not_applicable','due') AND ${where} AND ${G}`,[at,filmId,...extra,...params()]];
+ // A verified source change reopens only what its digest says is stale. The part rows it can touch exclude `not_applicable` (a superseded credits slot, the other credit source, a source with no typed title: none is stale), and the Film's
+// plan epoch is raised only when at least one such row WOULD reopen, so a signal that finds every relevant version equal and complete changes nothing.
+ const sourceChange=signal.kind==='source_changed';
+ const statuses=sourceChange?"'complete','complete_with_gaps','needs_attention','deferred_repair','identity_disagreement','due'":"'complete','complete_with_gaps','needs_attention','deferred_repair','identity_disagreement','not_applicable','due'";
+ const stale=sourceChange?" AND EXISTS (SELECT 1 FROM catalog_enrichment_state r WHERE r.film_id=? AND r.part=? AND r.part<>'film' AND (r.source=? OR ?='') AND r.status IN ("+statuses+") AND NOT (r.source_version IS ? AND r.status IN ('complete','complete_with_gaps')))":'';
+ const staleParams=sourceChange?[filmId,signal.part||'core',signal.source,signal.source,signal.digest??null]:[];
+ const out=[[`UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at=?${signal.kind==='anchor_changed'?",status='active',reason='check_anchors'":''} WHERE film_id=? AND part='film' AND source='*'${stale} AND ${G}`,[at,filmId,...staleParams,...params()]]];
+ const reopen=(where,extra=[])=>[`UPDATE catalog_enrichment_state SET refresh_epoch=refresh_epoch+1,status='due',failures=0,retry_at=NULL,reason=CASE WHEN reason='owner_blocked' THEN NULL ELSE reason END,expected_json=CASE WHEN part='credits' THEN NULL ELSE expected_json END,updated_at=? WHERE film_id=? AND part<>'film' AND status IN (${statuses}) AND ${where} AND ${G}`,[at,filmId,...extra,...params()]];
  if(signal.kind==='anchor_changed')out.push(reopen("status<>'complete'"));
  else if(signal.kind==='protection_released')out.push(reopen('part=?',[signal.part==='metadata'?'core':signal.part]));
  else if(signal.kind==='source_changed'){

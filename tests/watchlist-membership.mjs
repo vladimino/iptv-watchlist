@@ -657,5 +657,17 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
   assert.equal(refused.body.reason,'baseline_not_proved');
  }
 }
+// ===== AIR-673 / ADR 0217 decision 9: the projection accepts a lid-only Film `film:lb:<lid>`, keyed through its trusted `letterboxd` claim (never the id spelling) =====
+{
+ const made=open('sync');
+ addFilm(made.file,'lo1',{owner:'film:lb:lo1'});
+ const out=await setFilmMembership(made.env,{id:'film:lb:lo1',member:true,version:1,at:T});
+ assert.equal(out.written,true,'film:lb: is accepted by the membership projection');
+ assert.deepEqual(members(made.file),['film:lb:lo1']);
+ assert.deepEqual(fences(made.file),[['film:lb:lo1',1,1]]);
+ assert.equal((await setFilmMembership(made.env,{id:'film:lb:lo1',member:false,version:2,at:T})).written,true,'and removed again by the same typed id');
+ assert.deepEqual(members(made.file),[]);
+}
+
 fs.rmSync(root,{recursive:true,force:true});
 console.log('watchlist-membership: ok');

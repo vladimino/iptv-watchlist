@@ -941,7 +941,7 @@ async function saveWatchlistRoot(env,value){
  const out=await PublishedEpg.putWatchlistRoot(env,value);
  return out.blocked?{skipped:'watchlist_root_not_writable'}:{etag:out.etag};
 }
-const saveJSON=async(env,key,value)=>{
+const saveJSON=async(env,key,value,context=undefined)=>{
  await epgStepGuard(env);
  if(EPG_CHECKPOINT_KEYS.has(key)){
   const gate=await epgCheckpointState(env);
@@ -961,7 +961,7 @@ const saveJSON=async(env,key,value)=>{
   if(routed)return routed;
  }
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
-  const routed=await DiscoveryAuthority.routeWrite(env,key,value);
+  const routed=await DiscoveryAuthority.routeWrite(env,key,value,context);
   if(routed.handled)return;
  }
  if(typeof PredictionD1!=='undefined'){
@@ -2853,6 +2853,7 @@ async function routeRequest(request,env,execution){
   if(url.pathname.startsWith('/api/admin/letterboxd-archive/'))return await adminLetterboxdArchiveRoute(request,env,url);
   if(url.pathname==='/api/admin/discovery-recovery')return await adminDiscoveryRecoveryRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/discovery-recovery/'))return await adminDiscoveryReconsiderRoute(request,env,url);
+  if(url.pathname.startsWith('/api/admin/films/')&&url.pathname.endsWith('/metadata'))return await adminFilmMetadataRoute(request,env,url); // AIR-634 (PV3): the owner metadata API of one Film, GET is a pure read, POST is owner-only
   if(request.method==='POST'&&url.pathname.startsWith('/api/admin/films/')&&url.pathname.endsWith('/title-review'))return await filmTitleReviewRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/people/')&&url.pathname.endsWith('/name-review'))return await adminPersonNameRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/'))return await adminReadRoute(request,env,url);

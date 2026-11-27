@@ -436,6 +436,9 @@ export const FILES={
  "catalog-enrichment-settings.mjs": {
   "suite": "core"
  },
+ "admin-film-metadata-api.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-workflow.mjs": {
   "suite": "core"
  },
@@ -449,6 +452,15 @@ export const FILES={
   "suite": "core"
  },
  "catalog-enrichment-wake.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-recorded-tmdb.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-discovery.mjs": {
+  "suite": "core"
+ },
+ "migration-0050-discovery-enrichment.mjs": {
   "suite": "core"
  },
  "catalog-enrichment-bootstrap.mjs": {
@@ -467,6 +479,18 @@ export const FILES={
   "suite": "core"
  },
  "film-aggregate-resolver.mjs": {
+  "suite": "core"
+ },
+ "prediction-lid-only-exclusion.mjs": {
+  "suite": "core"
+ },
+ "lid-only-consumers.mjs": {
+  "suite": "core"
+ },
+ "prediction-lid-only-real-path.mjs": {
+  "suite": "core"
+ },
+ "prediction-lid-only-merge.mjs": {
   "suite": "core"
  },
  "film-readiness.mjs": {

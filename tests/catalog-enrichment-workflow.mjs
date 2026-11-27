@@ -40,7 +40,7 @@ function world({films=0,active=true}={}){
  return w;
 }
 const res=(status,body='')=>({status,ok:status>=200&&status<300,headers:{get:()=>null},text:async()=>body,body:null});
-const movie=id=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{name:'G'}],credits:{cast:[{id:id*10,name:'A',order:0}],crew:[]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'}}]}});
+const movie=id=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{id:18,name:'G'}],credits:{cast:[{id:id*10,name:'A',order:0}],crew:[]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т',overview:''}}]},images:{posters:[]}});
 const upstream=({tmdb='ok'}={})=>{const calls=[];const impl=async url=>{url=String(url);calls.push(url);if(url.startsWith('https://api.themoviedb.org/'))return tmdb==='transport'?res(503):res(200,JSON.stringify(movie(Number(/movie\/(\d+)/.exec(url)[1]))));if(url.startsWith('https://query.wikidata.org/'))return res(200,JSON.stringify({results:{bindings:[]}}));throw new Error('unexpected '+url);};impl.calls=calls;return impl;};
 const record=file=>JSON.parse(rows(file,"SELECT summary_json AS j FROM projection_run WHERE projection='catalog_enrichment_run'")[0]?.j||'null');
 const metaCount=file=>rows(file,'SELECT COUNT(*) AS n FROM film_metadata')[0].n;

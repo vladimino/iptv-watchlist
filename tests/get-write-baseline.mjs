@@ -6,7 +6,7 @@
 // Every prefix (or by-path route) the dispatcher uses, with the GET samples that stand for the reads it serves. An empty list says the prefix serves no GET.
 export const PREFIX_ROUTES={
  '/api/admin/':['/api/admin/overview','/api/admin/films?q=hot','/api/admin/people?queue=localization-missing','/api/admin/films?q=hot&queue=localization-missing','/api/admin/films/film:w1','/api/admin/people/person:director/one'],
- '/api/admin/films/':[],
+ '/api/admin/films/':['/api/admin/films/film:w1/metadata'],
  '/api/admin/people/':[],
  '/api/admin/health':['/api/admin/health'],
  '/api/admin/limbo':['/api/admin/limbo','/api/admin/limbo?cause=backoff&subsystem=prediction&kind=film&age=14&limit=5'],
