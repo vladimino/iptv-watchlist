@@ -332,17 +332,23 @@ async function createInstance(env,id,params){
  return {ok:false,reason:'create_uncertain'};
 }
 
-// AIR-572. The Monitor's whole D1 read of the Producer: exactly THREE SQL statements (one authority row joined by primary key to its generation row,
+// AIR-572. The Monitor's whole D1 read of the Producer: exactly THREE SQL statements, plus ONE conditional indexed lookup of an earlier generation never seen proven current (AIR-692) (one authority row joined by primary key to its generation row,
 // the chain by primary key, the run of the exact generation by index), no table inventory, no schema read, no scan, no write. Unlike
 // `PublishedEpg.readAuthority` (three statements on its own) it does not validate the install; it only names the published (P,g) when the marker row says
 // `d1`/`open`. Any failure throws (the Monitor reports `unreadable`).
-export async function readProducerMonitorFacts(env){
+export async function readProducerMonitorFacts(env,{prior=null}={}){
  const db=database(env);
  const row=await one(db,'SELECT a.mode AS mode,a.cutover AS cutover,a.programme_run_id AS programmeRunId,a.generation AS generation,g.published_at AS publishedAt FROM published_epg_authority a LEFT JOIN published_epg_generation g ON g.programme_run_id=a.programme_run_id WHERE a.id=1',[]);
  if(!row||row.mode!=='d1'||row.cutover!=='open'||!row.programmeRunId)return {ready:false};
  const label=snapshotLabel(row.programmeRunId,Number(row.generation));
  const [chain,run]=await Promise.all([readChain(env,row.programmeRunId),epgRunForGeneration(env,{sourceGeneration:label})]);
- return {ready:true,programmeRunId:row.programmeRunId,generation:Number(row.generation),label,publishedAt:row.publishedAt||null,chain,run};
+ // AIR-692: ONE conditional indexed read, only when the Monitor remembers an earlier observed generation it never saw proven current. It answers whether that
+ // exact generation durably passed (never inferred from the publication); a failure is `{error:true}` and clears nothing.
+ let priorProof=null;
+ if(typeof prior==='string'&&prior&&prior!==label){
+  try{priorProof={label:prior,run:await epgRunForGeneration(env,{sourceGeneration:prior})};}catch{priorProof={label:prior,error:true};}
+ }
+ return {ready:true,programmeRunId:row.programmeRunId,generation:Number(row.generation),label,publishedAt:row.publishedAt||null,chain,run,prior:priorProof};
 }
 
 // AIR-594 / ADR 0208 (Accepted, option B). The outcome rows are written by the terminal batches themselves (stop, completion, and here the in-flight supersede and the
