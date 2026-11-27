@@ -16,6 +16,26 @@ const CATALOG_ENRICHMENT_SOURCES=['letterboxd','tmdb','wikidata'];
 const catalogAbsentTable=error=>/no such table/i.test(String(error?.cause?.message||error?.message||error));
 
 // ---- the effective state: a pure read ----
+// ADR 0214 decision 13 (AIR-633): the provenance mode and revision, the durable history count per reason, the language upgrades still waiting for enforce, and the per-field outcome counts summed over the retained outbox entries.
+// Read-only counts; schema absent -> {configured:false}. No Film id, value or field text.
+async function catalogProvenanceTotals(first,all){
+ let control;
+ try{control=await first('SELECT mode,revision FROM film_metadata_provenance_control WHERE id=1');}
+ catch(error){if(catalogAbsentTable(error))return {configured:false,reason:'schema_missing'};throw error;}
+ if(!control)return {configured:false,reason:'control_missing'};
+ const history=await all('SELECT reason,COUNT(*) AS n FROM film_metadata_history GROUP BY reason').then(rows=>Object.fromEntries(rows.map(row=>[row.reason,Number(row.n)]))).catch(()=>null);
+ const waiting=await first("SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE part='core' AND json_valid(film_json) AND json_extract(film_json,'$.languageUpgrade.pending')=1").then(row=>Number(row?.n??0)).catch(()=>null);
+ const totals={fills:0,adoptions:0,replacements:0,agreed:0,source_absent:0,same_rank_conflict:0,agreement_stale:0,provenance_mismatch:0,history:0,owner_actions:0,refusals:{}};
+ let runs=0;
+ for(const row of await all("SELECT counts_json FROM catalog_enrichment_tick WHERE state IN ('finished','stopped') ORDER BY started_at DESC LIMIT 500").catch(()=>[])){
+  let counts=null;try{counts=JSON.parse(row.counts_json)?.provenance;}catch{counts=null;}
+  if(!counts||typeof counts!=='object')continue;
+  runs++;
+  for(const key of Object.keys(totals))if(key!=='refusals')totals[key]+=Number(counts[key])||0;
+  for(const [key,value] of Object.entries(counts.refusals||{}))totals.refusals[key]=(totals.refusals[key]||0)+(Number(value)||0);
+ }
+ return {configured:true,mode:control.mode,revision:Number(control.revision),historyByReason:history,historyTotal:history?Object.values(history).reduce((sum,n)=>sum+n,0):null,languageUpgradesWaiting:waiting,outcomes:{runs,...totals}};
+}
 async function catalogEnrichmentEffective(env){
  const db=env.DB;
  if(!db)return {configured:false,reason:'no_database'};
@@ -41,6 +61,7 @@ async function catalogEnrichmentEffective(env){
    lists:film?{fallbackFill:film.fallbackFill||[],unconfirmedAgreement:film.unconfirmedAgreement||[],writtenUnderSupersededAnchor:film.writtenUnderSupersededAnchor||[],disagreement:film.disagreement||null}:null,retry:{action:'retry',filmId:row.film_id,part:row.part==='film'?undefined:row.part,source:row.source==='*'?undefined:row.source}};
  });
  out.attentionTruncated=attention.length>CATALOG_ENRICHMENT_ATTENTION_LIMIT;
+ out.provenance=await catalogProvenanceTotals(first,all);
  return out;
 }
 

@@ -134,6 +134,12 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
   INSERT INTO upstream_cooldown (scope,until_at,reason,retry_after_s,set_by,updated_at) VALUES ('tmdb',4102444800000,'rate_limited',120,'x',0);`);
  const active=await call(env,'/api/admin/settings',{method:'GET',payload:undefined,type:null,action:null,token:null,origin:null});
  assert.deepEqual([active.body.control.state,active.body.scopes[0].scope,active.body.lastRun.counts.films,active.body.signals.pending,active.body.draining,active.body.cooldowns[0].scope],['active','rated',2,1,null,'tmdb']);
+ // AIR-633 (ADR 0214 decision 13): the provenance mode, revision, history count, waiting upgrades and the per-field outcome totals; counts only
+ sql(file,`INSERT INTO catalog_enrichment_tick (tick_id,started_at,finished_at,state,counts_json) VALUES ('run-2','2026-11-26T08:00:00.000Z','2026-11-26T08:01:00.000Z','finished','{"films":1,"provenance":{"fills":3,"replacements":2,"history":2,"refusals":{"language_kept":1,"stored_differs":2}}}'),('run-3','2026-11-26T08:30:00.000Z','2026-11-26T08:31:00.000Z','finished','{"films":1,"provenance":{"replacements":1,"history":1,"refusals":{"language_kept":4}}}');
+  INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,film_json) VALUES ('film:a','core','tmdb',0,'complete','${T}','${T}','{"languageUpgrade":{"pending":true,"fields":["synopsis"]}}');`);
+ const prov=(await call(env,'/api/admin/settings',{method:'GET',payload:undefined,type:null,action:null,token:null,origin:null})).body.provenance;
+ assert.deepEqual([prov.configured,prov.mode,prov.revision,prov.languageUpgradesWaiting,prov.outcomes.runs,prov.outcomes.fills,prov.outcomes.replacements,prov.outcomes.history,prov.outcomes.refusals.language_kept,prov.outcomes.refusals.stored_differs],[true,'off',1,1,2,3,3,3,5,2],'the totals are sums of the outbox counts, the mode and revision are read, the waiting upgrades are counted');
+ assert.ok(!JSON.stringify(prov).match(/film:|synopsis/),'counts only: no Film id and no field text');
  const list=active.body.attention;
  assert.deepEqual(list.map(item=>item.part+':'+item.status),['film:identity_disagreement','credits:deferred_repair'].sort((a,b)=>list.findIndex(x=>x.part+':'+x.status===a)-list.findIndex(x=>x.part+':'+x.status===b)));
  const film=list.find(item=>item.part==='film');

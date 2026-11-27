@@ -361,4 +361,14 @@ if(section('7')){
  const epg=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epg.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
 }
+// AIR-633 (ADR 0214 decision 13): the EPG producer outcome counts the writer's per-field provenance outcomes (undeclared callers: an unknown value is replaced with history, an attributed one is kept)
+if(section('3')){
+ const file=database('open'),env=envOf(file);
+ const run=(runId,at,runtime)=>applyEpgUnits(env,{plan:planEpgUnits({runId,at:iso(at),films:[{id:ID(40),facts:{...facts('A'),metadata:META({runtime})}}]}),now:()=>iso(at)});
+ const first=await run('prov-1',0,100);
+ assert.equal(first.counts.provenance,undefined,'mode off: the writer reports no per-field counts and the count object keeps its shape');
+ assert.equal(sqlite(file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'").status,0);
+ const second=await run('prov-2',60000,101);
+ assert.deepEqual([second.counts.applied,second.counts.provenance.replacements,second.counts.provenance.history],[1,1,1],'an unknown value is replaced by the undeclared EPG write, with a history row, and the pass counts it');
+}
 console.log('canonical-epg-producer: ok');

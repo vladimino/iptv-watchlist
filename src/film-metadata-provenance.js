@@ -135,6 +135,15 @@ function oldOf(value,stand,raw=null){
 }
 const fieldRow=(filmId,field,row,value,writeKey,revision,at)=>[FIELD_UPSERT,[filmId,field,row.tier,row.source,row.origin,row.anchorScheme??null,row.anchorValue??null,row.anchorDigest??null,row.agreement??null,row.language??null,row.languageBasis??null,row.observedAt,row.checkedAt??at,valueDigest(value),writeKey,revision,at]];
 
+// the writer's per-field outcome counts (ADR 0214 decision 13), summed per step and then per run
+export function addCounts(total,add){
+ if(!add||typeof add!=='object')return total;
+ for(const key of ['fills','adoptions','replacements','agreed','source_absent','same_rank_conflict','agreement_stale','provenance_mismatch','history','owner_actions'])total[key]=(total[key]||0)+(Number(add[key])||0);
+ total.refusals=total.refusals||{};
+ for(const [key,value] of Object.entries(add.refusals||{}))total.refusals[key]=(total.refusals[key]||0)+(Number(value)||0);
+ return total;
+}
+
 export const emptyCounts=()=>({fills:0,adoptions:0,replacements:0,agreed:0,refusals:{owner_kept:0,stored_differs:0,disagreement:0,anchor_changed:0,attributed_kept:0,hold:0,language_kept:0},source_absent:0,same_rank_conflict:0,agreement_stale:0,provenance_mismatch:0,history:0,owner_actions:0});
 
 // PURE. The metadata part of planFilmFacts under mode `enforce` or `hold`. `snapshot.provenance` is readProvenance's result. Returns

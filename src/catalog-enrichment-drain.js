@@ -9,6 +9,7 @@ import {database,many,one} from './film-person-authority.js';
 import {acquireLease,consumeSignal,readControl,releaseLease,renewLease,runnableSignals} from './catalog-enrichment-store.js';
 import {nextClass,priorityClass} from './catalog-enrichment-plan.js';
 import {processFilm,CODE_VERSION} from './catalog-enrichment-producer.js';
+import {addCounts as addProvenance,emptyCounts as emptyProvenanceCounts} from './film-metadata-provenance.js';
 
 // Engineering-owned defaults (ADR 0219 decision 6), one module, reported in each run's outbox entry. The statement budget is the ADR 0094 guard, not a provider limit; a handover happens at HANDOVER_AT, half the documented
 // 10,000; a step starts only when the remaining budget covers its own work plus the finalize-and-successor reserve.
@@ -132,6 +133,22 @@ export async function repairPending(env){
  const row=await one(database(env),"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>?",[CODE_VERSION]);
  return Number(row?.n??0)>0;
 }
+// AIR-633 (ADR 0214 decision 10, ADR 0224): a core part that completed while the provenance mode was `off` or `hold` carries the durable marker `languageUpgrade.pending` when a Russian upgrade of a nonblank English or unknown-language
+// synopsis or poster was waiting. Once the mode is `enforce`, that part becomes due again WITHOUT a new observer signal (an equal complete observation stays a no-op everywhere else). There is no sweep: only marked parts, at most
+// UPGRADE_WAKE_LIMIT per run (the next run continues), each reopened once (the marker is cleared in the same statement) and only inside the same lease and control generation.
+export const UPGRADE_WAKE_LIMIT=50;
+const ENFORCING="EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id=1 AND mode='enforce')";
+const MARKED="part='core' AND status IN ('complete','complete_with_gaps') AND json_valid(film_json) AND json_extract(film_json,'$.languageUpgrade.pending')=1";
+export async function languageUpgradePending(env){
+ try{const row=await one(database(env),`SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE ${MARKED} AND ${ENFORCING}`);return Number(row?.n??0)>0;}
+ catch(error){if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return false;throw error;}
+}
+export async function wakeLanguageUpgrades(env,{leaseId,generation,now,limit=UPGRADE_WAKE_LIMIT}){
+ const guard=await repairGuard(null,leaseId,generation,now);
+ const result=await database(env).prepare(`UPDATE catalog_enrichment_state SET refresh_epoch=refresh_epoch+1,status='due',failures=0,retry_at=NULL,reason=NULL,due_since=?,film_json=json_set(film_json,'$.languageUpgrade.pending',json('false'),'$.languageUpgrade.reopenedAt',?),updated_at=? WHERE rowid IN (SELECT rowid FROM catalog_enrichment_state WHERE ${MARKED} AND ${ENFORCING} ORDER BY updated_at,film_id LIMIT ?) AND ${ENFORCING} AND ${guard.sql} RETURNING film_id`).bind(now,now,now,limit,...guard.params).all();
+ return (result?.results||[]).length;
+}
+
 // The narrow EPG yield (ADR 0219 decision 6, P4 = B). The evidence that an EPG publication or seal phase is ACTIVE AND PROGRESSING comes from the publication's OWN durable claim, read at the write boundary:
 //   - a stage of the published EPG (`published_epg_stage`) that is `loading` or `validated` and whose publisher claim is still live (`claim_expires_at` ahead; the publisher renews it with every chunk, so a publisher that stopped
 //     renewing stops holding enrichment within the contract's own claim TTL);
@@ -196,7 +213,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  let baseLive=0,baseBackground=0;
  let holdSuspected=false,newest=true;
  try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);if(newest){holdSuspected=c.stop==='yield';newest=false;}baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
- const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,bySource:{}};
+ const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,upgradesReopened:0,provenance:emptyProvenanceCounts(),bySource:{}};
  const holdCache={at:null,value:null},cursors=new Map();
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed,requests:sent.n}});
  const control=await readControl(env);
@@ -213,6 +230,8 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
   const lease=(await repairGuard(handle,leaseId,generation,clock()));
   await handle.prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>? AND ${lease.sql}`).bind(clock(),CODE_VERSION,...lease.params).run();
  }catch{/* a repair wake never blocks the run */}
+ // AIR-633: a language upgrade that enforce now permits becomes due again (bounded per run, marker-driven, no new observer signal)
+ try{counts.upgradesReopened=await wakeLanguageUpgrades(env,{leaseId,generation,now:clock()});}catch{/* an upgrade wake never blocks the run */}
  let result;
  // Films this run processed without any progress (blocked, waiting, nothing due): not picked again in this run, so a deferred or blocked Film can never keep a run spinning.
  const skip=new Set();
@@ -286,6 +305,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     const committed=step.report.units.filter(unit=>['applied'].includes(unit.state)).length;
     counts.units+=committed;
     if(klass==='live')counts.committedLive+=committed;else counts.committedBackground+=committed;
+    addProvenance(counts.provenance,step.report.provenance);
     counts.transport+=step.report.transport.length;counts.failed+=step.report.failed.length;if(step.report.disagreement)counts.disagreements++;
     // per SOURCE: requests actually asked (a cooldown skip sends none), transport outcomes, definite failures and cooldown skips
     for(const source of step.report.fetched||[]){const entry=(counts.bySource[source]||={requests:0,transport:0,failed:0,cooldownSkips:0});const skipped=step.report.transport.some(item=>item.source===source&&item.cooldown);if(skipped)entry.cooldownSkips++;else entry.requests++;}

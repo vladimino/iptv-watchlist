@@ -243,6 +243,16 @@ const isTime=value=>typeof value==='string'&&value.length>=20&&value.length<=40&
 const whole=value=>{const n=Number(value);return Number.isInteger(n)&&n>=0?n:null;};
 const SOURCES=['letterboxd','tmdb','wikidata'];
 export const tickEventKey=event=>'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
+// ADR 0214 decision 13 (AIR-633): the per-field outcome counts of a run, whole numbers only. Counts, never a value, a Film id or a field text.
+const PROVENANCE_KEYS=['fills','adoptions','replacements','agreed','source_absent','same_rank_conflict','agreement_stale','provenance_mismatch','history','owner_actions'];
+export function provenanceCounts(value){
+ if(!value||typeof value!=='object')return null;
+ const out={};
+ for(const key of PROVENANCE_KEYS)out[key]=whole(value[key])??0;
+ out.refusals={};
+ for(const key of ['owner_kept','stored_differs','disagreement','anchor_changed','attributed_kept','hold','language_kept'])out.refusals[key]=whole(value.refusals?.[key])??0;
+ return out;
+}
 // PURE. The event of one terminal outbox row, or null when the row is not deliverable. Counts only: no Film id, title, name or payload.
 export function tickEvent(row){
  if(!row||typeof row.tick_id!=='string'||!['finished','stopped'].includes(row.state)||!isTime(row.finished_at))return null;
@@ -259,7 +269,8 @@ export function tickEvent(row){
  return {id:row.tick_id,type:EVENT_TYPE,at:new Date(endedMs).toISOString(),outcome:row.state,stop,
   startedAt:isTime(row.started_at)?new Date(startedMs).toISOString():null,durationMs:isTime(row.started_at)&&endedMs>=startedMs?endedMs-startedMs:null,
   counts:{films:whole(counts.films),signals:whole(counts.signals),units:whole(counts.units),steps:whole(counts.steps),statements:whole(counts.statements),failedStatements:whole(counts.failedStatements),
-   committedLive:whole(counts.committedLive),committedBackground:whole(counts.committedBackground),yields:whole(counts.yields),deferred:whole(counts.deferred),errors:whole(counts.errors),disagreements:whole(counts.disagreements)},
+   committedLive:whole(counts.committedLive),committedBackground:whole(counts.committedBackground),yields:whole(counts.yields),deferred:whole(counts.deferred),errors:whole(counts.errors),disagreements:whole(counts.disagreements),...(whole(counts.upgradesReopened)!==null?{upgradesReopened:whole(counts.upgradesReopened)}:{})},
+  ...(provenanceCounts(counts.provenance)?{provenance:provenanceCounts(counts.provenance)}:{}),
   bySource};
 }
 async function putTickEvent(env,event){

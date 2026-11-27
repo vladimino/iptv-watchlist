@@ -22,6 +22,10 @@ const tickRow=(over={})=>({tick_id:'ce-00000001-0',started_at:iso(Tms),finished_
  assert.deepEqual([event.id,event.type,event.outcome,event.stop,event.at,event.durationMs],['ce-00000001-0','catalog_enrichment','finished','idle',iso(Tms+60000),60000]);
  assert.deepEqual(event.counts,{films:3,signals:3,units:12,steps:6,statements:420,failedStatements:1,committedLive:12,committedBackground:0,yields:0,deferred:1,errors:1,disagreements:0});
  assert.deepEqual(event.bySource,{letterboxd:{requests:2,transport:1,failed:0,cooldownSkips:1},tmdb:{requests:3,transport:0,failed:0,cooldownSkips:0}},'source-specific counts; only the known sources, no free text');
+ assert.equal(event.provenance,undefined,'a run without provenance counts adds no key (the event shape is unchanged)');
+ const withProv=S.tickEvent(tickRow({counts_json:counts({provenance:{fills:2,replacements:1,history:1,refusals:{language_kept:3,evil:9},leak:'film:tmdb:1'},upgradesReopened:4})}));
+ assert.deepEqual([withProv.provenance.fills,withProv.provenance.replacements,withProv.provenance.history,withProv.provenance.refusals.language_kept,withProv.counts.upgradesReopened],[2,1,1,3,4],'AIR-633: per-field outcome counts and the reopened upgrades ride the event');
+ assert.ok(!JSON.stringify(withProv).match(/evil|leak|film:/),'only the known count keys, whole numbers');
  assert.equal(S.tickEvent(tickRow({state:'started'})),null,'a started row is not deliverable');
  assert.equal(S.tickEvent(tickRow({finished_at:null})),null);
  assert.equal(S.tickEvent(tickRow({counts_json:'not json'})),null);

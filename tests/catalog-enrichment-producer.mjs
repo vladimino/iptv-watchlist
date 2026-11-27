@@ -8,6 +8,9 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as S from '../src/catalog-enrichment-store.js';
 import * as PR from '../src/catalog-enrichment-producer.js';
+import * as D from '../src/catalog-enrichment-drain.js';
+import * as SRC from '../src/catalog-enrichment-sources.js';
+import {Plan} from '../src/catalog-enrichment-plan.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-enrich-producer-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -415,4 +418,108 @@ function file0(w){return w.file;}
  assert.deepEqual(settled,[],'and settled no part row as current: '+JSON.stringify(out.state));
  assert.ok((out.report?.units||[]).every(unit=>unit.state==='stale'),'every unit answered stale, none failed the Film');
 }
+
+// ---- AIR-633 (PV2, ADR 0214 decisions 5, 10, 12, 13; ADR 0224): replacement planning, the language upgrade and the counts, through the REAL producer step and drainer wake on the real migrated schema ----
+// The shared Russian-first projection (AIR-684) reaches the step through its `sources` seam as per-field `answer.meta`; here the real TMDB fetcher answers and its answer is overlaid with that contract.
+const RU_SYNOPSIS='Русский синопсис';
+const RU_POSTER='https://image.tmdb.org/t/p/w500/ru.jpg';
+const sourcesWith=({synopsis=RU_SYNOPSIS,poster=RU_POSTER,language='ru'}={})=>({fetchLetterboxd:SRC.fetchLetterboxd,fetchWikidata:SRC.fetchWikidata,
+ fetchTmdb:async(env,args)=>{const answer=await SRC.fetchTmdb(env,args);if(answer.status!=='ok')return answer;
+  const meta={};if(synopsis)meta.synopsis={language,languageBasis:'explicit'};if(poster)meta.poster={language,languageBasis:'explicit'};
+  return {...answer,fields:{...answer.fields,...(synopsis?{synopsis}:{}),...(poster?{poster}:{})},meta};}});
+const setMode=(file,mode,revision)=>assert.equal(sqlite(file,`UPDATE film_metadata_provenance_control SET mode='${mode}',revision=${revision},updated_at='${T}',updated_by='test'`).status,0);
+const fieldRow=(file,field)=>rows(file,`SELECT tier,source,language,language_basis,agreement FROM film_metadata_field WHERE film_id='${FILM}' AND field='${field}'`)[0]||null;
+const history=file=>rows(file,`SELECT field,reason,old_language,new_language FROM film_metadata_history WHERE film_id='${FILM}' ORDER BY id`);
+const marker=file=>rows(file,`SELECT source,status,json_extract(film_json,'$.languageUpgrade.pending') AS pending FROM catalog_enrichment_state WHERE film_id='${FILM}' AND part='core' ORDER BY source`);
+const stepWith=(w,up,sources,now,over={})=>step(w,up,now,{sources,...over});
+const wake=(w,now)=>D.wakeLanguageUpgrades(w.env,{leaseId:w.leaseId,generation:w.generation,now});
+
+// the MANDATORY regression: core completes at `off` with the Russian observed version but an English value stored; once enforce permits it the upgrade becomes due and writes Russian with NO new observer signal
+for(const middle of ['off','hold']){
+ const w=await world();
+ const up=upstream({tm:movie()});
+ await stepWith(w,up,sourcesWith(),at(10)); // the anchor check
+ if(middle==='hold'){setMode(w.file,'enforce',2);setMode(w.file,'hold',3);}
+ const first=await stepWith(w,up,sourcesWith(),at(11));
+ assert.equal(first.state,'done');
+ assert.equal(meta(w.file).synopsis,'lb synopsis','the English (Letterboxd, assumed) synopsis is filled while the mode cannot replace: '+middle);
+ assert.equal(meta(w.file).poster,'https://img/lb.jpg');
+ assert.deepEqual(marker(w.file).map(r=>[r.status,r.pending]),[['complete',1],['complete',1]],'core is COMPLETE and carries the durable upgrade marker');
+ assert.equal(await wake(w,at(12)),0,'neither off nor hold reopens anything');
+ assert.equal((await step(w,up,at(12),{sources:sourcesWith()})).state,'idle','a completed part is not fetched again');
+ const calls=up.calls.length;
+ setMode(w.file,'enforce',middle==='hold'?4:2);
+ assert.equal(await D.languageUpgradePending(w.env),true,'the reconcile counts a marked upgrade as runnable work once enforce permits it');
+ assert.equal(await wake(w,at(13)),2,'the marked core parts become due again, bounded and once');
+ assert.equal(await wake(w,at(14)),0,'the marker is cleared in the same statement: no repeated reopen');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,'no observer signal and no extra queue');
+ const done=await stepWith(w,up,sourcesWith(),at(15));
+ assert.equal(done.state,'done');
+ assert.ok(up.calls.length>calls,'the due part fetches once');
+ assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'the Russian synopsis replaces the English one: '+middle);
+ assert.equal(meta(w.file).poster,RU_POSTER,'and the Russian poster replaces the English-source poster');
+ assert.deepEqual(fieldRow(w.file,'synopsis'),{tier:'automatic',source:'tmdb',language:'ru',language_basis:'explicit',agreement:'confirmed'});
+ assert.deepEqual(history(w.file).map(r=>[r.field,r.reason,r.old_language,r.new_language]).sort((x,y)=>x[0]<y[0]?-1:1),[['poster','replaced',null,'ru'],['synopsis','replaced',middle==='hold'?'en':null,'ru']],'history keeps the replaced value; at hold the assumed English of the Letterboxd fill was recorded, at off nothing was');
+ assert.equal(done.report.provenance.replacements,2,'the actual outcome counts include the replacements');
+ assert.equal(done.report.provenance.history,2);
+ assert.equal(marker(w.file).every(r=>!r.pending),true);
+ // an equal complete observation is a no-op and wakes nothing
+ const again=await stepWith(w,up,sourcesWith(),at(16));
+ assert.equal(again.state,'idle');
+ assert.equal(await D.languageUpgradePending(w.env),false);
+}
+{
+ // P3-A: a genuinely unknown legacy value is kept against English or unknown-language observations, and replaced only by a confirmed Russian one; a verified absence preserves the value
+ for(const scenario of ['unknown_observation','verified_ru','absence']){
+  const w=await world();
+  assert.equal(sqlite(w.file,`INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES ('${FILM}',1,1999,136,'legacy text','https://img/legacy.jpg','https://letterboxd.com/film/the-matrix/','["Sci-Fi"]',0,'{}',NULL,NULL,'${T}')`).status,0);
+  setMode(w.file,'enforce',2);
+  const up=upstream({tm:scenario==='absence'?movie({overview:null,poster_path:null}):movie()});
+  const sources=scenario==='verified_ru'?sourcesWith():scenario==='absence'?sourcesWith({synopsis:null,poster:null}):{fetchLetterboxd:SRC.fetchLetterboxd,fetchTmdb:SRC.fetchTmdb,fetchWikidata:SRC.fetchWikidata};
+  await stepWith(w,up,sources,at(10));
+  await stepWith(w,up,sources,at(11));
+  if(scenario==='verified_ru'){assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'confirmed Russian replaces the unknown-language legacy value');assert.equal(history(w.file).some(r=>r.field==='synopsis'&&r.reason==='replaced'),true);}
+  else{assert.equal(meta(w.file).synopsis,'legacy text','the unattributed legacy synopsis is preserved: '+scenario);assert.equal(meta(w.file).poster,'https://img/legacy.jpg');assert.deepEqual(history(w.file),[],'no downgrade, no history');}
+ }
+}
+{
+ // no downgrade and no owner override: a stored verified Russian value is never replaced by the English observation, and an owner pin is never an offer
+ const w=await world();
+ const up=upstream({tm:movie()});
+ setMode(w.file,'enforce',2);
+ await stepWith(w,up,sourcesWith(),at(10));
+ await stepWith(w,up,sourcesWith(),at(11));
+ assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'enforce picks the Russian value for a blank field directly (language before provider precedence)');
+ assert.equal(fieldRow(w.file,'synopsis').language,'ru');
+ // the English observation of a later fetch: reopen the part by the real owner retry path and fetch the English-only answer
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET status='due',refresh_epoch=refresh_epoch+1 WHERE part='core'");
+ const noRu={fetchLetterboxd:SRC.fetchLetterboxd,fetchTmdb:SRC.fetchTmdb,fetchWikidata:SRC.fetchWikidata};
+ const later=await stepWith(w,up,noRu,at(12));
+ assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'a verified Russian value is not downgraded: '+later.state);
+ assert.equal(history(w.file).filter(r=>r.field==='synopsis').length,0);
+ // an owner pin: the offered replacement never exists (and the writer would refuse it)
+ const releaseBefore=rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_history')[0].n;
+ sqlite(w.file,"UPDATE film_metadata_field SET tier='owner',source='owner' WHERE film_id='"+FILM+"' AND field='synopsis'");
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET status='due',refresh_epoch=refresh_epoch+1 WHERE part='core'");
+ const pinned=await stepWith(w,upstream({tm:movie()}),sourcesWith({synopsis:'Другой русский синопсис'}),at(13));
+ assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'an owner-pinned field is never replaced by an automatic observation: '+pinned.state);
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_history')[0].n,releaseBefore,'no history row for a pinned field');
+}
+{
+ // pure planner table (ADR 0214 decision 5, ADR 0224): which fields the planner OFFERS the writer
+ const answers=(lbSyn='lb',tmSyn='tm',tmLang=null)=>({letterboxd:{status:'ok',fields:{synopsis:lbSyn}},tmdb:{status:'ok',fields:{synopsis:tmSyn},...(tmLang?{meta:{synopsis:{language:tmLang,languageBasis:'explicit'}}}:{})}});
+ const plan=(provenance,stored,over={})=>Plan.planReplacements({provenance,applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,stored:{synopsis:stored},answers:answers(...(over.args||[])),locked:false,fills:{},...over});
+ const enforce=fields=>({mode:'enforce',fields:{synopsis:fields}});
+ assert.deepEqual(Object.keys(plan(enforce({name:'confirmed',language:'en'}),'old',{args:['lb','tm','ru']}).offers),['synopsis'],'ru over confirmed en');
+ assert.deepEqual(Object.keys(plan(enforce({name:'confirmed',language:'ru'}),'old',{args:['lb','tm','ru']}).offers),[],'a Russian value is not offered a replacement by another Russian one (the comparator keeps it)');
+ assert.deepEqual(plan(enforce({name:'unknown',language:null}),'old',{args:['lb','tm']}).offers,{},'P3-A: an English or unknown observation never replaces an unknown-language value');
+ assert.equal(plan(enforce({name:'owner',language:'en'}),'old',{args:['lb','tm','ru']}).offers.synopsis,undefined,'owner is never offered');
+ assert.equal(plan(enforce({name:'unknown',language:null}),'old',{args:['lb','tm','ru'],agreed:false}).offers.synopsis,undefined,'an unconfirmed observation never replaces a nonblank value');
+ assert.equal(plan(enforce({name:'unknown',language:null}),'old',{args:['lb','tm','ru'],locked:true}).offers.synopsis,undefined,'a locked metadata dimension plans nothing');
+ assert.equal(plan({mode:'hold',fields:{synopsis:{name:'confirmed',language:'en'}}},'old',{args:['lb','tm','ru']}).pending[0].reason,'language_upgrade','hold records the pending upgrade, offers nothing different');
+ assert.equal(plan({mode:'off',fields:{}},'old',{args:['lb','tm','ru']}).pending[0].field,'synopsis','off records it too');
+ assert.equal(plan({mode:'off',fields:{}},'old',{args:['lb','tm']}).pending.length,0,'no Russian observation, nothing pending');
+ assert.equal(plan(enforce({name:'unknown',language:null}),'tm',{args:['lb','tm','ru']}).offers.synopsis.mode,'adopt','an equal Russian value is an adoption of its language evidence');
+}
+
 console.log('catalog enrichment producer: ok');

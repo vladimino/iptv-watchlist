@@ -157,6 +157,68 @@ export function decideCore(input){
  return out;
 }
 
+// ---- replacement planning (ADR 0214 decisions 5, 10 and 12; ADR 0224; AIR-633 PV2) ----
+// The planner only DECIDES WHICH FIELDS ARE WORTH OFFERING to the one canonical writer: the writer's comparator (confidence, then language quality for synopsis and poster, then source precedence, freshness, digest) remains the single
+// authority that replaces, adopts or refuses. Offering a field the comparator then refuses is harmless (it is counted as a refusal); NOT offering a reachable upgrade is the defect this closes (a comparator unreachable behind a blank guard).
+// `provenance` (optional): {mode:'off'|'hold'|'enforce', fields:{field->{name:'owner'|'confirmed'|'superseded'|'unconfirmed'|'unknown', language:'ru'|'en'|null}}}; absent or mode `off` reads every stored value as unknown-language.
+export const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
+const REPLACEABLE=Object.freeze(['unknown','superseded','unconfirmed']);
+const LANGUAGE_RANK=Object.freeze({ru:2,en:1});
+const same=(a,b)=>canonical(a??null)===canonical(b??null);
+// The language of one observed field. The shared Russian-first projection (AIR-684) supplies `answer.meta[field]={language,languageBasis}`; until it does, the only language known is the owner-approved P4-B default (a freshly observed
+// Letterboxd synopsis is ASSUMED English). A top-level TMDB overview or poster is never given a language here (ADR 0224: a ru-RU request is not proof).
+export function observedLanguage(source,field,answer){
+ if(!LANGUAGE_FIELDS.includes(field))return {language:null,languageBasis:null};
+ const meta=answer?.meta?.[field];
+ if(meta&&(meta.language==='ru'||meta.language==='en'))return {language:meta.language,languageBasis:meta.languageBasis||'explicit'};
+ if(field==='synopsis'&&source==='letterboxd')return {language:'en',languageBasis:'assumed'};
+ return {language:null,languageBasis:null};
+}
+// -> {offers:{field->{source,value,mode:'replace'|'adopt',language,languageBasis}}, pending:[{field,source,reason}]}
+// enforce: every eligible replacement or adoption is offered. hold: only an equal value (adoption) is offered, a different one is `pending` (it is replaceable once enforce permits it). off or schema absent: nothing is offered; a
+// Russian upgrade of a different nonblank synopsis or poster is `pending`, which is the durable marker that reopens the part when enforce becomes permissible.
+export function planReplacements(input){
+ const out={offers:{},pending:[],fillOverrides:{}};
+ const {provenance,applicable,hasLetterboxdAnchor,agreed,stored,answers,locked,fills={}}=input;
+ if(locked)return out;
+ const mode=provenance?.mode||'off';
+ const confirmed=!hasLetterboxdAnchor||!!agreed; // an unconfirmed observation never replaces a different nonblank value (ADR 0214 decision 5)
+ if(!confirmed)return out;
+ for(const field of CORE_FIELDS){
+  if(blank(stored[field])){
+   // a blank is filled by decideCore in source order. For synopsis and poster a Russian observation of ANOTHER source is better than that fill (ADR 0224): enforce fills the Russian value directly; off and hold fill as before and leave the
+   // durable marker that makes the Russian value an upgrade once enforce permits it.
+   const fill=fills[field];
+   if(!fill||!LANGUAGE_FIELDS.includes(field))continue;
+   const russian=CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],...observedLanguage(source,field,answers[source])})).find(item=>item.language==='ru');
+   if(!russian||same(fill.value,russian.value)||observedLanguage(fill.source,field,answers[fill.source]).language==='ru')continue;
+   if(mode==='enforce')out.fillOverrides[field]={source:russian.source,value:russian.value};
+   else out.pending.push({field,source:russian.source,reason:'language_upgrade'});
+   continue;
+  }
+  const standing=provenance?.fields?.[field]||{name:'unknown',language:null};
+  if(standing.name==='owner')continue;
+  const seen=[];
+  for(const source of CORE_ORDER){
+   const state=fieldState(source,field,{applicable,answers});
+   if(state==='value')seen.push({source,value:answers[source].fields[field],...observedLanguage(source,field,answers[source])});
+   else if((state==='pending'||state==='failed')&&!LANGUAGE_FIELDS.includes(field))break; // an earlier source still owes its answer: precedence decides first
+  }
+  if(!seen.length)continue;
+  // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order
+  const pick=LANGUAGE_FIELDS.includes(field)?[...seen].sort((a,b)=>(LANGUAGE_RANK[b.language]||0)-(LANGUAGE_RANK[a.language]||0))[0]:seen[0];
+  const equal=same(stored[field],pick.value),isLanguage=LANGUAGE_FIELDS.includes(field);
+  const upgrade=isLanguage&&pick.language==='ru'&&standing.language!=='ru'; // P3-A: a confirmed Russian value may replace an eligible unknown or English one
+  const replaceable=REPLACEABLE.includes(standing.name);
+  if(!upgrade&&!replaceable)continue;
+  if(isLanguage&&!equal&&pick.language!=='ru'&&standing.language!=='en')continue; // P3-A: English or unknown never replaces a different nonblank unknown-language value
+  if(mode==='enforce'){out.offers[field]={source:pick.source,value:pick.value,mode:equal?'adopt':'replace',language:pick.language,languageBasis:pick.languageBasis};continue;}
+  if(equal){if(mode==='hold')out.offers[field]={source:pick.source,value:pick.value,mode:'adopt',language:pick.language,languageBasis:pick.languageBasis};continue;}
+  if(mode==='hold'||upgrade)out.pending.push({field,source:pick.source,reason:upgrade?'language_upgrade':'replacement'});
+ }
+ return out;
+}
+
 // ---- credits (decisions 2 and 8) ----
 // A person id is person:<role>/<key>. Letterboxd persons are actor/<slug>, director/<slug>; TMDB persons tmdb_actor/<id>, tmdb_director/<id>. One namespace per Film.
 export function namespaceOf(personId){
@@ -243,4 +305,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({LANGUAGE_FIELDS,planReplacements,observedLanguage,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
