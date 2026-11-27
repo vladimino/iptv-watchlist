@@ -381,7 +381,7 @@ async function publishedPointer(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null};
 }
-const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000;
+const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000,DISCOVERY_FENCE_COLLISION_SERIES_LIMIT=6;
 // The authority gate still names this run and is ready: a fence refusal then was a generation-counter collision, not a switch of the published run.
 async function authorityStillOwnsRun(env,runId){
  if(typeof DiscoveryAuthority==='undefined')return true;
@@ -1767,7 +1767,7 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
   const typed=TYPED_DISCOVERY_CODES.has(failure.error);
   return {stage:'error',reason:typed?failure.error:String(result.error||'discovery_failed'),at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null,failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null};
  }
- if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
+ if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null,...(result.fenceCollisions?{fenceCollisions:result.fenceCollisions}:{})};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
  if(result.remaining===0&&!(result.cheapRemaining>0)&&!(result.deferred>0)&&!(result.waitingRetry>0)&&!result.legacyPending&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
@@ -1993,7 +1993,13 @@ async function advanceDiscovery(env,body={}){
   else{
    const failure=discoveryFailureFields(e,e?.timings);
    const typed=TYPED_DISCOVERY_CODES.has(failure.error);
-   result={stage:'error',error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
+   // AIR-687: a fence refusal thrown outside `guarded` (status, checkpoint or assignment write) is the same CAS collision on discovery_authority.generation as AIR-534. While the published run and the authority still name this chunk's run,
+   // it is a short, bounded retry, not an `error` record that waits for the next hour boundary (where the hourly cron collides again). A real switch, a held authority or exhausted retries keep the fail-closed error below.
+   let collision=null;
+   if(typed&&failure.error==='discovery_fence'&&programmeRunId&&(Number(current?.fenceCollisions)||0)<DISCOVERY_FENCE_COLLISION_SERIES_LIMIT){
+    try{if(await publishedGenerationMatches(env,programmeRunId)&&await authorityStillOwnsRun(env,programmeRunId))collision={count:(Number(current?.fenceCollisions)||0)+1};}catch{collision=null;}
+   }
+   result=collision?{stage:'partial',generationCollision:true,fenceCollisions:collision.count,checked:0,remaining:null,error:null,retryAt:new Date(Date.now()+DISCOVERY_FENCE_COLLISION_DEFER_MS).toISOString(),programmeRunId}:{stage:'error',error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
   }
  }
  trace.chunk=chunkSummary(result);

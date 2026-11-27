@@ -581,14 +581,17 @@ async function runWorkflowChunk(env,meter){
   const outcome=await advanceDiscovery(env,{caller:'internal',chunkBudgetMs:DISCOVERY_WORKFLOW_CHUNK_BUDGET_MS});
   const saved=outcome?.diagnostic?.saved?.owned===true;
   const busy=outcome?.stage==='busy'||outcome?.discovery?.reason==='busy';
-  return {threw:false,progress:saved,busy,until:outcome?.discovery?.nextCatchUpAt||null,summary:chunkSummary(outcome),saved};
+  // AIR-687: `progress` only says the checkpoint was saved (a state transition, also for an error or a collision retry). `usefulProgress` is real queue movement:
+  // a checked candidate, or cheap-pass/replay work; an error or collision chunk with nothing checked is not.
+  const worked=outcome?.stage!=='error'&&!outcome?.generationCollision&&((outcome?.checked||0)>0||(outcome?.touched||0)>0||(outcome?.replay?.outcomes?.assigned||0)>0);
+  return {threw:false,progress:saved,usefulProgress:saved&&worked,busy,until:outcome?.discovery?.nextCatchUpAt||null,summary:chunkSummary(outcome),saved};
  }catch(e){
   logWorkflowFailure('chunk',e,meter);
   let after=null;
   try{after=await readContinuation(env);}catch{}
   // An unsaved checkpoint stays `running` or keeps the etag we read. Another writer's commit is not this step's progress.
   const saved=!!(after&&after.etag!==before.etag&&after.record?.hopId&&after.record.hopId!==before.record?.hopId&&after.record.stage!=='running');
-  return {threw:true,progress:saved,busy:false,error:diagnosticErrorCode(e),saved};
+  return {threw:true,progress:saved,usefulProgress:false,busy:false,error:diagnosticErrorCode(e),saved};
  }
 }
 async function workflowInstanceStatus(binding,id){

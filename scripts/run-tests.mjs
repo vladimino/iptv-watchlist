@@ -257,6 +257,7 @@ export const CORE_WEIGHTS={
  'discovery-events.mjs':2,
  'discovery-fast-recovery.mjs':2,
  'discovery-fence-collision.mjs':2,
+ 'discovery-fence-hourly-lockstep.mjs':2,
  'discovery-ledger-archive.mjs':2,
  'discovery-revalidation.mjs':2,
  'discovery-seal-resume.mjs':2,
