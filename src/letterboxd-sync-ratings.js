@@ -61,7 +61,15 @@ export function ratingsSlotPhase({ratings, fenceGuard, phase}) {
       const reply = await ratings.step(env, {runId}, {now, clock: ctx.clock || (() => Date.now())});
       if (reply.reason === 'busy') { const until = Date.parse(reply.nextCatchUpAt || ''); return {done: false, wakeAt: Number.isFinite(until) ? until : now + BUSY_WAIT_MS}; }
       // AIR-694: a lost lease or a run the pipeline no longer recognises is an INTERRUPTION of the run (outcome unknown), not a confirmed error; the phase and the stored checkpoint stay known facts.
-      if (INTERRUPTED_REPLIES.includes(reply.reason)) return {done: true, ...interruptedOf(own || inherited, phase, reply.reason), at: at(), counts: countsOf(own)};
+      if (INTERRUPTED_REPLIES.includes(reply.reason)) {
+        // The run is read again: what the step committed before it lost its lease is positively THIS slot's work (same run id, same slot key). The same builder as for a stored `unknown` run turns that record into the
+        // Event contract in memory only: nothing is stored, no terminal state is invented and the run is not stepped again. A run that is not ours, or already terminal, gives no contract here.
+        const latest = await ratings.readRun(env).catch(() => null);
+        const mine = latest && latest.runId === runId && latest.slotKey === ctx.slotKey ? latest : null;
+        const view = mine && mine.state === 'running' ? {...mine, state: 'unknown', cause: 'interrupted', interruptedPhase: phaseOf(mine, phase), closedAt: at()} : mine;
+        const attributed = mine && ['running', 'unknown'].includes(mine.state) ? view : null;
+        return {done: true, ...interruptedOf(attributed || own || inherited, phase, reply.reason), at: at(), counts: countsOf(own), ...(attributed ? {event: eventOf(ratings, attributed)} : {})};
+      }
       if (reply.reason === 'storage_unsupported') return {done: true, outcome: 'error', at: at(), reason: 'storage_unsupported'};
       return {done: false, wakeAt: now + SLEEP_FLOOR_MS};
     }

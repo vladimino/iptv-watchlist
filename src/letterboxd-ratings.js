@@ -112,8 +112,8 @@ const LetterboxdRatings=(()=>{
   const ended=Date.parse(run.finishedAt||run.closedAt||'');if(!Number.isFinite(ended))return null;
   const n=value=>Number.isInteger(value)&&value>=0?value:0,diary=run.diary||null,counts=diary?.counts||{},facts=diary?.facts||{},lookup=run.removal?.lookup||{};
   const cause=EVENT_CAUSES.includes(run.cause)?run.cause:null;
-  // AIR-694: a run closed as `unknown` never confirmed what it did not finish. A group is reported only when its phase confirmed it (Diary: at least one page was read and checkpointed; removal: at least one removal step committed its counters on the run), otherwise it is null = unknown, never zero. The phase the run was interrupted in is exported with it.
-  const unknownRun=run.state==='unknown',diaryKnown=!unknownRun||n(run.checkpoint?.diaryPagesRead)>0,removalKnown=!unknownRun||!!run.removal;
+  // AIR-694: a run closed as `unknown` never confirmed what it did not finish. A group is reported only when its phase confirmed it (Diary: the step summary with its counts and facts was committed; removal: a removal step committed its settled/lookup counters). A checkpoint, a planned or applied page record or an intents-only container is NOT evidence of an aggregate, otherwise it is null = unknown, never zero. The phase the run was interrupted in is exported with it.
+  const unknownRun=run.state==='unknown',diaryKnown=!unknownRun||(!!run.diary?.counts&&!!run.diary?.facts),removalKnown=!unknownRun||!!(run.removal?.settled||run.removal?.lookup);
   // Removal counters do not overlap: `rated` counts removed films whose rating was found in this run (by Diary or by a member-page
   // lookup), `resolved` counts removal references of the Events Log that were settled with a rating (including films rated earlier).
   return {id:run.runId+'-ratings',type:'ratings',at:new Date(ended).toISOString(),runId:run.runId,trigger:run.trigger==='manual'?'manual':'scheduled',state:run.state,cause,
@@ -349,7 +349,7 @@ const LetterboxdRatings=(()=>{
   const prior=run.diary||null;
   if((cp.diaryPagesRead||0)>=1)return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
-  let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0,unratedLids=[],identityCounts={};
+  let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=null,resolved=0,unratedLids=[],identityCounts={};
   // AIR-393: the films this page changes are *planned* from the view before any fact is written and saved on the run record under the page's
   // key (`diary.pageChanges[page]`, state `planned`), so a kill after the facts are written cannot lose them. A plan is an intent, not a
   // receipt: only a contribution in state `applied` reaches the event, and it is made `applied` with the page checkpoint after the facts were
@@ -372,7 +372,7 @@ const LetterboxdRatings=(()=>{
       plan={...mergeChanges(null,await labelledChanges(env,groups),STORE_CAP),state:'planned',news:2};planned[key]=plan;
       await own(current=>({...current,updatedAt:iso(clock()),diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),[key]:plan}}}));
      }
-    }catch(e){if(e instanceof LeaseLost){leaseLost=true;return;}plan=null;incomplete=true;}
+    }catch(e){if(e instanceof LeaseLost){leaseLost=e.how;return;}plan=null;incomplete=true;}
    }
    mark('planned');
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
@@ -408,10 +408,10 @@ const LetterboxdRatings=(()=>{
   mark('pageSaving');
    pagesRead++;stepPages++;
    try{await own(current=>({...current,updatedAt:iso(clock()),...(Object.keys(pageNow).length?{diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),...pageNow}}}:{}),checkpoint:{...current.checkpoint,diaryPagesRead:pagesRead,diaryNextPage:next?.page??null,diaryMode:next?.mode??current.checkpoint.diaryMode}}));return true;}
-   catch(e){if(e instanceof LeaseLost){leaseLost=true;return false;}throw e;}
+   catch(e){if(e instanceof LeaseLost){leaseLost=e.how;return false;}throw e;}
   };
   const diary=await LetterboxdDiary.syncHistory(env,{now:clock(),afterPage,beforePage:async()=>remaining()>LEASE_MARGIN_MS,onPage,writer:{runId:run.runId,step:stepId},progressWrites:true});
-  if(leaseLost)throw new LeaseLost();
+  if(leaseLost)throw new LeaseLost(typeof leaseLost==='string'?leaseLost:'expired');
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
    facts:addCounts(prior?.facts,{...facts,enabled:true}),...(Object.keys(identityCounts).length||prior?.identity?{identity:addCounts(prior?.identity,identityCounts)}:{}),removalResolved:(prior?.removalResolved||0)+resolved,...(Object.keys({...stored,...planned,...pageNow}).length?{pageChanges:{...stored,...planned,...pageNow}}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};

@@ -759,13 +759,24 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
    html.ev={type:'ratings',state:'error',cause};assert.equal(vm.runInContext('eventPresentationStatus(ev)',html),status);
   }
  }
- // (d) A lost lease in the removal phase: the reply carries the real phase of the run; no counters are guessed.
+ // (d) A lost lease in the removal phase after a confirmed Diary, with NO terminal readback: the Event keeps the confirmed Diary counts from the same builder, the unconfirmed removal stays unknown, nothing is stored or rerun.
  {
-  const run={current:{...closed({phase:'removal',interruptedPhase:null,state:'running',cause:null}),lease:{step:'s',expiresAt:'2026-11-27T21:34:09.374Z'}},reply:{reason:'lease_lost'}},p=portsOf(run);
+  const diary={counts:{pages:1,rows:50,added:1,updated:0},facts:{written:1,unchanged:49,skipped:0,conflicts:0},historicalCoverage:'incomplete'};
+  const run={current:{...closed({phase:'removal',interruptedPhase:null,state:'running',cause:null,checkpoint:{diaryPagesRead:1,diaryNextPage:null,removalChecked:0},diary,removal:{intents:[{id:'x'}]}}),lease:{step:'s',expiresAt:'2026-11-27T21:34:09.374Z'}},reply:{reason:'lease_lost'}},p=portsOf(run);
+  const before=JSON.stringify(run.current);
   const out=await p.reconcile.run({env:{},slotKey:'2026-11-21T1030',epoch:1,now:()=>T('2026-11-21T09:40:00Z')});
   assert.deepEqual([out.outcome,out.interrupted],['error',{reason:'lease_lost',phase:'removal'}]);
-  const f=Sync.slotEventPayloads({key:'2026-11-21T1030'},{ratings:{outcome:'finished',interruption:out.interrupted},watchlist:{outcome:'no_change'},closedAt:'2026-11-21T09:50:00.000Z'}).ratings.payload;
-  assert.deepEqual([f.state,f.interruptedPhase,f.diary,f.reason,f.outcome],['unknown','removal',null,'lease_lost','finished']);
+  assert.deepEqual([out.event.state,out.event.interruptedPhase,out.event.diary.rows,out.event.diary.written,out.event.removal],['unknown','removal',50,1,null],'an intents-only removal container is not a count; the confirmed Diary is kept');
+  assert.equal(JSON.stringify(run.current),before,'nothing was stored and the run record was not changed');
+  const r=await wholeRun({ratings:okPort('finished',{at:'2026-11-21T09:45:00.000Z'}),watchlist:okPort('no_change'),reconcile:{async run(c){return p.reconcile.run(c);}}});
+  assert.equal(r.f.db.sql("SELECT COUNT(*) AS n FROM letterboxd_slot_event")[0].n,2);
+  const {ev,card,interrupted}=await drawn(r.b);
+  assert.deepEqual([ev.state,ev.diary.rows,ev.removal,ev.reason],['unknown',50,null,'lease_lost']);
+  assert.match(card,/записей проверено/);assert.doesNotMatch(card,/Удалений обработано/);assert.equal(interrupted,true);
+  // a run that is NOT this slot's own (an inherited run) gives no contract and no counters
+  const other={current:{...run.current,slotKey:'2026-11-20T1030'},reply:{reason:'lease_lost'}};
+  const o=await portsOf(other).ratings.run({env:{},slotKey:'2026-11-21T1030',epoch:1,now:()=>T('2026-11-21T09:40:00Z')});
+  assert.deepEqual([o.outcome,o.counts,o.event],['interrupted',null,undefined]);
  }
 }
 console.log('letterboxd-sync ok');

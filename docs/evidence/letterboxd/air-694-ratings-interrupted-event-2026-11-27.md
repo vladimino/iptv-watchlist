@@ -20,13 +20,13 @@
 ## Fix
 
 - Interruption classification in the slot ports (Diary phase: `interrupted`; reconciliation: an `error` of the reconciliation with the interruption beside it); counters only from the slot's own run; a finished Diary outcome is never changed.
-- The pipeline contract (`ratingsEventOf`) exports `interruptedPhase` and keeps unconfirmed groups `null`; the slot freezes its own honest fallback only when the pipeline gave no contract.
+- The pipeline contract (`ratingsEventOf`) exports `interruptedPhase`; a group is reported only from a committed aggregate (the Diary step summary, the removal settled/lookup counters), never from a checkpoint, an applied page record or an intents-only container; confirmed `details` and genuine zeros are kept. After a lost lease the slot's own still-`running` run is read again and run through the same builder in memory (nothing stored, no rerun); the slot freezes its own honest fallback only when the pipeline gave no contract.
 - Reader: legacy `outcome`/`reason` shape classified; title from the badge status; the specific reason before the generic cause. Stored events are not rewritten.
-- Diagnostic (natural next occurrence): one bounded `ratings_step_lease_lost` line with `how`, `elapsedMs` and stage `marks`; no rows, URLs, titles or personal data.
+- Diagnostic (natural next occurrence): one bounded `ratings_step_lease_lost` line with the exact `how` (`expired`, `record_taken`, `cas_retries`, preserved through the Diary page callbacks), `elapsedMs` and stage `marks`; no rows, URLs, titles or personal data.
 
 ## Proof
 
-Offline: `tests/letterboxd-sync.mjs` (real chain closed `unknown` run → `ratingsEventOf` → ports → slot and outbox → stored Event → `eventHTML`/`eventMatchesFilters`; direct lease loss then stale closure; an already `unknown` run; interruption in removal after a finished Diary; exactly two Events), `tests/letterboxd-sync-ratings.mjs`, `tests/ratings-event-details.mjs` (diagnostic line and null groups), `tests/events-result-status.mjs`.
+Offline: `tests/letterboxd-sync.mjs` (real chain closed `unknown` run → `ratingsEventOf` → ports → slot and outbox → stored Event → `eventHTML`/`eventMatchesFilters`; direct lease loss then stale closure; an already `unknown` run; interruption in removal after a finished Diary; exactly two Events), `tests/letterboxd-sync-ratings.mjs`, `tests/ratings-event-details.mjs` (exact `how` for expiry, record takeover and CAS exhaustion; partial aggregates; committed zeros), `tests/events-result-status.mjs`.
 
 ## Open
 
