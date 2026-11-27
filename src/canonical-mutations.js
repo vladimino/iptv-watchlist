@@ -282,6 +282,17 @@ export async function mergeFilms(env,input){
   if(left&&!right)s.push(['UPDATE film_rated_admission SET film_id=? WHERE film_id=?',[to,from]]);
   s.push(['INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) SELECT ?,basis,watchlist,evidence_json,request_id,observed_at,? FROM film_retention WHERE film_id=? ON CONFLICT(film_id) DO UPDATE SET watchlist=excluded.watchlist,evidence_json=excluded.evidence_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_retention.observed_at',[to,at,from]]);
  }
+ // Lid-only admission (schema 48, ADR 0217 decision 5c, AIR-674): the immutable proof row of a lid-only Film follows the merge to the survivor. Only `film_id` moves (the trigger freezes every other column), so the proof, receipt key and
+ // history stay as admitted and the row is never deleted. One row per lid and one lid-only Film per row: a survivor that holds a different admission is a competing ownership and refuses the merge, as two rated admissions do.
+ // The existence of both sides is asserted INSIDE the batch, so a stale survivor or an admission that appeared after the read rolls everything back. Absent table (schema below 48): nothing can be admitted, nothing moves.
+ if(await hasTable(db,'film_lid_admission')){
+  const [left,right]=await Promise.all([one(db,'SELECT lid FROM film_lid_admission WHERE film_id=?',[from]),one(db,'SELECT lid FROM film_lid_admission WHERE film_id=?',[to])]);
+  if(left&&right)throw failed('film_person_data_conflict');
+  if(left){
+   s.push([assertSql('EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND film_id=?) AND NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE film_id=?)'),[left.lid,from,to]]);
+   s.push(['UPDATE film_lid_admission SET film_id=? WHERE lid=? AND film_id=?',[to,left.lid,from]]);
+  }else s.push([assertSql('NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE film_id=?)'),[from]]);
+ }
  const discarded=[];
  for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded))s.push(item);
  // Catalog Enrichment (schema 47): the retained membership of the retired Film moves to the survivor and its state rows go, in the SAME batch as the delete (both tables reference the Film, so the delete would otherwise be refused);
