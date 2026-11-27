@@ -124,6 +124,10 @@ const lease=async(env,id='lease-aaaaaaaa',now=T)=>{const r=await S.acquireLease(
   'a control generation moved (a scope change)':{mutate:(file)=>sql(file,"UPDATE catalog_enrichment_scope SET revision=revision+1")},
   'the lease lost':{mutate:(file)=>sql(file,"UPDATE projection_run SET lease_id='lease-other000'")},
   'the lease expired':{mutate:(file,)=>sql(file,"UPDATE projection_run SET lease_until='2020-01-01T00:00:00.000Z'")},
+  // the RESOLVED identity: the trusted claim moved to another Film, or the Film was merged, after the signal was read
+  'the trusted claim moved to another Film':{mutate:(file)=>sql(file,"UPDATE film_external_id SET film_id='film:c' WHERE scheme='tmdb' AND value='10'")},
+  'the claim became conflicting':{mutate:(file)=>sql(file,"UPDATE film_external_id SET conflicting=1 WHERE scheme='tmdb' AND value='10'")},
+  'the Film was merged (a redirect exists)':{mutate:(file)=>sql(file,`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:a','film:c','${T}')`)},
  };
  for(const [name,{mutate}] of Object.entries(cases)){
   const {env,file}=world();
@@ -169,6 +173,33 @@ const lease=async(env,id='lease-aaaaaaaa',now=T)=>{const r=await S.acquireLease(
  assert.deepEqual((await S.runnableSignals(w.env,{now:at(3)})).map(item=>item.subject),[],'a backed-off signal is not runnable before its retry');
  assert.deepEqual((await S.runnableSignals(w.env,{now:at(70)})).map(item=>item.subject),['tmdb:10'],'and is runnable when due');
  fail=false;
+}
+
+// ---- a stale failure never backs off a fresher event ----
+{
+ const {env,file}=world();
+ const generation=active(file);const id=await lease(env);
+ sql(file,`INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:10','rated','',1,'pending','${T}');`);
+ const [signal]=await S.runnableSignals(env,{now:at(1)});
+ sql(file,"UPDATE enrichment_signal SET version=2,attempts=0,retry_at=NULL,state='pending' WHERE subject='tmdb:10'"); // a re-arm after the signal was read
+ await S.recordFailure(env,{signal,now:at(1),error:{code:'boom'}});
+ const row=signalOf(file,'admitted','tmdb:10','rated');
+ assert.deepEqual([row.attempts,row.retry_at,row.last_error],[0,null,null],'the failure of version 1 does not touch version 2');
+ void generation;void id;
+ await S.recordFailure(env,{signal:{...signal,version:2},now:at(1),error:{code:'boom'}});
+ assert.equal(signalOf(file,'admitted','tmdb:10','rated').attempts,1,'the failure of the observed version is recorded');
+}
+
+// ---- eligibility is decided BEFORE the window: held heads cannot hide runnable signals ----
+{
+ const {env,file}=world();
+ // the rated scope is held (disabled); the discovery scope is enabled
+ sql(file,`INSERT INTO catalog_enrichment_control VALUES (1,'inactive',0,1,'${T}','owner');UPDATE catalog_enrichment_control SET state='active',generation=1,revision=2;INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,0,1,'${T}'),('discovery',1,1,1,'${T}');`);
+ const films=Array.from({length:12},(_,i)=>`('film:h${i}',2,NULL,'H${i}','${T}')`).join(',');
+ sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ${films};`+Array.from({length:12},(_,i)=>`INSERT INTO film_external_id VALUES ('film:h${i}','tmdb','${100+i}',1,0,NULL);INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:${100+i}','rated','',1,'pending','2026-11-25T00:00:0${i%10}.000Z');`).join('')
+  +`INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:10','discovery','',1,'pending','${T}');`);
+ const runnable=await S.runnableSignals(env,{now:at(1),limit:5});
+ assert.deepEqual(runnable.map(item=>item.subject),['tmdb:10'],'12 older held heads do not fill the window; the one runnable signal is returned');
 }
 
 // ---- consumption of the reopening kinds ----

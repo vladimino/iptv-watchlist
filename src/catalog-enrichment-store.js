@@ -105,25 +105,34 @@ export function emitStatement({kind,subject,source='',part='',digest=null,cause=
 export async function runnableSignals(env,{now,limit=50}){
  instant(now);
  const handle=db(env);
- const admitted=(await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,e.film_id AS film_id FROM enrichment_signal s JOIN film_external_id e ON e.scheme='tmdb' AND e.value=substr(s.subject,6) AND e.trusted=1 AND e.conflicting=0 WHERE s.kind='admitted' AND s.state='pending' AND s.acked_version<s.version AND s.subject LIKE 'tmdb:%' AND (s.retry_at IS NULL OR s.retry_at<=?) AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope IN (SELECT value FROM json_each(?))) ORDER BY s.armed_at LIMIT ?`,[now,JSON.stringify(SCOPES),limit])).filter(row=>(SOURCE_SCOPES[row.source]||[]).length);
- const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,limit]);
- const own=[];
- for(const row of admitted){
-  const scopes=SOURCE_SCOPES[row.source];
-  const enabled=await one(handle,`SELECT 1 AS x FROM catalog_enrichment_scope WHERE enabled=1 AND scope IN (${marks(scopes)})`,scopes);
-  if(enabled)own.push(row);
- }
- return [...own,...others].map(row=>({kind:row.kind,subject:row.subject,source:row.source,part:row.part,version:Number(row.version),digest:row.digest??null,filmId:row.film_id}));
+ // Eligibility is decided in SQL BEFORE the window: a signal whose source has no enabled scope is not a candidate, so held heads can never fill the LIMIT and hide runnable signals behind them.
+ const sources=Object.keys(SOURCE_SCOPES).filter(source=>(SOURCE_SCOPES[source]||[]).length);
+ const eligible=sources.map(source=>`(s.source=? AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope IN (${marks(SOURCE_SCOPES[source])})))`).join(' OR ')||'0';
+ const eligibleParams=sources.flatMap(source=>[source,...SOURCE_SCOPES[source]]);
+ const admitted=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,e.film_id AS film_id FROM enrichment_signal s JOIN film_external_id e ON e.scheme='tmdb' AND e.value=substr(s.subject,6) AND e.trusted=1 AND e.conflicting=0 WHERE s.kind='admitted' AND s.state='pending' AND s.acked_version<s.version AND s.subject LIKE 'tmdb:%' AND (s.retry_at IS NULL OR s.retry_at<=?) AND (${eligible}) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) ORDER BY s.armed_at LIMIT ?`,[now,...eligibleParams,limit]);
+ const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=s.subject) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,limit]);
+
+ return [...admitted,...others].map(row=>({kind:row.kind,subject:row.subject,source:row.source,part:row.part,version:Number(row.version),digest:row.digest??null,filmId:row.film_id}));
 }
 
 // ---- guarded consumption ----
 // ONE condition, repeated verbatim in every effect and in the acknowledgement. `scopes`: the scopes whose enabled flag justifies the effect (admitted: the source's scopes); for the other kinds `filmId` selects "at least
 // one enabled membership of the Film" instead.
+// The RESOLVED IDENTITY is part of the guard: an `admitted` effect still names the Film that holds the trusted, non-conflicting tmdb claim at commit time and that Film is not redirected; any other effect names a Film that still
+// exists and is not redirected. A claim that moved, a merge or a retirement after the signal was read therefore applies nothing and leaves the newest version pending.
+function identityGuard(signal){
+ const filmId=signal.filmId||signal.subject;
+ if(signal.kind==='admitted'){
+  const value=String(signal.subject).startsWith('tmdb:')?String(signal.subject).slice(5):'';
+  return {sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)",params:[filmId,value,filmId]};
+ }
+ return {sql:'EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)',params:[filmId,filmId]};
+}
 export function consumeGuard({signal,generation,leaseId,now,scopes=null}){
- const lease=leaseGuard(leaseId,now),control=controlGuard(generation);
+ const lease=leaseGuard(leaseId,now),control=controlGuard(generation),identity=identityGuard(signal);
  const justification=scopes?{sql:`EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE enabled=1 AND scope IN (${marks(scopes)}))`,params:[...scopes]}:{sql:'EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=?)',params:[signal.filmId||signal.subject]};
- const sql=`(EXISTS (SELECT 1 FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=? AND state='pending' AND version=? AND acked_version<?) AND ${control.sql} AND ${lease.sql} AND ${justification.sql})`;
- return {sql,params:[signal.kind,signal.subject,signal.source??'',signal.part??'',signal.version,signal.version,...control.params,...lease.params,...justification.params]};
+ const sql=`(EXISTS (SELECT 1 FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=? AND state='pending' AND version=? AND acked_version<?) AND ${control.sql} AND ${lease.sql} AND ${justification.sql} AND ${identity.sql})`;
+ return {sql,params:[signal.kind,signal.subject,signal.source??'',signal.part??'',signal.version,signal.version,...control.params,...lease.params,...justification.params,...identity.params]};
 }
 // The effect statements of one signal kind, each `WHERE <guard>`; the acknowledgement is appended last by `consumeSignal`.
 // admitted: the retained membership and the Film's state row. The other kinds reopen work: the Film's `plan_epoch` and, once, the `refresh_epoch` of the affected rows (every row for an anchor change, the part for a protection
@@ -172,13 +181,15 @@ export async function consumeSignal(env,{signal,generation,leaseId,now}){
 }
 // A failed consumption stays pending with attempts, the error class and the next retry (the ADR 0098 tiers: 1, 5, 15 and 60 minutes, then hourly).
 const RETRY_MIN=[1,5,15,60];
+// The failure is recorded ONLY against the exact version that was observed: a stale failure must not back off a fresher event (the re-arm resets attempts and retry).
 export async function recordFailure(env,{signal,now,error}){
  const handle=db(env);
- const row=await one(handle,'SELECT attempts FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=?',[signal.kind,signal.subject,signal.source??'',signal.part??'']);
+ const row=await one(handle,'SELECT attempts FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=? AND version=?',[signal.kind,signal.subject,signal.source??'',signal.part??'',signal.version]);
+ if(!row)return;
  const attempts=Number(row?.attempts??0)+1;
  const retryAt=new Date(Date.parse(now)+RETRY_MIN[Math.min(attempts-1,RETRY_MIN.length-1)]*60000).toISOString();
  const code=String(error?.code||error?.cause?.code||'consume_failed').replace(/[^a-z0-9_]/gi,'_').slice(0,80);
- await handle.prepare('UPDATE enrichment_signal SET attempts=?,last_error=?,retry_at=? WHERE kind=? AND subject=? AND source=? AND part=? AND state=\'pending\'').bind(attempts,code,retryAt,signal.kind,signal.subject,signal.source??'',signal.part??'').run();
+ await handle.prepare('UPDATE enrichment_signal SET attempts=?,last_error=?,retry_at=? WHERE kind=? AND subject=? AND source=? AND part=? AND version=? AND state=\'pending\'').bind(attempts,code,retryAt,signal.kind,signal.subject,signal.source??'',signal.part??'',signal.version).run();
 }
 
 // ---- the Monitor fact reader (ADR 0211 decision 5 as amended by ADR 0219) ----

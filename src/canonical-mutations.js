@@ -63,7 +63,7 @@ async function current(db,kind,id){return Number((await one(db,'SELECT revision 
 // error says whether the authority moved, an entity moved, or the data itself refused (a trusted id, an ordinal, a missing person).
 // ADR 0219 causal wake. After a commit that touched a table whose triggers write the Catalog Enrichment inbox, make idle runnable work start without waiting for the cron.
 // Best effort, AFTER the commit (never inside the batch, no network in a transaction): a lost wake is recovered by reconcile, and while the producer is dormant (not bundled, schema absent, control not active) it is a no-op.
-const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission/i;
+const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission|film_rated_admission/i;
 async function wakeEnrichment(env,statements){
  if(typeof CatalogEnrichmentRunner==='undefined')return;
  if(!statements.some(([sql])=>ENRICHMENT_CAUSAL.test(sql)))return;
@@ -94,6 +94,8 @@ async function commit(env,gate,statements,entities,tail=[]){
   if(/UNIQUE constraint failed: film_person_credit|UNIQUE constraint failed: index 'film_person_credit_order'/i.test(message))throw failed('credit_ordinal_conflict',error);
   if(/UNIQUE constraint failed: person\.role_id/i.test(message))throw failed('person_role_collision',error);
   if(/FOREIGN KEY constraint failed/i.test(message))throw failed('film_person_reference',error);
+  // an UNCERTAIN outcome (the batch may have committed before the answer was lost) wakes too: a wake with nothing runnable is a no-op, and the committed signal never waits for the reconcile alone
+  await wakeEnrichment(env,statements);
   throw failed('film_person_unavailable',error);
  }
  await wakeEnrichment(env,statements);
@@ -282,6 +284,14 @@ export async function mergeFilms(env,input){
  }
  const discarded=[];
  for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded))s.push(item);
+ // Catalog Enrichment (schema 47): the retained membership of the retired Film moves to the survivor and its state rows go, in the SAME batch as the delete (both tables reference the Film, so the delete would otherwise be refused);
+ // the survivor's own anchor_changed signal (written by the redirect trigger) then plans it from its anchors.
+ if(await hasTable(db,'catalog_enrichment_member')){
+  s.push(['INSERT OR IGNORE INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) SELECT ?,scope,admitted_at,signal_key FROM catalog_enrichment_member WHERE film_id=?',[to,from]]);
+  s.push(["INSERT OR IGNORE INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,plan_epoch) SELECT ?,'film','*',0,'active','check_anchors',?,?,0 WHERE EXISTS (SELECT 1 FROM catalog_enrichment_member WHERE film_id=?)",[to,at,at,to]]);
+  s.push(['DELETE FROM catalog_enrichment_state WHERE film_id=?',[from]]);
+  s.push(['DELETE FROM catalog_enrichment_member WHERE film_id=?',[from]]);
+ }
  for(const sql of [
   'DELETE FROM film_person_credit WHERE film_id=?',
   'DELETE FROM film_alias WHERE film_id=?',
