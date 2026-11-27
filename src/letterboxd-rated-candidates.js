@@ -403,9 +403,14 @@ const LetterboxdRatedCandidates = (() => {
     // receipt digest (`sha`) is unchanged. A call that made no check (a recovery from the durable intent) has no page and no document, so it keeps the legacy root and never fabricates a common one.
     const legacy = await digestHex({code, path: film.filmPath || null, tmdb: film.tmdb, title: film.title, year: film.year, source: 'letterboxd_rated_archive_page'});
     const root = commonRoot || legacy;
+    // The Diary and Watchlist steps' LEGACY root of the SAME page is computable from what this step holds (code, film path, movie id, title, year): a prior legacy evidence row of those routes is matched by its own key, and this check then joins
+    // that root (one source, one root). The Diary legacy digest is `sha256(JSON{lid,slug,path,tmdb,title,year,source:'letterboxd_diary_page'})`, in that key order.
+    const slug = String(film.filmPath || '').replace(/^\/film\/|\/$/g, '');
+    const diaryLegacy = commonRoot && slug ? await digestHex({lid: code, slug, path: film.filmPath, tmdb: film.tmdb, title: film.title, year: film.year, source: 'letterboxd_diary_page'}) : null;
+    const alternates = diaryLegacy ? ['ratings_diary', 'watchlist_admission'].map(route => ({subject: {kind: 'letterboxd_lid', value: code}, route, sourceRoot: diaryLegacy, sourceScope: null})) : [];
     const at = new Date().toISOString();
     const out = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: intended ? {tmdb: intended} : null, receipt: {tmdb: film.tmdb, archiveSha256: sha, title: film.title, year: film.year, filmPath: film.filmPath || null},
-      evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12) + ':legacy:' + legacy, sourceScope: sha, ...(commonRoot ? {legacySourceRoot: legacy} : {}), observedAt: at},
+      evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12) + ':legacy:' + legacy, sourceScope: sha, ...(commonRoot ? {legacySourceRoot: legacy, legacyAlternates: alternates} : {}), observedAt: at},
       // ADR 0222: the terminal review is the row's own D1 document write, committed in ONE batch with the history assertion of this attempt (`guard.statement`); a refused batch writes nothing and the attempt replans.
       finalize: async (result, guard) => {
         const reason = result.outcome === 'other_code' ? 'duplicate_tmdb' : result.outcome === 'conflict' ? 'historical_alias_conflict' : 'source_changed';
@@ -450,8 +455,10 @@ const LetterboxdRatedCandidates = (() => {
       return current;
     });
     if (outcome === 'already') {
-      if (atD1) await admitRatedAtD1(env, film, code, sha, evidence, {commonRoot: recover.commonRoot || null});
-      else {
+      // A fetchless replay of a row completed concurrently (`recover.settled`) made no check and records no page check, exactly as the normal branch below; at `d1` the R2 entry is never written.
+      if (atD1) {
+        if (!recover.settled) await admitRatedAtD1(env, film, code, sha, evidence, {commonRoot: recover.commonRoot || null});
+      } else {
         const stored = await writeAdmission(env, film);
         if (stored.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, stored.film);
       }

@@ -1511,7 +1511,7 @@ const file=fresh('d1'),env=world(file);
  const legacy=createHash('sha256').update(JSON.stringify({lid:LID,slug:SLUG,path:'/film/'+SLUG+'/',tmdb:TM,title:'Fixture Legacy',year:2019,source:'letterboxd_diary_page'})).digest('hex');
  const receipt={tmdb:TM,archiveSha256:legacy,title:'Fixture Legacy',year:2019,filmPath:'/film/'+SLUG+'/'};
  const row=(route,root,extra={})=>({subject:{kind:'letterboxd_lid',value:LID},relation:'same_work',object:{kind:'tmdb_movie',value:TM},polarity:'asserts',route,method:'page_check',sourceRoot:root,sourceRef:'diary:'+LID,observedAt:new Date(NOW).toISOString(),...extra});
- const NEWSTYLE=route=>row(route,common,{legacySourceRoot:legacy,legacyRoutes:['ratings_diary','watchlist_admission']});
+ const NEWSTYLE=route=>row(route,common,{legacySourceRoot:legacy,legacyAlternates:[{route:'ratings_diary',sourceRoot:legacy},{route:'watchlist_admission',sourceRoot:legacy}]});
  const stamp=()=>new Date(NOW).toISOString();
  const lidKeyReceipts=db=>rows(db,"SELECT request_id,state,content_digest,operation_key FROM canonical_write_receipt WHERE operation_key='admission:lid:"+LID+"' ORDER BY created_at,request_id");
 
@@ -1544,6 +1544,36 @@ const file=fresh('d1'),env=world(file);
  // a repeat of that sibling check is idempotent
  await D1.admitVerifiedFilm(oldEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('watchlist_admission'),now:()=>stamp()});
  assert.equal(evidence(oldDb).length,2);
+
+ // (3b) the RATED ARCHIVE on a prior-legacy database (the Diary admission and its LEGACY evidence row written by the old code, no Ratings link yet, so the archive's own import rule lets it check): its own legacy key differs (subject kind,
+ // route, encoding, scope) and cannot find the Diary row by itself, but the Diary legacy root of the same page is computable from what the archive holds, so the archive check joins that root: ONE root across the routes
+ {
+  const legacyDb=fresh('d1'),legacyEnv=world(legacyDb);
+  await seed(legacyEnv,LID);
+  assert.equal((await D1.admitVerifiedFilm(legacyEnv,{kind:'lid',lid:LID,receipt,evidence:row('ratings_diary',legacy),now:()=>stamp()})).outcome,'admitted');
+  const SHA3='1'.repeat(64),KEY3='letterboxd/imports/'+SHA3+'/rated-candidates.json';
+  setDocD1(legacyDb,KEY3,{schemaVersion:1,archiveSha256:SHA3,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[LID]:{code:LID,state:'pending',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name:'Fixture Legacy',year:2019,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:null}},checkpoint:{cursor:null,stopped:null}});
+  const viaArchive=await Candidates.identityStep(legacyEnv,{sha:SHA3,fetchImpl});
+  assert.equal(viaArchive.verified,true,JSON.stringify(viaArchive));
+  const all=rows(legacyDb,"SELECT route,source_root FROM film_identity_evidence WHERE subject_value='"+LID+"' ORDER BY seq");
+  assert.deepEqual(all.map(r=>r.route),['ratings_diary','letterboxd_rated_archive'],'the archive recorded its own evidence row beside the Diary one');
+  assert.equal(new Set(all.map(r=>r.source_root)).size,1,'Diary legacy row and the archive check: ONE root: '+JSON.stringify(all));
+  assert.equal(all[0].source_root,legacy);
+ }
+ // (3c) the claim bridge handoff carries the ADOPTED root of the evidence row (the coordinator names it), never an independent common root beside it
+ {
+  const out=await D1.admitVerifiedFilm(oldEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('ratings_diary'),now:()=>stamp()});
+  assert.equal(out.evidenceRoot,legacy,'the coordinator hands on the adopted root');
+  const fresh2=await D1.admitVerifiedFilm(newEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('ratings_diary'),now:()=>stamp()});
+  assert.equal(fresh2.evidenceRoot,common,'and the common root where nothing legacy exists');
+ }
+ // (3d) an uncertain lookup never mints a second root: a failing ledger read is a failure of the check, not "no legacy row"; only an ABSENT ledger means no legacy row
+ {
+  const flaky=world(oldDb);
+  const failing={...flaky,DB:d1Standin(oldDb,{onQuery:async text=>{if(/FROM film_identity_evidence WHERE evidence_key/.test(text))throw new Error('D1_ERROR: read failed');}})};
+  await assert.rejects(()=>D1.admitVerifiedFilm(failing,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('watchlist_admission'),now:()=>stamp()}),()=>true,'the read failure surfaces');
+  assert.equal(new Set(rows(oldDb,"SELECT source_root FROM film_identity_evidence WHERE subject_value='"+LID+"'").map(r=>r.source_root)).size,1,'no second root was minted');
+ }
 
  // (4) a source with NO legacy row records under the common root for every route (the new database above): two routes, one root
  const second=await D1.admitVerifiedFilm(newEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('watchlist_admission'),now:()=>stamp()});

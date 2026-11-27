@@ -376,7 +376,7 @@ const LetterboxdDiaryIdentity=(()=>{
     if(intended===null||intended===String(verdict.tmdb)){if(!(await intend(item,verdict.tmdb)))return {ok:false,reason:'deferred'};}
     const evidenceSha256=await pageCheckDigest(item,verdict);
     return {ok:true,receipt:{tmdb:verdict.tmdb,archiveSha256:evidenceSha256,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath},
-     evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:outcome.commonRoot||evidenceSha256,sourceRef:'diary:'+lid+':legacy:'+evidenceSha256,...(outcome.commonRoot?{legacySourceRoot:evidenceSha256,legacyRoutes:['ratings_diary','watchlist_admission']}:{}),observedAt:iso(clock())}};
+     evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:outcome.commonRoot||evidenceSha256,sourceRef:'diary:'+lid+':legacy:'+evidenceSha256,...(outcome.commonRoot?{legacySourceRoot:evidenceSha256,legacyAlternates:[{route:'ratings_diary',sourceRoot:evidenceSha256},{route:'watchlist_admission',sourceRoot:evidenceSha256}]}:{}),observedAt:iso(clock())}};
    };
    const finalize=async(result,guard)=>{
     record(item,result.outcome==='source_unavailable'?String(result.reason||'check_failed'):D1_TERMINAL[result.outcome]||'admission_failed');
@@ -404,7 +404,7 @@ const LetterboxdDiaryIdentity=(()=>{
     case 'admitted':case 'present':{
      if(!tmdb){record(item,'deferred');return;}
      const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb}).catch(()=>({state:'error'}));
-     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,tmdb,verdict?(checkedRoot||checkedDigest):null);labels.set(lid,verdict?label(verdict):{title:null,year:null,tmdb});return;}
+     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,tmdb,verdict?(out.evidenceRoot||checkedRoot||checkedDigest):null);labels.set(lid,verdict?label(verdict):{title:null,year:null,tmdb});return;}
      record(item,linked.state==='conflict'?'link_conflict':'link_failed',linked.state==='conflict'?{}:{tmdb});
      return;
     }
