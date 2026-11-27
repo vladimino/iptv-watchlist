@@ -11,6 +11,7 @@ import {RATED_ADMISSION_ORIGIN} from '../src/canonical-rated-admission-producer.
 import {lidOnlyProofDigest} from '../src/domain/letterboxd-lid-only-digest.js';
 import {admitLidOnlyFilm,ratingsDocumentFence} from '../src/film-admission.js';
 import {MUTATION_STATEMENT_CAP} from '../src/canonical-mutations.js';
+import {ownedAttemptCondition} from '../src/receipt-operation-key.js';
 
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lid-only-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -303,6 +304,25 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  const alias=await run(j,'Ab1',{extra:{links:{fence,tmdbAlias:'603'}}});
  assert.deepEqual([alias.out.outcome,alias.out.reason,alias.out.terminal],['held','ratings_tmdb_link',false]);assert.equal(snapshot(j),beforeJ);
  void file;
+}
+
+// ===== 5c. the owned-attempt assertion of a link batch: an expired or abandoned attempt cannot land a late effect =====
+{
+ const file=fresh();
+ const open=new Date(T0+3600000).toISOString(),now=new Date(T0).toISOString();
+ pending(file,'own-1','admission:lid:Ab1',open);
+ const holds=cond=>Number(rows(file,'SELECT CASE WHEN ('+cond.sql.replace(/\?/g,()=>"'"+String(cond.params.shift()).replace(/'/g,"''")+"'")+') THEN 1 ELSE 0 END AS ok')[0].ok)===1;
+ const cond=over=>ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey:'admission:lid:Ab1',requestId:'own-1',attempt:1,now,...over});
+ assert.equal(holds(cond()),true,'the live pending attempt owns the effect');
+ assert.equal(holds(cond({requestId:'other'})),false,'another request id');
+ assert.equal(holds(cond({attempt:2})),false,'another attempt number');
+ assert.equal(holds(cond({operationKey:'admission:lid:Zz9'})),false,'another key');
+ assert.equal(holds(cond({now:new Date(T0+7200000).toISOString()})),false,'past its window the attempt no longer owns anything');
+ // a later attempt abandons it (ADR 0207 step 2): its late link can never land
+ sqlite(file,"UPDATE canonical_write_receipt SET state='abandoned',error_class='superseded_by_retry',next_attempt_at=NULL,updated_at='"+STAMP+"',settled_at='"+STAMP+"' WHERE request_id='own-1'");
+ assert.equal(holds(cond()),false,'an abandoned attempt owns nothing');
+ assert.throws(()=>ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey:'admission:lid:Ab1',requestId:'',attempt:1,now}),code('film_person_invalid'));
+ assert.throws(()=>ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey:'admission:lid:Ab1',requestId:'x',attempt:0,now}),code('film_person_invalid'));
 }
 
 // ===== 16. statement count: the lid-only batch within the cap =====
