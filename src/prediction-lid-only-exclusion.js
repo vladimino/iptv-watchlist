@@ -15,7 +15,8 @@ import {database,failed,many} from './film-person-authority.js';
 export const LID_ONLY_DEFERRED={status:'not_eligible',reason:'lid_only_deferred'};
 const LID=/^[A-Za-z0-9_-]{1,80}$/;
 const CHUNK=80;
-const MISSING_TABLE=/no such table/i;
+// Only the intended absent migration (0048: no lid-only Film can exist) is an empty answer; a missing OTHER table (the redirects, the claims, the retirement ledger) is an unreadable store and fails closed.
+export const MISSING_LID_ADMISSION=/no such table:\s*(?:main\.)?film_lid_admission\b/i;
 const MAX_HOPS=8;
 
 // The lid an id may stand for (a nomination only). `film:lb:<lid>` and `lb-<lid>` are the lid-only minting and fact-key spellings; a bare lid is a lid. Anything else is not a lid.
@@ -28,11 +29,9 @@ export function lidCandidate(id){
  return LID.test(lid)?lid:null;
 }
 
-// The Films a set of lids nominates: the trusted `letterboxd` claim holder and the proof row's Film. One statement.
-const NOMINATE_SQL=n=>{
- const marks=Array(n).fill('?').join(',');
- return "SELECT e.value AS lid, e.film_id AS film FROM film_external_id e WHERE e.scheme='letterboxd' AND e.trusted=1 AND e.conflicting=0 AND e.value IN ("+marks+") UNION SELECT a.lid AS lid, a.film_id AS film FROM film_lid_admission a WHERE a.lid IN ("+marks+')';
-};
+// The Films a set of lids nominates: the trusted `letterboxd` claim holder and the proof row's Film. One statement, TWO bound parameters whatever the chunk (each is one JSON array read by `json_each`): Cloudflare D1 binds at
+// most 100 parameters per statement (ADR 0078, `src/metadata-cache.js`), so a placeholder list per lid is never used.
+const NOMINATE_SQL="SELECT e.value AS lid, e.film_id AS film FROM film_external_id e WHERE e.scheme='letterboxd' AND e.trusted=1 AND e.conflicting=0 AND e.value IN (SELECT value FROM json_each(?)) UNION SELECT a.lid AS lid, a.film_id AS film FROM film_lid_admission a WHERE a.lid IN (SELECT value FROM json_each(?))";
 
 // THE cohort statement (also run by the aggregate for one Film). `?` = a JSON array of Film ids. -> one row per input Film id that is in the cohort (`origin`). Bounded: redirect chains stop at MAX_HOPS, the reverse walk
 // uses `film_redirect_by_target` (0043). The retirement test is the aggregate's: a retired movie claim is historical evidence, not a current claim.
@@ -43,7 +42,7 @@ export const COHORT_SQL="WITH RECURSIVE chain(origin,cur,hops) AS (SELECT value,
  +"AND NOT EXISTS (SELECT 1 FROM film_external_id e WHERE e.film_id=surv.film AND e.scheme='tmdb' AND e.trusted=1 AND e.conflicting=0 "
  +"AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision d WHERE d.movie_id=e.value AND d.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s2 WHERE s2.supersedes_seq=d.seq)))";
 
-const missingTable=error=>MISSING_TABLE.test(String(error?.message||error?.cause?.message||''));
+const missingTable=error=>MISSING_LID_ADMISSION.test(String(error?.message||error?.cause?.message||''));
 
 // -> the Film ids (of the given list) that are in the cohort. `db` is a D1 binding or a counted binding. Throws `lid_only_exclusion_unreadable`; a missing `film_lid_admission` table is an empty answer.
 export async function cohortFilms(db,filmIds){
@@ -81,7 +80,7 @@ export async function readLidOnlyDeferred(env,ids){
  for(let at=0;at<lids.length;at+=CHUNK){
   const slice=lids.slice(at,at+CHUNK);
   let rows;
-  try{rows=await many(db,NOMINATE_SQL(slice.length),[...slice,...slice]);}
+  try{const list=JSON.stringify(slice);rows=await many(db,NOMINATE_SQL,[list,list]);}
   catch(error){if(missingTable(error))return excluded;throw failed('lid_only_exclusion_unreadable',error);}
   for(const row of rows)for(const id of byLid.get(String(row.lid))||[])add(nominated,String(row.film),id);
  }

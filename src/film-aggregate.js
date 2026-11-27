@@ -24,7 +24,7 @@ import {createHash} from 'node:crypto';
 import {CREDIT_SELECTION_SQL,database} from './film-person-authority.js';
 import {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT} from './film-aggregate-resolver.js';
-import {COHORT_SQL,predictionEligibility} from './prediction-lid-only-exclusion.js';
+import {COHORT_SQL,MISSING_LID_ADMISSION,predictionEligibility} from './prediction-lid-only-exclusion.js';
 
 export {FILM_AGGREGATE_CONTRACT};
 // ADR 0216 decision 6b, the work bounds of candidate discovery.
@@ -441,7 +441,7 @@ async function eligibilitySection(db,resolution){
  try{inCohort=(await db.prepare(COHORT_SQL).bind(JSON.stringify([resolution.filmId])).all()).results?.length>0;}
  catch(error){
   if(error instanceof BudgetExceeded)return {status:'unknown',reason:'budget_exceeded'};
-  if(/no such table/i.test(String(error?.message||error?.cause?.message||'')))return null;
+  if(MISSING_LID_ADMISSION.test(String(error?.message||error?.cause?.message||'')))return null;
   return {status:'unknown',reason:'eligibility_unavailable'};
  }
  return predictionEligibility({inCohort});

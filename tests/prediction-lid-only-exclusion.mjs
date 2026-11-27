@@ -23,6 +23,8 @@ const film=(file,id)=>sqlite(file,"INSERT INTO film (id,contract_version,canonic
 const claim=(file,id,scheme,value,{trusted=1,conflicting=0}={})=>sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+id+"','"+scheme+"','"+value+"',"+trusted+","+conflicting+")");
 const admission=(file,lid,filmId)=>sqlite(file,"INSERT INTO film_lid_admission (lid,film_id,route,admitted_at,receipt_key,proof_version,final_url,slug,canonical_path,shortlink,type_marker,id_block_outcome,completeness_outcome,title,year,proof_digest,checked_at,redirect_status,page_status) VALUES ('"+lid+"','"+filmId+"','watchlist_admission',"+STAMP+",'admission:lid:"+lid+"',1,'https://letterboxd.com/film/s/','s','/film/s/','"+lid+"','film','absent','complete','T',1999,"+HEX+","+STAMP+",301,200)");
 const envOf=file=>({DB:d1Standin(file)});
+// Cloudflare D1 binds at most 100 parameters per statement; the unrestricted sqlite stand-in would not notice a regression, so the limit is emulated.
+const limited=file=>({DB:d1Standin(file,{maxBinds:100})});
 
 // The id spelling only nominates a lid; it never decides.
 assert.equal(lidCandidate('abc12'),'abc12');
@@ -96,6 +98,15 @@ assert.equal(lidCandidate(7),null);
  assert.equal(queried,0,'a movie id nominates nothing and costs no statement');
 }
 
+// 4b. The missing-table fallback is for the intended absent migration ONLY: a missing film_lid_admission is an empty answer; any other missing table is an unreadable store and fails closed.
+{
+ const failing=message=>({DB:{prepare(){return {bind(){return {all:async()=>{throw new Error(message);}};}};}}});
+ assert.equal((await readLidOnlyDeferred(failing('D1_ERROR: no such table: film_lid_admission: SQLITE_ERROR'),['abc12'])).size,0);
+ assert.equal((await readLidOnlyDeferred(failing('D1_ERROR: no such table: main.film_lid_admission'),['abc12'])).size,0);
+ for(const other of ['film_redirect','film_external_id','tmdb_retirement_decision'])await assert.rejects(()=>readLidOnlyDeferred(failing('D1_ERROR: no such table: '+other),['abc12']),error=>error.code==='lid_only_exclusion_unreadable',other);
+ await assert.rejects(()=>cohortFilms(failing('D1_ERROR: no such table: tmdb_retirement_decision').DB,['film:x']),error=>error.code==='lid_only_exclusion_unreadable');
+}
+
 // 5. Fail closed: any read failure other than the missing table is thrown, never turned into "not excluded".
 {
  const broken={DB:{prepare(){return {bind(){return {all:async()=>{throw new Error('D1_ERROR: network connection lost');}};}};}}};
@@ -107,8 +118,13 @@ assert.equal(lidCandidate(7),null);
  const file=fresh();
  const lids=Array.from({length:130},(_,i)=>'l'+i);
  for(const lid of lids){film(file,'film:lb:'+lid);claim(file,'film:lb:'+lid,'letterboxd',lid);admission(file,lid,'film:lb:'+lid);}
- const out=await readLidOnlyDeferred(envOf(file),lids);
- assert.equal(out.size,130);
+ const out=await readLidOnlyDeferred(limited(file),lids);
+ assert.equal(out.size,130,'130 lids, read in chunks, under the emulated 100-parameter limit');
+ // the cohort statement and the nomination each bind a constant number of parameters whatever the chunk
+ const seen=[];
+ const spy={DB:{prepare(sql){return {bind(...params){seen.push(params.length);return d1Standin(file,{maxBinds:100}).prepare(sql).bind(...params);}};}}};
+ await readLidOnlyDeferred(spy,lids);
+ assert.ok(seen.length>0&&Math.max(...seen)<=2,'at most two bound parameters per statement: '+seen.join(','));
 }
 
 // 7. The separate `predictions.eligibility` field is a verdict about eligibility only, from the SAME cohort statement.
