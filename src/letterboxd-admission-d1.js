@@ -367,10 +367,18 @@ export async function admitVerifiedLidOnly(env,input={}){
   return src;
  };
  if(typeof input.reacquire!=='function'&&input.settleOnly!==true)await acquire();
- // An applied attempt is settled only while the CURRENT durable rows still show a complete lid-only admission of the lid (decision 5b, "complete, non-conflicting ownership").
+ // The caller's DURABLE intent (a recovery: a row or Diary entry that persisted the proof digest of the page it proved). An applied attempt is the caller's own replay only when its content digest names that proof; a Film
+ // whose proof row or receipt belongs to ANOTHER digest is never silently reinterpreted as this caller's result (it is `source_changed`, below). Without an intent the caller is a fresh one and an independently
+ // verified present Film is a legitimate `present_lid_only`.
+ const intentDigest=typeof input.intent?.proofDigest==='string'&&/^[0-9a-f]{64}$/.test(input.intent.proofDigest)?input.intent.proofDigest:null;
+ const expectedReceiptDigest=intentDigest?await lidOnlyReceiptDigest({lid,proofDigest:intentDigest}):null;
+ // An applied attempt is settled only while the CURRENT durable rows still show a complete lid-only admission of the lid (decision 5b, "complete, non-conflicting ownership"), and, for a caller with an intent, only
+ // when the applied receipt is that intent's own.
  const validate=async(applied,{currentTarget})=>{
   const plan=await planLidOnlyD1(env,{lid});
-  return plan.outcome==='present_lid_only'&&plan.id===currentTarget.id?'settled':'historical';
+  if(!(plan.outcome==='present_lid_only'&&plan.id===currentTarget.id))return 'historical';
+  if(expectedReceiptDigest!==null&&applied.contentDigest!==expectedReceiptDigest)return 'historical';
+  return 'settled';
  };
  let observed=null;
  const guardOf=guard=>({...guard,statement:[fenced.assertSql(guard.sql),guard.params],holds:async()=>{
@@ -386,7 +394,14 @@ export async function admitVerifiedLidOnly(env,input={}){
   // The durable state first: a replay, a lost response and the TMDB-held lid settle WITHOUT a fetch (case 4, "replay never fetches").
   const plan=await planLidOnlyD1(env,{lid});
   observed=plan;
-  if(plan.outcome==='present_lid_only')return {kind:'none',result:result('present_lid_only',{id:plan.id})};
+  if(plan.outcome==='present_lid_only'){
+   // A caller with a durable intent finds a Film proved by ANOTHER digest: its own intent is mismatched, a changed source (never a silent present result).
+   if(intentDigest!==null){
+    const row=await one(db,'SELECT proof_digest FROM film_lid_admission WHERE lid=?',[lid]);
+    if(row?.proof_digest!==intentDigest)return terminalOf(result('source_changed',{id:plan.id,reason:'source_changed',intended:intentDigest,found:row?.proof_digest??null}));
+   }
+   return {kind:'none',result:result('present_lid_only',{id:plan.id})};
+  }
   if(plan.outcome==='present')return {kind:'none',result:result('present',{id:plan.id})};
   if(plan.outcome==='held'||plan.outcome==='redirect')return {kind:'none',result:result(plan.outcome,{id:plan.id??null,reason:plan.reason??null})};
   if(plan.outcome==='conflict')return terminalOf(result('conflict',{id:plan.id??null,reason:plan.reason}));
@@ -429,7 +444,8 @@ export async function admitVerifiedLidOnly(env,input={}){
  let out;
  switch(ran.status){
   case 'wait':out=result('wait',{reason:ran.reason??'in_flight',dueAt:ran.dueAt??null});break;
-  case 'settled':out=result('present_lid_only',{id:ran.currentTarget?.id??null,requestId:ran.receipt?.requestId??null,fromReceipt:true});break;
+  // `ownReplay`: the applied receipt was validated against THIS caller's durable intent (its own attempt). Without an intent the receipt is only history of a Film proved independently (`present`, no receipt of this caller's own).
+  case 'settled':out=result('present_lid_only',{id:ran.currentTarget?.id??null,requestId:ran.receipt?.requestId??null,fromReceipt:true,ownReplay:intentDigest!==null});break;
   case 'none':out=ran.result;break;
   case 'finalized':out=ran.result;break;
   case 'refused':out=result('deferred',{reason:'finalize_refused'});break;
@@ -451,17 +467,22 @@ export async function admitVerifiedLidOnly(env,input={}){
 // non-conflicting ownership of the lid by `filmId` (exactly one `letterboxd` row of the lid on any Film, trusted and non-conflicting, on that Film; the proof row names that Film; the Film exists; no redirect leaves it)
 // and, when the proof row is the one THIS caller's page proof produced (`proofDigest`), that its own applied receipt of the common lid key (target, content digest and, for a newly applied attempt, request id) is still
 // there. A proof row of another route (another digest) is settled as present, without a receipt of its own. Never a fabricated receipt. -> one assertion statement `[sql, params]` for the caller's batch `extra`.
-async function lidOnlyOwnershipCondition({lid,filmId,proofDigest=null,requestId=null}){
+async function lidOnlyOwnershipCondition({lid,filmId,proofDigest=null,requestId=null,replay=false}){
  if(typeof lid!=='string'||!LID.test(lid)||typeof filmId!=='string'||!filmId.startsWith('film:'))throw failed('film_person_invalid');
  let sql="(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd' AND value=?)=1"
   +" AND EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=? AND film_id=? AND trusted=1 AND conflicting=0)"
   +' AND EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND film_id=?)'
   +' AND EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)';
  const params=[lid,lid,filmId,lid,filmId,filmId,filmId];
- if(proofDigest){
+ // REPLAY: the settlement of THIS caller's own attempt (a newly applied one, or a proven replay of its durable intent). The proof row must be its proof and its own applied receipt of the common lid key (content digest
+ // of lid and proof, and the request id when the coordinator named one) must still stand. The receipt's target is the Film the attempt wrote (a merge moves the proof row, not the receipt), so it is bound by key,
+ // digest and request, not by the survivor's id. PRESENT (replay false): an independently verified Film, settled on ownership alone, with no receipt of this caller's own.
+ if(replay){
+  if(typeof proofDigest!=='string'||!/^[0-9a-f]{64}$/.test(proofDigest))throw failed('film_person_invalid');
   const digest=await lidOnlyReceiptDigest({lid,proofDigest});
-  sql+=' AND (NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND proof_digest=?) OR EXISTS (SELECT 1 FROM canonical_write_receipt WHERE operation_key=? AND state=\'applied\' AND target_id=? AND content_digest=?'+(requestId?' AND request_id=?':'')+'))';
-  params.push(lid,proofDigest,admissionOperationKey({lid}),filmId,digest,...(requestId?[requestId]:[]));
+  sql+=' AND EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND proof_digest=?)'
+   +" AND EXISTS (SELECT 1 FROM canonical_write_receipt WHERE operation_key=? AND state='applied' AND content_digest=?"+(requestId?' AND request_id=?':'')+')';
+  params.push(lid,proofDigest,admissionOperationKey({lid}),digest,...(requestId?[requestId]:[]));
  }
  return {sql,params};
 }
@@ -471,4 +492,13 @@ export async function lidOnlyOwnershipHolds(env,input){
  const {sql,params}=await lidOnlyOwnershipCondition(input);
  const row=await one(database(env),'SELECT CASE WHEN ('+sql+') THEN 1 ELSE 0 END AS ok',params);
  return Number(row?.ok)===1;
+}
+
+// AIR-673: the exact version of a Ratings document the caller READ (`{key, parts, etag}`, zero parts for a proven absent document) as ONE assertion statement for a batch: the candidate document of a rated settlement is
+// bound to the row content the attempt read, so an effect after the row was replaced, removed or changed fails with the batch (the same fence as the `links.json` of ADR 0217 5b).
+export function lidOnlyDocumentFence(fence){
+ if(!fence||typeof fence.key!=='string'||!fence.key||!Number.isInteger(fence.parts)||fence.parts<0)throw failed('film_person_invalid');
+ if(fence.parts===0)return [fenced.assertSql('(SELECT COUNT(*) FROM ratings_document WHERE key=?)=0'),[fence.key]];
+ if(typeof fence.etag!=='string'||!fence.etag)throw failed('film_person_invalid');
+ return [fenced.assertSql('(SELECT COUNT(*) FROM ratings_document WHERE key=?)=? AND (SELECT COUNT(DISTINCT etag) FROM ratings_document WHERE key=?)=1 AND (SELECT MIN(etag) FROM ratings_document WHERE key=?)=?'),[fence.key,fence.parts,fence.key,fence.key,fence.etag]];
 }

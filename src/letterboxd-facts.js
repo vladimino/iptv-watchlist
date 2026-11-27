@@ -189,7 +189,7 @@ function recordRatingChange(record,incoming,effective){
 
  // Links a film's trusted aliases to one record key; an alias already pointing elsewhere is an alias_conflict for review.
  // `expectKey` (AIR-559): the record key an inferred import has already marked; a key that moved meanwhile is refused as an alias_conflict, so an inferred alias never lands on an unmarked record.
- async function linkFilm(env,links,{expectKey=null}={}){
+ async function linkFilm(env,links,{expectKey=null,extra=[],noTmdb=false}={}){
   // Writers always know the Letterboxd id, so no record exists without one and two records of one film can only meet as an
   // alias_conflict; joining them is the convergence migration, which is not implemented in this phase.
   if(!links?.letterboxd||!LID.test(String(links.letterboxd)))throw new FactsError('invalid_identity','A fact record needs a Letterboxd id');
@@ -200,11 +200,13 @@ function recordRatingChange(record,incoming,effective){
    if(keys.length>1)throw new FactsError('alias_conflict','Aliases point at different records');
    factKey=keys[0]||factKeyFor(links);
    if(expectKey&&factKey!==expectKey)throw new FactsError('alias_conflict','The record key moved since the inferred pair was marked');
+   // AIR-673: a lid-only link holds AT THE EFFECT: no movie alias may point at the record the lid is linked to (not even the same `lb-<lid>` key a Diary-first link would produce).
+   if(noTmdb)for(const [alias,key] of Object.entries(index))if(key===factKey&&alias.startsWith('tmdb:'))throw new FactsError('alias_conflict','The lid-only record already carries a movie alias');
    // A record holds one Letterboxd id and one TMDB id: another id of the same kind on it is a conflict, never a merge.
    for(const [alias,key] of Object.entries(index))if(key===factKey&&!aliases.includes(alias)&&aliases.some(mine=>mine.split(':')[0]===alias.split(':')[0]))throw new FactsError('alias_conflict','Record already has another '+alias.split(':')[0]+' id');
    let changed=false;for(const alias of aliases)if(index[alias]!==factKey){index[alias]=factKey;changed=true;}
    return changed?index:null;
-  });
+  },{extra});
   return factKey;
  }
  // AIR-673 / ADR 0217 decisions 5b and 9: the positive observation of the link document a lid-only admission is fenced on, and the lid's own fact key. `tmdbAlias` is the movie id the lid's record already carries (null for none): a
@@ -220,10 +222,10 @@ function recordRatingChange(record,incoming,effective){
   return {fence:owned.fence,tmdbAlias};
  }
  // The lid's own fact record `lb-<lid>`, linked by `letterboxd:<lid>` ONLY: no TMDB alias is written or invented (ADR 0217 decision 9, rated and Diary entry points).
- async function linkLidOnly(env,lid){
+ async function linkLidOnly(env,lid,{extra=[]}={}){
   if(!LID.test(String(lid||'')))throw new FactsError('invalid_identity','Invalid Letterboxd id');
   // `expectKey`: the record MUST be the lid's own `lb-<lid>`. A Ratings link that appeared since the admission (a movie alias on another record) is an `alias_conflict`, never a TMDB-linked record returned as the lid's.
-  return linkFilm(env,{letterboxd:String(lid)},{expectKey:'lb-'+String(lid)});
+  return linkFilm(env,{letterboxd:String(lid)},{expectKey:'lb-'+String(lid),noTmdb:true,extra});
  }
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
  // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.
@@ -282,18 +284,21 @@ function recordRatingChange(record,incoming,effective){
   return (back.inferredPairs||[]).some(entry=>namesPair(entry,links))||statesPair(back,links);
  }
  // Writes observations into one record. A redirected record is followed once; a fenced one sends the write to its target.
- async function recordObservations(env,factKey,links,observations,{floors={},identity=null}={}){
+ async function recordObservations(env,factKey,links,observations,{floors={},identity=null,extra=[],lidOnly=false}={}){
   let key=factKey;
   for(let hop=0;hop<2;hop++){
    const {value}=await readJSON(env,recordKey(key));
    const next=value?.redirectTo||value?.migrating?.to;
    if(!next)break;
+   // AIR-673: a lid-only write lands on exactly the lid's own record; a record that moved is a conflict, never followed.
+   if(lidOnly)throw new FactsError('alias_conflict','The lid-only record was redirected');
    if(hop===1)throw new FactsError('redirect_chain','Record redirect chain is longer than one hop');
    key=next;
   }
   const outcomes=[];
   const {value:record}=await casJSON(env,recordKey(key),emptyRecord(key,links),current=>{
    if(current.redirectTo||current.migrating)throw new FactsError('write_contention','Record started a migration during write');
+   if(lidOnly&&current.links?.tmdb!=null)throw new FactsError('alias_conflict','The lid-only record already carries a movie id');
    outcomes.length=0;let changed=false;
    // An inferred identity (AIR-388, ADR 0104) is recorded on the record that first receives the Letterboxd id: a fresh record, or an
    // existing one that had no Letterboxd id. A record that already holds facts and a Letterboxd id keeps whatever it had, so a
@@ -307,13 +312,13 @@ function recordRatingChange(record,incoming,effective){
    if(identity&&!current.identity&&(untouched||letterboxdMissing)){current.identity={kind:identity.kind,basis:identity.basis,sourceRef:identity.sourceRef};changed=true;}
    for(const {fact,observation:incoming} of observations){const result=applyObservation(current,fact,incoming,{floor:floors[fact]||null});outcomes.push({fact,...result});if(result.outcome==='new'||result.outcome==='replaces')changed=true;}
    return changed?current:null;
-  });
+  },{extra});
   return {factKey:key,record,outcomes};
  }
 
  // The view index is a projection of records under every id of the film; it is never the source of a fact.
- async function projectRecords(env,records){
-  if(typeof RatingsD1!=='undefined'){const projected=await RatingsD1.projectView(env,records);if(projected.owned)return {changed:projected.changed};}
+ async function projectRecords(env,records,{extra=[]}={}){
+  if(typeof RatingsD1!=='undefined'){const projected=await RatingsD1.projectView(env,records,{extra});if(projected.owned)return {changed:projected.changed};}
   // AIR-558: the view index has no raw object any more, so a ratings domain that does not own the projection (marker not d1 and open) projects nothing. The
   // facts stay the source of truth and the callers keep their gates (a held domain is reported as blocked); the former raw projection was invisible there.
   return {changed:0};

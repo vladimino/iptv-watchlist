@@ -222,12 +222,13 @@ const LetterboxdDiaryIdentity=(()=>{
    // AIR-602 (review of PR #1018): the movie this id's own durable record named (a `linking` intent, or the `intent` an earlier not-now outcome carried) survives every outcome except the one that
    // settles it (`source_changed`): a wait, a transport stop or an unknown answer never discards it.
    const carried=reason==='source_changed'?null:(cur&&cur.reason==='linking'&&TMDB.test(String(cur.tmdb||''))?String(cur.tmdb):(TMDB.test(String(cur?.intent?.tmdb||''))?String(cur.intent.tmdb):null));
+   const carriedLid=reason==='source_changed'||reason==='lid_only_intent'?null:lidIntentOf(cur);
    const before=Math.max(cur?Number(cur.attempts)||0:0,item.seed||0),streakBefore=Number(cur?.streak)||0;
    let attempts=before,streak=streakBefore,next=now,checkId=cur?.checkId||null;
    if(intent||cls==='not_now'){/* no attempt, place kept, due at the next run */}
    else if(cls==='transport'){streak=streakBefore+1;next=Math.max(now+transportDelayMs(streak),Number.isFinite(until)?until:0);}// AIR-604: the later of the local backoff and the shared cooldown end
    else{attempts=before+1;streak=0;next=now+reviewDelayMs(attempts);checkId=cur?.reservation?.checkId||newCheckId();}
-   set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{}),...(carried?{intent:{tmdb:carried,...(dueOf(cur)?{evidenceDue:true}:{})},...(cur?.pendingEvidence?{pendingEvidence:cur.pendingEvidence}:{})}:{})};
+   set[item.lid]={reason:String(reason).slice(0,64),class:intent?'intent':cls,slug:item.slug||cur?.slug||null,attempts,streak,queuedAt:(cur&&queuePos(cur))||item.queuedAt||iso(now),lastAttemptAt:iso(now),nextAttemptAt:iso(next),route,...(checkId?{checkId}:{}),...(carriedLid?{lidIntent:{proofDigest:carriedLid}}:{}),...(tmdb?{tmdb:String(tmdb)}:{}),...(cur?.requeued?{requeued:cur.requeued}:{}),...(carried?{intent:{tmdb:carried,...(dueOf(cur)?{evidenceDue:true}:{})},...(cur?.pendingEvidence?{pendingEvidence:cur.pendingEvidence}:{})}:{})};
    counts.pending++;
   };
   // An id this step could not reach is kept for the next ordinary step (due now, attempts unchanged), never dropped. A new id gets its entry (and its place in the queue).
@@ -298,6 +299,8 @@ const LetterboxdDiaryIdentity=(()=>{
   // other unresolved attempt is abandoned, an applied attempt is validated against current state), and only then asks `reacquire` for the REAL bounded source check, so an id whose earlier attempt already proves the
   // work is finished WITHOUT a fetch and without fresh evidence. The writer's own durable intent (a `linking` entry, or the `intent` carried by a not-now outcome) is never overwritten by the movie of a new check: the
   // coordinator compares them and answers `source_changed`. A terminal outcome writes this writer's state through `finalize` with the history guard IN the same D1 batch, so it cannot settle against stale history.
+  // The durable LID-only intent of an entry (AIR-673): the `lid_only_intent` entry itself, or the `lidIntent` a not-now outcome carried over. Like the TMDB intent it is preserved on wait and transport, and a new check is compared to it before anything changes.
+  const lidIntentOf=entry=>!entry?null:(entry.reason==='lid_only_intent'&&/^[0-9a-f]{64}$/.test(String(entry.proofDigest||''))?String(entry.proofDigest):(/^[0-9a-f]{64}$/.test(String(entry.lidIntent?.proofDigest||''))?String(entry.lidIntent.proofDigest):null));
   const intentOf=entry=>!entry?null:(entry.reason==='linking'&&TMDB.test(String(entry.tmdb||''))?String(entry.tmdb):(TMDB.test(String(entry.intent?.tmdb||''))?String(entry.intent.tmdb):null));
   const D1_TERMINAL={other_code:'other_code',conflict:'admission_conflict',source_changed:'source_changed'};
   // AIR-673 / ADR 0217 decision 9 (dormant: only a page that passes the INJECTED H1 rules reaches it). The durable intent is written first (`lid_only_intent`, `kind: 'lid_only'`, no movie, the proof digest); the coordinator's
@@ -318,11 +321,13 @@ const LetterboxdDiaryIdentity=(()=>{
    if(!(await intendLidOnly(item,proof.proofDigest))){release(item);counts.deferred++;return;}
    let admitted;
    try{
-    admitted=await LetterboxdAdmissionD1.admitVerifiedLidOnly(guarded(lid),{lid,route,reacquire:async()=>{try{return {ok:true,proof,links:await LetterboxdFacts.linksObservation(env,lid)};}catch{return {ok:false,reason:'source_unavailable'};}},now:()=>iso(clock())});
+    admitted=await LetterboxdAdmissionD1.admitVerifiedLidOnly(guarded(lid),{lid,route,...(lidIntentOf(prior)===proof.proofDigest?{intent:{proofDigest:proof.proofDigest}}:{}),reacquire:async()=>{try{return {ok:true,proof,links:await LetterboxdFacts.linksObservation(env,lid)};}catch{return {ok:false,reason:'source_unavailable'};}},now:()=>iso(clock())});
    }catch(error){record(item,error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||'deferred');return;}
    if((admitted.outcome==='admitted_lid_only'||admitted.outcome==='present_lid_only')&&typeof admitted.id==='string'){
     counts.verified++;settled.set(lid,'lid_only');clear.push(lid);
-    lidOwned.set(lid,{filmId:admitted.id,proofDigest:proof.proofDigest,requestId:admitted.outcome==='admitted_lid_only'?admitted.requestId||null:null});
+    // REPLAY (its own applied receipt must stand) for a newly applied attempt or a replay validated against its own intent; PRESENT (ownership alone) for a Film another route proved.
+    const own=admitted.outcome==='admitted_lid_only'||admitted.ownReplay===true;
+    lidOwned.set(lid,{filmId:admitted.id,proofDigest:proof.proofDigest,requestId:own?admitted.requestId||null:null,replay:own});
     labels.set(lid,{title:null,year:null,tmdb:null,lidOnly:true});
     return;
    }
@@ -330,8 +335,21 @@ const LetterboxdDiaryIdentity=(()=>{
    record(item,admitted.outcome==='conflict'?'admission_conflict':admitted.outcome==='held'||admitted.outcome==='redirect'?'admission_held':'deferred');
   };
   const resolveAtD1=async(item,prior)=>{
-   const lid=item.lid,intended=intentOf(prior);
+   const lid=item.lid,intended=intentOf(prior),lidIntent=lidIntentOf(prior);
    let verdict=null,checkedDigest=null,lidProof=null;
+   // AIR-673: a persisted LID-only intent is recovered through the SAME coordinator before any source request: a lost response (the admission applied, the entry survived) settles from the intent's own applied receipt with
+   // no fetch; a live attempt waits (the entry, the intent, is kept); anything else falls through to the ordinary check, whose result is compared to the intent before it changes anything.
+   if(lidIntent&&!intended){
+    if(late()||!guarded(lid)){defer(item,prior);return;}
+    const recovered=await LetterboxdAdmissionD1.admitVerifiedLidOnly(guarded(lid),{lid,route,settleOnly:true,intent:{proofDigest:lidIntent},now:()=>iso(clock())}).catch(error=>({outcome:'deferred',reason:error&&error.code||'admission_unavailable'}));
+    if(recovered.outcome==='present_lid_only'&&recovered.ownReplay===true&&typeof recovered.id==='string'){
+     counts.verified++;settled.set(lid,'lid_only');clear.push(lid);
+     lidOwned.set(lid,{filmId:recovered.id,proofDigest:lidIntent,requestId:recovered.requestId||null,replay:true});
+     labels.set(lid,{title:null,year:null,tmdb:null,lidOnly:true});
+     return;
+    }
+    if(recovered.outcome==='wait'){defer(item,prior);return;}
+   }
    const reacquire=async()=>{
     if(stopped||STEP_LIMIT<=fetched||STEP_BUDGET_MS>remaining())return {ok:false,reason:'deferred'};
     fetched++;counts.checked++;checked.add(lid);
@@ -339,7 +357,12 @@ const LetterboxdDiaryIdentity=(()=>{
     try{outcome=await checkOne(env,item,{clock,fetchImpl,remaining,lidOnlyRules});}catch(error){outcome={state:'pending',reason:'check_failed'};}
     if(outcome.stop){stopped=true;}
     // The page proved a lid-only Film (H1): this TMDB coordinator call ends here, uncharged and with nothing reserved; the `lid_only` kind of the same common key takes over below.
-    if(outcome.state==='lid_only'){lidProof=outcome.proof;return {ok:false,reason:'lid_only_page',charged:false};}
+    if(outcome.state==='lid_only'){
+     // Mismatch in either direction is a changed source, never an overwrite of the durable intent: a TMDB intent meeting a lid-only page, or a LID-only intent of ANOTHER proof digest.
+     if(intended!==null||(lidIntent&&lidIntent!==outcome.proof.proofDigest))return {ok:false,reason:'source_changed',charged:true};
+     lidProof=outcome.proof;return {ok:false,reason:'lid_only_page',charged:false};
+    }
+    if(outcome.state==='verified'&&lidIntent)return {ok:false,reason:'source_changed',charged:true};
     if(outcome.state!=='verified'){const kind=classify(outcome.reason);return {ok:false,reason:outcome.reason,charged:kind==='gone'||kind==='definite'};}
     verdict=outcome.verdict;checkedDigest=outcome.pageDigest||null;
     if(WRITE_RESERVE_MS>remaining())return {ok:false,reason:'deferred'};
@@ -385,7 +408,7 @@ const LetterboxdDiaryIdentity=(()=>{
      // Settled by the coordinator for this lid: the Film is a lid-only Film (present from another route, or the TMDB page met it: never an automatic attach). The success is only as good as the CURRENT ownership,
      // so the same assertion rides in the Diary write below and is evaluated again before the label is trusted (`lidOwned`).
      if(typeof out.id!=='string'){record(item,'deferred');return;}
-     counts.verified++;settled.set(lid,'lid_only');clear.push(lid);lidOwned.set(lid,{filmId:out.id,proofDigest:null,requestId:null});labels.set(lid,{title:null,year:null,tmdb:null,lidOnly:true});return;
+     counts.verified++;settled.set(lid,'lid_only');clear.push(lid);lidOwned.set(lid,{filmId:out.id,proofDigest:null,requestId:null,replay:false});labels.set(lid,{title:null,year:null,tmdb:null,lidOnly:true});return;
     }
     case 'other_code':case 'conflict':case 'source_changed':return;
     case 'wait':defer(item,prior);outcomes.set(lid,{checked:false,class:'not_now',reason:'in_flight',retryAt:out.dueAt??null,attempts:Number(stored.films[lid]?.attempts)||0,streak:Number(stored.films[lid]?.streak)||0,terminal:false});return;

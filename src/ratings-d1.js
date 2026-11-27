@@ -177,8 +177,8 @@ export async function readOwned(env,key,{admission=false}={}){
 }
 
 // AIR-673 / ADR 0217 decision 5b: a POSITIVE observation of an owned document, with the exact fence of the parts read (`{key, parts, etag}`; zero parts for a proven absent document). Read only. {owned:false} outside the `d1` domain.
-export async function observeOwned(env,key){
- if(!ownsKey(key,false))return {owned:false};
+export async function observeOwned(env,key,{admission=false}={}){
+ if(!ownsKey(key,admission))return {owned:false};
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
  if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
@@ -346,12 +346,12 @@ async function viewWrites(db,records){
  return statements;
 }
 
-export async function projectView(env,records){
+export async function projectView(env,records,{extra=[]}={}){
  const gate=await requireOpen(env,'d1');
  if(!gate.open)return {owned:false,changed:0};
  const statements=await viewWrites(gate.db,records);
  if(!statements.length)return {owned:true,changed:0};
- const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
+ const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...(extra||[]),...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
  await fenced(gate.db,batch);
  return {owned:true,changed:statements.length};
 }

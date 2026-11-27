@@ -496,16 +496,17 @@ const LetterboxdRatedCandidates = (() => {
   // movie; the coordinator's `lid_only` kind admits the Film `film:lb:<lid>` and the candidate becomes `verified` with `tmdb: null`, its watched/rating facts written under the lid's own fact key `lb-<lid>` and NO TMDB alias.
   // The durable intent is the row itself: `admitting` with `kind: 'lid_only'`, `intendedTmdb: null` and the page path (`filmPath`), claimed by an exact compare-and-swap from `pending`. A row that already holds a
   // DIFFERENT intent (another path, or a TMDB intent) is a changed source: reviewed behind the history guard. The existing TMDB path is untouched.
-  async function writeLidRating(env, code, item, generatedAt, sha) {
-    const factKey = await LetterboxdFacts.linkLidOnly(env, code);
+  async function writeLidRating(env, code, item, generatedAt, sha, extra = []) {
+    // Every effect carries the settlement assertions (`extra`: the current ownership and the candidate document the attempt read) IN ITS OWN D1 batch, and the lid-only contract holds at the effect: the link and the
+    // record land on exactly `lb-<lid>`, with no movie alias, id or redirect. An effect whose guard is false commits nothing; effects that already committed (valid then) are kept, never rolled back.
+    const factKey = await LetterboxdFacts.linkLidOnly(env, code, {extra});
     const watched = await LetterboxdFacts.observation({factKey, fact: 'watched', value: true, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
     const rating = await LetterboxdFacts.observation({factKey, fact: 'rating', value: item.rating, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
-    const result = await LetterboxdFacts.recordObservations(env, factKey, {letterboxd: String(code)}, [{fact: 'watched', observation: watched}, {fact: 'rating', observation: rating}]);
-    await LetterboxdFacts.projectRecords(env, [result.record]);
+    const result = await LetterboxdFacts.recordObservations(env, factKey, {letterboxd: String(code)}, [{fact: 'watched', observation: watched}, {fact: 'rating', observation: rating}], {extra, lidOnly: true});
+    await LetterboxdFacts.projectRecords(env, [result.record], {extra});
     const outcomes = Object.fromEntries(result.outcomes.map(entry => [entry.fact, entry.outcome]));
     return {factKey, outcomes};
   }
-  // The durable intent is exact: kind, no movie, the page path AND the proof digest of the page this attempt proved. A row whose page changed (another digest) is a CHANGED source, never the same intent.
   const sameLidIntent = (row, filmPath, proofDigest) => !!(row && row.state === 'admitting' && row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath && row.proofDigest === proofDigest);
   async function commitLidOnly(env, sha, code, item, proof, generatedAt, recover = {}) {
     const key = CANDIDATES(sha);
@@ -531,8 +532,10 @@ const LetterboxdRatedCandidates = (() => {
     // The coordinator: the page proof is the one this step just made; the links observation is read FRESH here and fenced inside the canonical batch, so a link written in between fails the batch whole.
     let admitted;
     try {
+      // A row that already held this durable intent (`held`: an earlier attempt persisted it) passes it to the coordinator, so an applied attempt of ANOTHER proof is never taken for its own replay.
       admitted = await LetterboxdAdmissionD1.admitVerifiedLidOnly(env, {
         lid: code, route: 'letterboxd_rated_archive',
+        ...(outcome === 'held' ? {intent: {proofDigest}} : {}),
         reacquire: async () => {try {return {ok: true, proof: proof.proof, links: await LetterboxdFacts.linksObservation(env, code)};} catch (error) {return {ok: false, reason: 'source_unavailable'};}},
         finalize: async (result, guard) => {
           const reason = result.outcome === 'conflict' ? 'lid_only_conflict' : 'source_changed';
@@ -559,27 +562,41 @@ const LetterboxdRatedCandidates = (() => {
     }
     const filmId = admitted.id;
     if (typeof filmId !== 'string' || !filmId.startsWith('film:')) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'deferred', phase: 'identity'};
-    return settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId: admitted.outcome === 'admitted_lid_only' ? admitted.requestId || null : null, already: outcome === 'already', fetched: true, generatedAt, guard: recover.guard || null});
+    // REPLAY (this attempt's own applied receipt must stand) for a newly applied attempt, a proven replay from the receipt and a recovery of the persisted intent; PRESENT (ownership alone, no receipt of its own) for a Film
+    // another route proved independently.
+    const ownAttempt = admitted.outcome === 'admitted_lid_only' || admitted.ownReplay === true;
+    return settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId: ownAttempt ? admitted.requestId || null : null, replay: ownAttempt || outcome === 'held', already: outcome === 'already', fetched: true, generatedAt, guard: recover.guard || null});
   }
   // The ONE settlement of a lid-only candidate (a newly applied attempt, an already-present Film and the recovery from an applied receipt). The current candidate row is read before any fact is written; the facts go to the lid's own
   // fact key (a movie alias that appeared meanwhile is `alias_conflict`: reviewed, never reported verified); and the terminal `verified` write is a document compare-and-swap that carries, in the same D1 batch, the complete current
   // ownership of the lid by the resolved Film and, for this attempt's own proof row, its own applied receipt. A refused batch writes nothing and leaves the row `admitting`.
-  async function settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId, already, fetched, generatedAt, guard}) {
+  async function settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId, replay, already, fetched, generatedAt, guard}) {
     const key = CANDIDATES(sha);
     const current = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (already ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest ? {ok: true, row} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest) ? {ok: true, row} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
     const before = await current();
     if (!before.ok) return refusedClaim(code, before.reason);
+    // The assertions every effect and the terminal write carry, built BEFORE the first effect: complete current ownership (replay of the attempt's own receipt, or an independently proved present Film) and the exact
+    // version of the candidate document this settlement read (the row content).
+    const owned = await LetterboxdAdmissionD1.lidOnlySettlementGuard({lid: code, filmId, proofDigest, requestId, replay: replay === true});
+    let documentFence = null;
+    if (typeof RatingsD1 !== 'undefined') {
+      const observed = await RatingsD1.observeOwned(env, key, {admission: true});
+      if (!observed.owned) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'deferred', phase: 'identity'};
+      documentFence = LetterboxdAdmissionD1.lidOnlyDocumentFence(observed.fence);
+    }
+    const guards = documentFence ? [owned, documentFence] : [owned];
     let rating;
     try {
-      rating = await writeLidRating(env, code, item, generatedAt, sha);
+      rating = await writeLidRating(env, code, item, generatedAt, sha, guards);
     } catch (error) {
       if (error && error.code === 'alias_conflict') {
         const review = await markReview(env, key, code, 'ratings_tmdb_link', null, undefined, {guard});
         return {pending: true, fetched, verified: false, code, state: review.refused ? 'admitting' : 'needs_review', reason: review.refused ? 'in_flight' : review.reason, phase: 'identity', writes: review.changed === true};
       }
+      // A guard that is false (the ownership changed, or the candidate row was replaced or removed since it was read) refuses the effect's own batch: nothing new commits, the row keeps its durable intent.
+      if (error && (error.code === 'write_contention' || error.code === 'ratings_domain_fence' || error.code === 'atomic_unavailable')) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'ownership_changed', phase: 'identity'};
       throw error;
     }
-    const owned = await LetterboxdAdmissionD1.lidOnlySettlementGuard({lid: code, filmId, proofDigest, requestId});
     const saved = await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
       const row = current.candidates[code];
       if (!(already ? row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest : sameLidIntent(row, filmPath, proofDigest))) return null;
@@ -588,6 +605,7 @@ const LetterboxdRatedCandidates = (() => {
       current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, proofDigest, filmId, enrichment: 'done', intendedTmdb: null, reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
+    // The terminal write is itself the compare-and-swap of the candidate document (its own version check), so only the ownership assertion rides with it; the document fence guards the EFFECTS before it.
     }, {extra: [owned]});
     if (saved.refused === true) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'ownership_changed', phase: 'identity'};
     const after = await readDoc(env, key);
@@ -598,7 +616,7 @@ const LetterboxdRatedCandidates = (() => {
   // The recovery of an applied lid-only attempt: no page, no proof and no coordinator call. The coordinator's reconcile (`present_lid_only`, `fromReceipt`) named the resolved Film; the row's own exact intent (path and proof digest)
   // is checked, the settlement fence asserts the same applied receipt and the complete current ownership, and every write is the same idempotent one as in `commitLidOnly`.
   async function finishLidOnlyFromReceipt(env, sha, code, item, generatedAt, settled) {
-    return settleLidOnly(env, sha, code, item, {filmPath: item.filmPath, proofDigest: item.proofDigest, filmId: settled && settled.id, requestId: null, already: false, fetched: false, generatedAt, guard: null});
+    return settleLidOnly(env, sha, code, item, {filmPath: item.filmPath, proofDigest: item.proofDigest, filmId: settled && settled.id, requestId: (settled && settled.requestId) || null, replay: true, already: false, fetched: false, generatedAt, guard: null});
   }
 
   function peopleOf(list) {
@@ -880,7 +898,7 @@ const LetterboxdRatedCandidates = (() => {
     if (atD1 && (recovering || item.state === 'pending')) {
       // AIR-673: a recovering lid-only row reconciles the SAME common key through the `lid_only` kind (its intent carries no movie).
       const settled = await (lidOnlyRow
-        ? LetterboxdAdmissionD1.admitVerifiedLidOnly(env, {lid: code, route: 'letterboxd_rated_archive', settleOnly: true, now: () => new Date().toISOString()})
+        ? LetterboxdAdmissionD1.admitVerifiedLidOnly(env, {lid: code, route: 'letterboxd_rated_archive', settleOnly: true, intent: {proofDigest: item.proofDigest}, now: () => new Date().toISOString()})
         : LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: recovering ? {tmdb: item.intendedTmdb} : null, evidenceDue: recovering && item.evidenceDue === true, settleOnly: true, pendingEvidence: recovering ? item.pendingEvidence || null : null, now: () => new Date().toISOString()}))
         .catch(error => ({outcome: 'deferred', reason: error && error.code || 'admission_unavailable'}));
       if (recovering && settled.outcome === 'present' && settled.fromIntent) {
