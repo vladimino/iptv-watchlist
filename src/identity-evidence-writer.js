@@ -69,6 +69,12 @@ export async function attachWriterSchemaReady(env){
  }catch{return false;}
 }
 
+// AIR-675: the in-batch condition that the attach writer is `on` at the generation the caller read, at schema 50 or later ({sql, params}). Kept here so only this module names the control tables.
+export function attachWriterOnCondition(generation){
+ if(!Number.isSafeInteger(generation)||generation<1)throw invalid('generation');
+ return {sql:'(SELECT version FROM schema_contract WHERE id=1)>=50 AND EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state=\'on\' AND generation=?)',params:[ATTACH_WRITER,generation]};
+}
+
 // The control row of a writer. An absent row, and a schema without the control tables, is `off` at generation 0 (ADR 0215 decision 4).
 export async function readWriter(env,writer){
  writerName(writer);

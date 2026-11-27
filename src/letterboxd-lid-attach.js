@@ -20,8 +20,8 @@ import {currentTargetOf,keyedRequestIdOf,runOperationKey} from './receipt-operat
 import {hasLidAdmissionTable} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,authorityAssertion,d1BatchCondition,readAdmissionAuthority} from './letterboxd-admission-authority.js';
-import {evidenceInsertStatement,planIdentityEvidence} from './identity-evidence.js';
-import {ATTACH_WRITER,attachWriterSchemaReady,readWriter} from './identity-evidence-writer.js';
+import {evidenceInsertStatement,ownEvidenceRowCondition,planIdentityEvidence} from './identity-evidence.js';
+import {ATTACH_WRITER,attachWriterOnCondition,attachWriterSchemaReady,readWriter} from './identity-evidence-writer.js';
 import {attachRoot} from './domain/letterboxd-attach-root.js';
 
 export const ATTACH_KIND='lid_tmdb_attach';
@@ -165,7 +165,7 @@ export async function attachLidTmdb(env,input){
  statements.push(authorityAssertion(fenced.assertSql,condition));
  // The in-batch identity fence (decision 8b). The Film/Person generation and the admission marker are above; the owned attempt on the lid key, the writer `on` at its generation, and the intent open with this attempt and revision:
  statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM canonical_write_receipt WHERE request_id=? AND origin=? AND operation_key=? AND state='pending' AND attempts=?)"),[requestId,RATED_ADMISSION_ORIGIN,'admission:lid:'+lid,mark.attempt]]);
- statements.push([fenced.assertSql("(SELECT version FROM schema_contract WHERE id=1)>=50 AND EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state='on' AND generation=?)"),[ATTACH_WRITER,input.writerGeneration]]);
+ {const on=attachWriterOnCondition(input.writerGeneration);statements.push([fenced.assertSql(on.sql),on.params]);}
  statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM lid_recheck_intent WHERE request_id=? AND lid=? AND state='open' AND outcome IS NULL AND attempt_request_id=? AND revision=?)"),[input.intent.requestId,lid,requestId,input.intent.revision]]);
  // The target Film exists and is not a redirect source; the lid STILL uniquely belongs to it (a trusted, non-conflicting `letterboxd` claim, no other row of the lid of any trust on any Film, the proof row resolving to it).
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
@@ -179,7 +179,7 @@ export async function attachLidTmdb(env,input){
  statements.push([fenced.assertSql('changes()>=1'),[]]);
  statements.push(evidenceInsertStatement(evidencePlan,{filmId:id,requestId,at}));
  // The row with the key must be THIS batch's own (a silent no-op of the insert, a row of another request, fails the batch): evidence is never absent from an attach.
- statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND request_id=? AND film_id=?)'),[evidencePlan.evidenceKey,requestId,id]]);
+ {const own=ownEvidenceRowCondition(evidencePlan,{filmId:id,requestId});statements.push([fenced.assertSql(own.sql),own.params]);}
  // The intent in the SAME batch: `attached` / `owed`, the survivor, the proof inputs, the revision (the trigger raises it).
  statements.push(["UPDATE lid_recheck_intent SET outcome='attached',link_state='owed',film_id=?,proof_version=?,tmdb=?,final_url=?,slug=?,canonical_path=?,title=?,year=?,tmdb_doc_digest=?,attach_root=?,revision=revision+1,updated_at=? WHERE request_id=? AND state='open' AND outcome IS NULL AND attempt_request_id=? AND revision=?",
   [id,proof.proofVersion,tmdb,proof.finalUrl,proof.slug,proof.canonicalPath,proof.title,proof.year,proof.tmdbDocDigest,proof.attachRoot,at,input.intent.requestId,requestId,input.intent.revision]]);

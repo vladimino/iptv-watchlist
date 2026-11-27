@@ -209,6 +209,13 @@ export function evidenceInsertStatement(plan,{filmId,requestId,at}={}){
   r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,instant(at,'at')]];
 }
 
+// AIR-675: the assertion a batch makes about the row it just inserted (a silent no-op of the insert, or a row of another request under the same key, fails the batch): {sql, params} for the caller's own assertion
+// statement. It lives here so no other module names the ledger table (ADR 0213 decision 8: no reader outside the ledger modules).
+export function ownEvidenceRowCondition(plan,{filmId,requestId}={}){
+ if(!plan||!HEX64.test(plan.evidenceKey||'')||typeof requestId!=='string'||!REQUEST.test(requestId))throw failed('identity_evidence_out_of_slice');
+ return {sql:'EXISTS (SELECT 1 FROM film_identity_evidence WHERE evidence_key=? AND request_id=? AND film_id=?)',params:[plan.evidenceKey,requestId,fenced.filmId(filmId)]};
+}
+
 // `absent` (schema below 41 and no table: the legitimate pre-migration state), `ready`, or `film_person_unavailable` thrown for anything else (an unreadable database,
 // a version at or above 41 without the table): the writer fails closed and never treats a damaged schema as "no ledger".
 export async function identityEvidenceStatus(env){
