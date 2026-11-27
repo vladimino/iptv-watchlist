@@ -38,7 +38,7 @@ const apply=f=>exec(f,M50);
  assert.equal(version(f),50);
  const v46=migrated(48),b=dump(v46);assert.notEqual(run(v46,M50).status,0,'on version 48 the file aborts');assert.deepEqual(dump(v46),b,'and nothing changed');
  assert.notEqual(run(f,"UPDATE discovery_transfer SET origin='import' WHERE id=1").status,0,'only `resolver` is a stored origin');
- assert.equal(version(migrated(50)),50,'the chain up to this file ends at 50');
+ assert.equal(version(migrated()),53,'the full chain ends at 53 (0053, AIR-693)');
 }
 
 // ---- 2. the steady path: nothing before the activation, one signal after, TV never ----
