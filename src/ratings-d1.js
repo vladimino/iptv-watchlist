@@ -367,6 +367,13 @@ async function overlayViewRows(db){
   after=page[page.length-1].alias_id;
  }
 }
+// AIR-675: whether the ratings view ALREADY equals what projecting these records would write: the very comparison `viewWrites` makes against the stored rows (key, watched, watchlist, rating, with its absent-fact semantics), so a row that exists
+// with another `fact_key` or a stale value is NOT complete. Read only; the repair, when needed, is the existing projection (`projectView`) under the caller's guards.
+export async function viewComplete(env,records){
+ const db=database(env);
+ return (await viewWrites(db,records)).length===0;
+}
+
 export async function overlayView(env,index){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
