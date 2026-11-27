@@ -108,6 +108,15 @@ export async function readWriterGate(env){
  if(gate.state==='open'){scope.gate={...gate};scope.at=scope.now();}
  return {...gate};
 }
+// The gate at a ROUTING boundary (the start of a unit): ALWAYS a fresh, authoritative read, never the snapshot, because a path that executes no fenced batch (a fresh no-op, a settled or abandoned replay, a facts call that finds
+// everything stored) has no in-transaction assertion to catch a marker that moved after the snapshot. The fresh answer refreshes the scope, so the writers of the same unit then reuse it. A non-open answer clears it.
+export async function readRouteGate(env){
+ const scope=env?.gateReuse;
+ if(scope)scope.gate=null;
+ const gate=await readAuthority(env);
+ if(scope&&gate.state==='open'){scope.gate={...gate};scope.at=scope.now();}
+ return gate;
+}
 // Forget the snapshot (a failed batch, a moved marker). Safe to call without a scope.
 export function dropGateReuse(env){
  const scope=env?.gateReuse;

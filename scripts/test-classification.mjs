@@ -409,6 +409,9 @@ export const FILES={
  "catalog-enrichment-store.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-units-scoped.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-units.mjs": {
   "suite": "core"
  },
