@@ -235,6 +235,7 @@ const LetterboxdRatedCandidates = (() => {
 
   async function follow(fetchImpl, code) {
     let url = 'https://boxd.it/' + code;
+    let redirect = null; // AIR-673: the FIRST hop (the boxd.it redirect), additive: only the dormant lid-only proof reads it
     for (let hop = 0; hop < 4; hop++) {
       const fetched = await boundedFetch(fetchImpl, url, {redirect: 'manual', headers: {Accept: 'text/html'}}, PAGE_MS, PAGE_BYTES);
       if (fetched.stop) return fetched.network ? {stop: fetched.stop, network: true} : {stop: fetched.stop, ...(fetched.until !== undefined ? {until: fetched.until} : {})};
@@ -246,6 +247,7 @@ const LetterboxdRatedCandidates = (() => {
         if (stop) return {stop};
         const next = LetterboxdIdentity.allowedHop(headers.get('location'), url);
         if (!next) return {review: 'blocked_redirect'};
+        if (!redirect) redirect = {status, location: next.toString()};
         url = next.toString();
         continue;
       }
@@ -255,7 +257,7 @@ const LetterboxdRatedCandidates = (() => {
       if (status !== 200) return {review: 'fetch_failed', status}; // AIR-599: the status lets the Diary check split a 404 from a 5xx
       const landing = new URL(url);
       if (!LetterboxdIdentity.isFilmPage(landing)) return {review: 'not_film_page'};
-      return {html, landing};
+      return {html, landing, redirect};
     }
     return {review: 'too_many_hops'};
   }
@@ -490,6 +492,107 @@ const LetterboxdRatedCandidates = (() => {
     return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), rating: rating.outcomes, filmId: film.filmId, phase: 'identity'};
   }
 
+  // AIR-673 / ADR 0217 decision 9 (delivery step 4), DORMANT: the rated archive candidate of a lid-only Film. The page proved (H1, `lidOnlyPageProof`, whose rules ship EMPTY: no page can pass until step 8) that the film has no TMDB
+  // movie; the coordinator's `lid_only` kind admits the Film `film:lb:<lid>` and the candidate becomes `verified` with `tmdb: null`, its watched/rating facts written under the lid's own fact key `lb-<lid>` and NO TMDB alias.
+  // The durable intent is the row itself: `admitting` with `kind: 'lid_only'`, `intendedTmdb: null` and the page path (`filmPath`), claimed by an exact compare-and-swap from `pending`. A row that already holds a
+  // DIFFERENT intent (another path, or a TMDB intent) is a changed source: reviewed behind the history guard. The existing TMDB path is untouched.
+  async function writeLidRating(env, code, item, generatedAt, sha) {
+    const factKey = await LetterboxdFacts.linkLidOnly(env, code);
+    const watched = await LetterboxdFacts.observation({factKey, fact: 'watched', value: true, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
+    const rating = await LetterboxdFacts.observation({factKey, fact: 'rating', value: item.rating, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
+    const result = await LetterboxdFacts.recordObservations(env, factKey, {letterboxd: String(code)}, [{fact: 'watched', observation: watched}, {fact: 'rating', observation: rating}]);
+    await LetterboxdFacts.projectRecords(env, [result.record]);
+    const outcomes = Object.fromEntries(result.outcomes.map(entry => [entry.fact, entry.outcome]));
+    return {factKey, outcomes};
+  }
+  const sameLidIntent = (row, filmPath) => !!(row && row.state === 'admitting' && row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath);
+  async function commitLidOnly(env, sha, code, item, proof, generatedAt, recover = {}) {
+    const key = CANDIDATES(sha);
+    const filmPath = proof.proof.canonicalPath;
+    let outcome = 'missing';
+    await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
+      const row = current.candidates[code];
+      if (!row) {outcome = 'missing'; return null;}
+      if (row.state === 'removed' || row.state === 'needs_review') {outcome = row.state; return null;}
+      if (row.state === 'verified') {outcome = row.kind === 'lid_only' && row.tmdb == null && row.filmPath === filmPath ? 'already' : 'verified_conflict'; return null;}
+      if (row.state === 'admitting') {outcome = sameLidIntent(row, filmPath) ? 'held' : 'intent_conflict'; return null;}
+      if (row.state !== 'pending') {outcome = 'claim_changed'; return null;}
+      current.candidates[code] = {...row, state: 'admitting', kind: 'lid_only', intendedTmdb: null, filmPath, enrichment: 'pending', reason: null};
+      current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
+      outcome = 'claimed';
+      return current;
+    });
+    if (outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
+    if (outcome !== 'claimed' && outcome !== 'held' && outcome !== 'already') return refusedClaim(code, outcome);
+    const heldNow = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (outcome === 'already' ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath ? {ok: true} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath) ? {ok: true} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : 'claim_changed'});};
+    const held = await heldNow();
+    if (!held.ok) return refusedClaim(code, held.reason);
+    // The coordinator: the page proof is the one this step just made; the links observation is read FRESH here and fenced inside the canonical batch, so a link written in between fails the batch whole.
+    let admitted;
+    try {
+      admitted = await LetterboxdAdmissionD1.admitVerifiedLidOnly(env, {
+        lid: code, route: 'letterboxd_rated_archive',
+        reacquire: async () => {try {return {ok: true, proof: proof.proof, links: await LetterboxdFacts.linksObservation(env, code)};} catch (error) {return {ok: false, reason: 'source_unavailable'};}},
+        finalize: async (result, guard) => {
+          const reason = result.outcome === 'conflict' ? 'lid_only_conflict' : 'source_changed';
+          const review = await markReview(env, key, code, reason, null, undefined, {guard});
+          return review.refused ? {refused: true} : {reviewed: true, reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, changed: review.changed};
+        },
+        now: () => new Date().toISOString()});
+    } catch (error) {
+      return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: error && error.code === 'admission_closed' ? 'admission_closed' : 'deferred', phase: 'identity'};
+    }
+    if (admitted.finalized?.reviewed === true) return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: admitted.finalized.reason, phase: 'identity', writes: true};
+    // A lid already trusted on a TMDB Film (case 4b) contradicts a page that names no movie: the candidate is reviewed, never admitted twice and never attached by this path.
+    if (admitted.outcome === 'present') {
+      const review = await reviewBehindGuard(env, key, code, 'lid_on_tmdb_film', recover.guard || null);
+      return review;
+    }
+    if (admitted.outcome === 'held' && admitted.reason === 'ratings_tmdb_link') {
+      // The Ratings link of the lid names a movie the page does not: counted like any unreacquirable source (six attempts, then review).
+      const kept = await retryAdmitting(env, key, code, 'ratings_tmdb_link', recover.guard || null);
+      return {...kept, fetched: true};
+    }
+    if (admitted.outcome !== 'admitted_lid_only' && admitted.outcome !== 'present_lid_only') {
+      return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: admitted.reason || (admitted.outcome === 'wait' ? 'in_flight' : 'deferred'), phase: 'identity'};
+    }
+    const beforeRating = await heldNow();
+    if (!beforeRating.ok) return refusedClaim(code, beforeRating.reason);
+    const rating = await writeLidRating(env, code, item, generatedAt, sha);
+    await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
+      const row = current.candidates[code];
+      const ok = outcome === 'already' ? !!row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath : sameLidIntent(row, filmPath);
+      if (!ok) return null;
+      if (row.state === 'verified') return null;
+      // Enrichment is retired at `d1` and a lid-only Film is outside its scope (ADR 0211, ADR 0217 decision 9): nothing is left to enrich.
+      current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, enrichment: 'done', intendedTmdb: null, reason: null};
+      current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
+      return current;
+    });
+    const after = await readDoc(env, key);
+    const row = after.value && after.value.candidates && after.value.candidates[code];
+    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath) return refusedClaim(code, 'claim_changed');
+    return {pending: true, fetched: true, verified: true, code, tmdb: null, lidOnly: true, rating: rating.outcomes, filmId: 'film:lb:' + code, phase: 'identity'};
+  }
+
+  // The recovery of an applied lid-only attempt: no page, no proof and no coordinator call. The intent (`filmPath`) is the row's own; the rating and the verified row are the same idempotent writes as in `commitLidOnly`.
+  async function finishLidOnlyFromReceipt(env, sha, code, item, generatedAt) {
+    const key = CANDIDATES(sha), filmPath = item.filmPath;
+    if (!sameLidIntent(item, filmPath)) return refusedClaim(code, 'intent_conflict');
+    const rating = await writeLidRating(env, code, item, generatedAt, sha);
+    await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
+      const row = current.candidates[code];
+      if (!sameLidIntent(row, filmPath)) return null;
+      current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, enrichment: 'done', intendedTmdb: null, reason: null};
+      current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
+      return current;
+    });
+    const after = await readDoc(env, key);
+    const row = after.value && after.value.candidates && after.value.candidates[code];
+    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath) return refusedClaim(code, 'claim_changed');
+    return {pending: true, fetched: false, verified: true, code, tmdb: null, lidOnly: true, rating: rating.outcomes, filmId: 'film:lb:' + code, phase: 'identity'};
+  }
+
   function peopleOf(list) {
     return (Array.isArray(list) ? list : []).filter(person => person && typeof person.id === 'string').slice(0, 10).map(person => ({id: person.id, original: person.original || person.name || null, name: person.name || person.original || null}));
   }
@@ -710,7 +813,8 @@ const LetterboxdRatedCandidates = (() => {
 
   // One pending code, or one enrichment continuation. A stop is stored and the next code is not fetched.
   // `code` selects that one pending or admitting row and does not walk the rest of the queue.
-  async function identityStep(env, {sha, resume = false, code: requested = null, fetchImpl: baseFetch = fetch} = {}) {
+  // `lidOnlyRules` (AIR-673, tests and the owner's step 8 only): the H1 page rules of the dormant lid-only branch; omitted, the shipped EMPTY rules apply and no page can prove a lid-only Film.
+  async function identityStep(env, {sha, resume = false, code: requested = null, fetchImpl: baseFetch = fetch, lidOnlyRules = undefined} = {}) {
     const fetchImpl = typeof UpstreamCooldown === 'undefined' || baseFetch.coordinator ? baseFetch : UpstreamCooldown.createCoordinator(env, {caller: 'letterboxd-archive-step'}).guard(baseFetch);
     if (!HEX64.test(String(sha || ''))) return {error: 'invalid_request'};
     // AIR-602 / ADR 0207 decision 1: under `closed` (and while the marker cannot be read) the identity and enrichment steps refuse BEFORE their first effect, so no page is fetched and nothing is stored.
@@ -762,13 +866,22 @@ const LetterboxdRatedCandidates = (() => {
     // intent finishes the row WITHOUT a fetch and without fresh evidence (the admission is already proven); a live attempt waits (the row stays `admitting`); otherwise both sources are really reacquired below
     // (the same bounded check a pending row gets) and compared with the intent, and only a check that was made can write evidence.
     let recoverGuard = null;
-    const recovering = atD1 && item.state === 'admitting' && !!item.intendedTmdb;
+    const lidOnlyRow = atD1 && item.state === 'admitting' && item.kind === 'lid_only' && item.intendedTmdb == null;
+    const recovering = atD1 && item.state === 'admitting' && (!!item.intendedTmdb || lidOnlyRow);
     // PR #1018 review: EVERY row that can reach a terminal decision at `d1` reconciles the key first (a pending row too), so each terminal write below carries the history assertion of the history it observed.
     if (atD1 && (recovering || item.state === 'pending')) {
-      const settled = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: recovering ? {tmdb: item.intendedTmdb} : null, evidenceDue: recovering && item.evidenceDue === true, settleOnly: true, pendingEvidence: recovering ? item.pendingEvidence || null : null, now: () => new Date().toISOString()})
+      // AIR-673: a recovering lid-only row reconciles the SAME common key through the `lid_only` kind (its intent carries no movie).
+      const settled = await (lidOnlyRow
+        ? LetterboxdAdmissionD1.admitVerifiedLidOnly(env, {lid: code, route: 'letterboxd_rated_archive', settleOnly: true, now: () => new Date().toISOString()})
+        : LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: recovering ? {tmdb: item.intendedTmdb} : null, evidenceDue: recovering && item.evidenceDue === true, settleOnly: true, pendingEvidence: recovering ? item.pendingEvidence || null : null, now: () => new Date().toISOString()}))
         .catch(error => ({outcome: 'deferred', reason: error && error.code || 'admission_unavailable'}));
       if (recovering && settled.outcome === 'present' && settled.fromIntent) {
         const committed = await commitVerified(env, sha, code, item, item.intendedTmdb, {title: item.name, years: Number.isInteger(item.year) ? [item.year] : [], path: item.filmPath}, doc.generatedAt, atD1, {settled: true});
+        return withWrites(committed, committed.verified === true || committed.state === 'needs_review', committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
+      }
+      // AIR-673: an applied lid-only attempt of this row finishes it WITHOUT a fetch: the Film is admitted already; only the lid-keyed facts and the verified row remain (both idempotent).
+      if (lidOnlyRow && settled.outcome === 'present_lid_only' && settled.fromReceipt) {
+        const committed = await finishLidOnlyFromReceipt(env, sha, code, item, doc.generatedAt);
         return withWrites(committed, committed.verified === true || committed.state === 'needs_review', committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
       }
       if (settled.outcome !== 'needs_check') return withWrites({pending: true, fetched: false, verified: false, code, state: item.state, reason: settled.reason === 'evidence_unrecorded' ? 'evidence_unrecorded' : 'in_flight', phase: 'identity'}, false, 'none');
@@ -803,6 +916,14 @@ const LetterboxdRatedCandidates = (() => {
     const queued = collisionQueue(doc, code, item, evidence);
     if (queued.blocked) return terminal(queued.blocked, true);
     const decision = LetterboxdIdentity.decide(queued.queue, queued.observations, {importedTmdb: imported})[queued.queue.length - 1];
+    // AIR-673 / ADR 0217 (dormant): a page that names no accepted movie is tried as an H1 lid-only page. `H1_RULES` ships empty, so until the owner's step 8 no page proves `tmdb_none` and this branch changes nothing.
+    if (atD1 && typeof LetterboxdLidOnlyProof !== 'undefined' && (!decision || decision.decision !== 'accepted' || !decision.tmdbId)) {
+      const proof = await LetterboxdLidOnlyProof.lidOnlyPageProof({lid: code, redirect: page.redirect, fetched: page, evidence, ...(lidOnlyRules ? {rules: lidOnlyRules} : {}), checkedAt: new Date().toISOString()});
+      if (proof.admits === true) {
+        const committed = await commitLidOnly(env, sha, code, item, proof, doc.generatedAt, {guard: recoverGuard});
+        return withWrites(committed, committed.verified === true || committed.state === 'needs_review' || clearedStop, committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
+      }
+    }
     if (recovering && (!decision || decision.decision !== 'accepted' || !decision.tmdbId)) {
       const changed = await reviewBehindGuard(env, key, code, 'source_changed', recoverGuard);
       return withWrites(changed, changed.writes === true, changed.writes ? 'review' : 'none');

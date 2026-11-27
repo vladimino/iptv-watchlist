@@ -10,7 +10,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {execFileSync} from 'node:child_process';
 import {webcrypto,createHash} from 'node:crypto';
-import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedImports,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import * as WatchlistD1 from '../src/watchlist-d1.js';
 import {admissionStep} from '../src/letterboxd-sync-admission.js';
@@ -78,6 +78,7 @@ const ctx=vm.createContext({URL,Response,Request,Headers,Date,Map,Set,JSON,Objec
 vm.runInContext(bundle.slice(start,end),ctx);
 for(const file of ['src/domain/tmdb-tv-identity.js','src/sources.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace(/^export default/m,'globalThis.x='),ctx);
 vm.runInContext(scoped('src/letterboxd-match.js','LetterboxdMatch')+'\n'+scopedReplacing('src/letterboxd-identity.js','LetterboxdIdentity','const normTitle=LetterboxdMatch.normTitle;\n')+'\n'+scoped('src/domain/letterboxd-rated-admission.js','LetterboxdRatedAdmission')+'\n'+scoped('src/domain/letterboxd-import-registry.js','LetterboxdImportRegistry'),ctx);
+vm.runInContext(scopedImports('src/domain/letterboxd-lid-only-proof.js','LetterboxdLidOnlyProof','const {TMDB_STATES,pageTmdbObservation}=LetterboxdRatedAdmission;\nconst {LID_ONLY_PROOF_VERSION,lidOnlyProofDigest,normalizeFilmUrl}=LetterboxdLidOnlyDigest;'),ctx);
 for(const file of ['src/letterboxd-facts.js','src/letterboxd-rated-candidates.js','src/letterboxd-diary-identity.js'])vm.runInContext(fs.readFileSync(file,'utf8'),ctx);
 vm.runInContext(scoped('src/letterboxd-admission-documents.js','LetterboxdAdmissionDocuments'),ctx);
 vm.runInContext("globalThis.derivedViewIndex=async env=>RatingsD1.overlayView(env,{});globalThis.viewIndexD1Version=async env=>'d1:r'+(await RatingsD1.readRatingsAuthority(env?.DB??null,env)).generation;",ctx);
@@ -987,6 +988,101 @@ const file=fresh('d1'),env=world(file);
  assert.equal(new Set(all).size,N);
  const without=await D1.admittedMovieIds(big,{exceptCode:'bulk7'});
  assert.equal(without.length,N-1);assert.equal(without.includes('800007'),false,'the admission of the excepted code is left out');
+}
+
+// ===== AIR-673 / ADR 0217 decision 9, test 14: the rated archive candidate of a lid-only Film, and the Diary on a lid already admitted lid-only (DORMANT: H1 rules are supplied by the test only) =====
+{
+ const SHA='e'.repeat(64),KEY='letterboxd/imports/'+SHA+'/rated-candidates.json';
+ const RULES={eligibleTypes:['video.movie'],idBlockMarker:'<section class="film-ids">'};
+ const noTmdbPage=(lid,slug,title,year)=>'<html><head><link rel="canonical" href="https://letterboxd.com/film/'+slug+'/"><link rel="shortlink" href="https://boxd.it/'+lid+'"><meta property="og:type" content="video.movie"><meta property="og:title" content="'+title+' ('+year+')"><script type="application/ld+json">'+JSON.stringify({name:title,releasedEvent:[{startDate:String(year)}]})+'</script></head><body class="film"><section class="film-ids"></section></body></html>';
+ const addNoTmdb=(lid,slug,title='Lid Only',year=1999)=>site.set(lid,{slug,html:noTmdbPage(lid,slug,title,year)});
+ const doc=(code,over={})=>({schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[code]:{code,state:'pending',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name:'Lid Only',year:1999,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:null,...over}},checkpoint:{cursor:null,stopped:null}});
+ const rowOf=code=>getDocD1(file,KEY).candidates[code];
+ const lidRows=lid=>rows(file,"SELECT film_id,route,receipt_key FROM film_lid_admission WHERE lid='"+lid+"'");
+ const factRecord=async lid=>(await Facts.readJSON?.(env,Facts.recordKey('lb-'+lid)))??null;
+ const linksDoc=()=>getDocD1(file,'letterboxd/facts/links.json');
+ const step=extra=>Candidates.identityStep(env,{sha:SHA,fetchImpl,lidOnlyRules:RULES,...extra});
+
+ // 1. the SHIPPED (empty) rules: a page with no TMDB is never admitted; the delivered terminal review is unchanged.
+ reset();
+ setDocD1(file,KEY,doc('lo0'));addNoTmdb('lo0','lid-only-1999');
+ const refused=await Candidates.identityStep(env,{sha:SHA,fetchImpl});
+ assert.equal(refused.verified,false,JSON.stringify(refused));
+ assert.equal(rowOf('lo0').state,'needs_review','without rules the page is reviewed, as delivered');
+ assert.equal(lidRows('lo0').length,0,'no lid-only admission without H1 rules');
+
+ // 2. with H1 rules: the Film, the proof row, ONE keyed receipt, the rated row verified with tmdb null, the rating under the LID fact key, and no TMDB alias anywhere.
+ reset();
+ setDocD1(file,KEY,doc('lo1'));addNoTmdb('lo1','lid-only-1999');
+ const out=await step();
+ assert.equal(out.verified,true,JSON.stringify(out));
+ assert.deepEqual([out.tmdb,out.lidOnly,out.filmId],[null,true,'film:lb:lo1']);
+ assert.deepEqual(rows(file,"SELECT id FROM film WHERE id='film:lb:lo1'").length,1);
+ assert.deepEqual(lidRows('lo1').map(item=>[item.film_id,item.route]),[['film:lb:lo1','letterboxd_rated_archive']]);
+ assert.deepEqual(receipts(file).filter(item=>item.operation_key==='admission:lid:lo1').map(item=>item.state),['applied'],'one keyed receipt under the common lid key');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film_rated_admission WHERE source_code='lo1'")[0].n,0,'no film_rated_admission row: the Film stays outside the ADR 0211 scope');
+ assert.equal(evidence(file).filter(item=>item.subject_value==='lo1').length,0,'K2 writes no evidence row');
+ const r=rowOf('lo1');
+ assert.deepEqual([r.state,r.kind,r.tmdb,r.intendedTmdb,r.enrichment,r.filmPath],['verified','lid_only',null,null,'done','/film/lid-only-1999/']);
+ const links=linksDoc();
+ assert.equal(links['letterboxd:lo1'],'lb-lo1','the lid is linked to its own fact key');
+ assert.equal(Object.keys(links).some(alias=>alias.startsWith('tmdb:')&&links[alias]==='lb-lo1'),false,'no TMDB alias is invented');
+ const fact=getDocD1(file,'letterboxd/facts/films/lb-lo1.json');
+ assert.deepEqual([fact.links.letterboxd,fact.links.tmdb,fact.rating?.value,fact.watched?.value],['lo1',null,4,true],'the rating and the watched fact are written under the lid fact key');
+ assert.equal(puts.includes(ADMISSIONS),false,'no R2 admissions object');
+
+ // 3. interruption after the canonical batch: the row is `admitting` again, the receipt is applied. The recovery finishes WITHOUT a fetch, a second Film, a second receipt or a second proof row.
+ const filmsBefore=JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),lidRows('lo1'),receipts(file)]);
+ const interrupted=getDocD1(file,KEY);interrupted.candidates.lo1={...interrupted.candidates.lo1,state:'admitting',tmdb:null,enrichment:'pending'};setDocD1(file,KEY,interrupted);
+ calls.length=0;
+ const recovered=await step();
+ assert.equal(recovered.verified,true,JSON.stringify(recovered));
+ assert.deepEqual(calls,[],'recovery from an applied receipt makes no request');
+ assert.equal(JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),lidRows('lo1'),receipts(file)]),filmsBefore,'idempotent: nothing is written twice');
+ assert.deepEqual([rowOf('lo1').state,rowOf('lo1').kind,rowOf('lo1').tmdb],['verified','lid_only',null]);
+ // a replay of the same rating writes no second rating event
+ assert.equal(getDocD1(file,'letterboxd/facts/films/lb-lo1.json').rating.value,4);
+
+ // 4. the Diary on a lid ALREADY admitted lid-only, whose page now names a movie (ADR 0217 case 5a): the coordinator answers `present_lid_only`, which only SETTLES. The entry (intent) is cleared with the outcome
+ // `lid_only`, the label carries `lidOnly`, NO TMDB alias is written, nothing is attached (never an automatic attach) and no receipt of its own is written.
+ add('lo1','lid-only-1999','900150','Lid Only',1999);
+ await seed(env,'lo1');
+ const receiptsBefore=JSON.stringify(receipts(file)),factsBefore=JSON.stringify(linksDoc()),claimsBefore=JSON.stringify(rows(file,'SELECT film_id,scheme,value,trusted FROM film_external_id ORDER BY film_id,scheme,value'));
+ calls.length=0;
+ const diary=await Identity.resolve(env,[{lid:'lo1',slug:'lid-only-1999'}],opts({route:'ratings_diary'}));
+ const outcome=diary.outcomes.get('lo1');
+ assert.deepEqual([outcome.class,outcome.reason],['settled','lid_only'],JSON.stringify([...diary.outcomes]));
+ assert.equal(JSON.stringify(diary.labels.get('lo1')),JSON.stringify({title:null,year:null,tmdb:null,lidOnly:true}));
+ assert.equal(JSON.stringify(receipts(file)),receiptsBefore,'no receipt of its own');
+ assert.equal(JSON.stringify(linksDoc()),factsBefore,'no alias written');
+ assert.equal(JSON.stringify(rows(file,'SELECT film_id,scheme,value,trusted FROM film_external_id ORDER BY film_id,scheme,value')),claimsBefore,'no TMDB claim: never an automatic attach');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film WHERE id='film:tmdb:900150'")[0].n,0,'and no second Film for the movie');
+ assert.equal((await Facts.diaryLinks(env,['lo1'])).get('lo1').tmdb,null);
+ const stored=await Facts.readDiaryIdentity(env);
+ assert.ok(!stored.films.lo1,'the Diary entry is cleared with the outcome lid_only');
+ // idempotent: a second Diary check settles the same way and changes nothing
+ const again=await Identity.resolve(env,[{lid:'lo1',slug:'lid-only-1999'}],opts({route:'ratings_diary'}));
+ assert.equal(again.outcomes.get('lo1').reason,'lid_only',JSON.stringify([...again.outcomes]));
+ assert.equal(JSON.stringify(receipts(file)),receiptsBefore);
+ assert.equal(JSON.stringify(linksDoc()),factsBefore);
+
+ // 5. a changed intent: the row holds a TMDB intent, the page now proves lid-only: reviewed as a changed source, nothing admitted.
+ reset();
+ setDocD1(file,KEY,doc('lo2',{state:'admitting',intendedTmdb:'900123',filmPath:'/film/other-slug/',enrichment:'pending'}));addNoTmdb('lo2','lid-only-1999');
+ const changed=await step();
+ assert.equal(rowOf('lo2').state,'needs_review',JSON.stringify(changed));
+ assert.equal(rowOf('lo2').reason,'source_changed');
+ assert.equal(lidRows('lo2').length,0,'nothing admitted on a changed intent');
+
+ // 6. the Ratings link of the lid already names a movie: held, never admitted lid-only, no Film and no proof row.
+ reset();
+ await Facts.linkFilm(env,{letterboxd:'lo3',tmdb:'900124'});
+ setDocD1(file,KEY,doc('lo3'));addNoTmdb('lo3','lid-only-1999');
+ const held=await step();
+ assert.notEqual(held.verified,true,JSON.stringify(held));
+ assert.equal(lidRows('lo3').length,0);
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film WHERE id='film:lb:lo3'")[0].n,0,'no Film on a lid whose Ratings link names a movie');
+ assert.equal(rowOf('lo3').state,'admitting','the row stays in its durable intent for another attempt');
 }
 
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

@@ -207,6 +207,23 @@ function recordRatingChange(record,incoming,effective){
   });
   return factKey;
  }
+ // AIR-673 / ADR 0217 decisions 5b and 9: the positive observation of the link document a lid-only admission is fenced on, and the lid's own fact key. `tmdbAlias` is the movie id the lid's record already carries (null for none): a
+ // lid with a movie alias is NEVER admitted lid-only. Read only; a Ratings document domain that is not authoritative is a typed refusal, never an absence.
+ async function linksObservation(env,lid){
+  if(!LID.test(String(lid||'')))throw new FactsError('invalid_identity','Invalid Letterboxd id');
+  if(typeof RatingsD1==='undefined')throw new FactsError('admission_unavailable','The Ratings document domain is not available');
+  const owned=await RatingsD1.observeOwned(env,FACTS_KEYS.links);
+  if(!owned.owned)throw new FactsError('admission_unavailable','The Ratings document domain is not authoritative');
+  const factKey=owned.value?.['letterboxd:'+lid]||null,tmdbKey=Object.entries(owned.value||{}).find(([alias,key])=>alias.startsWith('tmdb:')&&key===factKey)?.[0]||null;
+  let tmdbAlias=tmdbKey?tmdbKey.slice(5):null;
+  if(factKey&&!tmdbAlias){const {value:record}=await readJSON(env,recordKey(factKey));if(record?.links?.tmdb!=null)tmdbAlias=String(record.links.tmdb);}
+  return {fence:owned.fence,tmdbAlias};
+ }
+ // The lid's own fact record `lb-<lid>`, linked by `letterboxd:<lid>` ONLY: no TMDB alias is written or invented (ADR 0217 decision 9, rated and Diary entry points).
+ async function linkLidOnly(env,lid){
+  if(!LID.test(String(lid||'')))throw new FactsError('invalid_identity','Invalid Letterboxd id');
+  return linkFilm(env,{letterboxd:String(lid)});
+ }
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
  // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.
  // The winner is the greater of the stored rating and the films-list floor. Null and absence are not a rating.
@@ -1036,5 +1053,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,linksObservation,linkLidOnly,recordOwnerWatchedMark};
 })();
