@@ -6,8 +6,9 @@
 // The checks (decision 2): 1 the boxd.it redirect reaches `/film/<slug>/`; 2 the page answered 200 with a complete body; 3 it is not a challenge page; 4 its shortlink equals the lid and its canonical path equals the
 // redirect target; 5 the film type marker is present, readable and in the eligible list, and the title is not empty; 6 the id block is present and holds no TMDB id of any type. The year is optional here only.
 import {TMDB_STATES, pageTmdbObservation} from './letterboxd-rated-admission.js';
+import {LID_ONLY_PROOF_VERSION, lidOnlyProofDigest, normalizeFilmUrl} from './letterboxd-lid-only-digest.js';
+export {LID_ONLY_PROOF_VERSION, lidOnlyProofDigest, normalizeFilmUrl};
 
-export const LID_ONLY_PROOF_VERSION = 1;
 // PROVISIONAL and EMPTY on purpose (see above). `eligibleTypes`: the enumerated feature-film page types (the value of the page's film type marker); `idBlockMarker`: a regular expression SOURCE that matches
 // the block where Letterboxd carries external ids, exactly once, so that its presence is positive and its absence of any TMDB id means something.
 export const H1_RULES = Object.freeze({eligibleTypes: Object.freeze([]), idBlockMarker: null});
@@ -16,22 +17,6 @@ const LID = /^[A-Za-z0-9_-]{1,80}$/;
 const SLUG = /^[a-z0-9-]{1,200}$/;
 const typed = (state, extra = {}) => ({state, ...(TMDB_STATES[state] || {}), ...extra});
 const refused = (state, outcome, extra = {}) => ({state, outcome, retryClass: 'definite', admits: false, ...extra});
-const sha256Hex = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-
-// The normalized final film page URL: https, lowercase host, no query, no fragment, one trailing slash (decision 8b, `source`).
-export function normalizeFilmUrl(value) {
-  let url;
-  try { url = new URL(String(value)); } catch { return null; }
-  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'letterboxd.com' || url.username || url.password || url.port) return null;
-  const path = url.pathname.replace(/\/+$/, '') + '/';
-  return 'https://letterboxd.com' + path;
-}
-
-// The proof digest: sha256 over a fixed-order record of every input, each also stored in its own column of `film_lid_admission` so the digest can be recomputed. `year` is null when unknown.
-export async function lidOnlyProofDigest(proof) {
-  const fields = [proof.proofVersion, proof.lid, proof.finalUrl, proof.slug, proof.canonicalPath, proof.shortlink, proof.typeMarker, proof.idBlockOutcome, proof.completenessOutcome, proof.title, proof.year ?? null];
-  return sha256Hex(JSON.stringify(fields));
-}
 
 // The page type marker: the one `og:type` meta of the page (an assumption of the PROVISIONAL rules; the real marker is fixed at step 8). Exactly one, non-empty, else unreadable (null).
 function typeMarkerOf(html) {

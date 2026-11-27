@@ -38,7 +38,7 @@ const attempt=(file,text)=>{try{sql(file,text);return 'ok';}catch(error){return 
  const open=(mode,generation)=>{const file=migrated();sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");if(mode!=='r2'){sql(file,"UPDATE prediction_aux_authority SET mode='closed', generation=1");if(mode==='d1')sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=2, activated_at='"+stamp+"'");}return {file,db:d1Standin(file,{})};};
  const env={PREDICTION_DB_REQUIRED:'on'};
  const r2=open('r2'),closed=open('closed'),d1=open('d1');
- assert.deepEqual({...await Aux.readAuxAuthority(closed.db,env)},{mode:'closed',proof:'closed',installed:true,generation:1,version:46,ready:false},'closed reads closed, not r2, not unavailable, not ready');
+ assert.deepEqual({...await Aux.readAuxAuthority(closed.db,env)},{mode:'closed',proof:'closed',installed:true,generation:1,version:47,ready:false},'closed reads closed, not r2, not unavailable, not ready');
  assert.equal(Aux.auxClosed(await Aux.readAuxAuthority(closed.db,env)),true);assert.equal(Aux.auxClosed(await Aux.readAuxAuthority(r2.db,env)),false);assert.equal(Aux.auxClosed(await Aux.readAuxAuthority(d1.db,env)),false);
  assert.equal(await Aux.auxD1(closed.db,env),null,'closed gives no D1 branch: the R2 objects are still the data');
  assert.equal((await Aux.guardR2Write(r2.db,env)).proof,'explicit_r2','the gate lets an r2 write through');
