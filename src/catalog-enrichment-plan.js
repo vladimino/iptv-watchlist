@@ -402,7 +402,8 @@ export function planReplacements(input){
    const states=CORE_ORDER.filter(source=>applicable.includes(source)).map(source=>observedState(source,field));
    if(standing.name==='superseded'&&states.length&&states.every(state=>state==='absent'))out.supersededKept.push(field);
    // the very source that attributed the stored value verifiably has none now: the writer counts it as `source_absent` and keeps the value (a blank never clears)
-   if(standing.source&&observedState(standing.source,field)==='absent')out.offers[field]={source:standing.source,value:null,mode:'absent',language:null};
+   // a RETAINED absence (what a settled source verified earlier, not asked now) is evidence for composing the finding, not a new upstream observation: it is never declared to the writer as a fresh absence
+   if(standing.source&&observedState(standing.source,field)==='absent'&&!answers[standing.source]?.retained)out.offers[field]={source:standing.source,value:null,mode:'absent',language:null};
    continue;
   }
   // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order

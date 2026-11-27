@@ -1137,7 +1137,8 @@ const fresh=async(w,when,name)=>{w.leaseId=(await S.acquireLease(w.env,{leaseId:
  // TMDB recovers LATER and also verifiably lacks the runtime; Letterboxd is NOT fetched again
  const later=at(13+3600);await fresh(w,later,'stagger');
  const up=upstream({tm:movie({id:604,runtime:null})});
- await step(w,up,later);
+ const recovered=await step(w,up,later);
+ assert.equal(recovered.report.provenance.source_absent||0,0,'a RETAINED absence is evidence for composition, not a new upstream observation: it is not counted as a fresh source_absent');
  assert.ok(!up.calls.some(url=>url.includes('letterboxd.com')||url.includes('boxd.it')),'the independently settled Letterboxd source is not fetched again');
  assert.deepEqual(rows(w.file,"SELECT source,status FROM catalog_enrichment_state WHERE part='core' ORDER BY source").map(r=>r.source+':'+r.status),['letterboxd:complete','tmdb:complete'],'both core rows complete');
  assert.equal(meta(w.file).runtime,136,'the old runtime stays');
@@ -1153,6 +1154,80 @@ const fresh=async(w,when,name)=>{w.leaseId=(await S.acquireLease(w.env,{leaseId:
  await step(w,upstream({tm:movie({id:604,runtime:120})}),t3);
  assert.equal(meta(w.file).runtime,120);
  assert.equal(filmJson(w.file).supersededKept,undefined,'resolved: the list is cleared');
+}
+
+
+// ---- AIR-633 fourth review: the core completions and the owner projection are ONE guarded publication ----
+{
+ const staggered=async()=>{
+  const w=await enforceWorld();
+  const both=()=>upstream({tm:movie()});
+  await step(w,both(),at(10));await step(w,both(),at(11));
+  sqlite(w.file,"UPDATE film_external_id SET value='604' WHERE film_id='"+FILM+"' AND scheme='tmdb'");
+  await step(w,upstream({lb:lbPage({tmdb:['604'],runtime:null}),tm:'transport'}),at(12));
+  await step(w,upstream({lb:lbPage({tmdb:['604'],runtime:null}),tm:'transport'}),at(13));
+  return w;
+ };
+ const failing={on:false,hits:0};
+ const injected=w=>({...w,env:{DB:d1Standin(w.file,{onBatch:async statements=>{if(failing.on&&statements.some(item=>String(item.text).includes('supersededKept'))){failing.hits++;throw new Error('D1_ERROR: injected failure at the final state publication');}}})}});
+ // (1) a failure at the final publication (last core + Film list): both persist or neither; the pending core stays retryable and a successful replan exposes the list
+ const w=await staggered();
+ const t1=at(13+3600);await fresh(w,t1,'inject');
+ failing.on=true;
+ await assert.rejects(()=>step(injected(w),upstream({tm:movie({id:604,runtime:null})}),t1),/injected failure/);
+ failing.on=false;
+ assert.ok(failing.hits>=1,'the injected failure hit the final publication');
+ assert.deepEqual(rows(w.file,"SELECT source,status FROM catalog_enrichment_state WHERE part='core' ORDER BY source").map(r=>r.source+':'+r.status),['letterboxd:complete','tmdb:due'],'the last core row did NOT commit without its Film list: it stays due and retryable');
+ assert.equal(filmJson(w.file).supersededKept,undefined);
+ const t2=at(13+7200);await fresh(w,t2,'retry');
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core'");
+ await step(w,upstream({tm:movie({id:604,runtime:null})}),t2);
+ assert.deepEqual(rows(w.file,"SELECT source,status FROM catalog_enrichment_state WHERE part='core' ORDER BY source").map(r=>r.source+':'+r.status),['letterboxd:complete','tmdb:complete']);
+ assert.deepEqual(filmJson(w.file).supersededKept,['runtime'],'the successful replan exposes the list once the core is settled');
+ // (2) a refused observation or a stale no-op never clears the established finding, and a control move before the publication publishes nothing: enforce -> hold during the TMDB fetch
+ reopenCore(w.file);
+ const t3=at(13+3*3600);await fresh(w,t3,'race');
+ const up=upstream({lb:lbPage({tmdb:['604'],runtime:null}),tm:movie({id:604,runtime:120})});
+ const racing=async(url,init)=>{if(String(url).startsWith('https://api.themoviedb.org/'))setMode(w.file,'hold',3);return up(url,init);};
+ racing.calls=up.calls;
+ await step(w,racing,t3);
+ assert.equal(meta(w.file).runtime,136,'hold refuses the replacement (a stale no-op): the stored runtime is unchanged');
+ assert.deepEqual(filmJson(w.file).supersededKept,['runtime'],'the established finding is NOT cleared by a planned offer that was refused');
+ assert.ok(coreStatus(w.file).includes('due'),'and the part is not settled with the stale policy');
+ // (3) back in enforce the same observation really resolves it, and the list is cleared by the actual replacement
+ setMode(w.file,'enforce',4);
+ const t4=at(13+4*3600);await fresh(w,t4,'resolve2');
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core'");
+ await step(w,upstream({lb:lbPage({tmdb:['604'],runtime:null}),tm:movie({id:604,runtime:120})}),t4);
+ assert.equal(meta(w.file).runtime,120);
+ assert.equal(filmJson(w.file).supersededKept,undefined,'cleared by the actual replacement');
+ // (4) an anchor change invalidates a finding that belongs to the old anchor set instead of carrying it as current
+ const v=await staggered();
+ const tv=at(13+3600);await fresh(v,tv,'v1');
+ await step(v,upstream({tm:movie({id:604,runtime:null})}),tv);
+ assert.deepEqual(filmJson(v.file).supersededKept,['runtime']);
+ sqlite(v.file,"DELETE FROM film_external_id WHERE film_id='"+FILM+"' AND scheme='tmdb'");
+ const tv2=at(13+7200);await fresh(v,tv2,'v2');
+ assert.equal((await step(v,upstream({}),tv2)).state,'replan');
+ assert.equal(filmJson(v.file).supersededKept,undefined,'the old-anchor finding is invalidated by the anchor change');
+}
+
+
+{
+ // a REFUSED observation (a language downgrade) never clears an established finding, with the publication itself succeeding
+ const w=await enforceWorld();
+ await step(w,upstream({tm:movie()}),at(10));await step(w,upstream({tm:movie()}),at(11));
+ assert.equal(fieldRow(w.file,'synopsis').language,'ru');
+ sqlite(w.file,"UPDATE film_external_id SET value='604' WHERE film_id='"+FILM+"' AND scheme='tmdb'");
+ const lb=lbPage({tmdb:['604'],synopsis:''});
+ await step(w,upstream({lb,tm:movie({id:604,translations:trs('')})}),at(12));
+ await step(w,upstream({lb,tm:movie({id:604,translations:trs('')})}),at(13));
+ assert.ok((filmJson(w.file).supersededKept||[]).includes('synopsis'),'the superseded Russian synopsis is listed once both sources verifiably lack one under the new anchors: '+JSON.stringify(filmJson(w.file).supersededKept));
+ reopenCore(w.file);
+ const refused=await step(w,upstream({lb,tm:movie({id:604,translations:trs('','An English overview')})}),at(14));
+ assert.ok(refused.report.provenance.refusals.language_kept>=1,'the English observation of a stored verified Russian value was offered and refused: '+JSON.stringify(refused.report.provenance));
+ assert.equal(meta(w.file).synopsis,'tm synopsis','the refused downgrade changed nothing');
+ assert.ok((filmJson(w.file).supersededKept||[]).includes('synopsis'),'and it does NOT clear the established finding: only an actual replacement or adoption does');
 }
 
 console.log('catalog enrichment producer: ok');
