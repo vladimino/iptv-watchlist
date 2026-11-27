@@ -650,9 +650,6 @@ export const FILES={
  "discovery-fence-collision.mjs": {
   "suite": "core"
  },
- "discovery-fence-hourly-lockstep.mjs": {
-  "suite": "core"
- },
  "discovery-recovery.mjs": {
   "suite": "core"
  },

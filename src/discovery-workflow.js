@@ -574,6 +574,13 @@ async function renewDiscoverySeries(env,pinned){
  if(after.record?.programmeRunId===pinned&&after.record.reason!=='chunk_budget'&&after.record.remainingChunks>0)return {renewed:true,reason:'already'};
  return {renewed:false,reason:'write_uncertain',uncertain:true};
 }
+// AIR-687: pure. Real queue movement read from the actual chunk summary shape (see `chunkUsefulProgress` callers): a checked candidate (the count includes the cheap pass), a touched Film, an added Film,
+// an assigned or replayed slot, or a revalidated decision. An error chunk, a collision retry and a checkpoint-only chunk with none of these are not useful progress.
+function chunkUsefulProgress(outcome){
+ const count=value=>Number.isFinite(value)&&value>0?value:0;
+ if(!outcome||outcome.stage==='error'||outcome.stage==='busy')return false;
+ return count(outcome.checked)+count(outcome.touched)+count(outcome.added)+count(outcome.assignment?.assigned)+count(outcome.assignment?.replayed)+count(outcome.revalidation?.revalidated)>0;
+}
 // A thrown step is retried by the platform, so this must not throw after a chunk may have committed.
 async function runWorkflowChunk(env,meter){
  const before=await readContinuation(env);
@@ -581,10 +588,10 @@ async function runWorkflowChunk(env,meter){
   const outcome=await advanceDiscovery(env,{caller:'internal',chunkBudgetMs:DISCOVERY_WORKFLOW_CHUNK_BUDGET_MS});
   const saved=outcome?.diagnostic?.saved?.owned===true;
   const busy=outcome?.stage==='busy'||outcome?.discovery?.reason==='busy';
-  // AIR-687: `progress` only says the checkpoint was saved (a state transition, also for an error or a collision retry). `usefulProgress` is real queue movement:
-  // a checked candidate, or cheap-pass/replay work; an error or collision chunk with nothing checked is not.
-  const worked=outcome?.stage!=='error'&&!outcome?.generationCollision&&((outcome?.checked||0)>0||(outcome?.touched||0)>0||(outcome?.replay?.outcomes?.assigned||0)>0);
-  return {threw:false,progress:saved,usefulProgress:saved&&worked,busy,until:outcome?.discovery?.nextCatchUpAt||null,summary:chunkSummary(outcome),saved};
+  // AIR-687: `progress` only says the checkpoint was saved and this hop owned it (also for an error or a collision retry); it keeps driving the stall counter. `usefulProgress` is real queue movement read from the
+  // actual summary shape: a checked candidate (the count includes the cheap pass), a touched Film, an assigned or replayed slot, or a revalidated decision. A checkpoint-only chunk is never useful progress.
+  const usefulProgress=saved&&chunkUsefulProgress(outcome);
+  return {threw:false,progress:saved,usefulProgress,busy,until:outcome?.discovery?.nextCatchUpAt||null,summary:{...chunkSummary(outcome),usefulProgress},saved};
  }catch(e){
   logWorkflowFailure('chunk',e,meter);
   let after=null;
@@ -1280,7 +1287,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     // AIR-410: the chunk's key is its instance and its ordinal in that instance, stable across a replay. The patch is a function of the record read
     // inside the compare-and-swap, so a cron closing the period in between cannot be overwritten, and a retried checkpoint adds nothing twice.
     const chunkKey=ownId+':'+chunks;
-    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey,pinned),...ownVersion});
+    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,lastUsefulProgressAt:outcome.usefulProgress?new Date().toISOString():record.lastUsefulProgressAt||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey,pinned),...ownVersion});
     const checkpoint=await persist('progress',()=>settleWorkflowIfOwner(env,ownId,progressPatch),settleKind);
     if(checkpoint.kind==='lost')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
     if(checkpoint.kind==='deferred')return deferredExit('checkpoint_unsaved',checkpoint.cause);
