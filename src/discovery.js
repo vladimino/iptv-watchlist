@@ -2146,7 +2146,7 @@ function discoveryQueueState(evidence,now=Date.now()){
   continuationProgrammeRunId:c&&typeof c.programmeRunId==='string'?c.programmeRunId:null,hopId:same&&typeof c.hopId==='string'&&c.hopId?c.hopId:null,
   stage:c&&typeof c.stage==='string'?c.stage:null,continuationReason:c&&typeof c.reason==='string'?c.reason:null,
   remainingChunks:same?discoveryQueueCount(c.remainingChunks):null,remaining:reading?.remaining??null,cheapRemaining:reading?.cheapRemaining??null,deferred:reading?.deferred??null,waitingRetry:reading?.waitingRetry??null,
-  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,usefulProgressAt:workflow?discoveryQueueTime(workflow.lastUsefulProgressAt)||null:null,usefulProgressSince:workflow?discoveryQueueTime(workflow.usefulProgressTrackedSince)||null:null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
+  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,fenceCollisions:same?discoveryQueueCount(c.fenceCollisions):null,usefulProgressAt:workflow?discoveryQueueTime(workflow.lastUsefulProgressAt)||null:null,usefulProgressSince:workflow?discoveryQueueTime(workflow.usefulProgressTrackedSince)||null:null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
  const out=(state,reason,extra={})=>({...base,state,reason,...extra});
  if(e.authority?.state==='unavailable')return out('unknown','authority_unavailable');
  if(unavailable.some(name=>['authority','status','continuation','workflow','generation'].includes(name)))return out('unknown','records_unreadable');

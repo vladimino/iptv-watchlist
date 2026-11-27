@@ -201,14 +201,17 @@ const P=await import('../src/domain/monitor-policy.js');
  bumpOnStatus(w,1);
  const collided=await wf.runWorkflowChunk(w.env,meter);
  const hour=3600000,now=Date.now();
- const stored={schemaVersion:1,programmeRunId:RUN,series:0,instanceId:'inst-0',phase:'running',usefulProgressTrackedSince:new Date(now-5*hour).toISOString(),lastUsefulProgressAt:new Date(now-5*hour).toISOString()};
+ // A record written before the change: no useful-work fields. The first new-version chunk saves a zero-work collision checkpoint and starts tracking; that is not recovery of the open incident.
+ const stored={schemaVersion:1,programmeRunId:RUN,series:0,instanceId:'inst-0',phase:'running'};
  await wf.writeWorkflowState(w.env,stored,null);
+ await wf.settleWorkflowIfOwner(w.env,'inst-0',record=>wf.workflowProgressPatch(record,{outcome:collided,pinned:RUN,series:0,chunks:1,meter,tally,chunkKey:'inst-0:1',ownVersion:{}}));
  const readQueue=async at=>{const wfState=(await wf.readWorkflowState(w.env)).record;return wf.discoveryQueueState({observedAt:new Date(at).toISOString(),published:RUN,authority:{state:'open'},unavailable:[],records:{continuation:(await recordOf(w)),status:(await Authority.routeRead(w.env,'epg/discovery-status.json')).value,workflow:wfState,lease:null},pause:null},at);};
  const queue=await readQueue(now);
  assert.equal(queue.owed,true);assert.equal(collided.usefulProgress,false);
  const open={key:'discovery_stalled',firstSeenAt:new Date(now-4*hour).toISOString(),metrics:{},metricsAt:new Date(now-hour).toISOString()};
  const judged=P.evaluateDiscovery({executor:'workflow',continuation:await recordOf(w),queue,health:null,publishedRunId:RUN,readout:null},now,{open});
- assert.deepEqual(judged.issues.map(item=>item.key),['discovery_stalled'],'a fresh saved zero-work checkpoint does not recover the incident');assert.equal(judged.facts.recovery,null);
+ assert.equal(queue.fenceCollisions,1);assert.equal(queue.usefulProgressAt,null);assert.equal(typeof queue.usefulProgressSince,'string');
+ assert.deepEqual(judged.issues.map(item=>item.key),['discovery_stalled'],'starting to track on a zero-work collision checkpoint does not recover the incident');assert.equal(judged.facts.recovery,null);assert.equal(judged.issues[0].metrics.held,'progress_unconfirmed');
  // Genuine work: the recovery chunk settles the candidate; the Workflow records it; the incident recovers.
  clock.offset+=31000;
  const worked=await wf.runWorkflowChunk(w.env,meter);

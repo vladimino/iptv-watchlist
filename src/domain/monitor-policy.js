@@ -95,7 +95,7 @@ export function evaluateEpg(facts, now, {dailyDue}) {
 const DISCOVERY_OWED = new Set(['backlog', 'running', 'failed', 'blocked']);
 const DISCOVERY_INCIDENTS = ['discovery_stalled', 'discovery_unconfirmed'];
 const DISCOVERY_HANDOFF = new Set(['authority_loading', 'generation_mismatch', 'generation_handoff', 'gate_generation_moved']);
-const DISCOVERY_HELD_WHY = {records_unreadable: 'the Discovery records could not be read', queue_unconfirmed: 'the queue state is not confirmed'};
+const DISCOVERY_HELD_WHY = {records_unreadable: 'the Discovery records could not be read', queue_unconfirmed: 'the queue state is not confirmed', progress_unconfirmed: 'no chunk has moved the queue since the incident was established'};
 const discoveryOpen = previous => {
   const open = previous?.open && typeof previous.open === 'object' && DISCOVERY_INCIDENTS.includes(previous.open.key) && time(previous.open.firstSeenAt) !== null ? previous.open : null;
   return open;
@@ -126,7 +126,7 @@ export function evaluateDiscovery(facts, now, previous = null) {
   const backlog = !quiet && DISCOVERY_OWED.has(queue.state) && timed;
   const unconfirmed = !quiet && !backlog;
   const queueMetrics = {queueState: queue.state ?? null, queueReason: queue.reason ?? null, ...(DISCOVERY_OWED.has(queue.state) && !timed ? {timing: 'unknown'} : {})};
-  let state = queue.state === 'paused' ? 'waiting' : 'healthy', stall = null, unknownSince = null;
+  let state = queue.state === 'paused' ? 'waiting' : 'healthy', stall = null, unknownSince = null, progressAt = null, trackedBacklog = false, usefulNewer = false;
   if (backlog) {
     const allowedAt = time(queue.allowedAt) ?? 0;
     // AIR-687: a record that tracks useful work (`usefulProgressSince`) is judged by the last chunk with real queue movement, or by the start of tracking when there was none yet. A fresh error, collision or
@@ -134,9 +134,17 @@ export function evaluateDiscovery(facts, now, previous = null) {
     const usefulSince = time(queue.usefulProgressSince), usefulAt = time(queue.usefulProgressAt);
     const tracked = usefulSince !== null;
     const lastProgress = tracked ? (usefulAt ?? usefulSince) : Math.max(lastChunk ?? 0, checkpoint ?? 0);
+    progressAt = tracked && lastProgress ? lastProgress : null;
+    // The detection clock (above) and the recovery proof differ, as for the Predictions stream: starting to track is a baseline for detecting a NEW incident, never evidence that an open one ended. An open incident on tracked work
+    // recovers only on useful work newer than its baseline (`metrics.lastProgressAt` of its last stalled observation, else the time it was established).
+    trackedBacklog = tracked;
+    const baseline = open ? (time(open.metrics?.lastProgressAt) ?? time(open.firstSeenAt)) : null;
+    usefulNewer = usefulAt !== null && baseline !== null && usefulAt > baseline;
+    // A zero-work loop (a recorded error, or a counted `discovery_fence` collision retry) is not a legitimate wait: its own gate cannot hide it. A deferred wait of another kind (cooldown, budget backoff) keeps the gate order.
+    const loop = queue.state === 'failed' || Number(queue.fenceCollisions) > 0;
     const overdue = allowedAt && allowedAt <= now ? now - allowedAt : 0;
     const idle = lastProgress ? now - lastProgress : null;
-    if (tracked && idle !== null && idle >= THRESHOLDS.discoveryDegradedMs) stall = {key: 'discovery_stalled', stalledMs: Math.max(overdue, idle), allowedAt: allowedAt ? iso(allowedAt) : null};
+    if (tracked && loop && idle !== null && idle >= THRESHOLDS.discoveryDegradedMs) stall = {key: 'discovery_stalled', stalledMs: Math.max(overdue, idle), allowedAt: allowedAt ? iso(allowedAt) : null};
     else if (allowedAt && allowedAt > now) state = 'waiting';
     else if (overdue < THRESHOLDS.discoveryWaitingMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = overdue > 0 ? 'waiting' : 'healthy';
     else if (overdue < THRESHOLDS.discoveryDegradedMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = 'delayed';
@@ -152,12 +160,15 @@ export function evaluateDiscovery(facts, now, previous = null) {
     state = 'degraded';
     // While an incident is open its key stays: a change of diagnosis is shown in the metrics, never as a recovery followed by a new alert.
     const key = open ? open.key : stall.key, transition = open && open.key !== stall.key ? stall.key : null;
-    const shared = {stalledMs: stall.stalledMs, allowedAt: stall.allowedAt, lastChunkAt: iso(lastChunk), executor: facts.executor ?? null, ...queueMetrics, ...(transition ? {transition} : {})};
+    const shared = {stalledMs: stall.stalledMs, allowedAt: stall.allowedAt, lastChunkAt: iso(lastChunk), ...(progressAt ? {lastProgressAt: iso(progressAt)} : {}), executor: facts.executor ?? null, ...queueMetrics, ...(transition ? {transition} : {})};
     if (stall.key === 'discovery_stalled') issues.push(issue(key, 'degraded', 'discovery', 'Discovery backlog (' + (queue.remainingChunks ?? record?.remainingChunks ?? '?') + ' chunks) has had no allowed progress for ' + hours(stall.stalledMs) + ' hours', metrics({remainingChunks: queue.remainingChunks ?? null, ...shared})));
     else issues.push(issue(key, 'degraded', 'discovery', 'The Discovery queue state (' + (queue.reason ?? 'unknown') + ') has stayed unconfirmed for ' + hours(stall.stalledMs) + ' hours', metrics(shared)));
   } else if (open && unconfirmed) {
     state = 'degraded';
     issues.push(discoveryHold(open, 'queue_unconfirmed', queue));
+  } else if (open && backlog && trackedBacklog && !usefulNewer) {
+    state = 'degraded';
+    issues.push(discoveryHold(open, 'progress_unconfirmed', queue));
   }
   if (!quiet && facts.readout?.stalled && state !== 'degraded') { state = 'degraded'; issues.push(issue('discovery_executor_stalled', 'degraded', 'discovery', 'The Discovery Workflow instance is stalled', metrics({remainingChunks: queue.remainingChunks ?? null, lastChunkAt: iso(lastChunk), executor: facts.executor ?? null}))); }
   if (state === 'degraded' && facts.publishedRunId && record?.programmeRunId && facts.publishedRunId !== record.programmeRunId) issues.push(issue('discovery_generation_mismatch', 'degraded', 'discovery', 'The continuation belongs to another generation than the published one'));

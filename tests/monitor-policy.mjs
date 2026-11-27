@@ -104,24 +104,38 @@ const keys=result=>result.issues.map(item=>item.key);
   const recovered=ev(queue,{},{open});
   assert.deepEqual(keys(recovered),[],label);assert.equal(recovered.facts.recovery,reason,label);assert.equal(P.discoveryRecovery(recovered.facts).reason,reason,label);
  }
- // AIR-687: an open incident with an owed queue is judged by the last chunk that really moved the queue, not by a fresh saved checkpoint. A series of zero-work error or collision checkpoints
- // (fresh checkpoint and chunk times, a gate in the future) neither refreshes the clock nor recovers the incident; genuine persisted work does. A legacy record without the fields keeps the old clocks (above).
+ // AIR-687: an open incident with an owed queue is judged by the last chunk that really moved the queue, not by a fresh saved checkpoint. A zero-work loop (a recorded error or a counted fence collision retry,
+ // with fresh checkpoint and chunk times and a future gate) neither refreshes the clock nor recovers the incident. Starting to track is a detection baseline, never recovery evidence: an open incident recovers only on
+ // useful work newer than its baseline. A legitimate deferred wait (cooldown, budget backoff) with a future gate is not a loop and opens no new stall. A legacy record without the fields keeps the old clocks (above).
  {
-  const zeroWork={checkpointAt:at(now-MIN),lastChunkAt:at(now-MIN),allowedAt:at(now+30*60*MIN/60),usefulProgressAt:at(now-5*H),usefulProgressSince:at(now-6*H)};
-  for(const [label,queue] of [['saved error checkpoints',{...q(zeroWork),state:'failed',reason:'discovery_fence'}],['saved collision backoff checkpoints',q({...zeroWork,reason:'backoff'})],['no useful work since tracking began',q({...zeroWork,usefulProgressAt:null,usefulProgressSince:at(now-5*H)})]]){
+  const zeroWork={checkpointAt:at(now-MIN),lastChunkAt:at(now-MIN),allowedAt:at(now+30*MIN),usefulProgressAt:at(now-5*H),usefulProgressSince:at(now-6*H)};
+  for(const [label,queue] of [['saved error checkpoints',{...q(zeroWork),state:'failed',reason:'discovery_fence'}],['saved collision backoff checkpoints',q({...zeroWork,reason:'backoff',fenceCollisions:3})],['collisions, no useful work since tracking began',q({...zeroWork,reason:'backoff',fenceCollisions:2,usefulProgressAt:null,usefulProgressSince:at(now-5*H)})]]){
    const held=ev(queue,{},{open});
    assert.deepEqual(keys(held),['discovery_stalled'],label+': the incident stays open');assert.equal(held.state,'degraded',label);assert.equal(held.facts.recovery,null,label);
-   const fresh=ev(queue);
-   assert.deepEqual(keys(fresh),['discovery_stalled'],label+': and is raised without an earlier incident');
+   assert.deepEqual(keys(ev(queue)),['discovery_stalled'],label+': and is raised without an earlier incident');
   }
-  // Real persisted work (cheap pass, replay or candidate) recorded by the Workflow ends it; so does a series that has only just started tracking.
-  const worked=ev(q({...zeroWork,usefulProgressAt:at(now-10*MIN),usefulProgressSince:at(now-6*H)}),{},{open});
-  assert.deepEqual(keys(worked),[]);assert.equal(worked.facts.recovery,'within_policy');
-  const justStarted=ev(q({...zeroWork,usefulProgressAt:null,usefulProgressSince:at(now-10*MIN)}),{},{open});
-  assert.deepEqual(keys(justStarted),[]);assert.equal(justStarted.facts.recovery,'within_policy');
+  // A legitimate deferred wait (no collision count): the future gate keeps it `waiting`, no fresh stall; an open incident is held, not recovered, without useful work newer than its baseline.
+  const legit=q({...zeroWork,reason:'backoff',usefulProgressAt:null,usefulProgressSince:at(now-5*H)});
+  const legitFresh=ev(legit);
+  assert.deepEqual([legitFresh.state,keys(legitFresh)],['waiting',[]],'a cooldown with a future gate opens no stall');
+  const legitHeld=ev(legit,{},{open});
+  assert.deepEqual(keys(legitHeld),['discovery_stalled']);assert.equal(legitHeld.issues[0].metrics.held,'progress_unconfirmed');assert.equal(legitHeld.facts.recovery,null);
+  // Rollout: an old three-hour incident, then the first new-version chunk saves a zero-work checkpoint and starts tracking now. That is not recovery; the productive chunk after it is.
+  const first=q({checkpointAt:at(now-MIN),lastChunkAt:at(now-MIN),allowedAt:null,usefulProgressAt:null,usefulProgressSince:at(now-10*MIN),reason:'backoff',fenceCollisions:1});
+  const justStarted=ev(first,{},{open});
+  assert.deepEqual(keys(justStarted),['discovery_stalled'],'starting to track does not close the incident');assert.equal(justStarted.facts.recovery,null);assert.equal(justStarted.issues[0].metrics.held,'progress_unconfirmed');
+  const productive=ev(q({...first,usefulProgressAt:at(now-MIN)}),{},{open});
+  assert.deepEqual(keys(productive),[]);assert.equal(productive.facts.recovery,'within_policy');
+  // The baseline is the last stalled observation's progress time when the incident recorded one: older useful work does not recover it.
+  const measured={...open,metrics:{...open.metrics,lastProgressAt:at(now-2*H)}};
+  assert.deepEqual(keys(ev(q({...first,usefulProgressAt:at(now-3*H),usefulProgressSince:at(now-6*H)}),{},{open:measured})),['discovery_stalled'],'useful work older than the baseline');
+  assert.equal(ev(q({...first,usefulProgressAt:at(now-H),usefulProgressSince:at(now-6*H)}),{},{open:measured}).facts.recovery,'within_policy');
+  // A stalled observation records the progress time it judged, for the next tick's baseline.
+  assert.equal(ev(queueStalledTracked()).issues[0].metrics.lastProgressAt,at(now-5*H));
   // A quiet state is unaffected: the proven empty queue and the EPG pause still recover regardless of the useful-work clock.
   assert.equal(ev({state:'empty',reason:'drained',owed:false,eligible:false,usefulProgressSince:at(now-9*H)},{},{open}).facts.recovery,'queue_empty');
   assert.equal(ev({state:'paused',reason:'epg_priority',owed:true,eligible:false,usefulProgressSince:at(now-9*H)},{},{open}).facts.recovery,'epg_priority');
+  function queueStalledTracked(){return {...q({...zeroWork}),state:'failed',reason:'discovery_fence'};}
  }
  // Re-review: owed work without any usable time of this generation is unconfirmed, never healthy and never a recovery `within_policy`.
  const untimed=q({allowedAt:null,checkpointAt:null,lastChunkAt:null});
