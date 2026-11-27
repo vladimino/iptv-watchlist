@@ -424,6 +424,9 @@ export const FILES={
  "catalog-enrichment-settings.mjs": {
   "suite": "core"
  },
+ "admin-film-metadata-api.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-workflow.mjs": {
   "suite": "core"
  },
