@@ -244,7 +244,9 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const sync=CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
   const anchorGuard=Plan.anchorSetGuard(filmId,context.anchors);
   const guards=[...writeFields.map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
-  const metadata={updatedAt:now,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
+  // ADR 0214 decision 4 (AIR-631 PV1): every core write DECLARES, per field, the source, the anchor it relied on, its observation time and the agreement digest it holds. The writer ignores the declaration at mode `off` or while the provenance schema is absent (planning is unchanged).
+  const declared=Object.fromEntries(writeFields.map(field=>{const source=core.writes[field].source,anchor=context.anchors[source];return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null}];}));
+  const metadata={updatedAt:now,declared,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},metadata,...(sync?{sync:{metadataAt:now}}:{}),requireExisting:true,guards};
   {const stop=await mayWrite();if(stop)return partial(report,stop);}
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.core(filmId),input,now:()=>now});

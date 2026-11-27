@@ -18,6 +18,7 @@
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced,metadataLocked,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
 import {resolveLocalization} from './localization-sources.js';
+import {planMetadataClear,planMetadataProvenance,readProvenance} from './film-metadata-provenance.js';
 
 export const FILM_FACTS_SOURCE_CAP=10;
 // Owner-approved order (11 Nov 2026) for the selection/overwrite of original_title ONLY, highest first; it is not a ranking of any other field. A value of an unlisted source can fill an empty field but never overwrite anything.
@@ -88,7 +89,7 @@ export async function readFilmSnapshot(env,id){
  if(!db)throw failed('film_person_unavailable');
  const filmId=fenced.filmId(id);
  try{
-  const [film,redirect,revision,dimensions,metadata,sync,member,tmdb,sources]=await Promise.all([
+  const [film,redirect,revision,dimensions,metadata,sync,member,tmdb,sources,provenance]=await Promise.all([
    one(db,'SELECT id,contract_version,canonical_identity,original_title,updated_at FROM film WHERE id=?',[filmId]),
    one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[filmId]),
    one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',['film',filmId]),
@@ -98,8 +99,10 @@ export async function readFilmSnapshot(env,id){
    one(db,'SELECT 1 AS present FROM watchlist_film WHERE film_id=?',[filmId]),
    many(db,"SELECT value FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND trusted=1 AND conflicting=0",[filmId]),
    many(db,"SELECT source,value,source_version,provenance_json,request_id,observed_at FROM film_localization_source WHERE film_id=?",[filmId]).catch(error=>{if(/no such table/i.test(String(error?.message||error)))return [];throw error;}),
+   // ADR 0214 (AIR-631): null while migration 0048 is absent (today's behaviour); a present control row at `off` reads only the mode; an unreadable control or field table fails the write closed.
+   readProvenance(db,filmId),
   ]);
-  return {id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources};
+  return {provenance,id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources};
  }catch(error){if(error?.code)throw error;throw failed('film_person_unavailable',error);}
 }
 
@@ -228,15 +231,44 @@ export function planFilmFacts(snapshot,input){
   }else if(effective.tier!=='none')skipped.push({field:'localization',reason:effective.tier==='owner'?'owner_kept':'reviewed_kept'});
  }
  // (b) film_metadata
+ // ADR 0214 (AIR-631): with the provenance control row at enforce or hold, the six fields go through the one comparator and every metadata batch carries its fences; schema absent or `off` keeps today's merge byte for byte.
+ const prov=snapshot.provenance,active=!!prov&&prov.mode!=='off';
+ const guards=[];let counts=null,ownerBatch=false,ownerChanged=false;
+ if(input.metadata!==undefined&&input.metadata!==null&&!active&&(input.metadata.ownerActions!==undefined||input.metadataAuthority!==undefined))throw failed('film_person_precondition');
  if(input.metadata===null){
-  if(snapshot.metadata)changes.push('metadata:clear');
-  statements.push(['DELETE FROM film_metadata WHERE film_id=?',[id]]);
+  if(active){
+   const clear=planMetadataClear(snapshot,input,at);
+   if(snapshot.metadata)changes.push('metadata:clear');
+   statements.push(...clear.pre);
+   statements.push(['DELETE FROM film_metadata WHERE film_id=?',[id]]);
+   statements.push(...clear.post);
+   counts=clear.counts;ownerBatch=clear.owner;
+  }else{
+   if(snapshot.metadata)changes.push('metadata:clear');
+   statements.push(['DELETE FROM film_metadata WHERE film_id=?',[id]]);
+  }
  }else if(input.metadata!==undefined){
   if(!plain(input.metadata)||typeof input.metadata.updatedAt!=='string'||!input.metadata.updatedAt)throw failed('film_person_invalid');
-  const merged=mergeMetadata(snapshot.metadata,input.metadata),params=metadataParams(id,merged),row=snapshot.metadata;
+  const decided=active?planMetadataProvenance(snapshot,input,at):null;
+  const merged=mergeMetadata(snapshot.metadata,decided?decided.effective:input.metadata),params=metadataParams(id,merged),row=snapshot.metadata;
   const same=!!row&&['schema_version','year','runtime','synopsis','poster','url','genres_json','people_version','payload_json','r2_key','content_sha256'].every((name,index)=>(row[name]??null)===(params[index+1]??null));
   if(!same)changes.push('metadata');
+  if(decided){statements.push(...decided.pre);}
   statements.push([METADATA_UPSERT,params]);
+  if(decided){
+   statements.push(...decided.post);changes.push(...decided.changes);skipped.push(...decided.skipped);guards.push(...decided.guards);counts=decided.counts;ownerBatch=decided.owner;ownerChanged=decided.changes.length>0;
+  }
+ }
+ // The control fence of EVERY metadata batch (a fill included): the mode and revision the plan read, so a batch planned under one mode never commits under another.
+ const control=prov&&input.metadata!==undefined?{mode:prov.mode,revision:prov.revision}:null;
+ // The owner command record: one immutable row per committed owner command, a no-op included (it bumps the Film revision), in the same batch as the effect.
+ let commandRow=false;
+ if(input.ownerCommand!==undefined){
+  const command=input.ownerCommand;
+  if(!active||!ownerBatch||!plain(command)||typeof command.requestId!=='string'||!command.requestId||!['set','lock','release','revert','refresh'].includes(command.action)||typeof command.digest!=='string'||!/^[0-9a-f]{64}$/.test(command.digest))throw failed('film_person_invalid');
+  const atIso=new Date(at).toISOString();
+  statements.push(['INSERT INTO film_metadata_owner_command (request_id,film_id,action,command_digest,outcome,applied_revision,at) VALUES (?,?,?,?,?,?,?)',[command.requestId,id,command.action,command.digest,ownerChanged?'applied':'noop',(Number.isInteger(input.expectedRevision)?input.expectedRevision:snapshot.revision)+1,atIso]]);
+  commandRow=true;
  }
  // (c) film_sync_state
  if(input.sync===null){
@@ -264,8 +296,8 @@ export function planFilmFacts(snapshot,input){
   if(snapshot.member)changes.push('membership:clear');
   statements.push(['DELETE FROM watchlist_film WHERE film_id=?',[id]]);
  }else if(input.watchlist!==undefined)throw failed('film_person_invalid');
- if(statements.length+4>MUTATION_STATEMENT_CAP)throw failed('film_person_bounded');
- return {id,statements,changes,skipped,noop:changes.length===0};
+ if(statements.length+guards.length+(control?1:0)+4>MUTATION_STATEMENT_CAP)throw failed('film_person_bounded');
+ return {id,statements,changes,skipped,guards,control,counts,noop:changes.length===0&&!commandRow};
 }
 
 // The fenced write of the film-side producer facts of ONE Film. Refuses before the database unless the marker is open. A call whose rows are all
@@ -303,10 +335,12 @@ export async function writeFilmFacts(env,input){
   if(!Array.isArray(input.guards)||input.guards.length>12||input.guards.some(guard=>!guard||typeof guard.sql!=='string'||!guard.sql||!Array.isArray(guard.params)||guard.params.some(value=>value===undefined)))throw failed('film_person_invalid');
   for(const guard of input.guards)statements.push([fenced.assertSql(guard.sql),guard.params]);
  }
+ if(plan.control)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id=1 AND mode=? AND revision=?)'),[plan.control.mode,plan.control.revision]]);
+ for(const guard of plan.guards)statements.push([fenced.assertSql(guard.sql),guard.params]);
  statements.push(...plan.statements);
  statements.push([fenced.BUMP,['film',id,at]]);
  await fenced.commit(env,gate,statements,entities,tail);
- return {id,revision:expected+1,written:true,changes:plan.changes,skipped:plan.skipped};
+ return {id,revision:expected+1,written:true,changes:plan.changes,skipped:plan.skipped,...(plan.counts?{provenance:plan.counts}:{})};
 }
 
 // Read-only. Does D1 already hold every row the call would write? Used by producers.readback to settle an unknown outcome by CONTENT.

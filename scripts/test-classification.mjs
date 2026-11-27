@@ -379,6 +379,12 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "film-metadata-provenance.mjs": {
+  "suite": "core"
+ },
+ "migration-0048-film-metadata-provenance.mjs": {
+  "suite": "core"
+ },
  "migration-0047-catalog-enrichment.mjs": {
   "suite": "core"
  },

@@ -13,6 +13,7 @@ export const REPAIR_AFTER_FAILURES=6;
 const MINUTE=60000,HOUR=3600000;
 // SHA-256 of canonical JSON (object keys sorted, undefined dropped, no clocks): the planner imports nothing, so it stays outside the receipt modules' dormancy surface.
 const canonical=value=>Array.isArray(value)?'['+value.map(canonical).join(',')+']':plain(value)?'{'+Object.keys(value).filter(key=>value[key]!==undefined).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}':JSON.stringify(value??null);
+export const canonicalJson=canonical;
 export async function digestOf(value){
  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonical(value)));
  return [...new Uint8Array(bytes)].map(byte=>byte.toString(16).padStart(2,'0')).join('');

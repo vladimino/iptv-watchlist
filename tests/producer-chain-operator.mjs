@@ -60,7 +60,7 @@ async function seed(made){
 const chainRow=(file,p)=>rows(file,"SELECT * FROM canonical_producer_chain WHERE programme_run_id='"+p+"'")[0]||null;
 // every row of every table except the sqlite internals: what "nothing else changed" means
 const tables=file=>rows(file,"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").map(row=>row.name);
-const dump=file=>Object.fromEntries(tables(file).map(name=>[name,JSON.stringify(rows(file,'SELECT * FROM "'+name+'" ORDER BY rowid'))]));
+const dump=file=>Object.fromEntries(tables(file).map(name=>[name,JSON.stringify(rows(file,'SELECT * FROM "'+name+'" ORDER BY '+(rows(file,"SELECT wr FROM pragma_table_list WHERE name='"+name+"'")[0]?.wr?Array.from({length:rows(file,"SELECT COUNT(*) AS n FROM pragma_table_info('"+name+"')")[0].n},(_,i)=>i+1).join(','):'rowid')))]));
 const sameExcept=(before,after,except=[])=>{for(const name of Object.keys(before))if(!except.includes(name))assert.equal(after[name],before[name],'table '+name+' unchanged');};
 const operatorOf=({held=true,now=NOW,...rest}={})=>producerChainOperator({held:()=>held,now:()=>now,...rest});
 
