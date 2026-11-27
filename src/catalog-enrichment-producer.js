@@ -255,7 +255,10 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const declared=Object.fromEntries(writeFields.map(field=>{
    const source=core.writes[field].source,anchor=context.anchors[source];
    const typed=Plan.declarationOf(field,source,anchor,answers[source]?.observation?.[field]);
-   return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null,...(typed&&typed.language?{language:typed.language,languageBasis:typed.languageBasis}:{})}];
+   // only a tag the writer can persist is declared; a verified tag it cannot hold is reported, never invented as ru/en and never allowed to fail the write
+   const tag=typed&&typed.language&&Plan.WRITER_LANGUAGES.includes(typed.language);
+   if(typed&&typed.language&&!tag)(report.languageNotDeclared??=[]).push({field,language:typed.language,source});
+   return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null,...(tag?{language:typed.language,languageBasis:typed.languageBasis}:{})}];
   }));
   const metadata={updatedAt:now,declared,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},metadata,...(sync?{sync:{metadataAt:now}}:{}),requireExisting:true,guards};

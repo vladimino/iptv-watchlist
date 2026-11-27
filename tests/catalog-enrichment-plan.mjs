@@ -256,6 +256,15 @@ function CORE_ALL(waiting,reason){return P.CORE_FIELDS.every(field=>waiting[fiel
  const lb=obs({synopsis:f('English text.','verified','en','assumed'),poster:f('https://img/lb.jpg'),genres:{...f(['Drama']),ids:[],unmapped:[]}});
  assert.match(await P.coreVersion('letterboxd','abc',lb),/^[0-9a-f]{64}$/);
  assert.notEqual(await P.coreVersion('letterboxd','abc',obs({...lb,synopsis:f('English text.','verified','en','explicit')})),await P.coreVersion('letterboxd','abc',lb),'assumed and explicit English are told apart');
+ // a verified OTHER-language tag of the last-resort poster is preserved, told apart from an unknown one by the digest, and ranks below Russian and English
+ const topOnly=(posters)=>P.selectPoster({posters},'/top.jpg');
+ assert.deepEqual(topOnly([{iso_639_1:'fr',file_path:'/top.jpg',width:100}]),{value:'/top.jpg',language:'fr',languageBasis:'explicit',coverage:'verified'});
+ assert.deepEqual(topOnly([{iso_639_1:'fr',file_path:'/x.jpg',width:100}]),{value:'/top.jpg',language:null,languageBasis:null,coverage:'verified'},'the same path with no listing: unknown');
+ const withTag=await P.coreVersion('tmdb','603',obs({poster:f('/top.jpg','verified','fr','explicit')})),withoutTag=await P.coreVersion('tmdb','603',obs({poster:f('/top.jpg','verified',null,null)}));
+ assert.notEqual(withTag,withoutTag,'a verified tag and an unknown language are different observations of the identical path');
+ const rank=(tmLang)=>P.decideCore({applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,disagreement:false,stored:{},now:'2026-11-27T10:00:00.000Z',answers:{letterboxd:{status:'ok',fields:{year:1,runtime:1,synopsis:'e',poster:'lb',url:'u',genres:['x']},coverage:{},language:{synopsis:'en',poster:null}},tmdb:{status:'ok',fields:{year:2,runtime:2,synopsis:'s',poster:'tm',url:'t',genres:['y']},coverage:{},language:{synopsis:null,poster:tmLang}}}}).writes.poster.source;
+ assert.equal(rank('fr'),'letterboxd','another language does not outrank the unknown-language poster of the first source: it stays below ru and en');assert.equal(rank('en'),'tmdb');assert.equal(rank('ru'),'tmdb');
+ assert.deepEqual(P.WRITER_LANGUAGES,['ru','en'],'the languages the provenance writer persists today');
  // the typed writer declaration: the value that carries the tag, its language and basis, or both null; never a language the observation did not carry
  assert.deepEqual(P.declarationOf('synopsis','tmdb',{scheme:'tmdb',value:'603'},f('Хакер.','verified','ru','explicit')),{field:'synopsis',source:'tmdb',anchor:{scheme:'tmdb',value:'603'},value:'Хакер.',language:'ru',languageBasis:'explicit'});
  assert.deepEqual(P.declarationOf('poster','tmdb',{scheme:'tmdb',value:'603'},f('u','verified')),{field:'poster',source:'tmdb',anchor:{scheme:'tmdb',value:'603'},value:'u',language:null,languageBasis:null});

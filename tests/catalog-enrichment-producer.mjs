@@ -681,4 +681,24 @@ function file0(w){return w.file;}
  // the same recorded response observed again: nothing is written, nothing wakes, no epoch change
  assert.deepEqual(await D.emitSourceChanged(w.env,{tmdbId:'603',movie:recorded,at:at(60)}),{state:'unchanged',parts:[]},'an identical complete observation of the recorded response is a no-op');
 }
+// ---- AIR-684 (review): a verified OTHER-language tag of the last-resort poster, end to end on the real writer ----
+{
+ const onlyFrench=movie({images:{posters:[{iso_639_1:'fr',file_path:'/p.jpg',width:100}]}});
+ const unlisted=movie({images:{posters:[]}});
+ // the observation keeps the tag and the digest tells it from the same path without one
+ assert.notEqual((await D.tmdbPartVersions(onlyFrench,603)).core,(await D.tmdbPartVersions(unlisted,603)).core,'a verified tag and an unknown language are different observations of the identical path');
+ const w=await world({lid:null,scope:'discovery'});
+ await step(w,upstream({lb:'404'}));
+ sqlite(w.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
+ const out=await step(w,upstream({lb:'404',tm:onlyFrench}),at(11));
+ assert.equal(out.state,'done','the write is not failed by a tag the schema cannot hold');
+ assert.equal(meta(w.file).poster,'https://image.tmdb.org/t/p/w500/p.jpg','the poster is still filled');
+ const poster=rows(w.file,`SELECT source,language,language_basis FROM film_metadata_field WHERE film_id='${FILM}' AND field='poster'`)[0];
+ assert.deepEqual(poster,{source:'tmdb',language:null,language_basis:null},'persisted with NO language until the additive schema support: never an invented ru or en');
+ assert.deepEqual(out.report.languageNotDeclared,[{field:'poster',language:'fr',source:'tmdb'}],'the verified tag the writer cannot hold is reported, not lost silently');
+ assert.equal(out.report.declarations.find(item=>item.field==='poster').language,undefined,'the declaration carries no language');
+ assert.equal(rows(w.file,`SELECT COUNT(*) AS n FROM film_metadata_history WHERE film_id='${FILM}'`)[0].n,0,'a fill adds no history');
+ assert.equal(core_version_present(w.file),true,'the part still settles with its version');
+ function core_version_present(file){return !!rows(file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v;}
+}
 console.log('catalog enrichment producer: ok');

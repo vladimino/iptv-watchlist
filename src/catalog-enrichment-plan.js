@@ -301,7 +301,7 @@ export function selectSynopsis(translations){
  return field(null,'absent');
 }
 // The poster: a verified Russian-language image of `images.posters[]`, else an English one, else (P1-A) a language-neutral one (`iso_639_1 = null`), else the top-level `poster_path`, whose language is known only when the same file
-// is listed in `images` as Russian or English (any other tag, or no listing, is unknown: never attributed). Within a tier the greater width, then the lexically smaller `file_path` (P2-A): votes and list order never decide. A missing or
+// is listed in `images` (its verified tag is kept, whatever the language; no listing is unknown, never attributed). Within a tier the greater width, then the lexically smaller `file_path` (P2-A): votes and list order never decide. A missing or
 // malformed images section is unreadable (the value is then the top-level path with no language, for writing only). A top-level `poster_path` that is null is TMDB's explicit "no poster"; a missing key or a bad shape is unreadable.
 // -> {value: path, language, languageBasis, coverage}
 export function selectPoster(images,topLevel){
@@ -314,12 +314,17 @@ export function selectPoster(images,topLevel){
   if(tier.length)return field(tier[0].file_path,'verified',language,language?'explicit':null);
  }
  if(top){
+  // the top-level path keeps the VERIFIED tag of the image that lists it (any two-letter language tag, never a guess); a path the images do not list is unknown. Another language ranks below Russian and English in the planner.
   const listed=posters.find(item=>item.file_path===top);
-  const language=listed&&(listed.iso_639_1==='ru'||listed.iso_639_1==='en')?listed.iso_639_1:null;
+  const language=listed&&typeof listed.iso_639_1==='string'&&/^[a-z]{2}$/.test(listed.iso_639_1)?listed.iso_639_1:null;
   return field(top,'verified',language,language?'explicit':null);
  }
  return topLevel===null?field(null,'absent'):unreadable();
 }
+// The languages the provenance writer can PERSIST today (AIR-631's `languageOf` and the CHECKs of migration 0049 accept `ru` and `en`). The observation and the digest keep any verified tag; the producer tells the writer only a tag in this set, so
+// a verified tag the schema cannot hold (for example `fr` on a last-resort poster) is neither invented as ru/en nor allowed to fail the write: it is reported (`languageNotDeclared`) and the declaration carries no language. Extending this set is
+// the additive schema step that AIR-631 owns.
+export const WRITER_LANGUAGES=Object.freeze(['ru','en']);
 // The typed writer declaration of ONE selected field: the single, explicit conversion from the observation to what a provenance writer is told (AIR-631): the source, the anchor, the value that carries the tag, and its language and basis
 // (`ru`/`en` with `explicit`/`assumed`, or both null). Never a language the observation did not carry.
 export function declarationOf(name,source,anchor,item){
@@ -365,4 +370,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({WRITER_LANGUAGES,declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
