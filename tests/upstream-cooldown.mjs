@@ -48,7 +48,7 @@ for (const status of [200, 403, 404, 429, 500, 503]) for (const headers of [H(),
   const file = migrated(44);
   assert.equal(sql(file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 44);
   const w = world(null);
-  assert.equal(sql(w.file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 46);
+  assert.equal(sql(w.file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 47);
   assert.equal(sql(w.file, 'SELECT COUNT(*) n FROM upstream_cooldown')[0].n, 0, 'created empty');
   assert.equal(sql(w.file, 'SELECT COUNT(*) n FROM upstream_coordination')[0].n, 0, 'no mode row: off by absence');
   // a second apply and a wrong predecessor are refused before any object is created
