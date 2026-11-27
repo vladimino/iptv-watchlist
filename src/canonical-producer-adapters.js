@@ -33,7 +33,7 @@ export const SOURCE_CHANGED='producer_source_changed';
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
 // The facts of one Film that make up its content. The id (the target), the request id, the revision and the clocks are not content.
-const CONTENT_KEYS=Object.freeze(['film','evidence','dimensions','localization','metadata','sync','watchlist']);
+const CONTENT_KEYS=Object.freeze(['film','evidence','dimensions','localization','metadata','metadataAuthority','sync','watchlist']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 // The typed failures of READING the store (the database is missing, held or not open, or a D1 transport or SQL exception wrapped by the snapshot read). A re-plan that fails like this is NOT 'cannot reconstruct': it propagates, so the
 // receipts module records an unsettled or waiting observation and leaves the receipt due. Anything else a re-plan throws (a typed content refusal, a producer that cannot reconstruct its source) stays 'no re-plan' (null, bounded retry).

@@ -92,6 +92,31 @@ const filmJson=file=>JSON.parse(rows(file,`SELECT film_json AS j FROM catalog_en
 }
 function file0(w){return w.file;}
 
+// ---- AIR-631 (PV1, ADR 0214 decision 4): the real C1 path DECLARES each core field it fills, so the first declared write after activation is attributed (planning is unchanged) ----
+{
+ const w=await world();
+ const up=upstream({});
+ await step(w,up);
+ // at mode `off` (the migration default) the declaration is ignored: today's rows, no field row
+ assert.equal(rows(w.file,'SELECT mode FROM film_metadata_provenance_control')[0].mode,'off');
+ sqlite(w.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
+ const done=await step(w,up,at(11));
+ assert.equal(done.state,'done');
+ const fieldRows=rows(w.file,`SELECT field,tier,source,origin,anchor_scheme,anchor_value,agreement,observed_at FROM film_metadata_field WHERE film_id='${FILM}' ORDER BY field`);
+ assert.deepEqual(fieldRows.map(row=>row.field),['genres','poster','runtime','synopsis','url','year'],'every field the core write filled is attributed');
+ assert.ok(fieldRows.every(row=>row.tier==='automatic'&&row.source==='letterboxd'&&row.origin==='catalog_enrichment'&&row.anchor_scheme==='letterboxd'&&row.anchor_value==='abc'&&row.agreement==='confirmed'),'declared by the Letterboxd source under its anchor, agreement recorded');
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_history')[0].n,0,'a fill adds no history');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,'the producer\'s own provenance rows wake nothing');
+}
+{
+ // the same path at `off`: the declaration is ignored and no provenance is written
+ const w=await world();
+ const up=upstream({});
+ await step(w,up);await step(w,up,at(11));
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_field')[0].n,0,'`off` writes no field row');
+ assert.equal(meta(w.file).year,1999);
+}
+
 // ---- paused or inactive: nothing happens before a request ----
 {
  const w=await world();

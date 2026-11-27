@@ -168,7 +168,9 @@ const results=read(prod);
  const db=d1Standin(file,{onQuery:async text=>{for(const match of text.matchAll(/\b(?:FROM|JOIN)\s+([a-z_]+)/gi))seen.add(match[1]);}});
  await dryRun({env:{DB:db},at:T,runId:'probe',films:[{id:ID(1),facts:facts('Title 1')},{id:ID(6),facts:facts('New')}],departed:[ID(9),ID(1)],personRows:[{id:'person:tmdb:1',roleId:'role:1',contractVersion:1}],credits:[{filmId:ID(1),credits:[{personId:'person:tmdb:1',role:'director'}]}],clock:steady()});
  const planned=new Set(COPY_PLAN.map(item=>item.table));
- assert.deepEqual([...seen].filter(table=>!planned.has(table)),[],'the harness reads a table the copy plan does not carry');
+ // AIR-631: every Film snapshot probes the provenance control row; the schema-21 scratch copy has no such table, which the writer reads as `absent` (today's behaviour), so it is probed on purpose and carried nowhere.
+ const PROBED_ABSENT=new Set(['film_metadata_provenance_control']);
+ assert.deepEqual([...seen].filter(table=>!planned.has(table)&&!PROBED_ABSENT.has(table)),[],'the harness reads a table the copy plan does not carry');
 }
 
 // 3. Round trip: statements run against the "production" file, pages pasted, a copy loaded; the copy is identical on the planned tables and the harness plans it like the original.
