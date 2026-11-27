@@ -18,26 +18,32 @@ The arguments are the number of Films and the number of cast members per Film. T
 
 ## Result
 
-| Measure | Value |
-| --- | --- |
-| Films drained | 60 of 60 (60 metadata rows, 60 Russian title rows, 780 credits, 780 Persons) |
-| Receipted units applied | 960, that is 16 per Film (1 core, 1 localization, 13 Persons, 1 credits chunk) |
-| Runs | 9: 8 ended at the statement budget (handover) and the ninth found the queue idle |
-| Films per run | 4 to 8 |
-| D1 statements, total | 43,833 |
-| D1 statements per Film | 730.6 (13 credits) |
-| D1 statements per unit | 45.7 |
-| Upstream requests per Film | 1 TMDB, 1 Wikidata |
-| Pending signals afterwards | 0 (the producer's own writes emitted none) |
+Two fixtures, same script, current code. Statements are counted by the harness wrapper around the D1 binding (every prepared statement, failed ones included); the sqlite3 stand-in reports no billed rows, so **billed `rows_written` is not measured here** (index writes would add to it).
+
+| Measure | 60 Films, 13 credits | 20 Films, 141 credits |
+| --- | --- | --- |
+| Films drained | 60 of 60 (780 credits, 780 Persons) | 20 of 20 (2,820 credits, 2,060 distinct Persons) |
+| Receipted units applied | 960 (16 per Film) | 2,160 (108 per Film: 1 core, 1 localization, Person units, 3 credits chunks) |
+| Runs | 9: 8 ended at the statement budget (handover), the ninth found the queue idle | 17: 16 handovers and one idle |
+| Films per run | 5 to 7 | 1 to 5 (a Film is resumed by the next run without refetching) |
+| D1 statements per Film | 705.3 | 4,186.7 |
+| D1 statements per unit | 44.1 | 38.8 |
+| Upstream requests per Film | 1 TMDB, 1 Wikidata | 1 TMDB, 1 Wikidata |
+| Applied receipts | 960, one per unit | 2,160, one per unit |
+| Pending signals afterwards | 0 | 0 |
 
 ## Reading
 
-- **More than two Films drain per run, and a run crosses the statement budget without waiting.** The successor run starts at once (the harness calls the next run immediately); the runs share no clock-based quota.
-- **The cost is dominated by Person units.** Each missing Person is its own receipted unit (reconcile read, reservation, fenced batch, state write), so a Film's cost grows with its cast. At 13 credits a Film costs about 730 statements; a cast of 140 would cost roughly ten times that. This is a measurement, not a gate: on the Workers Paid baseline it is neither a limit nor a reason to cap the credits (decision 8 of ADR 0219 keeps every correctly identified credit). If the cost proves to matter, the lever is a cheaper per-Person unit, a separate decision with evidence.
-- **Steady state is far below the budget.** The dated census behind ADR 0219 estimates about 280 new Discovery admissions per day. At the measured cost that is of the order of 200,000 statements per day for the fixture's cast size, spread over runs that each stop at the budget.
+- **A run crosses the statement budget without waiting, and a large cast spans runs.** The successor starts at once; the plan, rows and receipts make the next run resume the same Film at the next unit group without a second fetch. No operation key is applied twice.
+- **The cost is dominated by Person units.** Each missing Person is its own receipted unit (reconcile read, reservation, fenced batch, state write), so a Film's cost grows with its cast: about 705 statements at 13 credits and about 4,190 at 141. Shared Persons are reused (2,060 Persons for 2,820 credits).
+- **Steady state is far below the budget.** The dated census behind ADR 0219 estimates about 280 new Discovery admissions per day; at the measured cost that is of the order of 200,000 statements per day at the first fixture's cast size, spread over runs that each stop at their own budget.
+
+## Covered by tests, not by this script
+
+These are executable tests on the same stand-in, not measurements: priority split and fairness across handovers (`tests/catalog-enrichment-drain.mjs`), EPG yield and its resumption, the due-time wake for a backed-off item and for a backed-off signal, the code-version repair wake, the uncapped Letterboxd credits path (`tests/catalog-enrichment-letterboxd-credits.mjs`), the Workflow kick, park, handover and reconcile (`tests/catalog-enrichment-workflow.mjs`) and the causal postcommit wake (`tests/catalog-enrichment-wake.mjs`).
 
 ## Not measured here
 
-- Wall time and CPU on the Worker, real D1 latency, TMDB, Letterboxd and Wikidata response times and rate limits.
-- The Letterboxd path (the fixture has no Letterboxd anchor), a Film with a very large cast across several runs, EPG contention (the yield predicate is injected, not read from a real EPG seal phase) and the priority split between live and background Films (availability in the pinned EPG generation is read as unknown, which is live).
-- The Cloudflare Workflow wrapper, the kick and the due-time wake: the drainer is the body of a run; its Worker wiring is not part of what was measured.
+- Wall time and CPU on the Worker, real D1 latency and billed rows, TMDB, Letterboxd and Wikidata response times and rate limits.
+- A Letterboxd-anchored Film in the harness itself, a real EPG seal phase (the yield predicate is injected), trigger fan-out cost on a populated catalog and recovery-scan cost on a large retained set.
+- The Cloudflare Workflow platform itself: a whole drain is one step in the wrapper, so step-level replay limits are not measured.
