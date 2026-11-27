@@ -16,8 +16,10 @@ const ADMIN_META_REFUSAL_TEXT = {
   identity_unknown: 'Набор идентификаторов фильма неизвестен, поэтому вернуть старое значение нельзя. Задать новое значение можно.',
   anchor_changed: 'Идентичность фильма изменилась после этой записи, поэтому вернуть её нельзя. Задать новое значение можно.',
   no_value: 'В этой записи не было значения, возвращать нечего.',
-  stale_revision: 'Карточка изменилась с момента чтения. Данные перечитаны, повторите действие.',
-  stale_rows: 'Состояние источников изменилось с момента чтения. Данные перечитаны, повторите действие.',
+  stale_revision: 'Карточка изменилась с момента чтения. Команда не выполнена. Данные перечитываются, повторите действие.',
+  stale_rows: 'Состояние источников изменилось с момента чтения. Команда не выполнена. Данные перечитываются, повторите действие.',
+  pending: 'Есть команда с неизвестным исходом: повторите её или откажитесь от повтора выше. Другие действия отключены.',
+  stale_view: 'Данные устарели или читаются заново. Действия отключены, пока чтение не завершится успешно.',
   request_mismatch: 'Этот requestId уже использован для другой команды. Нажмите действие ещё раз, получится новая команда.',
   redirected: 'Фильм объединён с другим. Откройте целевой фильм.',
   blank_field: 'Поле пустое, закреплять нечего. Сначала задайте значение.',
@@ -28,13 +30,16 @@ const ADMIN_META_REFUSAL_TEXT = {
   authority_not_open: 'Запись канонического фильма сейчас закрыта (authority).',
   precondition_failed: 'Условие записи изменилось. Перечитайте фильм и повторите.',
   bounded: 'Значение превышает допустимый размер.',
-  invalid_value: 'Значение не подходит для этого поля.',
+  invalid_value: 'Сервер отклонил значение. Допустимо: год 1870–2200, длительность 1–10000, описание до 20000 знаков, постер и ссылка до 2000 знаков (ссылка начинается с http:// или https://), жанров до 40, каждый до 80 знаков.',
   invalid_command: 'Команда составлена неверно.',
   not_owner: 'Действие доступно только владельцу.',
   forbidden: 'Действие доступно только владельцу.',
   storage_unavailable: 'Хранилище не ответило, результат неизвестен. Можно отправить ту же команду ещё раз: requestId решит, записана ли она.',
   network: 'Нет ответа от сервера. Можно повторить: это будет та же команда, без второй правки.',
 };
+// the writer's own bounds (ownerValue in src/film-metadata-provenance.js); the server stays the judge, the page only does not forbid a value the writer accepts
+const ADMIN_META_MAXLENGTH = {year: 5, runtime: 5, synopsis: 20000, poster: 2000, url: 2000};
+let adminMetaPending = null;
 const adminMetaText = value => String(value === null || value === undefined ? '' : value);
 const adminMetaEsc = value => adminMetaText(value).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 
@@ -58,21 +63,33 @@ async function adminWriteFilmMetadata(storedId, body) {
 }
 
 // ---- 2. pure decisions ----
-// Whether a write can be offered at all, and the reason when it cannot.
-function adminMetaWritable(view) {
+// Whether a write can be offered at all, and the reason when it cannot. `options.stale`: the readback is not current (a command or a read is in flight, or the last read failed).
+// `options.pending`: a command with an unknown outcome is held; it must be retried or given up before any other action.
+function adminMetaWritable(view, options) {
   if (!view || view.redirectedTo) return {ok: false, reason: 'redirected'};
   if (view.schemaAbsent) return {ok: false, reason: 'schema_absent'};
   if (view.mode === 'off') return {ok: false, reason: 'provenance_off'};
+  if (options && options.pending) return {ok: false, reason: 'pending'};
+  if (options && options.stale) return {ok: false, reason: 'stale_view'};
   return {ok: true, reason: null};
 }
-// The state of one field as the owner must read it: never more provenance than the API stored.
-function adminMetaFieldState(entry) {
-  if (!entry) return {kind: 'none', label: 'нет данных'};
-  if (entry.blank) return {kind: 'blank', label: 'пусто'};
-  if (!entry.rank) return {kind: 'plain', label: 'происхождение недоступно'};
-  if (!entry.row) return {kind: 'unattributed', label: 'без происхождения (unattributed)'};
-  if (entry.row.tier === 'owner' && entry.rank.name === 'owner') return {kind: 'locked', label: 'закреплено владельцем'};
-  return {kind: entry.rank.name, label: ADMIN_META_RANK_TEXT[entry.rank.name] || entry.rank.name};
+// The state of one field as the owner must read it: never more provenance than the API stored, and three separate facts.
+//  pin        the owner's own pin of this field (`row.tier === 'owner'`); `entry.locked` is NOT it, it is the effective rank and is also `owner` under the metadata dimension lock
+//  rank       the effective rank (`entry.rank`); `owner` without a pin means the dimension lock protects the field
+//  unbound    a stored row whose value digest is not the displayed value's: its lineage is history, not the value's source
+function adminMetaFieldState(entry, dimensionLocked) {
+  if (!entry) return {kind: 'none', label: 'нет данных', pin: false, dimension: false, unbound: false};
+  const row = entry.row || null;
+  const pin = !!row && row.tier === 'owner';
+  const dimension = !!dimensionLocked && !!entry.rank;
+  const unbound = !!row && !entry.blank && entry.bound === false;
+  const base = {pin, dimension, unbound};
+  if (entry.blank) return {kind: 'blank', label: 'пусто', ...base};
+  if (!entry.rank) return {kind: 'plain', label: 'происхождение недоступно', ...base};
+  if (!row) return {kind: 'unattributed', label: 'без происхождения (unattributed)', ...base};
+  if (entry.rank.name === 'owner') return {kind: 'owner', label: pin ? 'закреплено владельцем' : 'защищено блокировкой метаданных', ...base};
+  if (entry.rank.name === 'superseded') return {kind: 'superseded', label: 'вытеснено: идентичность фильма изменилась после записи', ...base};
+  return {kind: entry.rank.name, label: ADMIN_META_RANK_TEXT[entry.rank.name] || entry.rank.name, ...base};
 }
 function adminMetaValueText(field, value) {
   if (value === null || value === undefined || value === '') return '';
@@ -117,9 +134,24 @@ function adminMetaOutcomeText(response, action) {
 // An answer after which the same command may be sent again (the outcome is unknown); every other answer finishes the attempt.
 const adminMetaRetryable = response => response.error === 'network' || response.outcome === 'unknown' || response.status === 503;
 
+// What a held command is, in words: action, field and the exact value that will be sent again.
+function adminMetaDescribe(command) {
+  const parts = [ADMIN_META_ACTION_TEXT[command.action] || command.action];
+  if (command.field) parts.push(ADMIN_META_FIELD_TEXT[command.field] || command.field);
+  if (command.action === 'set') parts.push('= ' + adminMetaValueText(command.field, command.value));
+  if (command.action === 'revert') parts.push('(запись журнала ' + Number(command.historyRef) + ')');
+  if (command.action === 'refresh') parts.push('(источники: ' + (command.expectedRows || []).map(row => row.source).join(', ') + ')');
+  return parts.join(' ');
+}
+function adminMetaPendingHtml(pending) {
+  if (!pending) return '';
+  return `<div class="admin-meta-pending" data-meta-pending-box><p><strong>Команда с неизвестным исходом.</strong> ${adminMetaEsc(adminMetaDescribe(pending.command))}. requestId: <code>${adminMetaEsc(pending.command.requestId)}</code>.</p>`
+    + '<p class="muted">Неизвестно, записана ли она. «Повторить» отправит ровно эту же команду, а сохранённая запись решит, выполнена ли она уже. Другие действия отключены. Отказ от повтора не означает, что команда не записалась: после него проверьте значение и журнал.</p>'
+    + '<div class="admin-meta-controls"><button type="button" data-meta-retry>Повторить ту же команду</button><button type="button" data-meta-discard>Отказаться от повтора</button></div></div>';
+}
+
 // ---- 3. the HTML ----
-function adminMetaSummary(view) {
-  const writable = adminMetaWritable(view);
+function adminMetaSummary(view, writable) {
   const mode = view.schemaAbsent ? 'схема не установлена' : (ADMIN_META_MODE_TEXT[view.mode] || adminMetaText(view.mode) || 'не указан');
   const items = [`<span class="admin-status admin-status-plain">режим: ${adminMetaEsc(mode)}</span>`];
   if (view.dimensionLocked) items.push('<span class="admin-status admin-status-plain">метаданные закреплены целиком</span>');
@@ -128,37 +160,49 @@ function adminMetaSummary(view) {
   const note = writable.ok ? '' : `<p class="muted" data-meta-readonly>${adminMetaEsc(adminMetaRefusalText(writable.reason))}</p>`;
   return `<div class="admin-badges">${items.join('')}</div>${note}`;
 }
-function adminMetaFieldRow(field, entry, writable) {
-  const state = adminMetaFieldState(entry);
+function adminMetaFieldRow(field, entry, ctx) {
+  const {writable, dimensionLocked} = ctx;
+  const state = adminMetaFieldState(entry, dimensionLocked);
   const row = entry && entry.row;
   const value = adminMetaValueText(field, entry && entry.value);
-  const lineage = row
-    ? `<dl class="admin-meta-lineage"><dt>источник</dt><dd>${adminMetaEsc(row.source || '')}${row.tier ? ' · ' + adminMetaEsc(row.tier) : ''}</dd>`
+  let lineage = '';
+  if (row && state.unbound) {
+    // the stored row describes ANOTHER value (digest mismatch): it is history, never the displayed value's source or language
+    lineage = '<p class="muted" data-meta-unbound>Запись происхождения относится к другому, прежнему значению и не описывает показанное. '
+      + `Историческая запись: источник ${adminMetaEsc(row.source || '')}${row.tier ? ' · ' + adminMetaEsc(row.tier) : ''}${row.language ? ' · язык ' + adminMetaEsc(row.language) : ''}.</p>`;
+  } else if (row) {
+    lineage = `<dl class="admin-meta-lineage"><dt>источник</dt><dd>${adminMetaEsc(row.source || '')}${row.tier ? ' · ' + adminMetaEsc(row.tier) : ''}</dd>`
       + (row.anchorScheme ? `<dt>идентичность</dt><dd>${adminMetaEsc(row.anchorScheme)}:${adminMetaEsc(row.anchorValue || '')}</dd>` : '')
       + (row.language ? `<dt>язык</dt><dd>${adminMetaEsc(row.language)}${row.languageBasis ? ' · ' + adminMetaEsc(row.languageBasis) : ''}</dd>` : '')
-      + (row.observedAt ? `<dt>наблюдалось</dt><dd>${adminMetaEsc(row.observedAt)}</dd>` : '') + '</dl>'
-    : (entry && entry.rank ? '<p class="muted">Происхождение не записано: значение показано как есть.</p>' : '');
+      + (row.observedAt ? `<dt>наблюдалось</dt><dd>${adminMetaEsc(row.observedAt)}</dd>` : '') + '</dl>';
+  } else if (entry && entry.rank && !entry.blank) lineage = '<p class="muted">Происхождение не записано: значение показано как есть.</p>';
   const flags = [];
-  if (entry && entry.mismatch) flags.push('<span class="admin-status admin-status-conflict">идентичность изменилась</span>');
-  if (entry && entry.rank && entry.bound === false && !entry.blank) flags.push('<span class="admin-status admin-status-plain">значение не привязано к записи</span>');
+  if (state.pin && state.kind !== 'owner') flags.push('<span class="admin-status admin-status-plain">закреплено владельцем</span>');
+  if (state.dimension && state.pin) flags.push('<span class="admin-status admin-status-plain">и защищено блокировкой метаданных</span>');
+  if (entry && entry.mismatch) flags.push('<span class="admin-status admin-status-conflict">значение не совпадает с записью происхождения</span>');
   const disabled = writable.ok ? '' : ' disabled';
-  const lockButton = entry && entry.locked
+  const blank = !entry || entry.blank;
+  const lockButton = state.pin
     ? `<button type="button" data-meta-action="release" data-field="${field}"${disabled}>${ADMIN_META_ACTION_TEXT.release}</button>`
-    : `<button type="button" data-meta-action="lock" data-field="${field}"${disabled}${entry && entry.blank ? ' disabled' : ''}>${ADMIN_META_ACTION_TEXT.lock}</button>`;
+    : `<button type="button" data-meta-action="lock" data-field="${field}"${disabled}${blank ? ' disabled' : ''}>${ADMIN_META_ACTION_TEXT.lock}</button>`;
+  const releaseNote = state.pin && dimensionLocked ? '<p class="muted">После снятия закрепления поле остаётся под блокировкой метаданных фильма.</p>' : '';
   const inputLabel = `${ADMIN_META_FIELD_TEXT[field]}: новое значение${field === 'genres' ? ' (через запятую)' : ''}`;
+  const max = ADMIN_META_MAXLENGTH[field] ? ` maxlength="${ADMIN_META_MAXLENGTH[field]}"` : '';
+  const control = field === 'synopsis'
+    ? `<textarea data-meta-input="${field}" rows="4"${max}${disabled}></textarea>`
+    : `<input type="text" data-meta-input="${field}"${max}${disabled}>`;
   return `<li class="admin-meta-field" data-meta-field="${field}"><h4>${ADMIN_META_FIELD_TEXT[field]} <span class="admin-status admin-status-${adminMetaEsc(state.kind)}">${adminMetaEsc(state.label)}</span>${flags.join('')}</h4>`
-    + `<p class="admin-meta-value">${value ? adminMetaEsc(value) : '<span class="muted">нет значения</span>'}</p>${lineage}`
-    + `<div class="admin-meta-controls"><label>${adminMetaEsc(inputLabel)} <input type="text" data-meta-input="${field}" maxlength="2000"${disabled}></label>`
+    + `<p class="admin-meta-value">${value ? adminMetaEsc(value) : '<span class="muted">нет значения</span>'}</p>${lineage}${releaseNote}`
+    + `<div class="admin-meta-controls"><label>${adminMetaEsc(inputLabel)} ${control}</label>`
     + `<button type="button" data-meta-action="set" data-field="${field}"${disabled}>${ADMIN_META_ACTION_TEXT.set}</button>${lockButton}</div></li>`;
 }
-function adminMetaC1(view) {
+function adminMetaC1(view, writable) {
   const c1 = view.c1;
   if (!c1) return '<p class="muted">Состояние обогащения каталога не установлено.</p>';
   const coreRows = (c1.rows || []).filter(row => row.part === 'core');
   const conflicts = (c1.conflicts || []).map(item => `<li>${adminMetaEsc(item.part)} · ${adminMetaEsc(item.source)}: <code>${adminMetaEsc(JSON.stringify(item.value))}</code></li>`).join('');
   const hints = (c1.hints || []).map(item => `<li>${adminMetaEsc(item.part)} · ${adminMetaEsc(item.source)}: <code>${adminMetaEsc(JSON.stringify(item.value))}</code></li>`).join('');
   const sources = coreRows.map(row => `<li>${adminMetaEsc(row.source)} · ${adminMetaEsc(row.status)}${row.reason ? ' · ' + adminMetaEsc(row.reason) : ''}</li>`).join('');
-  const writable = adminMetaWritable(view);
   const refreshable = coreRows.length && writable.ok;
   const credits = c1.credits && c1.credits.chunks ? `<p class="muted">Блоков состава: ${Number(c1.credits.chunks)}, с конфликтами: ${Number(c1.credits.withConflicts || 0)}.</p>` : '';
   return `<h4>Источники и конфликты</h4>${sources ? `<ul>${sources}</ul>` : '<p class="muted">Строк состояния источников нет.</p>'}`
@@ -183,77 +227,122 @@ function adminMetaHistory(view, writable) {
   const more = history.next ? `<button type="button" data-meta-more="${adminMetaEsc(history.next)}">Показать ещё</button>` : '';
   return `<h4>Журнал изменений</h4>${rows ? `<ul data-meta-history>${rows}</ul>` : '<p class="muted" data-meta-history-empty>Записей в журнале нет.</p>'}${more}`;
 }
-function adminMetaHtml(view) {
-  const writable = adminMetaWritable(view);
-  const fields = ADMIN_META_FIELDS.map(field => adminMetaFieldRow(field, view.fields && view.fields[field], writable)).join('');
+function adminMetaHtml(view, options) {
+  const writable = adminMetaWritable(view, options);
+  const ctx = {writable, dimensionLocked: !!view.dimensionLocked};
+  const fields = ADMIN_META_FIELDS.map(field => adminMetaFieldRow(field, view.fields && view.fields[field], ctx)).join('');
   const redirects = view.redirects && view.redirects.count ? `<p class="muted">В этот фильм объединено записей: ${Number(view.redirects.count)}. Их журнал включён ниже.</p>` : '';
-  return `${adminMetaSummary(view)}<ul class="admin-meta-fields">${fields}</ul>${adminMetaC1(view)}${redirects}${adminMetaHistory(view, writable)}`;
+  return `${adminMetaSummary(view, writable)}<ul class="admin-meta-fields">${fields}</ul>${adminMetaC1(view, writable)}${redirects}${adminMetaHistory(view, writable)}`;
 }
 
 // ---- 3. the binding ----
-// `state.pending` is the unfinished command: while the outcome is unknown the SAME command (same requestId, same body) is sent again.
+// ONE chain at a time: a read, a command and the readback that follows it are serialized by `state.busy`; a response that is not the latest read is dropped.
+// After a command (or a stale refusal) the rendered controls stay disabled until a read SUCCEEDS; a failed read is said as such, with its own retry, and never overwrites the command's result.
+// `adminMetaPending` (module level, like the title form's pending command) holds a command with an unknown outcome across a re-render of the detail: it is shown, it is the only thing
+// that can be sent, and the same body is sent again. Opening or re-mounting only READS; nothing is sent without a press.
 function adminBindFilmMetadata(host, storedId) {
   const section = host && host.querySelector ? host.querySelector('[data-film-metadata]') : null;
   if (!section || !storedId) return;
   const body = section.querySelector('[data-meta-body]');
-  const status = section.querySelector('[data-meta-status]');
-  const state = {view: null, pending: null, loaded: false, busy: false};
-  const say = text => { status.textContent = text; };
-  const render = () => { body.innerHTML = adminMetaHtml(state.view); };
+  const result = section.querySelector('[data-meta-result]');
+  const reading = section.querySelector('[data-meta-reading]');
+  const pendingBox = section.querySelector('[data-meta-pending]');
+  const state = {view: null, stale: true, loaded: false, busy: false, seq: 0, readFailed: false};
+  const held = () => (adminMetaPending && adminMetaPending.storedId === storedId ? adminMetaPending : null);
+  const say = text => { result.textContent = text; };
+  const render = () => {
+    if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!held()});
+    pendingBox.innerHTML = adminMetaPendingHtml(held());
+    reading.innerHTML = state.readFailed ? '<span>Не удалось прочитать метаданные. Действия отключены.</span> <button type="button" data-meta-reload>Повторить чтение</button>' : (state.busy && !state.loaded ? '<span>Читаю метаданные…</span>' : '');
+  };
+  // one read of the first page, or of the page after `cursor`; resolves true only when the answer was applied
   const load = async cursor => {
-    say('Читаю метаданные…');
-    const response = await adminReadFilmMetadata(storedId, cursor);
-    if (!response.ok) { say(response.status === 404 ? 'Фильм не найден.' : 'Не удалось прочитать метаданные. Можно открыть раздел ещё раз.'); state.loaded = false; return false; }
-    if (cursor && state.view) {
-      state.view = {...response.body, history: {rows: state.view.history.rows.concat(response.body.history.rows), next: response.body.history.next}};
-    } else state.view = response.body;
-    state.loaded = true;
+    const mine = ++state.seq;
+    state.stale = true; state.readFailed = false;
     render();
-    say('');
+    const response = await adminReadFilmMetadata(storedId, cursor);
+    if (mine !== state.seq) return false; // an answer that is not the latest read is dropped
+    if (!response.ok) { state.readFailed = true; state.stale = true; if (response.status === 404) reading.textContent = 'Фильм не найден.'; else render(); return false; }
+    const incoming = response.body;
+    if (cursor && state.view) {
+      // a later page carries the CURRENT revision and anchor: when they moved, the earlier rows' revert flags belong to the old state, so the first page is read again
+      if (incoming.revision !== state.view.revision || incoming.anchorDigest !== state.view.anchorDigest || incoming.mode !== state.view.mode || incoming.controlRevision !== state.view.controlRevision) {
+        state.seq++;
+        const again = await load(null);
+        if (again) say('Данные изменились, пока листался журнал: он перечитан с начала.');
+        return again;
+      }
+      state.view = {...incoming, history: {rows: state.view.history.rows.concat(incoming.history.rows), next: incoming.history.next}};
+    } else state.view = incoming;
+    state.loaded = true; state.stale = false; state.readFailed = false;
+    render();
     return true;
   };
-  section.addEventListener('toggle', () => { if (section.open && !state.loaded) load(null); });
-  body.addEventListener('click', async event => {
-    const target = event.target && event.target.closest ? event.target.closest('button') : null;
-    if (!target || target.disabled || state.busy) return;
-    const more = target.getAttribute('data-meta-more');
-    if (more) { state.busy = true; await load(more); state.busy = false; return; }
-    const action = target.getAttribute('data-meta-action');
-    if (!action || !state.view) return;
-    const field = target.getAttribute('data-field');
-    let command = state.pending && state.pending.signature === action + '|' + (field || '') + '|' + (target.getAttribute('data-history-ref') || '') ? state.pending.command : null;
-    if (!command) {
-      const options = {field, requestId: adminMetaNewRequestId()};
-      if (action === 'set') {
-        const input = body.querySelector('[data-meta-input="' + field + '"]');
-        const parsed = adminMetaParseValue(field, input ? input.value : '');
-        if (parsed.error) { say(parsed.error); return; }
-        options.value = parsed.value;
-      }
-      if (action === 'revert') options.historyRef = Number(target.getAttribute('data-history-ref'));
-      command = adminMetaCommand(state.view, action, options);
-      if (action === 'refresh' && !command.expectedRows.length) { say(adminMetaRefusalText('not_in_scope')); return; }
-      state.pending = {signature: action + '|' + (field || '') + '|' + (target.getAttribute('data-history-ref') || ''), command};
-    }
+  const run = async work => {
+    if (state.busy) return;
     state.busy = true;
+    try { await work(); } finally { state.busy = false; render(); }
+  };
+  const send = async (command, action) => {
+    state.stale = true; render();
     say('Записываем…');
     const response = await adminWriteFilmMetadata(storedId, command);
-    state.busy = false;
     if (response.ok) {
-      state.pending = null;
-      say(adminMetaOutcomeText(response, action));
-      await load(null);
-      say(adminMetaOutcomeText(response, action));
+      adminMetaPending = null;
+      const text = adminMetaOutcomeText(response, action);
+      say(text);
+      await load(null); // a failed read leaves the controls disabled and says so in its own place; the result above stays
       return;
     }
-    if (adminMetaRetryable(response)) { say(adminMetaRefusalText(response.error === 'network' ? 'network' : 'storage_unavailable')); return; }
-    // a definite refusal: the attempt is over, the readback is refreshed so the next command is planned on what is stored now
-    state.pending = null;
+    if (adminMetaRetryable(response)) {
+      state.stale = false; // the old read is still the latest known state; only the held command can be sent
+      say(adminMetaRefusalText(response.error === 'network' ? 'network' : 'storage_unavailable'));
+      return;
+    }
+    // a definite refusal ends the attempt
+    adminMetaPending = null;
     say(adminMetaRefusalText(response.error));
-    if (response.error === 'stale_revision' || response.error === 'stale_rows') { const message = adminMetaRefusalText(response.error); await load(null); say(message); }
+    if (response.error === 'stale_revision' || response.error === 'stale_rows') await load(null);
+    else state.stale = false;
+  };
+  section.addEventListener('toggle', () => { if (section.open && !state.loaded && !state.busy) run(() => load(null)); });
+  section.addEventListener('click', event => {
+    const target = event.target && event.target.closest ? event.target.closest('button') : null;
+    if (!target || target.disabled || state.busy) return;
+    if (target.hasAttribute && target.hasAttribute('data-meta-reload')) return run(() => load(null));
+    if (target.hasAttribute && target.hasAttribute('data-meta-retry')) {
+      const pending = held();
+      if (!pending) return;
+      return run(() => send(pending.command, pending.command.action));
+    }
+    if (target.hasAttribute && target.hasAttribute('data-meta-discard')) {
+      adminMetaPending = null;
+      say('Повтор отменён. Исход прошлой команды неизвестен: проверьте значение и журнал.');
+      return run(() => load(null));
+    }
+    const more = target.getAttribute('data-meta-more');
+    if (more) return run(() => load(more));
+    const action = target.getAttribute('data-meta-action');
+    if (!action || !state.view || state.stale || held()) return;
+    const field = target.getAttribute('data-field');
+    const options = {field, requestId: adminMetaNewRequestId()};
+    if (action === 'set') {
+      const input = body.querySelector('[data-meta-input="' + field + '"]');
+      const parsed = adminMetaParseValue(field, input ? input.value : '');
+      if (parsed.error) { say(parsed.error); return; }
+      options.value = parsed.value;
+    }
+    if (action === 'revert') options.historyRef = Number(target.getAttribute('data-history-ref'));
+    const command = adminMetaCommand(state.view, action, options);
+    if (action === 'refresh' && !command.expectedRows.length) { say(adminMetaRefusalText('not_in_scope')); return; }
+    // frozen inside the serialized chain: a click that finds the chain busy can never replace a held command
+    return run(() => { adminMetaPending = {storedId, command: JSON.parse(JSON.stringify(command))}; return send(command, action); });
   });
+  render();
+  // a held command survives a re-render of the detail: show it again; this READS only and never sends
+  if (held()) { section.open = true; say('Команда с неизвестным исходом сохранена. Её можно повторить или отменить.'); run(() => load(null)); }
 }
 function adminFilmMetadataSection(record) {
   if (!record || !record.storedId) return '';
-  return `<details class="admin-meta" data-film-metadata data-stored-id="${adminMetaEsc(record.storedId)}"><summary>Происхождение метаданных</summary><div class="admin-meta-status" data-meta-status role="status" tabindex="-1"></div><div data-meta-body><p class="muted">Раздел читает данные при открытии. Запись выполняется только по кнопке.</p></div></details>`;
+  return `<details class="admin-meta" data-film-metadata data-stored-id="${adminMetaEsc(record.storedId)}"><summary>Происхождение метаданных</summary><div class="admin-meta-status" data-meta-result role="status" tabindex="-1"></div><div class="admin-meta-status" data-meta-reading role="status"></div><div data-meta-pending></div><div data-meta-body><p class="muted">Раздел читает данные при открытии. Запись выполняется только по кнопке.</p></div></details>`;
 }

@@ -479,3 +479,5 @@
 .admin-meta-status{min-height:1.4em;margin:8px 0}
 .admin-meta-history-row{margin-bottom:10px;overflow-wrap:anywhere}
 @media(max-width:800px){.admin-meta-controls button{width:100%}.admin-meta-lineage{grid-template-columns:minmax(0,1fr)}}
+.admin-meta-pending{border:2px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}
+.admin-meta-controls textarea{width:100%;box-sizing:border-box;font:inherit;resize:vertical}
