@@ -133,6 +133,40 @@ const world=file=>JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),l
  void before;
 }
 
+// ===== the proof must not outlive its LID claim (independent review P1): the survivor must end with exactly one trusted, non-conflicting claim of the lid, and no other Film may hold one =====
+{
+ const claim=(trusted,conflicting)=>[{scheme:'letterboxd',value:'Ab1',trusted,conflicting}];
+ // a legal conflicting, untrusted claim of the same lid on the survivor: the moved trust cannot be restored, so the merge refuses and nothing changes
+ const file=fresh();
+ await run(file);
+ await mutateFilm(envOf(file),{id:'film:survivor',expectedRevision:0,at:AT,film:{contractVersion:1,originalTitle:'Survivor',externalIds:claim(false,true)}});
+ const before=world(file),planBefore=JSON.stringify(await planLidOnlyD1(envOf(file),{lid:'Ab1'}));
+ const failure=await merge(file).then(()=>null,error=>error);
+ assert.ok(failure,'the merge is refused');
+ assert.equal(world(file),before,'atomic: claims, proof, redirect, receipt and revisions are unchanged');
+ assert.equal(JSON.stringify(await planLidOnlyD1(envOf(file),{lid:'Ab1'})),planBefore,'the refused merge changes no ownership verdict');
+ await assert.rejects(()=>merge(file,{input:{evidence:{verified:true}}}),undefined,'verified evidence does not bless an unresolved claim');
+ assert.equal(world(file),before);
+ // survivor-held admission: a third Film holding a foreign claim of the lid makes ownership incomplete; the merge of an unrelated Film into the owner refuses
+ const g=fresh();
+ await run(g);await survivorOf(g,'film:plain');
+ await mutateFilm(envOf(g),{id:'film:third',expectedRevision:0,at:AT,film:{contractVersion:1,originalTitle:'Third',externalIds:claim(false,true)}});
+ const beforeG=world(g);
+ await assert.rejects(()=>mergeFilms(envOf(g),{from:'film:plain',to:'film:lb:Ab1',expected:{from:1,to:1},at:AT}),undefined,'a foreign claim of the lid blocks the merge');
+ assert.equal(world(g),beforeG);
+ // happy paths stay usable: the survivor owns the lid completely after a transfer and after a survivor-held merge
+ const h=fresh();
+ await run(h);await survivorOf(h);
+ await merge(h);
+ assert.deepEqual(rows(h,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='letterboxd' AND value='Ab1'"),[{film_id:'film:survivor',trusted:1,conflicting:0}]);
+ const plan=await planLidOnlyD1(envOf(h),{lid:'Ab1'});
+ assert.deepEqual([plan.outcome,plan.id],['present_lid_only','film:survivor'],JSON.stringify(plan));
+ const k=fresh();
+ await run(k);await survivorOf(k,'film:plain');
+ await mergeFilms(envOf(k),{from:'film:plain',to:'film:lb:Ab1',expected:{from:1,to:1},at:AT});
+ assert.equal((await planLidOnlyD1(envOf(k),{lid:'Ab1'})).outcome,'present_lid_only');
+}
+
 // ===== a schema below 48 (no table): a merge of ordinary Films is unaffected =====
 {
  const file=fresh();

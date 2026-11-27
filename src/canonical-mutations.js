@@ -288,6 +288,10 @@ export async function mergeFilms(env,input){
  if(await hasTable(db,'film_lid_admission')){
   const [left,right]=await Promise.all([one(db,'SELECT lid FROM film_lid_admission WHERE film_id=?',[from]),one(db,'SELECT lid FROM film_lid_admission WHERE film_id=?',[to])]);
   if(left&&right)throw failed('film_person_data_conflict');
+  // The proof must never outlive its LID claim (ADR 0217 5b ownership, independent review of AIR-674): after the external-id moves above, in this same batch, the lid has exactly one `letterboxd` claim on the whole table and it is the survivor's, trusted and
+  // not conflicting. A survivor that holds the same lid as an unresolved (untrusted or conflicting) claim, or any other Film holding a claim of it, refuses the merge (`evidence.verified` does not bless it): nothing is resolved here.
+  const lid=(left||right)?.lid;
+  if(lid)s.push([assertSql("(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd' AND value=?)=1 AND EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='letterboxd' AND value=? AND trusted=1 AND conflicting=0)"),[lid,to,lid]]);
   if(left){
    s.push([assertSql('EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND film_id=?) AND NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE film_id=?)'),[left.lid,from,to]]);
    s.push(['UPDATE film_lid_admission SET film_id=? WHERE lid=? AND film_id=?',[to,left.lid,from]]);
