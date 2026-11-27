@@ -351,7 +351,7 @@ const IDENTITY_STOP = /^producer_identity_/;
 // does not store the baseline, so `now` would renew the window on every read of the same unchanged row: in `readOnly` a movement is dated by the run row's
 // own `updated_at` (never later than `now`), the first-tick grace does not exist (no stored clock: the streak starts at the publication), and nothing is
 // ever dated by the read itself.
-export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false} = {}) {
+export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false, current = false, boundary = false, label = null} = {}) {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const stamp = value => Number.isFinite(Date.parse(value || '')) ? Date.parse(value) : null;
   const live = stamp(prior.liveSince) ?? (readOnly ? null : now);
@@ -364,10 +364,17 @@ export function canonicalProducerClock(previous, run, publishedAt, now, {readOnl
   const movedAt = readOnly ? (rowAt !== null ? Math.min(rowAt, now) : null) : now;
   const progress = moved ? (movedAt ?? stamp(prior.progressAt)) : (seeded !== null ? Math.min(seeded, now) : stamp(prior.progressAt));
   const published = stamp(publishedAt) ?? (readOnly ? null : now);
-  const streak = moved ? null : (stamp(prior.noProgressSince) ?? (Math.max(published ?? 0, live ?? 0) || null));
+  // AIR-692: a generation PROVEN current (passed, source = applied = published, zero eligible units included) closes its streak. The idle time that follows
+  // is normal, not missing progress, so the next publication starts its window at its OWN publication instead of inheriting the previous day's streak.
+  // A generation that rolls over while unfinished never reaches this branch, so its streak is kept.
+  // `boundary` (the earlier observed generation was proven passed) discards the stored streak and starts the window at THIS publication.
+  const streak = moved || current || (boundary && !label) ? null : ((boundary ? null : stamp(prior.noProgressSince)) ?? (Math.max(published ?? 0, live ?? 0) || null));
   const since = moved ? progress : (Math.max(progress ?? 0, streak ?? 0) || null);
   const at = value => value === null || value === undefined ? null : new Date(value).toISOString();
-  return {liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
+  // AIR-692 (review): `lastLabel` remembers the last OBSERVED publication (also before any run row exists) and `closed` says that this label was proven
+  // current. A tick that reads nothing (not ready) keeps both, so the closed boundary survives a transient unready observation.
+  const lastLabel = label || (prior.lastLabel ?? null), closed = label ? current : prior.closed === true;
+  return {lastLabel, closed, liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
     progressAt: at(progress), noProgressSince: at(streak), sinceAt: at(since), ...(readOnly ? {} : {observedAt: at(now)})};
 }
 // A count from D1: a non-negative integer (or a string of digits). null, '', a negative, a fraction or NaN is unknown (null), never 0.
@@ -388,9 +395,14 @@ function clockStateOf(previous, previousReadable, now) {
 export function canonicalProducerFacts({held = false, read = null, previous = null, now, readOnly = false, previousReadable = true}) {
   if (held) return {held: true, readable: true, clock: null};
   const extra = readOnly ? {clockState: clockStateOf(previous, previousReadable, now)} : {};
-  if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now, {readOnly}), ...extra};
-  const clock = canonicalProducerClock(previous, read.run, read.publishedAt, now, {readOnly});
+  if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now, {readOnly, boundary: previous?.closed === true}), ...extra};
   const {run, chain} = read;
+  const proves = (row, label) => !!row && !!label && row.pass_state === 'passed' && row.source_generation === label && row.applied_generation === label;
+  const current = proves(run, read.label);
+  // AIR-692 (review): a previous generation that was observed unfinished and has since been superseded closes the boundary only on its OWN exact
+  // passed/source/applied claim (ADR 0141: a passed run is immutable). An absent, unreadable or unmatched answer clears nothing.
+  const boundary = !current && ((previous?.closed === true && !!previous.lastLabel && read.label !== previous.lastLabel) || (!!read.prior && !read.prior.error && previous?.closed !== true && read.prior.label === previous?.lastLabel && proves(read.prior.run, read.prior.label)));
+  const clock = canonicalProducerClock(previous, run, read.publishedAt, now, {readOnly, current, boundary, label: read.label});
   const total = run ? knownCount(run.unit_count) : null;
   const parts = run ? [run.n_applied, run.n_noop, run.n_kept].map(knownCount) : [];
   const done = run && parts.every(value => value !== null) ? parts.reduce((sum, value) => sum + value, 0) : null;
@@ -411,8 +423,27 @@ export function evaluateCanonicalProducerReader(facts, now) {
   }
   return verdict;
 }
-export function evaluateCanonicalProducer(facts, now) {
-  if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
+// AIR-692 (review): an OPEN `canonical_producer_no_progress` incident (its alert entry, passed by Monitor.run like the AIR-596/598 incidents) is carried through
+// an observation that cannot prove anything: nothing ready, an unreadable read, or a stop verdict WITHOUT newer durable progress. The diagnostic verdict stays
+// honest (unreadable / waiting / failed), the alert entry, its accounting and outbox stay, and no recovery or fresh alert follows. Affirmative evidence still
+// recovers it: an exact pass (`current`), or proven progress newer than the one the incident recorded.
+const openProducerIssue = (open, now) => {
+  if (!open || open.key !== 'canonical_producer_no_progress') return null;
+  const since = time(open.metrics?.sinceAt) ?? time(open.firstSeenAt);
+  return issue('canonical_producer_no_progress', 'degraded', 'canonical_producer', 'The canonical Producer no-progress incident stays open: ' + (since === null ? 'no' : 'no durable progress since ' + iso(since) + ' and no') + ' proof of progress or completion has been observed',
+    {...(open.critical === true ? {critical: true} : {}), ...(open.metrics ? {metrics: open.metrics, ...(typeof open.metricsAt === 'string' ? {metricsAt: open.metricsAt} : {})} : {})});
+};
+const progressedSince = (open, progressAt) => {
+  const progress = time(progressAt);
+  const base = time(open?.metrics?.progressAt) ?? (open?.metrics ? -Infinity : (time(open?.firstSeenAt) ?? -Infinity));
+  return progress !== null && progress > base;
+};
+export function evaluateCanonicalProducer(facts, now, open = null) {
+  const carried = openProducerIssue(open, now);
+  if (!facts || facts.error || facts.readable === false) {
+    const base = unreadable('canonical_producer', 'canonical Producer');
+    return carried ? {...base, issues: [...base.issues, carried]} : base;
+  }
   const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,
     facts: {status, held: !!facts.held, generation: facts.label ?? null, chain: facts.chain?.ownerState ?? null, run: facts.run?.passState ?? null, progressAt: facts.progressAt ?? null, ...extra,
       // ADR 0208 decision 7: shown, never judged. The verdict above does not read it.
@@ -421,7 +452,7 @@ export function evaluateCanonicalProducer(facts, now) {
     // A deliberate delivery hold: honest and visible, never healthy and never a success. It is not an alert (the owner chose it).
     return out('delayed', 'held_by_delivery', [issue('canonical_producer_held_by_delivery', 'delayed', 'canonical_producer', 'The canonical Producer is held by delivery: no Producer progress is expected until the hold is lifted')]);
   }
-  if (!facts.label) return out('waiting', 'waiting', []);
+  if (!facts.label) return carried ? out('degraded', 'waiting', [carried]) : out('waiting', 'waiting', []);
   const run = facts.run, chain = facts.chain;
   if (run && run.passState === 'passed' && run.sourceGeneration === facts.label && run.appliedGeneration === facts.label) return out('healthy', 'current', []);
   const stoppedBy = chain?.ownerState === 'stopped' ? (chain.stoppedBy || 'unclassified') : run?.passState === 'stopped' ? (run.stoppedBy || 'unclassified') : null;
@@ -429,7 +460,8 @@ export function evaluateCanonicalProducer(facts, now) {
     // A hard stop (an identity code, or a terminal, fail_closed or exhausted class) is critical: it alerts at once and an earlier recoverable stop of the
     // same issue escalates. A recoverable stop is an ordinary degraded issue. Both keep `status` (blocked / failed) and the stop reason as diagnosis.
     const hard = IDENTITY_STOP.test(stoppedBy) || ['terminal', 'fail_closed', 'exhausted'].includes(chain?.recoveryClass || 'fail_closed');
-    return out('degraded', hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), {...(hard ? {critical: true} : {}), ...metrics({stoppedBy: String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60), hard, generation: facts.label ?? null})})], {stoppedBy});
+    const keep = carried && !progressedSince(open, facts.progressAt) ? [carried] : [];
+    return out('degraded', hard ? 'blocked' : 'failed', [...keep, issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), {...(hard ? {critical: true} : {}), ...metrics({stoppedBy: String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60), hard, generation: facts.label ?? null})})], {stoppedBy});
   }
   const since = time(facts.sinceAt), age = since === null ? null : Math.max(0, now - since);
   if (age === null || age > THRESHOLDS.producerNoProgressMs) {
@@ -495,7 +527,7 @@ export function evaluateAll(facts, previous, now, helpers) {
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
     ...(facts.letterboxd === undefined ? [] : [evaluateLetterboxd(facts.letterboxd, now)]),
-    ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now)]),
+    ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now, previous?.canonicalProducer?.open ?? null)]),
     ...(facts.catalogEnrichment === undefined ? [] : [evaluateCatalogEnrichment(facts.catalogEnrichment, now)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);
