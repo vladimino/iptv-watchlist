@@ -306,6 +306,16 @@ export function operationHistoryCondition({origin,operationKey,fingerprint}){
   params:[origin,key,seen.count,origin,key,seen.applied,origin,key],
  };
 }
+// AIR-675 / ADR 0217 decision 8a: a keyed reservation may carry ONE compare-and-swap of the owner re-check intent in the SAME batch as the receipt insert, so two requests with one `requestId` cannot both own the intent and an
+// attempt that lost the intent writes no receipt. Internal code only, never request input; only the exact shape is accepted: the intent `UPDATE` that sets the owner and raises the revision, matched on `state='open'` and the
+// revision read, and its `changes()` assertion. A refused batch (the intent moved) is `operation_key_moved` like any lost reservation, so the caller replans.
+const RESERVE_INTENT=/^UPDATE lid_recheck_intent SET attempt_request_id=\?,revision=revision\+1,updated_at=\? WHERE request_id=\? AND state='open' AND revision=\?$/;
+function reserveExtraOf(input){
+ const extra=input?.reserveExtra;
+ if(extra===undefined||extra===null)return [];
+ if(!Array.isArray(extra)||extra.length!==1||!Array.isArray(extra[0])||typeof extra[0][0]!=='string'||!RESERVE_INTENT.test(extra[0][0])||!Array.isArray(extra[0][1])||extra[0][1].length!==4)throw failed('film_person_invalid');
+ return [[extra[0][0],extra[0][1]],[fenced.assertSql('changes()>=1'),[]]];
+}
 function keyedOf(input){
  if(input?.operationKey===undefined&&input?.history===undefined)return null;
  return {operationKey:normalizeOperationKey(input.operationKey),history:normalizeFingerprint(input.history)};
@@ -541,6 +551,8 @@ export async function receiptedWrite(env,input,hooks){
  const request=normalizeRequest(input);
  // AIR-600 R1: an operation key and its observed history are validated with the request, before anything is read (see the reservation below).
  const keyed=keyedOf(input);
+ const reserveExtra=reserveExtraOf(input);
+ if(reserveExtra.length&&!keyed)throw failed('film_person_invalid');
  // A reservation at the history cap would make the key's own history unreadable: refused before anything is read or written.
  if(keyed&&keyed.history.count>=OPERATION_KEY_HISTORY_CAP)throw failed('operation_key_history_exhausted');
  // Atomic mode is the only mode unless the hooks carry an approved named exception (see APPROVED_EXCEPTIONS); this is checked before anything is read or written.
@@ -563,7 +575,7 @@ export async function receiptedWrite(env,input,hooks){
   try{
    if(keyed){
     const guard=operationHistoryCondition({origin:request.origin,operationKey:keyed.operationKey,fingerprint:keyed.history});
-    await writeBatch(env,gate,[[fenced.assertSql(guard.sql),guard.params],[INSERT_KEYED,[...values,keyed.operationKey]]]);
+    await writeBatch(env,gate,[[fenced.assertSql(guard.sql),guard.params],[INSERT_KEYED,[...values,keyed.operationKey]],...reserveExtra]);
    }else await writeBatch(env,gate,[[INSERT,values]]);
    created=true;
    row={requestId:request.requestId,operation:request.operation,origin:request.origin,target:request.target,contentDigest:request.digest,plannedRevision:request.expectedRevision,appliedRevision:null,markerGeneration:gate.generation,state:'pending',attempts:1,nextAttemptAt:plus(now,policy.attemptWindowMs),errorClass:null,createdAt:now,updatedAt:now,settledAt:null,...(keyed?{operationKey:keyed.operationKey}:{})};

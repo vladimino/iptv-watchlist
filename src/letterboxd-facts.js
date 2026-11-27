@@ -189,13 +189,15 @@ function recordRatingChange(record,incoming,effective){
 
  // Links a film's trusted aliases to one record key; an alias already pointing elsewhere is an alias_conflict for review.
  // `expectKey` (AIR-559): the record key an inferred import has already marked; a key that moved meanwhile is refused as an alias_conflict, so an inferred alias never lands on an unmarked record.
- async function linkFilm(env,links,{expectKey=null}={}){
+ // AIR-675 / ADR 0217 decision 8c: `extra` is a list of [sql, params] statements that commit in the SAME D1 batch as the links document (the owner re-check's intent settlement and its ownership predicates); `report.changed` tells
+ // the caller whether the document was actually written (false: the alias was already there, so no batch ran and `extra` did not commit). Without D1 ownership of the document a write with `extra` is refused whole (`atomic_unavailable`).
+ async function linkFilm(env,links,{expectKey=null,extra=[],report=null}={}){
   // Writers always know the Letterboxd id, so no record exists without one and two records of one film can only meet as an
   // alias_conflict; joining them is the convergence migration, which is not implemented in this phase.
   if(!links?.letterboxd||!LID.test(String(links.letterboxd)))throw new FactsError('invalid_identity','A fact record needs a Letterboxd id');
   const aliases=aliasesOf(links);
   let factKey=null;
-  await casJSON(env,FACTS_KEYS.links,{},index=>{
+  const written=await casJSON(env,FACTS_KEYS.links,{},index=>{
    const keys=[...new Set(aliases.map(alias=>index[alias]).filter(Boolean))];
    if(keys.length>1)throw new FactsError('alias_conflict','Aliases point at different records');
    factKey=keys[0]||factKeyFor(links);
@@ -204,8 +206,16 @@ function recordRatingChange(record,incoming,effective){
    for(const [alias,key] of Object.entries(index))if(key===factKey&&!aliases.includes(alias)&&aliases.some(mine=>mine.split(':')[0]===alias.split(':')[0]))throw new FactsError('alias_conflict','Record already has another '+alias.split(':')[0]+' id');
    let changed=false;for(const alias of aliases)if(index[alias]!==factKey){index[alias]=factKey;changed=true;}
    return changed?index:null;
-  });
+  },{extra});
+  if(report)report.changed=written?.changed===true;
   return factKey;
+ }
+ // AIR-675: the Ratings alias of ONE attached pair, with the existing protocol (linkFilm, then the conflict note of linkOrNote). -> {state:'linked', factKey, changed} | {state:'alias_conflict'}. Any other failure is thrown for the caller.
+ async function linkAttachedPair(env,{lid,tmdb,extra=[]}){
+  if(!LID.test(String(lid||''))||!TMDB.test(String(tmdb||'')))throw new FactsError('invalid_identity','An attached pair needs a Letterboxd id and a TMDB id');
+  const links={letterboxd:String(lid),tmdb:String(tmdb)},report={};
+  try{const factKey=await linkFilm(env,links,{extra,report});return {state:'linked',factKey,changed:report.changed===true};}
+  catch(error){if(error.code!=='alias_conflict')throw error;await noteConflict(env,links,'alias_conflict');return {state:'alias_conflict'};}
  }
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
  // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.
@@ -1036,5 +1046,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {linkAttachedPair,validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

@@ -97,7 +97,7 @@ for(const marker of ['epg/held','d1/open','d1/held']){
  const partial=open();sqlite(partial.file,'DROP TABLE watchlist_admission_pending');
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:partial.db,BUCKET:bucket()},A)).blocked,true,'a partial table set blocks');
  const noAuthority=open();sqlite(noAuthority.file,'DROP TRIGGER watchlist_cas_required;DROP TABLE watchlist_authority');
- assert.equal(Number(rows1(noAuthority.file,'SELECT version FROM schema_contract')),48);
+ assert.equal(Number(rows1(noAuthority.file,'SELECT version FROM schema_contract')),50);
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:noAuthority.db,BUCKET:bucket()},A)).blocked,true,'schema v33 with the authority table missing is not a legacy database');
  const noTables=open();sqlite(noTables.file,'PRAGMA foreign_keys=OFF;'+['watchlist_admission_pending','watchlist_effect','watchlist_change','watchlist_member','watchlist_snapshot','watchlist_staging','watchlist_current','watchlist_cas','watchlist_authority'].map(name=>'DROP TABLE '+name).join(';'));
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:noTables.db,BUCKET:bucket()},A)).blocked,true,'schema v33 with no Watchlist table at all is a contradiction, not a legacy database');

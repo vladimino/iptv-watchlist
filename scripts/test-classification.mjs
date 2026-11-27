@@ -251,6 +251,15 @@ export const FILES={
  "letterboxd-lid-only-admission-d1.mjs": {
   "suite": "core"
  },
+ "lid-attach-helpers.mjs": {
+  "suite": "core"
+ },
+ "lid-attach-migrations.mjs": {
+  "suite": "core"
+ },
+ "lid-tmdb-attach-d1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-check-legacy-report.mjs": {
   "suite": "core"
  },

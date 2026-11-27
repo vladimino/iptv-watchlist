@@ -175,6 +175,10 @@ export function evidenceStrength(row){
 
 // Pure. Whether a normalized row is one of the initial slice's live shapes (ADR 0213 decision 7).
 export function initialSliceShape(row){
+ // AIR-675 / ADR 0217 decision 7: the ONE Film-bound `film_has_id` live shape this helper accepts, written by the attach batch (the migration triggers already admit it): `asserts`, `film_has_id(film, tmdb_movie)`,
+ // route `owner_action`, method `page_check`, rooted in the attach root, no scope and no supersession. Anything else of this relation (another object kind, polarity, route or method) stays out of the slice.
+ if(row&&row.origin==='live'&&row.relation==='film_has_id')return row.subjectKind==='film'&&row.objectKind==='tmdb_movie'&&row.polarity==='asserts'&&row.route==='owner_action'&&row.method==='page_check'
+  &&row.scopeEvidenceKey===null&&row.supersedesKey===null&&row.sourceScope===null&&row.sourceOrder===null&&typeof row.sourceRoot==='string'&&HEX64.test(row.sourceRoot);
  if(!row||row.origin!=='live'||row.relation!=='same_work'||row.scopeEvidenceKey!==null||row.supersedesKey!==null)return false;
  // Canonical order puts the Letterboxd entity first (`letterboxd_*` sorts before `tmdb_movie`).
  if(!LETTERBOXD.has(row.subjectKind)||row.objectKind!=='tmdb_movie')return false;
@@ -199,6 +203,8 @@ export function evidenceInsertStatement(plan,{filmId,requestId,at}={}){
  if(!plan||!plain(plan.row)||!HEX64.test(plan.evidenceKey||'')||!initialSliceShape(plan.row))throw failed('identity_evidence_out_of_slice');
  const r=plan.row;
  if(typeof requestId!=='string'||!REQUEST.test(requestId))throw invalid('request_id');
+ // A `film_has_id` row names the Film it is about: it must be the very Film this batch writes (the survivor, not a spelling taken blindly).
+ if(r.relation==='film_has_id'&&r.subjectValue!==fenced.filmId(filmId))throw failed('identity_evidence_out_of_slice');
  return [INSERT,[plan.evidenceKey,fenced.filmId(filmId),r.subjectKind,r.subjectValue,r.relation,r.objectKind,r.objectValue,r.polarity,r.route,r.method,r.sourceRoot,r.sourceRef,r.sourceScope,
   r.scopeEvidenceKey,r.supersedesKey,r.observedAt,r.origin,r.reconstructionRun,r.reconstructedFrom,requestId,instant(at,'at')]];
 }
