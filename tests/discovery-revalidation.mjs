@@ -51,7 +51,7 @@ class SteppedDate extends Date{static now(){return super.now()+clock.offset;}}
 async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90,observed={title:'Film R',normalized:'film r'},catalog=null,movieTitles={translations:[],alternatives:[]},authority=Authority,extras=[],watchlist=false,movies={},enrichment=false}){
  clock.offset=0;advance.ms=0;slowAll.ms=0;
  const file=migrated();
- if(enrichment){// AIR-684: the rest of the real chain (0012 onward), so the Catalog Enrichment inbox, the scope tables and the Discovery triggers exist
+ if(enrichment&&enrichment.schema!==false){// AIR-684: the rest of the real chain (0012 onward), so the Catalog Enrichment inbox, the scope tables and the Discovery triggers exist
   const rest=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&!chain.includes(name.slice(0,-4))).sort();
   const applied=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+rest.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
   if(applied.status!==0)throw new Error(applied.stderr||'migration failed');
@@ -83,7 +83,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
  await Authority.releaseLease(setup,taken.lease);
  const env={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
  const fetched=[],queries=[];
- const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]},translations:{translations:movieTitles.translations},images:{posters:[]},alternative_titles:{titles:movieTitles.alternatives}};
+ const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]},translations:{translations:movieTitles.translations},images:{posters:[]},poster_path:null,alternative_titles:{titles:movieTitles.alternatives}};
  const context=vm.createContext({console,Date:SteppedDate,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
   fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);if(parsed.pathname.includes('/movie/'))queries.push(parsed.search);clock.offset+=slowAll.ms;if(parsed.pathname.includes('/movie/'))clock.offset+=advance.ms;if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));const wanted=Number((parsed.pathname.match(/\/movie\/(\d+)/)||[])[1]);return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?(movies[wanted]||movie):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:authority,...(enrichment?{CatalogEnrichmentDiscovery:EnrichmentDiscovery,CatalogEnrichmentRunner:enrichment.runner}:{}),pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
@@ -529,7 +529,7 @@ const hopsUntilStop=async(context,env,limit)=>{
   seedFilm(file);calls.length=0;
   const first=await chunk();
   assert.equal(queries.length,1,'one detail call');
-  assert.equal(decodeURIComponent(queries[0]),'?language=ru-RU&append_to_response=credits,translations,alternative_titles,images&include_image_language=ru,en,null','the revalidation\'s existing call (its alternative_titles kept) also carries the tagged image lists: the producer\'s request shape, never a second request');
+  assert.equal(decodeURIComponent(queries[0]),'?language=ru-RU&append_to_response=credits,translations,alternative_titles,images&include_image_language=ru,en,null','an approved observer (the schema applied, a retained Discovery membership): the existing call (its alternative_titles kept) also carries the tagged image lists, the producer\'s request shape, never a second request');
   assert.equal(first.revalidation.revalidated,1);
   assert.deepEqual(decisionOf(file).anchor,[90,96],'the revalidation outcome is durable');
   assert.deepEqual(signals(file),['core=pending@v1','credits=pending@v1','localization=pending@v1'],'one signal per VERIFIED part of the detail');
@@ -537,10 +537,11 @@ const hopsUntilStop=async(context,env,limit)=>{
   assert.equal(sql(file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE kind='admitted'")[0].n,0,'Discovery admission behaviour is unchanged: no admitted signal, no second queue');
  }
  {
-  // a Film with no retained membership: nothing is written and nothing wakes
-  const {file,chunk}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  // a Film with no retained membership: nothing is written and nothing wakes, and the LIVE request is the former one
+  const {file,chunk,queries}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
   calls.length=0;
   await chunk();
+  assert.equal(decodeURIComponent(queries[0]),'?language=ru-RU&append_to_response=credits,translations,alternative_titles','the schema is applied but no scope holds this Film: the live revalidation request is unchanged');
   assert.deepEqual(signals(file),[]);assert.deepEqual(calls,[]);
   assert.deepEqual(decisionOf(file).anchor,[90,96],'the revalidation is not delayed by an unobserved Film');
  }
@@ -570,6 +571,21 @@ const hopsUntilStop=async(context,env,limit)=>{
   const out=await EnrichmentDiscovery.emitSourceChanged(lost.env,{tmdbId:'101',movie:{id:101,release_date:'2001-05-01',runtime:96,credits:{cast:[],crew:[]},translations:{translations:[]}},lease:{id:'not-held',expiresAt:1}});
   assert.equal(out.state,'unchanged');assert.deepEqual(signals(lost.file),[]);
  }
+}
+
+// Dormancy of the live request: before the enrichment schema is applied (or without the module, as an older Worker) the revalidation asks for exactly what `main` asked for, and no signal can exist.
+{
+ // the NEW code deployed before the migration is applied: the module is present, the tables are not
+ {
+  const {queries,chunk}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner:null,schema:false}});
+  assert.equal((await chunk()).revalidation.revalidated,1);
+  assert.deepEqual(queries.map(decodeURIComponent),['?language=ru-RU&append_to_response=credits,translations,alternative_titles'],'new code, old schema: the live request is unchanged and nothing fails');
+ }
+ const {file,chunk,queries}=await world({durations:[90,96],decision:verified({anchor:[90]})});
+ const out=await chunk();
+ assert.equal(out.revalidation.revalidated,1);
+ assert.deepEqual(queries.map(decodeURIComponent),['?language=ru-RU&append_to_response=credits,translations,alternative_titles'],'before the apply: the live request, byte for byte');
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name='enrichment_signal'")[0].n,0);
 }
 delete globalThis.CatalogEnrichmentRunner;
 console.log('discovery revalidation ok');

@@ -126,7 +126,7 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
  assert.equal(await D.tmdbPartVersions(movie(),'abc'),null);
  // the same pure projection as the producer: each part IS what Plan computes from the parsed response
  const parsed=parseTmdb(movie(),'603');
- assert.equal(versions.core,await Plan.coreVersion('tmdb','603',parsed.fields,parsed.projection));
+ assert.equal(versions.core,await Plan.coreVersion('tmdb','603',parsed.observation));
  assert.equal(versions.credits,await Plan.creditsVersion('tmdb','603',parsed.credits));
  assert.equal(versions.localization,await Plan.localizationVersion('tmdb','603',parsed.title));
  // not compared: the top-level overview, the genre NAMES, the votes, the list order
@@ -204,9 +204,24 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
   assert.deepEqual(wakes,['has','kick'],'woken after an uncertain outcome');
   env.DB=real;
  }finally{delete globalThis.CatalogEnrichmentRunner;}
+ // the live revalidation request is widened only for an approved observer: the schema applied AND a retained discovery membership of a trusted, non-redirected claim
+ assert.equal(await D.observerEligible(env,'603'),false,'a Film no scope holds');
+ sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:o',2,NULL,'O','${T}');INSERT INTO film_external_id VALUES ('film:o','tmdb','777',1,0,NULL)`);
+ assert.equal(await D.observerEligible(env,'777'),false,'a Film with a claim but no membership');
+ sql(file,`INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('film:o','rated','${T}','k')`);
+ assert.equal(await D.observerEligible(env,'777'),false,'a membership of another scope');
+ sql(file,`INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('film:o','discovery','${T}','k')`);
+ assert.equal(await D.observerEligible(env,'777'),true,'a retained discovery membership');
+ assert.equal(await D.observerEligible(env,'abc'),false);
+ sql(file,"UPDATE film_external_id SET conflicting=1 WHERE film_id='film:o'");
+ assert.equal(await D.observerEligible(env,'777'),false,'a conflicting claim');
+ sql(file,"UPDATE film_external_id SET conflicting=0 WHERE film_id='film:o'");
+ sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:p',2,NULL,'P','${T}');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:o','film:p','${T}')`);
+ assert.equal(await D.observerEligible(env,'777'),false,'a redirected Film');
  // before the apply of the producer schema the emitter ends quietly
  const old=await setup({schema:46});
  assert.deepEqual(await D.emitSourceChanged(old.env,{tmdbId:'603',movie:movie(),at:T}),{state:'absent',parts:[]});
+ assert.equal(await D.observerEligible(old.env,'603'),false,'before the schema exists: never an observer, never a failure');
 }
 
 // ---- D. the activation preflight ----

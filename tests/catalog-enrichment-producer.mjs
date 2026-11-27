@@ -255,11 +255,16 @@ function file0(w){return w.file;}
   ('film:tmdb:900','core','letterboxd',0,'deferred_repair','repairable',7,'${FAR}','${T}','${OLD}');`);
  await step(rec,upstream({}));
  // this Film's translations are UNREADABLE: its core and credits are valid, its localization is not
- await step(rec,upstream({tm:movie({translations:{}})}),at(11));
+ // (a Russian entry without a string title: the title is malformed while the synopsis and the rest of the core observation are verified)
+ await step(rec,upstream({tm:movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{overview:'x'}}]}})}),at(11));
  const retry=part=>rows(rec.file,`SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='tmdb' AND part='${part}'`)[0].retry_at;
  assert.equal(retry('core'),null,'a valid core section wakes the deferred core items of other Films');
  assert.equal(retry('localization'),FAR,'an UNRELATED section does not wake it: this response\'s translations were unreadable');
  assert.equal(retry('credits'),FAR,'the bound: an item attempted a moment ago is not woken, so repeated successes cannot hot-loop it');
+ // a response whose translations section is missing leaves the core observation unverified: it wakes NO deferred core repair of another Film
+ sqlite(rec.file,`UPDATE catalog_enrichment_state SET retry_at='${FAR}',updated_at='${OLD}' WHERE film_id='film:tmdb:900'`);
+ await step(rec,upstream({tm:movie({translations:{}})}),at(12));
+ assert.equal(retry('core'),FAR,'an incomplete core observation is not a source recovery: it wakes nothing');
  assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='letterboxd'")[0].retry_at,FAR,'another source is not woken');
  // repeated identical malformed responses reach quarantine, and a good response recovers the part
  const rep=await world({lid:null});
@@ -478,7 +483,7 @@ function file0(w){return w.file;}
  assert.deepEqual(await emit({genres:[{id:28,name:'x'},{id:424242,name:'new'}]}),['core'],'an unmapped id is part of the version');
  // English fallback, then the appearance of a previously absent Russian value
  const w3=await world({lid:null,scope:'discovery'});
- const noRuSynopsis=ru({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]}});
+ const noRuSynopsis=ru({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:''}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]}});
  await done(w3,upstream({lb:'404',tm:noRuSynopsis}));
  assert.equal(meta(w3.file).synopsis,'english synopsis','Russian verified absent: the tagged English overview is the fallback');
  assert.equal((await D.emitSourceChanged(w3.env,{tmdbId:'603',movie:noRuSynopsis,at:at(50)})).state,'unchanged');
@@ -517,7 +522,8 @@ function file0(w){return w.file;}
  assert.equal((await D.tmdbPartVersions(malformed,603)).credits,null,'a present supported-role entry without an id makes the section unreadable instead of being filtered out of a "complete" set');
  assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{name:'D',job:'Director'}]}}),603)).credits,null,'a director without an id');
  assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[null]}}),603)).credits,null,'a crew entry that is not an object');
- assert.ok((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{job:'Editor'}]}}),603)).credits,'a crew entry of another job carries no credit and is not judged');
+ assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{id:5,job:'Editor'}]}}),603)).credits,null,'a crew list that names no recognized director is not a verified credit set');
+ assert.ok((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{id:12,job:'Director'},{job:'Editor'}]}}),603)).credits,'another job beside a recognized director is not judged');
  // genre ids: a missing or malformed list is unverified coverage (no core version), a present empty list is a valid empty set
  assert.equal((await D.tmdbPartVersions(movie({genres:undefined}),603)).core,null,'a missing genre list');
  assert.equal((await D.tmdbPartVersions(movie({genres:[{id:28},{name:'no id'}]}),603)).core,null,'a malformed genre entry');
@@ -526,5 +532,75 @@ function file0(w){return w.file;}
  assert.notEqual(emptyGenres.core,(await D.tmdbPartVersions(movie({genres:[{id:28,name:'A'}]}),603)).core);
  assert.deepEqual((await D.emitSourceChanged(w.env,{tmdbId:'603',movie:malformed,at:at(71)})).parts,['core','localization'].filter(part=>part==='core'||false),'only the verified sections of a response with a malformed credit entry are signalled');
  assert.equal(up.calls.length,calls);
+}
+// ---- AIR-684 (review): an INCOMPLETE core observation is never settled, never given a version, never clears a counter and never wakes a repair; valid independent fields still fill ----
+{
+ const core=file=>PR.rowView(rows(file,"SELECT * FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0]);
+ const incomplete={'missing images':{images:undefined},'malformed translations':{translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{overview:{}}}]}},'ambiguous synopsis':{translations:{translations:[{iso_639_1:'ru',iso_3166_1:'UA',data:{title:'Т',overview:'Один'}},{iso_639_1:'ru',iso_3166_1:'BY',data:{title:'Т',overview:'Два'}}]}},
+  'missing genres':{genres:undefined},'missing release date':{release_date:undefined},'missing runtime':{runtime:undefined},'unrecognized crew':{credits:{cast:[{id:11,name:'N',order:0}],crew:[{id:12,name:'W',job:'Writer'}]}}};
+ for(const [name,over] of Object.entries(incomplete)){
+  // a PARTIALLY BLANK Film: the valid sections of the response still fill their fields, the part is repairable and has no version
+  const w=await world({lid:null});
+  await step(w,upstream({lb:'404'}));
+  const out=await step(w,upstream({lb:'404',tm:movie(over)}),at(11));
+  const row=core(w.file);
+  if(name==='unrecognized crew')continue; // that one concerns credits, not the core observation (below)
+  assert.equal(out.state,'done',name);
+  assert.notEqual(row.status,'complete',name+': the part is not settled on an incomplete observation');assert.notEqual(row.status,'complete_with_gaps',name);
+  assert.equal(row.sourceVersion,null,name+': no version');
+  assert.deepEqual([row.failures,row.failureClass,row.reason],[1,'repairable','incomplete_core_coverage'],name+': a counted repairable failure with the existing backoff');
+  assert.ok(row.retryAt>at(11),name+': backed off');
+  assert.equal(meta(w.file)?.url,'https://www.themoviedb.org/movie/603',name+': the independent url field still fills');
+  if(!['missing release date','missing runtime'].includes(name))assert.equal(meta(w.file).year,1999,name+': a valid year still fills');
+  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,name+': nothing is signalled or woken');
+ }
+ // a FULLY POPULATED Film (every core field stored): an incomplete observation is repairable too, never a silent completion
+ const full=await world({lid:null});
+ await step(full,upstream({lb:'404'}));
+ sqlite(full.file,"UPDATE catalog_enrichment_state SET status='due',source_version=NULL,failures=0 WHERE part='core' AND source='tmdb'");
+ await step(full,upstream({lb:'404',tm:movie({images:undefined})}),at(12));
+ assert.deepEqual([core(full.file).status,core(full.file).sourceVersion,core(full.file).failures],['due',null,1],'a populated Film: still repairable, no version');
+ // repeated: six identical incomplete responses reach the existing quarantine, then a valid response recovers (no new retry mechanism)
+ const rep=await world({lid:null});
+ await step(rep,upstream({lb:'404'}));
+ for(let i=0;i<6;i++){
+  sqlite(rep.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core' AND source='tmdb'");
+  await step(rep,upstream({lb:'404',tm:movie({images:undefined})}),at(20+i));
+ }
+ const quarantined=core(rep.file);
+ assert.deepEqual([quarantined.status,quarantined.failures,quarantined.failureClass],['deferred_repair',6,'repairable'],'repeated incomplete observations reach the existing quarantine');
+ sqlite(rep.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core' AND source='tmdb'");
+ await step(rep,upstream({lb:'404',tm:movie()}),at(40));
+ const healed=core(rep.file);
+ assert.deepEqual([healed.status,healed.failures],['complete',0],'a valid observation recovers the part and clears its counter');
+ assert.equal(healed.sourceVersion,(await D.tmdbPartVersions(movie(),603)).core,'and it has the version of what was verified');
+ // an incomplete response must not erase the VERSION of an already settled part, nor touch an unfetched source: mixed-source rows
+ const mix=await world();
+ await step(mix,upstream({}));await step(mix,upstream({}),at(11));
+ const before=Object.fromEntries(rows(mix.file,"SELECT source,status,source_version AS v,failures FROM catalog_enrichment_state WHERE part='core'").map(r=>[r.source,r]));
+ assert.ok(before.letterboxd.v&&before.tmdb.v,'both sources settled with a version');
+ sqlite(mix.file,"UPDATE catalog_enrichment_state SET status='due' WHERE part='core' AND source='tmdb'");
+ const calls=await step(mix,upstream({tm:movie({images:undefined})}),at(30));
+ const after=Object.fromEntries(rows(mix.file,"SELECT source,status,source_version AS v,failures FROM catalog_enrichment_state WHERE part='core'").map(r=>[r.source,r]));
+ assert.deepEqual(after.letterboxd,before.letterboxd,'the unfetched Letterboxd row keeps its version, status and counters');
+ assert.equal(after.tmdb.v,before.tmdb.v,'the failed observation does not erase the settled version of its own source either');
+ assert.equal(after.tmdb.failures,1);assert.equal(calls.report.fetched.includes('letterboxd'),false,'only the due source was fetched');
+ // a field with an explicit absence is VERIFIED and settles (the empty-list and null cases are not malformed)
+ const blank=await world({lid:null});
+ await step(blank,upstream({lb:'404'}));
+ await step(blank,upstream({lb:'404',tm:movie({release_date:'',runtime:0,genres:[],poster_path:null,images:{posters:[]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:''}}]}})}),at(11));
+ assert.equal(core(blank.file).status,'complete_with_gaps','explicit absences settle the part with its gaps');assert.ok(core(blank.file).sourceVersion);
+ // the approved unmapped-genre case stays distinct: a verified id list with a mapping gap settles WITH a version and the visible gap
+ const gap=await world({lid:null});
+ await step(gap,upstream({lb:'404'}));
+ await step(gap,upstream({lb:'404',tm:movie({genres:[{id:28,name:'x'},{id:424242,name:'new'}]})}),at(11));
+ assert.equal(core(gap.file).status,'complete_with_gaps');assert.ok(core(gap.file).sourceVersion);
+ // the typed declarations of what was written: each value bound to the language its observation carried
+ const decl=await world({lid:null});
+ await step(decl,upstream({lb:'404'}));
+ const written=await step(decl,upstream({lb:'404'}),at(11));
+ const bySynopsis=(written.report.declarations||[]).find(item=>item.field==='synopsis');
+ assert.deepEqual([bySynopsis?.language,bySynopsis?.languageBasis,bySynopsis?.value,bySynopsis?.source],['ru','explicit','tm synopsis','tmdb'],'the synopsis is declared with its verified Russian tag');
+ assert.deepEqual((written.report.declarations||[]).find(item=>item.field==='poster')?.language,'ru');
 }
 console.log('catalog enrichment producer: ok');

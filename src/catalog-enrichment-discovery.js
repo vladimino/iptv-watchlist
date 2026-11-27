@@ -23,7 +23,7 @@ export async function tmdbPartVersions(movie,tmdbId){
  const parsed=parseTmdb(movie,String(tmdbId));
  if(!parsed)return null;
  const anchor=String(tmdbId);
- return {core:await coreVersion('tmdb',anchor,parsed.fields,parsed.projection),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
+ return {core:await coreVersion('tmdb',anchor,parsed.observation),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
 }
 // One statement per verified part, each followed by `SELECT changes()` so the caller reads the rows THIS batch changed (never a count over the catalog). A part is written only for a Film that holds a Discovery membership at the
 // time of the write and still holds the trusted, non-conflicting, non-redirected claim; with a `lease`, only while the Discovery lease of this revalidation is still held. And only when the producer's APPLIED state does not already
@@ -48,6 +48,16 @@ export function sourceChangedStatements({tmdbId,versions,at,lease=null}){
   out.push(['SELECT changes() AS n',[]]);
  }
  return out;
+}
+// Is this Film's revalidation an OBSERVER of the shared Russian-first projection? Only when the Catalog Enrichment schema of this change is applied AND the Film holds a retained `discovery` membership (a trusted tmdb claim, not
+// redirected). One bounded, indexed read. Anything else (no schema, no scope, a Film outside it, a failed read) answers false, so a deployment alone, or a Film no scope holds, leaves the live revalidation request exactly as it was.
+export async function observerEligible(env,tmdbId){
+ const handle=database(env);
+ if(!handle||!TMDB_ID.test(String(tmdbId)))return false;
+ try{
+  const row=await one(handle,"SELECT 1 AS ok FROM film_external_id e JOIN catalog_enrichment_member m ON m.film_id=e.film_id AND m.scope='discovery' WHERE e.scheme='tmdb' AND e.value=? AND e.trusted=1 AND e.conflicting=0 AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) LIMIT 1",[String(tmdbId)]);
+  return !!row;
+ }catch{return false;}
 }
 const absent=error=>/no such (table|column)/i.test(String(error?.cause?.message||error?.message||error));
 // The causal wake, AFTER the write (never inside the batch): only when work is runnable; no runner (an old version, the producer dormant) is a no-op, and a lost wake is recovered by the reconcile cron.

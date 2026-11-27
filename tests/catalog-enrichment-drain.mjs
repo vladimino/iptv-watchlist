@@ -35,7 +35,7 @@ function world(films=6,{active=true}={}){
  return {file,env:{DB:d1Standin(file)},ids};
 }
 const res=(status,body='',headers={})=>({status,ok:status>=200&&status<300,headers:{get:name=>headers[String(name).toLowerCase()]??null},text:async()=>body,body:null});
-const movie=(id,cast=1)=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{name:'G'}],credits:{cast:Array.from({length:cast},(_,i)=>({id:id*1000+i,name:'A'+i,order:i})),crew:[{id:id*10+1,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'+id}}]}});
+const movie=(id,cast=1)=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{id:18,name:'G'}],credits:{cast:Array.from({length:cast},(_,i)=>({id:id*1000+i,name:'A'+i,order:i})),crew:[{id:id*10+1,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'+id,overview:''}}]},images:{posters:[]}});
 function upstream({tmdb='ok',onCall=null,cast=1}={}){
  const calls=[];
  const impl=async url=>{

@@ -1091,10 +1091,11 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const revalidatedFirst=new Set();
  const revalidateDrift=async(key,previous,candidate,plan)=>{
    try{
-    // AIR-684 (ADR 0224): the revalidation is the one observer of the shared Russian-first projection, so its existing detail call (its `alternative_titles` kept) also carries the tagged image lists, exactly as the producer's own fetch
-    // does (`TMDB_DETAIL_QUERY` in the enrichment sources): the same request, never a second one.
-    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles,images&include_image_language=ru,en,null');
-    if(await noteCatalogSourceChange(env,previous.tmdbId,movie,lease)==='failed'){revalidation.deferred++;return 'break';}
+    // AIR-684 (ADR 0224): the live revalidation request stays EXACTLY as it was until this Film is an approved observer (the enrichment schema applied and a retained Discovery membership). Only then does the same call also carry the tagged
+    // image lists, the request shape of the producer's own fetch (`TMDB_DETAIL_QUERY`): never a second request, and a deployment alone changes nothing.
+    const observer=typeof CatalogEnrichmentDiscovery!=='undefined'&&await CatalogEnrichmentDiscovery.observerEligible(env,previous.tmdbId);
+    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles'+(observer?',images&include_image_language=ru,en,null':''));
+    if(observer&&await noteCatalogSourceChange(env,previous.tmdbId,movie,lease)==='failed'){revalidation.deferred++;return 'break';}
     const known=knownScorerCandidates(aliasIndex,candidate);
     // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
     // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.

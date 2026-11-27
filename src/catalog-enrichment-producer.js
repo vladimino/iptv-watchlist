@@ -196,7 +196,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   if(answer.status==='failed')report.failed.push({source,reason:answer.reason});
   // Success is classified PER APPLICABLE PART: a 200 whose translations or credits section is unreadable is not a recovery of that part, so its counter is preserved here and incremented by the section-specific outcome below
   // (repeated identical malformed responses therefore reach quarantine instead of sitting at one failure).
-  const sectionOk=row=>answer.status!=='ok'||(row.part==='localization'?!(answer.title&&answer.title.status==='unreadable'):row.part==='credits'?answer.credits?.status!=='unreadable':true);
+  const sectionOk=row=>answer.status!=='ok'||(row.part==='localization'?!(answer.title&&answer.title.status==='unreadable'):row.part==='credits'?answer.credits?.status!=='unreadable':row.part==='core'?Plan.unresolvedFields(answer.observation).length===0:true);
   for(const row of rows){
    if(!sectionOk(row))continue;
    const next=Plan.afterOutcome(row,outcome,now);
@@ -207,7 +207,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  // SOURCE RECOVERY (ADR 0219 decision 7), classified per part and BOUNDED: a valid section of a source wakes only the deferred repairable items of THAT part and source in other Films, at most REPAIR_WAKE_LIMIT per success, and
  // only items whose last attempt is older than REPAIR_WAKE_MIN_AGE_MS, so repeated unrelated successes cannot create a hot loop; settled parts are untouched.
  for(const [source,answer] of Object.entries(answers))if(answer.status==='ok'){
-  const valid={core:true,localization:!(answer.title&&answer.title.status==='unreadable'),credits:answer.credits?.status==='ok'};
+  const valid={core:Plan.unresolvedFields(answer.observation).length===0,localization:!(answer.title&&answer.title.status==='unreadable'),credits:answer.credits?.status==='ok'};
   const guard=guardSql(ctx),cutoff=new Date(Date.parse(now)-REPAIR_WAKE_MIN_AGE_MS).toISOString();
   for(const part of Object.keys(valid))if(valid[part])await db(env).prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE rowid IN (SELECT rowid FROM catalog_enrichment_state WHERE part=? AND source=? AND status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND retry_at>? AND film_id<>? AND updated_at<=? ORDER BY updated_at LIMIT ?) AND ${guard.sql}`).bind(now,part,source,now,filmId,cutoff,REPAIR_WAKE_LIMIT,...guard.params).run().catch(()=>{});
  }
@@ -228,7 +228,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const asAnswer=source=>{
   if(!applicable.includes(source))return undefined;
   const answer=answers[source];
-  if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
+  if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields,coverage:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.coverage]))}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
   const row=rowOf('core',source);
   if(row&&['complete','complete_with_gaps'].includes(row.status))return {status:'ok',fields:{}};
   return row?.pendingSince?{status:'transport'}:{status:'stopped'};
@@ -238,8 +238,11 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const core=Plan.decideCore({applicable,hasLetterboxdAnchor:hasLb,agreed,disagreement:false,stored,answers:coreAnswers,pendingSince,now});
  report.conflicts.push(...core.conflicts);
  // an id of the TMDB genre list with no entry in the reviewed mapping is a visible coverage GAP: the part completes with it, never as a silent partial genre set (ADR 0224)
- if(answers.tmdb?.status==='ok'&&(answers.tmdb.projection?.genres?.unmapped||[]).length&&!core.gaps.includes('genres_unmapped'))core.gaps.push('genres_unmapped');
+ if(answers.tmdb?.status==='ok'&&(answers.tmdb.observation?.genres?.unmapped||[]).length&&!core.gaps.includes('genres_unmapped'))core.gaps.push('genres_unmapped');
  const metadataEligible=!context.locked&&dueRows.some(row=>row.part==='core');
+ // A source settles its core row only when it was FETCHED this tick and its observation is complete coverage. An unfetched or failed source keeps its row, version and counters exactly as they were; an OK answer with an unreadable
+ // or ambiguous field is repairable (below), never a settlement and never a version.
+ const settles=source=>answers[source]?.status==='ok'&&Plan.unresolvedFields(answers[source].observation).length===0;
  const writeFields=Object.keys(core.writes);
  if(metadataEligible&&writeFields.length){
   const sourceRow=rowOf('core',core.writes[writeFields[0]].source);
@@ -253,10 +256,12 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   report.units.push({part:'core',state:unit.state});
   if(['applied','noop','settled'].includes(unit.state)){
    report.written.push(...writeFields);
-   const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source));
+   // the typed declarations of what was written: the one explicit boundary to a provenance writer (AIR-631); each value is bound to the language and basis its observation carried
+   report.declarations=writeFields.map(name=>Plan.declarationOf(name,core.writes[name].source,context.anchors[core.writes[name].source],answers[core.writes[name].source]?.observation?.[name])).filter(Boolean);
+   const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source)&&settles(row.source));
    for(const row of next){
     const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
-    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.fields||{},answers[row.source]?.projection??null),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
+    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
    }
    if(core.fallbackFill.length||core.unconfirmedAgreement.length||core.storedDiffers.length){
     const refreshed=(await readRows(env,filmId)).find(row=>row.part==='film');
@@ -266,9 +271,17 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  }else if(metadataEligible&&core.complete){
   // A refresh whose verified answer has nothing left to fill (every core field already holds a value, fill-only) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
   // (a verified source change) would stay due for ever and a later equal observation could never be told from a change.
-  for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&answers[item.source]?.status==='ok'&&['due','deferred_repair'].includes(item.status))){
-   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].fields,answers[row.source].projection??null),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
+  for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&settles(item.source)&&['due','deferred_repair'].includes(item.status))){
+   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
   }
+ }
+ // An OK answer whose observation has an unreadable or ambiguous field: the sections that ARE valid may fill (above), but the source's core part is REPAIRABLE (it backs off and counts like any malformed section, with the existing
+ // quarantine and recovery), never settled, never given a version and never a reason to clear its counters.
+ for(const source of ['letterboxd','tmdb']){
+  const row=rowOf('core',source);
+  if(!row||!answers[source]||answers[source].status!=='ok'||settles(source)||!['due','deferred_repair'].includes(row.status))continue;
+  const unresolved=Plan.unresolvedFields(answers[source].observation);
+  await putRow(env,ctx,{...Plan.afterOutcome(row,{type:'repairable',signature:'incomplete_core_coverage',responseDigest:await sha({source,unresolved})},now),reason:'incomplete_core_coverage'},{expectEpoch:row.refreshEpoch});
  }
  // ---- localization: each applicable source writes its OWN row, needing only its own anchor ----
  for(const source of Plan.SOURCES){

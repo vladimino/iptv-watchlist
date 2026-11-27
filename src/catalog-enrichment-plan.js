@@ -116,6 +116,9 @@ function fieldState(source,field,{applicable,answers}){
  const answer=answers[source];
  if(!answer||answer.status==='stopped'||answer.status==='transport')return 'pending';
  if(answer.status==='failed')return 'failed';
+ // a field whose coverage in an OK answer is unreadable or ambiguous is UNRESOLVED: it is neither a value nor an absence, so no lower-priority source may pass through it and the part cannot settle on it
+ const coverage=answer.coverage?.[field];
+ if(coverage==='unreadable'||coverage==='ambiguous')return 'unresolved';
  return blank(answer.fields?.[field])?'absent':'value';
 }
 // input: {applicable, hasLetterboxdAnchor, agreed, disagreement, stored:{field->value}, answers:{source->{status:'ok'|'transport'|'failed'|'stopped', fields}}, pendingSince:{source->iso|null}, now}
@@ -146,6 +149,7 @@ export function decideCore(input){
     decided=true;break;
    }
    if(state==='failed'){out.waiting[field]={reason:'failed_source',source,retryable:false};decided=true;break;}
+   if(state==='unresolved'){out.waiting[field]={reason:'unverified_coverage',source,retryable:true};decided=true;break;}
    // pending: the transport-only fallback applies only after 72 h of upstream transport (pendingSince is set by a transport outcome alone), and never over a known disagreement or a failure.
    if(fallbackElapsed(pendingSince[source],now)){fallbackOver=fallbackOver||source;continue;}
    out.waiting[field]={reason:'waiting_for_precedence',source,retryable:true};decided=true;break;
@@ -211,7 +215,9 @@ export function selectRussianTitle(translations){
   if(!plain(entry))return {status:'unreadable'};
   if(entry.iso_639_1!=='ru')continue;
   if(!plain(entry.data))return {status:'unreadable'};
-  const title=typeof entry.data.title==='string'?entry.data.title.trim():'';
+  // a Russian entry without a string `title` is malformed, never a blank: absence is not inferred from a shape that cannot be read
+  if(typeof entry.data.title!=='string')return {status:'unreadable'};
+  const title=entry.data.title.trim();
   if(title)ru.push({title,region:entry.iso_3166_1});
  }
  const distinct=[...new Set(ru.map(item=>item.title))];
@@ -225,74 +231,105 @@ export function selectRussianTitle(translations){
 // ONE pure projection of what a verified response says about a part, used by BOTH the producer (it stores the result as the part's `source_version` when the part is complete) and every observer of the same source
 // (the Discovery revalidation), so the two cannot disagree about what a part is. A part whose section is not VERIFIED (an unreadable or unsupported section, a failed response) has no version (null): it is never
 // signalled, never compared and never read as "no data". `anchor` is the identity the response was fetched for.
-// ---- the Russian-first TMDB projection (ADR 0224) ----
-// ONE normalized projection of a TMDB detail response (`language=ru-RU`, `append_to_response=credits,translations,images`, `include_image_language=ru,en,null`), built by `parseTmdb` from these pure selectors and consumed
-// identically by the producer (it writes the selected values and stores the version) and by every observer. Each selected field is `{value, language, languageBasis, coverage}` with coverage `verified`, `absent`, `unreadable`
-// or `ambiguous`; `language` is an explicit provider tag or null (unknown); `languageBasis` is `explicit`, `owner_default` (the Letterboxd synopsis assumption) or null. A verified response does not imply a verified language.
-export const PROJECTION_VERSION=2;
+// ---- the Russian-first TMDB observation (ADR 0224) ----
+// ONE typed observation of a source's core fields, built by the source's parser (`parseTmdb`, `fetchLetterboxd`) from these pure selectors, written from by the producer and compared by every observer. Each field is
+// `{value, language, languageBasis, coverage}`: coverage `verified`, `absent` (a verified, explicit absence), `unreadable` (missing or malformed: never an absence) or `ambiguous`; `language` is `ru`, `en` or null (unknown or any
+// other language: never attributed to ru or en); `languageBasis` is `explicit` (a provider tag), `assumed` (the owner-approved assumption for a Letterboxd synopsis only, P4-B) or null. Language and basis are null together.
+// The value written is the value that carries the tag: the observation binds them.
+export const PROJECTION_VERSION=3;
 export const GENRE_MAPPING_REVISION=1;
 // The reviewed TMDB genre id -> existing vocabulary (the Russian words of `GENRE_MAP` in `src/sources.js`, keyed there by the English names kept here). No other taxonomy. An id with no entry is a coverage GAP, never an invented label.
 export const TMDB_GENRES=Object.freeze({28:['Action','Боевик'],12:['Adventure','Приключения'],16:['Animation','Мультфильм'],35:['Comedy','Комедия'],80:['Crime','Криминал'],99:['Documentary','Документальный'],18:['Drama','Драма'],10751:['Family','Семейный'],14:['Fantasy','Фэнтези'],36:['History','Исторический'],27:['Horror','Ужасы'],10402:['Music','Музыкальный'],9648:['Mystery','Детектив'],10749:['Romance','Мелодрама'],878:['Science Fiction','Фантастика'],10770:['TV Movie','Телефильм'],53:['Thriller','Триллер'],10752:['War','Военный'],37:['Western','Вестерн']});
 const isId=value=>typeof value==='number'?Number.isInteger(value):typeof value==='string'&&/^\d+$/.test(value);
-// -> {coverage, ids:[sorted numeric strings], labels:[mapped, in id order], unmapped:[ids]}. A missing or malformed list is unreadable; a present empty list is a valid empty set.
-export function mapGenres(genres){
- if(!Array.isArray(genres)||!genres.every(item=>plain(item)&&isId(item.id)))return {coverage:'unreadable',ids:[],labels:[],unmapped:[]};
- const ids=[...new Set(genres.map(item=>String(item.id)))].sort((a,b)=>Number(a)-Number(b));
- return {coverage:'verified',ids,labels:ids.filter(id=>TMDB_GENRES[id]).map(id=>TMDB_GENRES[id][1]),unmapped:ids.filter(id=>!TMDB_GENRES[id])};
+const field=(value,coverage,language=null,languageBasis=null)=>({value,language,languageBasis,coverage});
+const unreadable=()=>field(null,'unreadable');
+// year: a present date string. An EMPTY string is TMDB's explicit "no date"; a missing key or any other shape is unreadable.
+export function readYear(releaseDate){
+ if(releaseDate==='')return field(null,'absent');
+ const match=typeof releaseDate==='string'?/^(\d{4})(-\d{2}-\d{2})?$/.exec(releaseDate):null;
+ return match?field(Number(match[1]),'verified'):unreadable();
 }
-const overviewOf=entry=>typeof entry?.data?.overview==='string'?entry.data.overview.trim():'';
+// runtime: a positive integer is a value; null or 0 is TMDB's explicit "unknown"; a missing key, a fraction or a negative is unreadable.
+export function readRuntime(runtime){
+ if(runtime===null||runtime===0)return field(null,'absent');
+ return Number.isInteger(runtime)&&runtime>0?field(runtime,'verified'):unreadable();
+}
+// -> {coverage, value:[labels], ids:[sorted numeric strings], unmapped:[ids]}. A missing or malformed list is unreadable; a present empty list is a valid empty set.
+export function mapGenres(genres){
+ if(!Array.isArray(genres)||!genres.every(item=>plain(item)&&isId(item.id)))return {coverage:'unreadable',value:[],ids:[],unmapped:[]};
+ const ids=[...new Set(genres.map(item=>String(item.id)))].sort((a,b)=>Number(a)-Number(b));
+ return {coverage:'verified',value:ids.filter(id=>TMDB_GENRES[id]).map(id=>TMDB_GENRES[id][1]),ids,unmapped:ids.filter(id=>!TMDB_GENRES[id])};
+}
+// The `translations` section as the selectors need it: every entry a plain object with string language and region tags and a plain `data`; an entry of Russian or English must carry a string `overview` (an explicit empty string is a
+// verified blank; a missing or non-string one is malformed, never a blank). Anything else is unreadable: absence is never inferred from a shape that cannot be read.
+function readTranslations(translations){
+ if(!plain(translations)||!Array.isArray(translations.translations))return null;
+ for(const entry of translations.translations){
+  if(!plain(entry)||typeof entry.iso_639_1!=='string'||typeof entry.iso_3166_1!=='string'||!plain(entry.data))return null;
+  if((entry.iso_639_1==='ru'||entry.iso_639_1==='en')&&typeof entry.data.overview!=='string')return null;
+ }
+ return translations.translations;
+}
 // The synopsis: a nonblank overview of an explicitly tagged Russian `translations` entry (several distinct: the RU region decides, otherwise ambiguous); only when Russian is VERIFIED absent, an explicitly tagged English one (US on a
 // tie, otherwise one distinct value). The top-level `overview` is never proof of language. A missing, malformed or ambiguous section is not an absence.
 export function selectSynopsis(translations){
- const empty=(coverage)=>({value:null,language:null,languageBasis:null,coverage});
- if(selectRussianTitle(translations).status==='unreadable'||!translations.translations.every(plain))return empty('unreadable');
- const pick=(language,regionFirst)=>{
-  const entries=translations.translations.filter(entry=>entry.iso_639_1===language&&overviewOf(entry));
-  if(!entries.length)return {status:'none'};
-  const distinct=list=>[...new Set(list.map(overviewOf))];
-  const all=distinct(entries);
+ const entries=readTranslations(translations);
+ if(!entries)return unreadable();
+ const pick=(language,region)=>{
+  const found=entries.filter(entry=>entry.iso_639_1===language&&entry.data.overview.trim());
+  if(!found.length)return {status:'none'};
+  const distinct=list=>[...new Set(list.map(entry=>entry.data.overview.trim()))];
+  const all=distinct(found);
   if(all.length===1)return {status:'value',value:all[0]};
-  const regional=distinct(entries.filter(entry=>entry.iso_3166_1===regionFirst));
+  const regional=distinct(found.filter(entry=>entry.iso_3166_1===region));
   return regional.length===1?{status:'value',value:regional[0]}:{status:'ambiguous'};
  };
  const ru=pick('ru','RU');
- if(ru.status==='value')return {value:ru.value,language:'ru',languageBasis:'explicit',coverage:'verified'};
- if(ru.status==='ambiguous')return empty('ambiguous');
+ if(ru.status==='value')return field(ru.value,'verified','ru','explicit');
+ if(ru.status==='ambiguous')return field(null,'ambiguous');
  const en=pick('en','US');
- if(en.status==='value')return {value:en.value,language:'en',languageBasis:'explicit',coverage:'verified'};
- if(en.status==='ambiguous')return empty('ambiguous');
- return empty('absent');
+ if(en.status==='value')return field(en.value,'verified','en','explicit');
+ if(en.status==='ambiguous')return field(null,'ambiguous');
+ return field(null,'absent');
 }
-// The poster: a verified Russian-language image of `images.posters[]`, else an English one, else (P1-A) a language-neutral one (`iso_639_1 = null`), else the top-level `poster_path` with its language known only when the same file is
-// listed in `images` (otherwise unknown). Within a tier the greater width, then the lexically smaller `file_path` (P2-A): votes and list order never decide. A missing or malformed images section is unreadable (the value is then the
-// top-level path of unknown language, for writing only: it has no version). -> {path, language, coverage}
+// The poster: a verified Russian-language image of `images.posters[]`, else an English one, else (P1-A) a language-neutral one (`iso_639_1 = null`), else the top-level `poster_path`, whose language is known only when the same file
+// is listed in `images` as Russian or English (any other tag, or no listing, is unknown: never attributed). Within a tier the greater width, then the lexically smaller `file_path` (P2-A): votes and list order never decide. A missing or
+// malformed images section is unreadable (the value is then the top-level path with no language, for writing only). A top-level `poster_path` that is null is TMDB's explicit "no poster"; a missing key or a bad shape is unreadable.
+// -> {value: path, language, languageBasis, coverage}
 export function selectPoster(images,topLevel){
  const top=typeof topLevel==='string'&&topLevel.startsWith('/')?topLevel:null;
  const posters=plain(images)&&Array.isArray(images.posters)?images.posters:null;
- if(!posters||!posters.every(item=>plain(item)&&typeof item.file_path==='string'&&item.file_path.startsWith('/')&&Number.isFinite(item.width)&&(item.iso_639_1===null||typeof item.iso_639_1==='string')))return {path:top,language:null,coverage:'unreadable'};
+ if(!posters||!posters.every(item=>plain(item)&&typeof item.file_path==='string'&&item.file_path.startsWith('/')&&Number.isFinite(item.width)&&(item.iso_639_1===null||typeof item.iso_639_1==='string')))return field(top,'unreadable');
  const order=(a,b)=>b.width-a.width||(a.file_path<b.file_path?-1:a.file_path>b.file_path?1:0);
  for(const language of ['ru','en',null]){
   const tier=posters.filter(item=>item.iso_639_1===language).sort(order);
-  if(tier.length)return {path:tier[0].file_path,language,coverage:'verified'};
+  if(tier.length)return field(tier[0].file_path,'verified',language,language?'explicit':null);
  }
- if(top){const listed=posters.find(item=>item.file_path===top);return {path:top,language:listed&&typeof listed.iso_639_1==='string'?listed.iso_639_1:null,coverage:'verified'};}
- return {path:null,language:null,coverage:'absent'};
+ if(top){
+  const listed=posters.find(item=>item.file_path===top);
+  const language=listed&&(listed.iso_639_1==='ru'||listed.iso_639_1==='en')?listed.iso_639_1:null;
+  return field(top,'verified',language,language?'explicit':null);
+ }
+ return topLevel===null?field(null,'absent'):unreadable();
+}
+// The typed writer declaration of ONE selected field: the single, explicit conversion from the observation to what a provenance writer is told (AIR-631): the source, the anchor, the value that carries the tag, and its language and basis
+// (`ru`/`en` with `explicit`/`assumed`, or both null). Never a language the observation did not carry.
+export function declarationOf(name,source,anchor,item){
+ if(!item||item.coverage!=='verified')return null;
+ return {field:name,source,anchor:anchor?{scheme:anchor.scheme,value:String(anchor.value)}:null,value:item.value,language:item.language??null,languageBasis:item.languageBasis??null};
 }
 const comparableCoverage=value=>value==='verified'||value==='absent';
-// core: a Letterboxd version covers every approved field and the owner-approved assumed-English basis of its synopsis (ADR 0224 P4-B). A TMDB version covers the whole Russian-first projection (all six selected fields with their
-// language, evidence basis and coverage, the normalized genre ids with the reviewed mapping revision and the unmapped ids) and the projection version, never timestamps, votes or the image list. It exists only when EVERY selected
-// field is verified coverage (a verified absence included); an unreadable or ambiguous section leaves it null.
-export function coreVersion(source,anchor,fields,projection=null){
- if(source==='tmdb'){
-  if(!projection||!comparableCoverage(projection.synopsis?.coverage)||!comparableCoverage(projection.poster?.coverage)||projection.genres?.coverage!=='verified')return null;
-  return digestOf({source,anchor,part:'core',projectionVersion:PROJECTION_VERSION,genreMappingRevision:GENRE_MAPPING_REVISION,
-   fields:{year:fields?.year??null,runtime:fields?.runtime??null,url:fields?.url??null,
-    synopsis:{value:projection.synopsis.value??null,language:projection.synopsis.language??null,basis:projection.synopsis.languageBasis??null,coverage:projection.synopsis.coverage},
-    poster:{path:projection.poster.path??null,language:projection.poster.language??null,coverage:projection.poster.coverage},
-    genres:{ids:projection.genres.ids,labels:projection.genres.labels,unmapped:projection.genres.unmapped}}});
- }
- const synopsis=fields?.synopsis??null;
- return digestOf({source,anchor,part:'core',projectionVersion:PROJECTION_VERSION,fields:{year:fields?.year??null,runtime:fields?.runtime??null,synopsis:synopsis===null?null:{value:synopsis,language:'en',basis:'owner_default'},poster:fields?.poster??null,url:fields?.url??null,genres:fields?.genres??[]}});
+const FIELDS=Object.freeze(['year','runtime','url','synopsis','poster','genres']);
+// Which fields of an observation are not verified coverage. -> [field names]
+export const unresolvedFields=observation=>FIELDS.filter(name=>{const item=observation?.[name];return !item||!comparableCoverage(item.coverage);});
+// The genre field with a verified id list but unmapped ids is still comparable (the gap is recorded and versioned); only an unreadable list is not.
+// core: ONE digest for both sources, over the whole typed observation: all six selected fields with their value, language, basis and coverage, the genre ids and the unmapped ids, the genre mapping revision and the projection
+// version; never timestamps, votes or the image list. It exists only when EVERY field is verified coverage (a verified absence included); otherwise null: an incomplete observation is never a version.
+export function coreVersion(source,anchor,observation){
+ if(!observation||unresolvedFields(observation).length)return null;
+ const shape=item=>({value:item.value??null,language:item.language??null,basis:item.languageBasis??null,coverage:item.coverage});
+ return digestOf({source,anchor,part:'core',projectionVersion:PROJECTION_VERSION,genreMappingRevision:GENRE_MAPPING_REVISION,
+  fields:{year:shape(observation.year),runtime:shape(observation.runtime),url:shape(observation.url),synopsis:shape(observation.synopsis),poster:shape(observation.poster),genres:{...shape(observation.genres),ids:observation.genres.ids??[],unmapped:observation.genres.unmapped??[]}}});
 }
 // localization: the selected typed title, or its verified absence. Ambiguous, unreadable and unsupported coverage has none.
 export const localizationVersion=(source,anchor,title)=>title?.status==='value'?digestOf({source,anchor,title:title.value}):title?.status==='absent'?digestOf({source,anchor,title:null,status:'absent'}):null;
@@ -320,4 +357,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
