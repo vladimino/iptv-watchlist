@@ -436,7 +436,10 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  await declare(env,{year:1999,synopsis:'Description'},{languages:{synopsis:{language:'en',languageBasis:'explicit'}}});
  for(let i=0;i<30;i++){await post(env,{action:'set',field:'runtime',value:100+i});}
  for(let i=0;i<30;i++){await post(env,{action:'set',field:'year',value:1900+i});}
- exec(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,conflicts_json,hints_json) VALUES ('${ID}','film','*',0,'identity_disagreement','${T}','${T}','[{"kind":"year"}]','["hint"]')`);
+ // producer-shaped C1 state (src/catalog-enrichment-producer.js rowStatement): the disagreement and the written-field evidence live in the Film row's film_json, conflicts and hints on the core row
+ exec(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,film_json) VALUES ('${ID}','film','*',0,'identity_disagreement','${T}','${T}','{"disagreement":{"reasons":["year_differs"],"at":"${T}","source":"letterboxd"},"fallbackFill":["year"],"unconfirmedAgreement":["synopsis"],"storedDiffers":["runtime"],"writtenFields":["year"],"agreedAnchorDigest":"${'a'.repeat(64)}","ownerRetry":"internal-token"}');
+ INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,conflicts_json,hints_json,gaps_json) VALUES ('${ID}','core','tmdb',0,'complete_with_gaps','${T}','${T}','[{"field":"year"}]','["hint"]','["poster"]');
+ WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<199) INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at) SELECT '${ID}','credits','tmdb',i,'complete','${T}','${T}' FROM n;`);
  // a Film redirected into it contributes its history (one hop)
  await post(env,{action:'set',field:'runtime',value:77},{id:OTHER});
  exec(file,`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('${OTHER}','${ID}','${T}')`);
@@ -450,8 +453,13 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  const head=await call(spy,{method:'HEAD'});assert.equal(head.status,200);
  assert.equal(first.body.fields.year.rank.name,'owner');assert.equal(first.body.fields.synopsis.row.language,'en');
  assert.deepEqual(first.body.locks.owner,['year','runtime']);
- assert.equal(first.body.c1.conflicts.length,1);assert.equal(first.body.c1.hints.length,1);
- assert.deepEqual(first.body.redirects.films,[OTHER]);
+ assert.deepEqual(first.body.c1.conflicts,[{part:'core',source:'tmdb',value:[{field:'year'}]}]);assert.deepEqual(first.body.c1.hints,[{part:'core',source:'tmdb',value:['hint']}]);assert.deepEqual(first.body.c1.gaps,[{part:'core',source:'tmdb',value:['poster']}]);
+ // the Film row's own evidence is read directly, whatever the number of credits chunks; internal markers are not exposed
+ assert.equal(first.body.c1.film.status,'identity_disagreement');assert.deepEqual(first.body.c1.film.disagreement.reasons,['year_differs']);
+ assert.deepEqual(first.body.c1.film.fallbackFill,['year']);assert.deepEqual(first.body.c1.film.unconfirmedAgreement,['synopsis']);assert.deepEqual(first.body.c1.film.storedDiffers,['runtime']);assert.equal(first.body.c1.film.ownerRetry,undefined);
+ assert.equal(first.body.c1.credits.chunks,200);assert.equal(first.body.c1.credits.byStatus.complete,200);
+ assert.ok(first.body.c1.rows.some(row=>row.part==='film')&&first.body.c1.rows.some(row=>row.part==='core'),'the fixed rows are never pushed out by credits chunks');
+ assert.equal(first.body.redirects.count,1);
  assert.equal(first.body.history.rows.length,50,'at most 50 rows a page');
  assert.ok(first.body.history.next,'there are more rows');
  const seen=new Set(first.body.history.rows.map(item=>item.id));
@@ -471,6 +479,99 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  assert.equal((await call(env,{method:'GET',query:'?cursor=garbage'})).status,400);
  // the history of the redirected Film carries its own Film id
  assert.ok([...seen].length>0&&rows(file,`SELECT COUNT(*) AS n FROM film_metadata_history WHERE film_id='${OTHER}'`)[0].n===1);
+}
+
+// ---- 9. review fixes (PR 1047): receipt reconciliation, complete redirect history, typed owner values ----
+// a pause right after the FIRST (empty) receipt read of a request: the other attempt commits, then the first one resumes
+function pausedAfterReceiptRead(w,onPause){
+ let armed=true;
+ return {...w.env,DB:{...w.db,prepare(sql){
+  const st=w.db.prepare(sql);
+  if(!(armed&&/FROM film_metadata_owner_command WHERE request_id/.test(sql)))return st;
+  return {bind:(...p)=>{const b=st.bind(...p);return {...b,first:async()=>{const row=await b.first();armed=false;await onPause();return row;}};}};
+ }}};
+}
+{
+ // metadata command: A commits in the gap; B (same command) answers already_applied, B (another digest) request_mismatch, also after a redirect
+ for(const variant of ['same','different','redirect']){
+  const w=await world();
+  const key='req-gap-'+variant;
+  const base={action:'set',field:'year',value:1999,expectedRevision:await revisionOf(w.env),requestId:key};
+  const racer=pausedAfterReceiptRead(w,async()=>{
+   assert.equal((await call(w.env,{payload:base})).status,200,'A commits in the gap');
+   if(variant==='redirect')exec(w.file,`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('${ID}','${OTHER}','${T}')`);
+  });
+  const b=await call(racer,{payload:variant==='different'?{...base,value:2001}:base});
+  if(variant==='different'){assert.equal(b.status,409);assert.equal(b.body.error,'request_mismatch');}
+  else{assert.equal(b.status,200,JSON.stringify(b.body));assert.equal(b.body.outcome,'already_applied');}
+  assert.equal(commands(w.file).length,1,'one receipt, whatever B answered');
+ }
+ // refresh: the same interleaving
+ for(const variant of ['same','different']){
+  const w=await world();
+  exec(w.file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at) VALUES ('${ID}','film','*',0,'active','${T}','${T}'),('${ID}','core','tmdb',0,'complete','${T}','${T}')`);
+  const rowsSeen=[{part:'core',source:'tmdb',status:'complete',updatedAt:T,refreshEpoch:0}];
+  const base={action:'refresh',expectedRevision:await revisionOf(w.env),expectedRows:rowsSeen,requestId:'req-gap-refresh-'+variant};
+  const racer=pausedAfterReceiptRead(w,async()=>{assert.equal((await call(w.env,{payload:base})).status,200);});
+  const b=await call(racer,{payload:variant==='different'?{...base,expectedRows:[{...rowsSeen[0],source:'tmdb',updatedAt:T2}]}:base});
+  if(variant==='different')assert.equal(b.body.error,'request_mismatch');else assert.equal(b.body.outcome,'already_applied');
+  assert.equal(commands(w.file).length,1);
+ }
+ // a refusal with no receipt behind it stays a refusal, and an unreadable receipt is not decided
+ const plain=await world();
+ const stale=await call(plain.env,{payload:{action:'set',field:'year',value:1,expectedRevision:99,requestId:'req-no-receipt'}});
+ assert.equal(stale.body.error,'stale_revision');
+ const blind=await world();
+ const blindDb={...blind.env,DB:{...blind.db,prepare(sql){if(/FROM film_metadata_owner_command WHERE request_id/.test(sql)&&blindDb.reads++>0)throw new Error('read lost');return blind.db.prepare(sql);}}};blindDb.reads=0;
+ const undecided=await call(blindDb,{payload:{action:'set',field:'year',value:1,expectedRevision:99,requestId:'req-blind-0001'}});
+ assert.equal(undecided.status,503);assert.equal(undecided.body.outcome,'unknown');
+}
+{
+ // history reaches EVERY one-hop predecessor (more than 20), with equal timestamps, 50 rows a page, and the query is indexed
+ const {file,env}=await world();
+ await post(env,{action:'set',field:'year',value:1999});
+ const preds=[];for(let i=0;i<27;i++)preds.push('film:tmdb:9'+String(i).padStart(2,'0'));
+ exec(file,preds.map(id=>`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('${id}','${ID}','${T}');`+['year','runtime','synopsis'].map((field,k)=>`INSERT INTO film_metadata_history (film_id,field,reason,old_value_text,write_key,at) VALUES ('${id}','${field}','owner_set','${k}','key-${id}-${field}','${T}');`).join('')).join('\n'));
+ const total=rows(file,'SELECT COUNT(*) AS n FROM film_metadata_history')[0].n;
+ const seen=[];let cursor=null,pages=0;
+ do{
+  const r=await call(env,{method:'GET',query:cursor?'?cursor='+encodeURIComponent(cursor):''});
+  assert.equal(r.status,200);assert.ok(r.body.history.rows.length<=50);
+  assert.equal(r.body.redirects.count,27);assert.equal(r.body.redirects.films,undefined,'no truncated list stands in for continuation');
+  seen.push(...r.body.history.rows.map(row=>row.id));cursor=r.body.history.next;pages++;
+ }while(cursor);
+ assert.equal(new Set(seen).size,seen.length,'no row twice');assert.equal(seen.length,total,'every row of every predecessor is reachable');assert.ok(pages>=2);
+ assert.ok(preds.every(id=>rows(file,`SELECT 1 FROM film_metadata_history WHERE film_id='${id}'`).length&&true));
+ // the 27th predecessor's row is revertible through the API, and visible
+ const last=await call(env,{method:'GET'});
+ const viaApi=[];let c2=null;do{const r=await call(env,{method:'GET',query:c2?'?cursor='+encodeURIComponent(c2):''});viaApi.push(...r.body.history.rows.map(row=>row.filmId));c2=r.body.history.next;}while(c2);
+ assert.ok(viaApi.includes(preds.at(-1)),'the last predecessor is shown');assert.equal(last.status,200);
+ // the plan: the predecessors come from the target index, the history through its (film_id, ...) unique index, never a full scan
+ const predicate=vm.runInContext('FILM_META_HISTORY_FILMS',context);
+ const explain=sqliteSync(['-bail',file],{input:`EXPLAIN QUERY PLAN SELECT id FROM film_metadata_history WHERE (${predicate.replace(/\?/g,`'${ID}'`)}) AND (at<'${T}' OR (at='${T}' AND id<1000)) ORDER BY at DESC,id DESC LIMIT 51;`,encoding:'utf8'});
+ assert.equal(explain.status,0,explain.stderr);
+ const plan=explain.stdout.trim().split('\n').join(' | ');
+ assert.match(plan,/film_redirect_by_target/,plan);
+ assert.match(plan,/SEARCH film_metadata_history USING (COVERING )?INDEX/,plan);
+ assert.doesNotMatch(plan,/SCAN film_metadata_history/,plan);
+}
+{
+ // an owner value is typed before it is normalized: nothing becomes a pin, a receipt, a history row or a revision
+ const {file,env}=await world();
+ const before=JSON.stringify(writes(file));
+ const bad=[['year',true],['year',{a:1}],['year',[1999]],['year',12.5],['year','nineteen'],['runtime',false],['runtime',null],['synopsis',{bad:true}],['synopsis',[1]],['synopsis',42],['synopsis',true],['synopsis','   '],['poster',{}],['poster',7],['url',['http://x']],['url',1],['genres','Drama'],['genres',[1,2]],['genres',[{}]],['genres',[]],['genres',{a:'b'}]];
+ for(const [field,value] of bad){
+  const r=await call(env,{payload:{action:'set',field,value,expectedRevision:await revisionOf(env),requestId:rid()}});
+  assert.equal(r.status,400,field+' '+JSON.stringify(value)+': '+JSON.stringify(r.body));assert.equal(r.body.error,'invalid_value');
+ }
+ assert.equal(JSON.stringify(writes(file)),before);
+ assert.equal(meta(file),undefined,'no film_metadata row was created');
+ // valid inputs keep the agreed canonical normalization
+ for(const [field,value,stored] of [['year',1999,1999],['year','2001',2001],['runtime',' 120 ',120],['synopsis','Текст','Текст']]){
+  const r=await post(env,{action:'set',field,value});assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(meta(file)[field],stored);
+ }
+ assert.equal((await post(env,{action:'set',field:'genres',value:['Драма','Комедия']})).status,200);
+ assert.equal(meta(file).genres_json,JSON.stringify(['Драма','Комедия']));
 }
 
 console.log('admin film metadata API (AIR-634): all checks passed');
