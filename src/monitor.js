@@ -136,7 +136,8 @@ const Monitor=(()=>{
  const canonicalProducerFacts=(env,now,previous,{readOnly=false,previousReadable=true}={})=>guarded(async()=>{
   if(typeof CanonicalProducerWorkflow==='undefined'||!env?.DB)return null;
   if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return policy().canonicalProducerFacts({held:true,now});
-  const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env);
+  const prior=typeof previous?.lastLabel==='string'&&previous.lastLabel&&previous.closed!==true?previous.lastLabel:null;
+  const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env,{prior});
   const facts=policy().canonicalProducerFacts({read,previous,now,readOnly,previousReadable});
   // ADR 0208 decision 7 (AIR-594): the outcome delivery to the Events Log, a read-only VISIBILITY fact for the hourly Monitor only (pending count, oldest pending
   // outcome, readability). It is never an input of the Producer's verdict: a healthy Producer with undelivered reports stays healthy, and no alert comes from it.

@@ -18,10 +18,15 @@ function setup({hold=false}={}){
  ctx.fetch=async(url,options={})=>{calls.push({url:String(url),method:options.method||'GET',body:options.body?JSON.parse(options.body):null});return new Response('',{status:String(url).startsWith('https://hooks.example/')&&!webhookOk?503:200});};
  ctx.RatingsOrchestration={async readModel(){return {mode:'cloudflare',health:'healthy',failure:null};}};
  // The stub D1 readers answer from `world`; every read is counted and none writes.
- const world={P:'run-p',generation:10,publishedAt:at(T0),chain:null,run:null,reads:0,unreadable:false};
+ const world={P:'run-p',generation:10,publishedAt:at(T0),chain:null,run:null,reads:0,unreadable:false,ready:true,runs:{},priorReads:0,priorUnreadable:false};
  const read=value=>{world.reads++;if(world.unreadable)throw new Error('d1 down');return value;};
- ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold,async readProducerMonitorFacts(){
-  return read({ready:true,programmeRunId:world.P,generation:world.generation,label:world.P+':'+world.generation,publishedAt:world.publishedAt,chain:world.chain,run:world.run});}};
+ ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold,async readProducerMonitorFacts(_env,{prior=null}={}){
+  const label=world.P+':'+world.generation;
+  if(!world.ready)return read({ready:false});
+  // AIR-692: the conditional lookup of an earlier generation, answered from `world.runs` (a durably passed run is immutable); counted separately.
+  let proof=null;
+  if(prior&&prior!==label){world.priorReads++;proof=world.priorUnreadable?{label:prior,error:true}:{label:prior,run:world.runs[prior]||null};}
+  return read({ready:true,programmeRunId:world.P,generation:world.generation,label,publishedAt:world.publishedAt,chain:world.chain,run:world.run,prior:proof});}};
  const env=baseEnv(bucket,{MONITOR:'on',MONITOR_WEBHOOK_URL:'https://hooks.example/alert',DB:{}});
  return {clock,bucket,ctx,env,calls,world,M:g(ctx,'Monitor'),setWebhook:ok=>{webhookOk=ok;}};
 }
@@ -219,7 +224,7 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
   world.generation=gen;world.publishedAt=at(now);world.chain=null;world.run=null;
   await M.run(env,{now:now+58*MIN});                       // tick 18:00: published, chain and run still absent
   world.chain=chain({owner_state:'complete'});
-  world.run=run({run_key:'epg:run-p:'+gen,pass_state:'passed',source_generation:label,applied_generation:label,n_applied:zero?0:3,n_noop:zero?4004:0,updated_at:at(now+90*MIN)});
+  world.run=run({run_key:'epg:run-p:'+gen,pass_state:'passed',source_generation:label,applied_generation:label,unit_count:zero?0:3,n_applied:zero?0:3,n_noop:0,updated_at:at(now+90*MIN)});
   await M.run(env,{now:now+2*H});                          // finished between ticks, seen by the next one
   now+=24*H;
   await M.run(env,{now:now-2*H+MIN});
@@ -237,5 +242,59 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
  for(const h of [20,21,22,23])await M.run(env,{now:T0+h*H+MIN});
  assert.equal((await producer(M,env,T0+23*H+MIN)).facts.status,'stalled');
  assert.equal(posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert').length,1);
+}
+// 11. AIR-692 review P1a: the previous generation was OBSERVED pending, durably passed between ticks (no tick saw current) and was superseded by a new
+// publication. The exact generation is looked up once (indexed, conditional) and its own passed/source/applied claim closes the boundary; the idle is normal.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.generation=10;world.publishedAt=at(T0);world.chain=null;world.run=null;           // observed with no run row yet
+ await M.run(env,{now:T0+MIN});
+ world.chain=chain();world.run=run({n_applied:5,updated_at:at(T0+30*MIN)});
+ await M.run(env,{now:T0+H});                                                           // observed pending, moving
+ world.runs['run-p:10']=run({pass_state:'passed',source_generation:'run-p:10',applied_generation:'run-p:10',n_applied:9});
+ world.generation=11;world.publishedAt=at(T0+24*H);world.chain=null;world.run=null;     // superseded, no tick saw current
+ const priorBefore=world.priorReads;
+ for(const m of [58,118,178]){await M.run(env,{now:T0+24*H+m*MIN});}
+ assert.equal(world.priorReads-priorBefore,1,'the earlier generation is looked up once; once the new label is remembered nothing more is read');
+ assert.equal((await producer(M,env,T0+24*H+178*MIN)).facts.status,'stalled','a new generation that really never starts still alerts after 2 h of ITS OWN window');
+ assert.equal(posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert').length,1);
+}
+{
+ // The same sequence: within the window nothing alerts when the proof exists; without a proof (no run, or an unreadable lookup) the old streak survives.
+ for(const mode of ['proof','none','unreadable','mismatch']){
+  const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+  world.chain=chain();world.run=run({n_applied:5,updated_at:at(T0+30*MIN)});
+  await M.run(env,{now:T0+MIN});await M.run(env,{now:T0+H});
+  if(mode==='proof')world.runs['run-p:10']=run({pass_state:'passed',source_generation:'run-p:10',applied_generation:'run-p:10'});
+  if(mode==='mismatch')world.runs['run-p:10']=run({pass_state:'passed',source_generation:'run-p:10',applied_generation:null});
+  if(mode==='unreadable')world.priorUnreadable=true;
+  world.generation=11;world.publishedAt=at(T0+24*H);world.chain=null;world.run=null;
+  await M.run(env,{now:T0+24*H+58*MIN});
+  const alerts=posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert').length;
+  assert.equal(alerts,mode==='proof'?0:1,mode+': a proof closes the boundary; absent, unreadable or unmatched evidence never clears the streak');
+ }
+}
+
+// 12. AIR-692 review P1b: a proven pass, a long idle, a tick that finds nothing ready, then a new publication with no run yet: the closed boundary survives
+// the unready observation (Monitor and footer). A genuinely unfinished pass keeps its old streak through the same observation.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'complete'});world.run=run({pass_state:'passed',source_generation:'run-p:10',applied_generation:'run-p:10',unit_count:0});
+ await M.run(env,{now:T0});
+ world.ready=false;
+ await M.run(env,{now:T0+22*H});
+ world.ready=true;world.generation=11;world.publishedAt=at(T0+23*H);world.chain=null;world.run=null;
+ await M.run(env,{now:T0+23*H+58*MIN});
+ await M.run(env,{now:T0+24*H+MIN});   // more than 2 h after the unready observation, but only about 1 h after the publication
+ assert.equal(posts(calls).filter(item=>item.body.stream==='canonical_producer').length,0,'an unready observation did not recreate the old idle streak');
+ assert.equal((await producer(M,env,T0+24*H+MIN)).facts.status,'waiting');
+}
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain();world.run=run({n_applied:0,cursor_id:null,updated_at:at(T0)});
+ await M.run(env,{now:T0});
+ world.ready=false;await M.run(env,{now:T0+H});await M.run(env,{now:T0+3*H});
+ world.ready=true;await M.run(env,{now:T0+4*H});
+ assert.ok(posts(calls).some(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert'),'an unfinished pass keeps its streak through an unready observation');
 }
 console.log('monitor canonical_producer stream: ok');

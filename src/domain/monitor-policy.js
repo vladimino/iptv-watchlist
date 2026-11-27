@@ -350,7 +350,7 @@ const IDENTITY_STOP = /^producer_identity_/;
 // does not store the baseline, so `now` would renew the window on every read of the same unchanged row: in `readOnly` a movement is dated by the run row's
 // own `updated_at` (never later than `now`), the first-tick grace does not exist (no stored clock: the streak starts at the publication), and nothing is
 // ever dated by the read itself.
-export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false, current = false} = {}) {
+export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false, current = false, boundary = false, label = null} = {}) {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const stamp = value => Number.isFinite(Date.parse(value || '')) ? Date.parse(value) : null;
   const live = stamp(prior.liveSince) ?? (readOnly ? null : now);
@@ -366,10 +366,14 @@ export function canonicalProducerClock(previous, run, publishedAt, now, {readOnl
   // AIR-692: a generation PROVEN current (passed, source = applied = published, zero eligible units included) closes its streak. The idle time that follows
   // is normal, not missing progress, so the next publication starts its window at its OWN publication instead of inheriting the previous day's streak.
   // A generation that rolls over while unfinished never reaches this branch, so its streak is kept.
-  const streak = moved || current ? null : (stamp(prior.noProgressSince) ?? (Math.max(published ?? 0, live ?? 0) || null));
+  // `boundary` (the earlier observed generation was proven passed) discards the stored streak and starts the window at THIS publication.
+  const streak = moved || current || (boundary && !label) ? null : ((boundary ? null : stamp(prior.noProgressSince)) ?? (Math.max(published ?? 0, live ?? 0) || null));
   const since = moved ? progress : (Math.max(progress ?? 0, streak ?? 0) || null);
   const at = value => value === null || value === undefined ? null : new Date(value).toISOString();
-  return {liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
+  // AIR-692 (review): `lastLabel` remembers the last OBSERVED publication (also before any run row exists) and `closed` says that this label was proven
+  // current. A tick that reads nothing (not ready) keeps both, so the closed boundary survives a transient unready observation.
+  const lastLabel = label || (prior.lastLabel ?? null), closed = label ? current : prior.closed === true;
+  return {lastLabel, closed, liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
     progressAt: at(progress), noProgressSince: at(streak), sinceAt: at(since), ...(readOnly ? {} : {observedAt: at(now)})};
 }
 // A count from D1: a non-negative integer (or a string of digits). null, '', a negative, a fraction or NaN is unknown (null), never 0.
@@ -390,10 +394,14 @@ function clockStateOf(previous, previousReadable, now) {
 export function canonicalProducerFacts({held = false, read = null, previous = null, now, readOnly = false, previousReadable = true}) {
   if (held) return {held: true, readable: true, clock: null};
   const extra = readOnly ? {clockState: clockStateOf(previous, previousReadable, now)} : {};
-  if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now, {readOnly}), ...extra};
+  if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now, {readOnly, boundary: previous?.closed === true}), ...extra};
   const {run, chain} = read;
-  const current = !!run && run.pass_state === 'passed' && !!read.label && run.source_generation === read.label && run.applied_generation === read.label;
-  const clock = canonicalProducerClock(previous, run, read.publishedAt, now, {readOnly, current});
+  const proves = (row, label) => !!row && !!label && row.pass_state === 'passed' && row.source_generation === label && row.applied_generation === label;
+  const current = proves(run, read.label);
+  // AIR-692 (review): a previous generation that was observed unfinished and has since been superseded closes the boundary only on its OWN exact
+  // passed/source/applied claim (ADR 0141: a passed run is immutable). An absent, unreadable or unmatched answer clears nothing.
+  const boundary = !current && ((previous?.closed === true && !!previous.lastLabel && read.label !== previous.lastLabel) || (!!read.prior && !read.prior.error && previous?.closed !== true && read.prior.label === previous?.lastLabel && proves(read.prior.run, read.prior.label)));
+  const clock = canonicalProducerClock(previous, run, read.publishedAt, now, {readOnly, current, boundary, label: read.label});
   const total = run ? knownCount(run.unit_count) : null;
   const parts = run ? [run.n_applied, run.n_noop, run.n_kept].map(knownCount) : [];
   const done = run && parts.every(value => value !== null) ? parts.reduce((sum, value) => sum + value, 0) : null;
