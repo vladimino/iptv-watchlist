@@ -1,4 +1,4 @@
--- Schema v49: per-field provenance of film_metadata (AIR-631, card PV1; ADR 0214 decisions 2, 9 and 11, Accepted). ADDITIVE and DORMANT. Five new STRICT tables and the triggers below; no existing table, column or row changes, and nothing is backfilled.
+-- Schema v49: per-field provenance of film_metadata (AIR-631, card PV1; ADR 0214 decisions 2, 9 and 11, Accepted; language-bound by ADR 0224, Accepted). ADDITIVE and DORMANT. Five new STRICT tables and the triggers below; no existing table, column or row changes, and nothing is backfilled.
 --  1. `film_metadata_provenance_control`: the one durable control row (id = 1), inserted at mode `off`. The mode moves only off -> enforce, enforce -> hold and hold -> enforce, each raising `revision`; it never returns to `off`.
 --  2. `film_metadata_field`: one typed provenance row per Film and field (year, runtime, synopsis, poster, url, genres), bound to the stored value by `value_digest`. No JSON, no foreign key, the primary key is the only index.
 --  3. `film_metadata_history`: append-only; one row per replaced, cleared or discarded value and per owner action.
@@ -69,6 +69,8 @@ CREATE TABLE film_metadata_field (
  anchor_value TEXT CHECK (anchor_value IS NULL OR length(anchor_value) BETWEEN 1 AND 200),
  anchor_digest TEXT CHECK (anchor_digest IS NULL OR (length(anchor_digest) = 64 AND anchor_digest NOT GLOB '*[^0-9a-f]*')),
  agreement TEXT CHECK (agreement IS NULL OR agreement IN ('confirmed', 'not_required', 'unconfirmed')),
+ language TEXT CHECK (language IS NULL OR language IN ('ru', 'en')),
+ language_basis TEXT CHECK (language_basis IS NULL OR language_basis IN ('explicit', 'assumed')),
  observed_at TEXT NOT NULL CHECK (length(observed_at) = 24),
  checked_at TEXT NOT NULL CHECK (length(checked_at) = 24),
  value_digest TEXT NOT NULL CHECK (length(value_digest) = 64 AND value_digest NOT GLOB '*[^0-9a-f]*'),
@@ -80,7 +82,12 @@ CREATE TABLE film_metadata_field (
  CHECK ((tier = 'automatic') = (agreement IS NOT NULL)),
  CHECK (tier <> 'automatic' OR (anchor_scheme IS NOT NULL AND anchor_digest IS NOT NULL)),
  CHECK (source NOT IN ('owner', 'unattributed') OR (origin = 'owner_route' AND tier IN ('owner', 'released') AND anchor_scheme IS NULL)),
- CHECK (source <> 'owner' OR anchor_digest IS NOT NULL)
+ CHECK (source <> 'owner' OR anchor_digest IS NOT NULL),
+ -- ADR 0224 (language-bound provenance): the language of the selected value and the evidence for it, bound to the value like every other semantic column. Only synopsis and poster carry one; NULL is unknown or not applicable.
+ -- `assumed` is the owner-approved P4-B default for a freshly observed Letterboxd synopsis (not a verified tag) and exists for no other field or source.
+ CHECK ((language IS NULL) = (language_basis IS NULL)),
+ CHECK (language IS NULL OR field IN ('synopsis', 'poster')),
+ CHECK (language_basis IS NULL OR language_basis <> 'assumed' OR (field = 'synopsis' AND source = 'letterboxd'))
 ) STRICT, WITHOUT ROWID;
 
 -- 3. The history. Append-only; nothing cascades into it, so it outlives a deleted row or Film. `old_value_text` is the canonical JSON text of one scalar or array (a value, not a provenance store).
@@ -96,10 +103,14 @@ CREATE TABLE film_metadata_history (
  old_anchor_value TEXT,
  old_anchor_digest TEXT CHECK (old_anchor_digest IS NULL OR (length(old_anchor_digest) = 64 AND old_anchor_digest NOT GLOB '*[^0-9a-f]*')),
  old_agreement TEXT CHECK (old_agreement IS NULL OR old_agreement IN ('confirmed', 'not_required', 'unconfirmed')),
+ old_language TEXT CHECK (old_language IS NULL OR old_language IN ('ru', 'en')),
+ old_language_basis TEXT CHECK (old_language_basis IS NULL OR old_language_basis IN ('explicit', 'assumed')),
  old_observed_at TEXT,
  new_value_digest TEXT CHECK (new_value_digest IS NULL OR (length(new_value_digest) = 64 AND new_value_digest NOT GLOB '*[^0-9a-f]*')),
  new_tier TEXT CHECK (new_tier IS NULL OR new_tier IN ('owner', 'automatic', 'released')),
  new_source TEXT CHECK (new_source IS NULL OR new_source IN ('letterboxd', 'tmdb', 'owner', 'unattributed')),
+ new_language TEXT CHECK (new_language IS NULL OR new_language IN ('ru', 'en')),
+ new_language_basis TEXT CHECK (new_language_basis IS NULL OR new_language_basis IN ('explicit', 'assumed')),
  new_anchor_digest TEXT CHECK (new_anchor_digest IS NULL OR (length(new_anchor_digest) = 64 AND new_anchor_digest NOT GLOB '*[^0-9a-f]*')),
  write_key TEXT NOT NULL CHECK (length(write_key) BETWEEN 1 AND 200),
  at TEXT NOT NULL CHECK (length(at) = 24),

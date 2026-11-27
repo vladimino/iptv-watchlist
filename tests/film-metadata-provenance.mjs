@@ -58,10 +58,10 @@ const digestOfFilm=async(env,id=ID)=>(await readFilmSnapshot(env,id)).provenance
 let counter=0;
 const req=()=>'req-'+(++counter);
 // A declared (catalog enrichment) write of one or more fields.
-async function declare(env,fields,{source='letterboxd',at=T,observedAt=at,agree=true,id=ID,requestId=req(),guards,rev}={}){
+async function declare(env,fields,{source='letterboxd',at=T,observedAt=at,agree=true,id=ID,requestId=req(),guards,rev,languages={}}={}){
  const digest=await digestOfFilm(env,id),snapshot=await readFilmSnapshot(env,id);
  const anchor=snapshot.provenance.anchors.computed[source];
- const declared=Object.fromEntries(Object.keys(fields).map(field=>[field,{source,anchor:{scheme:source,value:anchor?.value??'x'},observedAt,agreedAnchorDigest:agree?digest:null}]));
+ const declared=Object.fromEntries(Object.keys(fields).map(field=>[field,{source,anchor:{scheme:source,value:anchor?.value??'x'},observedAt,agreedAnchorDigest:agree?digest:null,...(languages[field]||{})}]));
  return writeFilmFacts(env,{id,at,requestId,expectedRevision:rev??snapshot.revision,film:{contractVersion:1},metadata:{updatedAt:at,declared,...fields},requireExisting:true,...(guards?{guards}:{})});
 }
 // An undeclared write (the EPG callers).
@@ -77,6 +77,7 @@ const field=(file,name,id=ID)=>fieldRows(file,id).find(item=>item.field===name);
 const meta=(file,id=ID)=>rows(file,`SELECT * FROM film_metadata WHERE film_id='${id}'`)[0];
 const history=file=>rows(file,'SELECT * FROM film_metadata_history ORDER BY id');
 const CMD=text=>sha256Hex(text);
+const RU={language:'ru',languageBasis:'explicit'},EN={language:'en',languageBasis:'explicit'},ASSUMED_EN={language:'en',languageBasis:'assumed'};
 // Runs `statement` once, right before the writer's batch: the state the plan read moves under it (a race).
 function racing(env,file,statement){
  let armed=true;
@@ -579,7 +580,7 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  console.log('measured: a core batch of six declared fields = '+probe.seen.size+' statements');
  const replace={year:2000,runtime:140,synopsis:'S2',poster:'/p2',url:'https://e.test/m2',genres:['c']};
  const replaced=batchSize(env);
- await declare(replaced.env,replace,{at:T3,observedAt:T3});
+ await declare(replaced.env,replace,{at:T3,observedAt:T3,languages:{synopsis:RU,poster:RU}});
  assert.ok(replaced.seen.size<=MUTATION_STATEMENT_CAP);
  assert.equal(history(file).length,6,'six replaced fields write six history rows');
  console.log('measured: a core batch replacing six fields = '+replaced.seen.size+' statements');
@@ -597,7 +598,7 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  assert.equal(JSON.stringify(facts).includes('declared'),false,'the EPG facts carry no declaration');
  await writeFilmFacts(env,{...facts,id:ID,at:T,requestId:req(),expectedRevision:await revisionOf(env),requireExisting:true});
  assert.equal(meta(file).synopsis,'EPG text');assert.equal(fieldRows(file).length,0,'the first EPG write after activation stays unknown');
- await declare(env,{synopsis:'Confirmed text'},{at:T1});
+ await declare(env,{synopsis:'Confirmed text'},{at:T1,languages:{synopsis:RU}});
  assert.equal(meta(file).synopsis,'Confirmed text','a confirmed observation replaces the unknown EPG text');
  await writeFilmFacts(env,{...facts,id:ID,at:T2,requestId:req(),expectedRevision:await revisionOf(env),requireExisting:true,metadata:{...facts.metadata,updatedAt:T2,synopsis:'October text'}});
  assert.equal(meta(file).synopsis,'Confirmed text','an EPG replay of old text never replaces a confirmed value (worked example 3)');
@@ -734,6 +735,123 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
    await mergeFilms(merged.env,{from:B,to:ID,expected:{from:await revisionOf(merged.env,B),to:await revisionOf(merged.env,ID)},at:T3,evidence:{verified:true}});
    assert.equal(signals(merged.file).length,0,'a merge that keeps the pin releases nothing');
   }finally{delete globalThis.CatalogEnrichmentRunner;}
+ }
+}
+// ---- 12. ADR 0224: language-bound provenance (Russian first, English fallback; P3-A, P4-B) ----
+{
+ const lang=row=>row&&[row.language,row.language_basis];
+ const world=async()=>{const w=fresh();await seed(w.env);setMode(w.file,'enforce');return w;};
+ // the language is part of the row bound to the value; assumed English (P4-B) is distinct from tagged English; a Russian TMDB value replaces an English Letterboxd one although Letterboxd has the higher precedence
+ {
+  const w=await world();
+  await declare(w.env,{synopsis:'English text'},{languages:{synopsis:ASSUMED_EN}});
+  assert.deepEqual(lang(field(w.file,'synopsis')),['en','assumed'],'a freshly observed Letterboxd synopsis is recorded as assumed English');
+  const ru=await declare(w.env,{synopsis:'Русский текст'},{source:'tmdb',at:T1,languages:{synopsis:RU}});
+  assert.equal(ru.provenance.replacements,1);assert.equal(meta(w.file).synopsis,'Русский текст');
+  const row=field(w.file,'synopsis');assert.deepEqual([row.source,...lang(row)],['tmdb','ru','explicit']);
+  const h=history(w.file)[0];assert.deepEqual([h.reason,h.old_language,h.old_language_basis,h.new_language,h.new_language_basis],['replaced','en','assumed','ru','explicit'],'history keeps the language and its evidence basis of both values');
+  // an English fallback never replaces a verified Russian value, whatever its source precedence or confidence
+  const down=await declare(w.env,{synopsis:'English again'},{at:T2,languages:{synopsis:ASSUMED_EN}});
+  assert.deepEqual(down.skipped.map(item=>item.reason),['language_kept']);assert.equal(meta(w.file).synopsis,'Русский текст');
+  const unknownLang=await declare(w.env,{synopsis:'Unlabelled'},{at:T2});
+  assert.deepEqual(unknownLang.skipped.map(item=>item.reason),['language_kept'],'an unknown-language observation does not downgrade it either');
+  // a Russian value protected even when the stored one is only the unconfirmed fallback and the English one is confirmed
+  const fb=await world();
+  await declare(fb.env,{synopsis:'Русский fallback'},{source:'tmdb',agree:false,languages:{synopsis:RU}});
+  const protectedRu=await declare(fb.env,{synopsis:'Confirmed English'},{at:T1,languages:{synopsis:ASSUMED_EN}});
+  assert.deepEqual(protectedRu.skipped.map(item=>item.reason),['language_kept']);assert.equal(meta(fb.file).synopsis,'Русский fallback');
+ }
+ // P3-A: an unknown-language legacy value is replaced only by a confirmed Russian observation; English or unknown language may fill a blank or adopt an identical value
+ for(const name of ['synopsis','poster']){
+  const w=await world();
+  const legacy=name==='poster'?'/legacy.jpg':'Старый текст';
+  await undeclared(w.env,{[name]:legacy});
+  const en=await declare(w.env,{[name]:name==='poster'?'/en.jpg':'English'},{at:T1,languages:{[name]:EN}});
+  assert.deepEqual(en.skipped.map(item=>item.reason),['language_kept'],name+': English does not replace an unknown-language value solely because its lineage is missing');
+  const none=await declare(w.env,{[name]:name==='poster'?'/x.jpg':'No tag'},{at:T1});
+  assert.deepEqual(none.skipped.map(item=>item.reason),['language_kept']);
+  const epg=await undeclared(w.env,{[name]:name==='poster'?'/epg.jpg':'EPG'},{at:T1});
+  assert.deepEqual(epg.skipped.map(item=>item.reason),['language_kept'],name+': nor does an undeclared write');
+  assert.equal(meta(w.file)[name],legacy);
+  const adopt=await declare(w.env,{[name]:legacy},{at:T2,languages:{[name]:EN}});
+  assert.equal(adopt.provenance.adoptions,1);assert.deepEqual(lang(field(w.file,name)),['en','explicit'],name+': an identical value is adopted with its verified lineage');
+  const ru=await declare(w.env,{[name]:name==='poster'?'/ru.jpg':'Русский'},{at:T3,observedAt:T3,languages:{[name]:RU}});
+  assert.equal(ru.provenance.replacements,1,name+': a confirmed Russian observation replaces it');
+ }
+ {
+  const w=await world();
+  await undeclared(w.env,{synopsis:'Старый текст'});
+  const ru=await declare(w.env,{synopsis:'Новый русский'},{at:T1,languages:{synopsis:RU}});
+  assert.equal(ru.provenance.replacements,1);assert.equal(history(w.file)[0].old_tier,null,'the unknown legacy value leaves NULL lineage in history');
+  // a blank is filled by English; other fields are untouched by the language rule (runtime keeps the ADR 0214 precedence)
+  const b=await world();
+  await declare(b.env,{synopsis:'Filled'},{languages:{synopsis:EN}});assert.equal(meta(b.file).synopsis,'Filled');
+  await declare(b.env,{runtime:110},{source:'tmdb',at:T1});await declare(b.env,{runtime:112},{at:T2,observedAt:T2});
+  assert.equal(meta(b.file).runtime,112,'runtime still follows source precedence and freshness');
+ }
+ // validation of the declared language
+ {
+  const w=await world();
+  for(const [why,field,item,source] of [['a language on a field that has none','year',{language:'ru',languageBasis:'explicit'},'letterboxd'],['assumed on a TMDB synopsis','synopsis',ASSUMED_EN,'tmdb'],['assumed on a poster','poster',ASSUMED_EN,'letterboxd'],['a language without a basis','synopsis',{language:'ru'},'letterboxd'],['a basis without a language','synopsis',{languageBasis:'explicit'},'letterboxd'],['an unsupported language','synopsis',{language:'de',languageBasis:'explicit'},'letterboxd']])
+   await assert.rejects(declare(w.env,{[field]:field==='year'?1999:'x'},{source,languages:{[field]:item}}),error=>error.code==='film_person_invalid',why);
+ }
+ // hold fills and adopts only: a Russian observation does not replace English there, and the same text is adopted with its language; enforce replaces afterwards
+ {
+  const w=await world();
+  await declare(w.env,{synopsis:'English'},{languages:{synopsis:ASSUMED_EN}});
+  setMode(w.file,'hold');
+  const held=await declare(w.env,{synopsis:'Русский'},{source:'tmdb',at:T1,languages:{synopsis:RU}});
+  assert.deepEqual(held.skipped.map(item=>item.reason),['hold_fill_only']);assert.equal(meta(w.file).synopsis,'English');
+  const same=await declare(w.env,{synopsis:'English'},{source:'tmdb',at:T1,languages:{synopsis:EN}});
+  assert.equal(same.written,false,'a lower-ranked equal observation changes nothing');
+  setMode(w.file,'enforce');
+  const up=await declare(w.env,{synopsis:'Русский'},{source:'tmdb',at:T2,languages:{synopsis:RU}});
+  assert.equal(up.provenance.replacements,1);assert.deepEqual(lang(field(w.file,'synopsis')),['ru','explicit']);
+ }
+ // owner lock, release, revert and merge keep the language bound to the selected value
+ {
+  const w=await world();
+  await declare(w.env,{synopsis:'Русский'},{source:'tmdb',languages:{synopsis:RU}});
+  await owner(w.env,[{action:'lock',field:'synopsis'}]);
+  assert.deepEqual(lang(field(w.file,'synopsis')),['ru','explicit'],'a lock keeps the language of the pinned value');
+  await owner(w.env,[{action:'set',field:'synopsis',value:'Owner text'}],{at:T1});
+  assert.deepEqual(lang(field(w.file,'synopsis')),[null,null],'an owner value has no verified language');
+  const stored=history(w.file).find(item=>item.reason==='owner_set');
+  assert.deepEqual([stored.old_language,stored.old_language_basis],['ru','explicit'],'history keeps the language of the replaced value');
+  await owner(w.env,[{action:'revert',field:'synopsis',history:{...historyAction(stored,'synopsis'),oldLanguage:stored.old_language,oldLanguageBasis:stored.old_language_basis}}],{at:T2});
+  assert.equal(meta(w.file).synopsis,'Русский');assert.deepEqual(lang(field(w.file,'synopsis')),['ru','explicit'],'a revert restores the language of the restored value');
+  await assert.rejects(owner(w.env,[{action:'set',field:'synopsis',value:'Again'}],{at:T3}).then(()=>owner(w.env,[{action:'revert',field:'synopsis',history:{...historyAction(stored,'synopsis'),oldLanguage:'en',oldLanguageBasis:'explicit'}}],{at:T3})),/.+/,'a caller-supplied language that differs from the stored history row is refused');
+  await owner(w.env,[{action:'release',field:'synopsis'}],{at:T3});
+  assert.deepEqual(lang(field(w.file,'synopsis')),[null,null],'the language of the last pinned value survives release');
+ }
+ {
+  const B='film:tmdb:604';
+  const w=fresh();await seed(w.env);await seed(w.env,{id:B,tmdb:'604',lid:'lid604'});setMode(w.file,'enforce');
+  await declare(w.env,{synopsis:'Same'},{languages:{synopsis:ASSUMED_EN}});await declare(w.env,{synopsis:'Same'},{id:B,source:'letterboxd',languages:{synopsis:ASSUMED_EN},observedAt:T1,at:T1});
+  await declare(w.env,{poster:'/a.jpg'},{languages:{poster:EN}});await declare(w.env,{poster:'/b.jpg'},{id:B,languages:{poster:RU}});
+  await mergeFilms(w.env,{from:B,to:ID,expected:{from:await revisionOf(w.env,B),to:await revisionOf(w.env,ID)},at:T3,evidence:{verified:true},resolve:{metadata:'retired'}});
+  assert.deepEqual(lang(field(w.file,'synopsis')),['en','assumed'],'equal values: the higher row keeps its assumed-English basis through the merge');
+  assert.deepEqual(lang(field(w.file,'poster')),['ru','explicit'],'the retired value chosen by the merge brings its language');
+  assert.ok(history(w.file).some(item=>item.reason==='merge_discarded'&&item.field==='poster'&&item.old_language==='en'&&item.old_language_basis==='explicit'),'the discarded value keeps its language in history');
+ }
+ // convergence with language: every order of a mixed set ends with the same projection (Russian wins, then precedence, freshness and the digest)
+ {
+  const OBS=[
+   {source:'letterboxd',value:'English one',languages:ASSUMED_EN,at:T1},
+   {source:'tmdb',value:'Русский',languages:RU,at:T},
+   {source:'tmdb',value:'English two',languages:EN,at:T3},
+   {source:'letterboxd',value:'English three',languages:ASSUMED_EN,at:T},
+  ];
+  const permutations=list=>list.length<=1?[list]:list.flatMap((item,index)=>permutations([...list.slice(0,index),...list.slice(index+1)]).map(rest=>[item,...rest]));
+  const seen=new Set();
+  for(const order of permutations(OBS)){
+   const w=await world();
+   for(const item of order)await declare(w.env,{synopsis:item.value},{source:item.source,observedAt:item.at,at:T3,languages:{synopsis:item.languages}});
+   const row=field(w.file,'synopsis');
+   seen.add(JSON.stringify({value:meta(w.file).synopsis,source:row.source,language:[row.language,row.language_basis],observed_at:row.observed_at,value_digest:row.value_digest}));
+  }
+  assert.equal(seen.size,1,'24 orders end with one projection: '+[...seen].join(' | '));
+  assert.equal(JSON.parse([...seen][0]).value,'Русский');
  }
 }
 console.log('film metadata provenance (AIR-631): the sync SHA-256 and the writer digest, schema absent and off byte-identical, binding, invalidation and declaration, anchor and mode races, the comparator with convergence over every permutation, locks, triggers and owner actions, modes, clear rules and the field-wise merge, and the statement bounds: ok');

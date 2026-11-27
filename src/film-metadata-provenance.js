@@ -71,7 +71,7 @@ function ownerValue(field,value){
 // ---- reading (ONE Film). null = the control table does not exist (today's behaviour). ----
 const ANCHOR_SQL=`SELECT e.scheme,e.value,e.trusted,e.conflicting,EXISTS (SELECT 1 FROM film_external_id o WHERE o.scheme=e.scheme AND o.value=e.value AND o.trusted=1 AND o.film_id<>e.film_id) AS other_owner,EXISTS (SELECT 1 FROM tmdb_retirement_decision r WHERE e.scheme='tmdb' AND r.film_id=e.film_id AND r.movie_id=e.value AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq)) AS retired FROM film_external_id e WHERE e.film_id=? AND e.scheme IN ('tmdb','letterboxd') AND e.trusted=1`;
 const ANCHOR_SQL_NO_RETIREMENT=`SELECT e.scheme,e.value,e.trusted,e.conflicting,EXISTS (SELECT 1 FROM film_external_id o WHERE o.scheme=e.scheme AND o.value=e.value AND o.trusted=1 AND o.film_id<>e.film_id) AS other_owner,0 AS retired FROM film_external_id e WHERE e.film_id=? AND e.scheme IN ('tmdb','letterboxd') AND e.trusted=1`;
-const FIELD_COLUMNS='field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,observed_at,checked_at,value_digest,write_key,written_revision,updated_at';
+const FIELD_COLUMNS='field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,language,language_basis,observed_at,checked_at,value_digest,write_key,written_revision,updated_at';
 export async function readProvenance(db,filmId){
  let control;
  try{control=await one(db,'SELECT mode,revision FROM film_metadata_provenance_control WHERE id=1');}
@@ -105,22 +105,33 @@ function standing(row,value,digest,dimLocked){
  if(row.anchor_digest!==digest)return {name:'superseded',rank:3,bound,mismatch,row};
  return row.agreement==='unconfirmed'?{name:'unconfirmed',rank:2,bound,mismatch,row}:{name:'confirmed',rank:4,bound,mismatch,row};
 }
-const rankOf=(rank,source,observedAt,digest)=>[rank,PRECEDENCE[source]||0,observedAt||'',digest||''];
-const compare=(left,right)=>{for(let i=0;i<4;i++){if(left[i]<right[i])return -1;if(left[i]>right[i])return 1;}return 0;};
+// ADR 0224: for synopsis and poster ONLY, language quality is compared before provider precedence at equal confidence (Russian 2, English 1, unknown 0; an assumed English counts as English). Every other field has no language, so its order is unchanged.
+const LANGUAGE_RANK=Object.freeze({ru:2,en:1});
+export const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
+const rankOf=(rank,source,observedAt,digest,language=null)=>[rank,LANGUAGE_RANK[language]||0,PRECEDENCE[source]||0,observedAt||'',digest||''];
+const compare=(left,right)=>{for(let i=0;i<5;i++){if(left[i]<right[i])return -1;if(left[i]>right[i])return 1;}return 0;};
 export const confidenceOf=standing;
 
-const HISTORY_SQL='INSERT INTO film_metadata_history (film_id,field,reason,old_value_text,old_tier,old_source,old_anchor_scheme,old_anchor_value,old_anchor_digest,old_agreement,old_observed_at,new_value_digest,new_tier,new_source,new_anchor_digest,write_key,at,merged_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,field,write_key) DO NOTHING';
-export const FIELD_UPSERT='INSERT INTO film_metadata_field (film_id,field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,observed_at,checked_at,value_digest,write_key,written_revision,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,field) DO UPDATE SET tier=excluded.tier,source=excluded.source,origin=excluded.origin,anchor_scheme=excluded.anchor_scheme,anchor_value=excluded.anchor_value,anchor_digest=excluded.anchor_digest,agreement=excluded.agreement,observed_at=excluded.observed_at,checked_at=excluded.checked_at,value_digest=excluded.value_digest,write_key=excluded.write_key,written_revision=excluded.written_revision,updated_at=excluded.updated_at';
-export const historyStatement=(filmId,field,reason,old,next,writeKey,at,mergedFrom=null)=>[HISTORY_SQL,[filmId,field,reason,old?.valueText??null,old?.tier??null,old?.source??null,old?.anchorScheme??null,old?.anchorValue??null,old?.anchorDigest??null,old?.agreement??null,old?.observedAt??null,next?.valueDigest??null,next?.tier??null,next?.source??null,next?.anchorDigest??null,writeKey,at,mergedFrom]];
+// ADR 0224: the language a declaration carries for the value it declares (null/undefined = unknown or not applicable). Only synopsis and poster have one; `assumed` is the P4-B default of a freshly observed Letterboxd synopsis.
+export function languageOf(field,item){
+ const language=item?.language??null,basis=item?.languageBasis??null;
+ if(language===null&&basis===null)return {language:null,languageBasis:null};
+ if(!['ru','en'].includes(language)||!['explicit','assumed'].includes(basis)||!LANGUAGE_FIELDS.includes(field))throw failed('film_person_invalid');
+ if(basis==='assumed'&&!(field==='synopsis'&&item.source==='letterboxd'))throw failed('film_person_invalid');
+ return {language,languageBasis:basis};
+}
+const HISTORY_SQL='INSERT INTO film_metadata_history (film_id,field,reason,old_value_text,old_tier,old_source,old_anchor_scheme,old_anchor_value,old_anchor_digest,old_agreement,old_language,old_language_basis,old_observed_at,new_value_digest,new_tier,new_source,new_language,new_language_basis,new_anchor_digest,write_key,at,merged_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,field,write_key) DO NOTHING';
+export const FIELD_UPSERT='INSERT INTO film_metadata_field (film_id,field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,language,language_basis,observed_at,checked_at,value_digest,write_key,written_revision,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,field) DO UPDATE SET tier=excluded.tier,source=excluded.source,origin=excluded.origin,anchor_scheme=excluded.anchor_scheme,anchor_value=excluded.anchor_value,anchor_digest=excluded.anchor_digest,agreement=excluded.agreement,language=excluded.language,language_basis=excluded.language_basis,observed_at=excluded.observed_at,checked_at=excluded.checked_at,value_digest=excluded.value_digest,write_key=excluded.write_key,written_revision=excluded.written_revision,updated_at=excluded.updated_at';
+export const historyStatement=(filmId,field,reason,old,next,writeKey,at,mergedFrom=null)=>[HISTORY_SQL,[filmId,field,reason,old?.valueText??null,old?.tier??null,old?.source??null,old?.anchorScheme??null,old?.anchorValue??null,old?.anchorDigest??null,old?.agreement??null,old?.language??null,old?.languageBasis??null,old?.observedAt??null,next?.valueDigest??null,next?.tier??null,next?.source??null,next?.language??null,next?.languageBasis??null,next?.anchorDigest??null,writeKey,at,mergedFrom]];
 // The old value and its semantic columns for a history row; the columns are null when the old value was `unknown` (no bound row).
 function oldOf(value,stand){
  if(value===null)return null;
  const row=stand.row&&stand.bound?stand.row:null;
- return {valueText:valueText(value),tier:row?.tier??null,source:row?.source??null,anchorScheme:row?.anchor_scheme??null,anchorValue:row?.anchor_value??null,anchorDigest:row?.anchor_digest??null,agreement:row?.agreement??null,observedAt:row?.observed_at??null};
+ return {valueText:valueText(value),tier:row?.tier??null,source:row?.source??null,anchorScheme:row?.anchor_scheme??null,anchorValue:row?.anchor_value??null,anchorDigest:row?.anchor_digest??null,agreement:row?.agreement??null,language:row?.language??null,languageBasis:row?.language_basis??null,observedAt:row?.observed_at??null};
 }
-const fieldRow=(filmId,field,row,value,writeKey,revision,at)=>[FIELD_UPSERT,[filmId,field,row.tier,row.source,row.origin,row.anchorScheme??null,row.anchorValue??null,row.anchorDigest??null,row.agreement??null,row.observedAt,row.checkedAt??at,valueDigest(value),writeKey,revision,at]];
+const fieldRow=(filmId,field,row,value,writeKey,revision,at)=>[FIELD_UPSERT,[filmId,field,row.tier,row.source,row.origin,row.anchorScheme??null,row.anchorValue??null,row.anchorDigest??null,row.agreement??null,row.language??null,row.languageBasis??null,row.observedAt,row.checkedAt??at,valueDigest(value),writeKey,revision,at]];
 
-export const emptyCounts=()=>({fills:0,adoptions:0,replacements:0,agreed:0,refusals:{owner_kept:0,stored_differs:0,disagreement:0,anchor_changed:0,attributed_kept:0,hold:0},source_absent:0,same_rank_conflict:0,agreement_stale:0,provenance_mismatch:0,history:0,owner_actions:0});
+export const emptyCounts=()=>({fills:0,adoptions:0,replacements:0,agreed:0,refusals:{owner_kept:0,stored_differs:0,disagreement:0,anchor_changed:0,attributed_kept:0,hold:0,language_kept:0},source_absent:0,same_rank_conflict:0,agreement_stale:0,provenance_mismatch:0,history:0,owner_actions:0});
 
 // PURE. The metadata part of planFilmFacts under mode `enforce` or `hold`. `snapshot.provenance` is readProvenance's result. Returns
 // {effective, post, changes, skipped, guards, counts, owner, declared}: `effective` is what mergeMetadata receives (a field that is not written is null, so the stored value survives), `post` the statements that follow the value upsert, `pre` the release-row insert.
@@ -140,6 +151,7 @@ export function planMetadataProvenance(snapshot,input,at){
   const observed=instant(item.observedAt);
   if(!observed||Date.parse(observed)>Date.parse(atIso)+FUTURE_SLACK_MS)throw failed('film_person_invalid');
   if(item.agreedAnchorDigest!==undefined&&item.agreedAnchorDigest!==null&&!HEX64.test(item.agreedAnchorDigest))throw failed('film_person_invalid');
+  languageOf(field,item);
  }
  const revision=(Number.isInteger(input.expectedRevision)?input.expectedRevision:snapshot.revision)+1,writeKey=String(input.requestId).slice(0,200);
  const row=snapshot.metadata,digest=prov.anchors.digest,computed=prov.anchors.computed;
@@ -163,7 +175,7 @@ export function planMetadataProvenance(snapshot,input,at){
   if(actions.has(field)){
    const action=actions.get(field),current=prov.fields[field];
    out.counts.owner_actions++;
-   const ownerRow=(tier,source,origin,lineage,value)=>fieldRow(id,field,{tier,source,origin,anchorScheme:lineage.anchorScheme,anchorValue:lineage.anchorValue,anchorDigest:lineage.anchorDigest,agreement:null,observedAt:lineage.observedAt||atIso,checkedAt:atIso},value,writeKey,revision,atIso);
+   const ownerRow=(tier,source,origin,lineage,value)=>fieldRow(id,field,{tier,source,origin,anchorScheme:lineage.anchorScheme,anchorValue:lineage.anchorValue,anchorDigest:lineage.anchorDigest,agreement:null,language:lineage.language??null,languageBasis:lineage.languageBasis??null,observedAt:lineage.observedAt||atIso,checkedAt:atIso},value,writeKey,revision,atIso);
    if(action.action==='set'){
     const value=ownerValue(field,action.value);
     const alreadyOwner=current?.tier==='owner'&&current.source==='owner'&&same(stored,value)&&current.value_digest===valueDigest(value)&&current.anchor_digest===digest;
@@ -178,7 +190,7 @@ export function planMetadataProvenance(snapshot,input,at){
     const keep=stand.name==='confirmed'||stand.name==='superseded'||stand.name==='unconfirmed'?stand.row:null;
     history(field,'owner_lock',old,{valueDigest:valueDigest(stored),tier:'owner',source:keep?keep.source:'unattributed',anchorDigest:keep?keep.anchor_digest:null});
     out.post.push(keep
-     ?ownerRow('owner',keep.source,keep.origin,{anchorScheme:keep.anchor_scheme,anchorValue:keep.anchor_value,anchorDigest:keep.anchor_digest,observedAt:keep.observed_at},stored)
+     ?ownerRow('owner',keep.source,keep.origin,{anchorScheme:keep.anchor_scheme,anchorValue:keep.anchor_value,anchorDigest:keep.anchor_digest,language:keep.language,languageBasis:keep.language_basis,observedAt:keep.observed_at},stored)
      :ownerRow('owner','unattributed','owner_route',{anchorScheme:null,anchorValue:null,anchorDigest:null,observedAt:atIso},stored));
     out.changes.push('owner_lock:'+field);
    }else if(action.action==='release'){
@@ -192,13 +204,14 @@ export function planMetadataProvenance(snapshot,input,at){
     if(hist.oldAnchorDigest==null){reject(field,'identity_unknown');continue;}
     if(hist.oldAnchorDigest!==digest){reject(field,'anchor_changed');continue;}
     const value=ownerValue(field,parse(hist.oldValueText));
+    const histLanguage=languageOf(field,{language:hist.oldLanguage,languageBasis:hist.oldLanguageBasis,source:hist.oldSource});
     // the caller's history row is bound to the STORED immutable row in the batch: every lineage column it restores must equal the stored one, and the row must belong to this Film or to a Film redirected into it (one hop)
-    out.guards.push({sql:'EXISTS (SELECT 1 FROM film_metadata_history h WHERE h.id=? AND h.field=? AND h.old_value_text=? AND h.old_source IS ? AND h.old_anchor_scheme IS ? AND h.old_anchor_value IS ? AND h.old_anchor_digest IS ? AND h.old_observed_at IS ? AND (h.film_id=? OR h.film_id IN (SELECT r.from_id FROM film_redirect r WHERE r.to_film_id=?)))',params:[hist.id,field,hist.oldValueText,hist.oldSource??null,hist.oldAnchorScheme??null,hist.oldAnchorValue??null,hist.oldAnchorDigest,hist.oldObservedAt??null,id,id]});
+    out.guards.push({sql:'EXISTS (SELECT 1 FROM film_metadata_history h WHERE h.id=? AND h.field=? AND h.old_value_text=? AND h.old_source IS ? AND h.old_anchor_scheme IS ? AND h.old_anchor_value IS ? AND h.old_anchor_digest IS ? AND h.old_language IS ? AND h.old_language_basis IS ? AND h.old_observed_at IS ? AND (h.film_id=? OR h.film_id IN (SELECT r.from_id FROM film_redirect r WHERE r.to_film_id=?)))',params:[hist.id,field,hist.oldValueText,hist.oldSource??null,hist.oldAnchorScheme??null,hist.oldAnchorValue??null,hist.oldAnchorDigest,histLanguage.language,histLanguage.languageBasis,hist.oldObservedAt??null,id,id]});
     anchorGuard=true;
     const source=hist.oldSource||'owner',lineageOwned=source==='owner'||source==='unattributed';
     out.effective[field]=value;
     history(field,'owner_revert',old,{valueDigest:valueDigest(value),tier:'owner',source,anchorDigest:digest});
-    out.post.push(ownerRow('owner',source,lineageOwned?'owner_route':'catalog_enrichment',{anchorScheme:hist.oldAnchorScheme??null,anchorValue:hist.oldAnchorValue??null,anchorDigest:digest,observedAt:hist.oldObservedAt||atIso},value));
+    out.post.push(ownerRow('owner',source,lineageOwned?'owner_route':'catalog_enrichment',{anchorScheme:hist.oldAnchorScheme??null,anchorValue:hist.oldAnchorValue??null,anchorDigest:digest,language:histLanguage.language,languageBasis:histLanguage.languageBasis,observedAt:hist.oldObservedAt||atIso},value));
     out.changes.push('owner_revert:'+field);
    }
    continue;
@@ -219,6 +232,8 @@ export function planMetadataProvenance(snapshot,input,at){
    if(same(stored,incoming))continue;
    if(mode==='hold'){out.skipped.push({field,reason:'hold_fill_only'});out.counts.refusals.hold++;continue;}
    if(stand.name!=='unknown'){out.skipped.push({field,reason:'attributed_kept'});out.counts.refusals.attributed_kept++;continue;}
+   // ADR 0224 (P3-A): an unknown-language observation does not replace a nonblank unknown-language synopsis or poster solely because its lineage is missing
+   if(LANGUAGE_FIELDS.includes(field)){out.skipped.push({field,reason:'language_kept'});out.counts.refusals.language_kept++;continue;}
    history(field,'replaced',old,{valueDigest:valueDigest(incoming),tier:null,source:null,anchorDigest:null});
    out.effective[field]=incoming;out.counts.replacements++;
    continue;
@@ -230,9 +245,10 @@ export function planMetadataProvenance(snapshot,input,at){
   const agreement=computed.letterboxd?(decl.agreedAnchorDigest===digest?'confirmed':'unconfirmed'):'not_required';
   if(agreement==='unconfirmed')out.counts.agreement_stale++;
   const observedAt=instant(decl.observedAt),vDigest=valueDigest(incoming);
-  const vRank=rankOf(agreement==='unconfirmed'?2:4,decl.source,observedAt,vDigest);
-  const sRank=rankOf(stand.rank,stand.row?.source,stand.row?.observed_at,stand.row?.value_digest);
-  const next={tier:'automatic',source:decl.source,origin:'catalog_enrichment',anchorScheme:decl.anchor.scheme,anchorValue:decl.anchor.value,anchorDigest:digest,agreement,observedAt,checkedAt:atIso};
+  const lang=languageOf(field,decl);
+  const vRank=rankOf(agreement==='unconfirmed'?2:4,decl.source,observedAt,vDigest,lang.language);
+  const sRank=rankOf(stand.rank,stand.row?.source,stand.row?.observed_at,stand.row?.value_digest,stand.row?.language);
+  const next={tier:'automatic',source:decl.source,origin:'catalog_enrichment',anchorScheme:decl.anchor.scheme,anchorValue:decl.anchor.value,anchorDigest:digest,agreement,language:lang.language,languageBasis:lang.languageBasis,observedAt,checkedAt:atIso};
   const upsert=()=>out.post.push(fieldRow(id,field,next,incoming,writeKey,revision,atIso));
   anchorGuard=true;
   if(stored===null){fill();upsert();out.changes.push('provenance:'+field);continue;}
@@ -246,9 +262,11 @@ export function planMetadataProvenance(snapshot,input,at){
    continue;
   }
   if(mode==='hold'){out.skipped.push({field,reason:'hold_fill_only'});out.counts.refusals.hold++;continue;}
+  // ADR 0224 (P3-A): for synopsis and poster, a verified Russian value is never downgraded to an English or unknown-language one, and a genuinely unknown-language nonblank value is replaced only by a confirmed Russian observation (a missing lineage alone never lets English or unknown replace it)
+  if(LANGUAGE_FIELDS.includes(field)&&lang.language!=='ru'&&(stand.row?.language==='ru'||!stand.row?.language)){out.skipped.push({field,reason:'language_kept'});out.counts.refusals.language_kept++;continue;}
   if(vRank[0]===4&&compare(vRank,sRank)>0){
-   if(vRank[0]===sRank[0]&&vRank[1]===sRank[1]&&vRank[2]===sRank[2])out.counts.same_rank_conflict++;
-   history(field,'replaced',old,{valueDigest:vDigest,tier:'automatic',source:decl.source,anchorDigest:digest});
+   if(vRank[0]===sRank[0]&&vRank[1]===sRank[1]&&vRank[2]===sRank[2]&&vRank[3]===sRank[3])out.counts.same_rank_conflict++;
+   history(field,'replaced',old,{valueDigest:vDigest,tier:'automatic',source:decl.source,language:lang.language,languageBasis:lang.languageBasis,anchorDigest:digest});
    out.effective[field]=incoming;out.counts.replacements++;upsert();out.changes.push('replace:'+field);
    continue;
   }
@@ -325,10 +343,10 @@ export async function reconcileMetadata(db,from,to,resolve,at){
  if(anyPin){out.pre.push(['INSERT OR IGNORE INTO film_metadata_owner_release (film_id) VALUES (?)',[from]]);out.pre.push(['INSERT OR IGNORE INTO film_metadata_owner_release (film_id) VALUES (?)',[to]]);}
  const releaseDone=()=>{if(anyPin){out.post.push(['DELETE FROM film_metadata_owner_release WHERE film_id=?',[from]]);out.post.push(['DELETE FROM film_metadata_owner_release WHERE film_id=?',[to]]);}};
  // the retired Film's field rows under the survivor's id (a moved row); the trigger of the row move removes the non-owner ones first, so every row is written explicitly after it
- const moved=(field,row)=>[FIELD_UPSERT,[to,field,row.tier,row.source,row.origin,row.anchor_scheme,row.anchor_value,row.anchor_digest,row.agreement,row.observed_at,row.checked_at,row.value_digest,row.written_revision?row.write_key:writeKey,row.written_revision,row.updated_at]];
+ const moved=(field,row)=>[FIELD_UPSERT,[to,field,row.tier,row.source,row.origin,row.anchor_scheme,row.anchor_value,row.anchor_digest,row.agreement,row.language,row.language_basis,row.observed_at,row.checked_at,row.value_digest,row.write_key,row.written_revision,row.updated_at]];
  // The row that describes a value: a pin always, an automatic row only while it is bound to its value. Anything else is `unknown` (no row).
  const effective=(raw,stand)=>raw&&(raw.tier==='owner'||stand.bound)?raw:null;
- const semantic=row=>row?JSON.stringify([row.tier,row.source,row.anchor_scheme,row.anchor_value,row.anchor_digest,row.agreement,row.observed_at,row.value_digest]):null;
+ const semantic=row=>row?JSON.stringify([row.tier,row.source,row.anchor_scheme,row.anchor_value,row.anchor_digest,row.agreement,row.language,row.language_basis,row.observed_at,row.value_digest]):null;
  const discard=(film,prov,dim,field,value,stand)=>{const row=effective(prov?.fields[field],stand);const old=oldOf(value,{row,bound:!!row});out.items.push(historyStatement(to,field,'merge_discarded',old,null,writeKey,atIso,from));out.discarded.push('metadata:'+field+':'+(film===from?'retired':'survivor'));};
  if(!toRow){
   // the survivor holds no metadata row: the retired row moves whole, with its field rows
@@ -354,7 +372,7 @@ export async function reconcileMetadata(db,from,to,resolve,at){
   if(toValue===null){takeRetired();continue;}
   if(same(fromValue,toValue)){
    // equal values: the pin is preserved by default; with two pins the survivor's is kept
-   const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest);
+   const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest,fromStand.row?.language),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest,toStand.row?.language);
    const rowsEqual=semantic(retiredRow())===semantic(effective(toProv?.fields[field],toStand));
    if(rowsEqual)continue;
    const retiredWins=toPinned?false:fromPinned?true:compare(fromRank,toRank)>0;
