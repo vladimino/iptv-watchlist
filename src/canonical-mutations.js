@@ -61,6 +61,17 @@ async function current(db,kind,id){return Number((await one(db,'SELECT revision 
 
 // Runs the statements as one batch and names the failure. After a failed batch the marker and the revisions are read again, so the
 // error says whether the authority moved, an entity moved, or the data itself refused (a trusted id, an ordinal, a missing person).
+// ADR 0219 causal wake. After a commit that touched a table whose triggers write the Catalog Enrichment inbox, make idle runnable work start without waiting for the cron.
+// Best effort, AFTER the commit (never inside the batch, no network in a transaction): a lost wake is recovered by reconcile, and while the producer is dormant (not bundled, schema absent, control not active) it is a no-op.
+const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission/i;
+async function wakeEnrichment(env,statements){
+ if(typeof CatalogEnrichmentRunner==='undefined')return;
+ if(!statements.some(([sql])=>ENRICHMENT_CAUSAL.test(sql)))return;
+ try{
+  const now=new Date().toISOString();
+  if(await CatalogEnrichmentRunner.hasRunnable(env,{now}))await CatalogEnrichmentRunner.kick(env);
+ }catch{}
+}
 async function commit(env,gate,statements,entities,tail=[]){
  const db=database(env);
  if(!db||typeof db.batch!=='function')throw failed('film_person_unavailable');
@@ -85,6 +96,7 @@ async function commit(env,gate,statements,entities,tail=[]){
   if(/FOREIGN KEY constraint failed/i.test(message))throw failed('film_person_reference',error);
   throw failed('film_person_unavailable',error);
  }
+ await wakeEnrichment(env,statements);
 }
 
 // The pieces the other fenced writers of the canonical domain reuse (the localization source writer); not a second API.

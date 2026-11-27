@@ -412,6 +412,9 @@ export const FILES={
  "catalog-enrichment-events.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-wake.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
