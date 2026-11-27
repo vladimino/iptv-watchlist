@@ -764,6 +764,18 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
   await expectTyped('page network failure', {fetchImpl: () => {throw new TypeError('network');}}, ['tmdb_unavailable', 'network_error', 'transport'], {network: true});
   await expectTyped('page enforced cooldown', {fetchImpl: cooldown(777)}, ['tmdb_unavailable', 'upstream_cooldown', 'transport'], {until: 777});
   await expectTyped('oversized page', {pageHtml: 'x'.repeat(3000001)}, ['tmdb_unreadable', 'page_unreadable', 'definite']);
+  // the movie path's page evidence is mandatory and reuses the live reasons: a page with a missing or contradictory year is refused before TMDB is asked, even with an agreeing TMDB document
+  {
+    const noYear = base().replace(' (2020)"', '"').replace(/"releasedEvent":\[[^\]]*\]/, '"releasedEvent":[]');
+    const twoYears = base().replace('"startDate":"2020"', '"startDate":"2021"');
+    for (const [label, pageHtml, reason] of [['missing page year', noYear, 'page_year_missing'], ['contradictory OG and JSON-LD years', twoYears, 'page_year_inconsistent']]) {
+      const {out, requested} = await chain({pageHtml});
+      assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits, requested], ['page_refused', reason, 'definite', false, false], label);
+      const page = RC.follow ? await RC.follow(ctx.fetch, 'Ch1') : null;
+      assert.equal(Identity.verifyPage({lid: 'Ch1', slug: 'chain-one-2020', page}, tools).reason, reason, label + ': the live check refuses the same page with the same reason');
+      assert.equal(Identity.classify(reason), 'definite', label);
+    }
+  }
   // unreadable pages, read by the real parser: truncated, no id block, several ids, and a malformed id or type that the parser drops from its arrays
   const withTypes = (type, html = base()) => html.replace(' data-tmdb-type="movie"', type === null ? '' : ' data-tmdb-type="' + type + '"');
   const unreadable = [

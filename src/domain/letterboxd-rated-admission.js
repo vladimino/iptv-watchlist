@@ -286,14 +286,18 @@ function detailTmdbState(result, tmdbId, title, year) {
   return agree.reason === 'tmdb_tv' ? typed('tmdb_tv') : typed('tmdb_disagrees', {outcome: agree.reason});
 }
 
-// The one composition of a check: the final state is admitting (`tmdb_movie`) only when the page names one movie id AND the TMDB document for that id agrees. While the document has not been fetched
-// (`detail` undefined) the answer is the non-admitting `page_movie`. title and year default to the page's own; a caller may pass its fallbacks.
-export function tmdbCheckState({fetched, evidence, detail, title, year}) {
+// The one composition of a check: the final state is admitting (`tmdb_movie`) only when the page names one movie id, the page carries the evidence the existing movie path requires, AND the TMDB document for that id
+// agrees. The movie path's page evidence is the one `LetterboxdDiaryIdentity.verifyPage` already demands: a non-empty title and exactly one page year (`title_missing`, `page_year_inconsistent`, `page_year_missing`, the
+// existing reasons, `definite`). Only a lid-only admission may omit the year (ADR 0217 decision 2), and that is not this function. There is no caller fallback: a title or year the page did not show is never evidence of
+// agreement. Such a page is `page_refused` before TMDB is asked, as in the live check; while the document has not been fetched (`detail` undefined) a page that passes is the non-admitting `page_movie`.
+export function tmdbCheckState({fetched, evidence, detail}) {
   const page = pageTmdbObservation(fetched, evidence);
-  if (page.state !== 'page_movie' || detail === undefined) return page;
-  const seenTitle = title || (evidence && evidence.title) || null;
-  const seenYear = (evidence && evidence.years && evidence.years[0]) || year || null;
-  return {...detailTmdbState(detail, page.tmdbId, seenTitle, seenYear), tmdbId: page.tmdbId};
+  if (page.state !== 'page_movie') return page;
+  const years = Array.isArray(evidence.years) ? evidence.years : [];
+  const refusal = !evidence.title ? 'title_missing' : years.length !== 1 ? (years.length ? 'page_year_inconsistent' : 'page_year_missing') : null;
+  if (refusal) return {state: 'page_refused', outcome: refusal, retryClass: 'definite', admits: false, tmdbId: page.tmdbId};
+  if (detail === undefined) return page;
+  return {...detailTmdbState(detail, page.tmdbId, evidence.title, years[0]), tmdbId: page.tmdbId};
 }
 
 // The Film id is the verified movie id. No watchlist field is stored.

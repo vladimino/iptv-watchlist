@@ -188,7 +188,8 @@ The check names the TMDB state of each answer, so a later lid-only path (ADR 021
 | State | Observed | Outcome | Retry class |
 | --- | --- | --- | --- |
 | `page_movie` (intermediate, **not admitting**) | the page names exactly one movie id; the TMDB document is not fetched yet | none | — |
-| `tmdb_movie` | `page_movie` **and** an agreeing TMDB document, reached only by `tmdbCheckState` | none: the existing path | — |
+| `page_refused` (outside decision 3's table) | the page names one movie id but lacks the movie path's mandatory page evidence: no title (`title_missing`), no page year (`page_year_missing`) or several (`page_year_inconsistent`); refused before TMDB is asked | the existing `verifyPage` reason | `definite` |
+| `tmdb_movie` | `page_movie` that passed the page evidence, **and** an agreeing TMDB document, reached only by `tmdbCheckState` | none: the existing path | — |
 | `tmdb_disagrees` | the TMDB document disagrees | the existing `detail_*` reason | `definite` |
 | `tmdb_tv` | one id with a `tv` marker, or a TV document | `tmdb_not_movie` | `definite` |
 | `tmdb_missing` | TMDB answers `404` for the movie id | `tmdb_contradiction` | `definite` (owner review at the cap) |
@@ -196,6 +197,8 @@ The check names the TMDB state of each answer, so a later lid-only path (ADR 021
 | `tmdb_failed` | any other non-200 below 500, an unparseable or oversized TMDB document | `tmdb_fetch_failed` | `definite` |
 | `tmdb_unreadable` | oversized or truncated page (no closing `html` tag), unparsable page, no id block, several ids, or any malformed, doubled or unknown `data-tmdb-id` or `data-tmdb-type` value in the raw markup | `page_unreadable` | `definite` |
 | `page_not_read` (outside decision 3's table) | the film page itself answered 404 or 410, or with another review reason (`fetch_failed`, `blocked_redirect`, `not_film_page`, `too_many_hops`) | the established reason, e.g. `not_found` | `gone` or `definite`, as today |
+
+**Preconditions of `tmdb_movie`.** The movie path keeps its page evidence exactly as `LetterboxdDiaryIdentity.verifyPage` demands it: a non-empty title and exactly one page year, taken from the page only. `tmdbCheckState` takes no caller fallback for either, so a missing or contradictory year (for example OG and JSON-LD disagreeing) can never become admitting through an agreeing TMDB document; only a lid-only admission may omit the year ([ADR 0217](../../adr/0217-source-independent-film-admission.md) decision 2), and that is a later card. A test compares the refusal with the live check's reason on the same page.
 
 The page's id and type values are read from the raw HTML, not only from `pageEvidence`, whose arrays keep just well-formed numeric ids and lowercase alphabetic types: a malformed value next to a valid one would otherwise disappear. `pageEvidence` and the live acceptance are unchanged. No state is downgraded to `tmdb_none`: that state (H1) does not exist in this code, and a page without any id is `tmdb_unreadable` until a later card proves a parseable absence marker. No state mints a Film or writes canonical data. Rollback is a code revert; no schema or data is involved.
 

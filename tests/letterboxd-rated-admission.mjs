@@ -116,6 +116,19 @@ assert.equal(validatedRetryExpected({candidates: retryRows}, ['103U'], {}).ok, f
     const out = check(['900001'], ['movie'], detail);
     assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], [state, outcome, 'definite', false], label);
   }
+  // the movie path's page evidence is mandatory: a non-empty title and exactly one page year, no caller fallback, refused before TMDB is asked (the live `verifyPage` reasons)
+  for (const [label, evidence, outcome] of [
+    ['no year', {...evidenceOf(['900001'], ['movie']), years: []}, 'page_year_missing'],
+    ['two years', {...evidenceOf(['900001'], ['movie']), years: [2020, 2021]}, 'page_year_inconsistent'],
+    ['years absent', {...evidenceOf(['900001'], ['movie']), years: undefined}, 'page_year_missing'],
+    ['no title', {...evidenceOf(['900001'], ['movie']), title: null}, 'title_missing'],
+    ['empty title', {...evidenceOf(['900001'], ['movie']), title: ''}, 'title_missing'],
+  ]) {
+    for (const detail of [undefined, {detail: movie}]) {
+      const out = tmdbCheckState({fetched: {html: markup(['900001'], ['movie'])}, evidence, detail, title: 'Invented Alpha', year: 2001});
+      assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], ['page_refused', outcome, 'definite', false], label + ': a caller fallback never makes it admit');
+    }
+  }
   // the transport answers of TMDB keep their established class and their cooldown information
   for (const [label, detail, outcome, extra] of [
     ['5xx', {review: 'tmdb_fetch_failed', status: 500, state: 'tmdb_unavailable'}, 'upstream_5xx', {}],
