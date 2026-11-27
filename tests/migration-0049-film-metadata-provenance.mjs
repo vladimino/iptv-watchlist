@@ -36,7 +36,7 @@ assert.equal(rows(v48,"SELECT name FROM sqlite_master WHERE name LIKE 'film_meta
  assert.notEqual(run(v47,M49).status,0,'on version 47 the file aborts');
  assert.deepEqual(dump(v47),before,'and the whole state is unchanged');
 }
-const db=migrated();
+const db=migrated(49);
 assert.equal(version(db),49);
 {
  const again=copyOf(db,'again'),before=dump(again);
