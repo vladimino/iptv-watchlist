@@ -9,6 +9,7 @@
 // D1-only TMDB credits (AIR-286) are never deleted by a roster write.
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {bindProducerFence,fenceStatements} from './canonical-producer-fence.js';
+import {readControl,reconcileMetadata} from './film-metadata-provenance.js';
 
 export const MUTATION_STATEMENT_CAP=60;
 const FILM_ID=/^film:.+/;
@@ -63,7 +64,8 @@ async function current(db,kind,id){return Number((await one(db,'SELECT revision 
 // error says whether the authority moved, an entity moved, or the data itself refused (a trusted id, an ordinal, a missing person).
 // ADR 0219 causal wake. After a commit that touched a table whose triggers write the Catalog Enrichment inbox, make idle runnable work start without waiting for the cron.
 // Best effort, AFTER the commit (never inside the batch, no network in a transaction): a lost wake is recovered by reconcile, and while the producer is dormant (not bundled, schema absent, control not active) it is a no-op.
-const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission|film_rated_admission/i;
+// AIR-631: an ACTUAL protection release (the owner `release` statement and the owner clear's own signal) wakes too; an ordinary provenance upsert matches neither.
+const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission|film_rated_admission|UPDATE\s+film_metadata_field\s+SET\s+tier=|INTO\s+enrichment_signal/i;
 async function wakeEnrichment(env,statements){
  if(typeof CatalogEnrichmentRunner==='undefined')return;
  if(!statements.some(([sql])=>ENRICHMENT_CAUSAL.test(sql)))return;
@@ -298,7 +300,12 @@ export async function mergeFilms(env,input){
   }else s.push([assertSql('NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE film_id=?)'),[from]]);
  }
  const discarded=[];
- for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded))s.push(item);
+ // ADR 0214 (AIR-631): with the provenance control row at enforce or hold the metadata of the two Films is merged FIELD-WISE (six values plus their field rows, pins kept, history for every discarded value, release rows around it); the control row is asserted in the batch.
+ const control=await readControl(db);
+ const meta=control&&control.mode!=='off'?await reconcileMetadata(db,from,to,input?.resolve||{},at):null;
+ if(control)s.push([assertSql('EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id=1 AND mode=? AND revision=?)'),[control.mode,control.revision]]);
+ if(meta)for(const item of meta.pre)s.push(item);
+ for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded,meta))s.push(item);
  // Catalog Enrichment (schema 47): the retained membership of the retired Film moves to the survivor and its state rows go, in the SAME batch as the delete (both tables reference the Film, so the delete would otherwise be refused);
  // the survivor's own anchor_changed signal (written by the redirect trigger) then plans it from its anchors.
  if(await hasTable(db,'catalog_enrichment_member')){
@@ -319,6 +326,7 @@ export async function mergeFilms(env,input){
   "DELETE FROM localization_conflict WHERE entity_kind='film' AND entity_id=?",
   'DELETE FROM film WHERE id=?',
  ])s.push([sql,[from]]);
+ if(meta)for(const item of meta.post)s.push(item);
  s.push(['INSERT INTO film_redirect (from_id,to_film_id,at) VALUES (?,?,?)',[from,to,at]]);
  s.push([BUMP,['film',to,at]]);
  s.push([BUMP,['film',from,at]]);
@@ -350,11 +358,12 @@ function newest(left,right){
  if(right===null||right===undefined)return left;
  return left>=right?left:right;
 }
-async function reconcile(db,from,to,resolve,at,discarded){
+async function reconcile(db,from,to,resolve,at,discarded,meta=null){
  const out=[];
  const choice=(kind,allowed=['survivor','retired'])=>{const value=resolve?.[kind];if(value!==undefined&&!allowed.includes(value))throw failed('film_person_invalid');return value;};
- const [fromMeta,toMeta]=await Promise.all([one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[from]),one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[to])]);
+ const [fromMeta,toMeta]=meta?[null,null]:await Promise.all([one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[from]),one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[to])]);
  let bodyFromRetired=false;
+ if(meta){out.push(...meta.items);discarded.push(...meta.discarded);bodyFromRetired=meta.bodyFromRetired;}
  if(fromMeta){
   if(!toMeta){out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);bodyFromRetired=true;}
   else if(fromMeta.payload_json!==toMeta.payload_json||fromMeta.content_sha256!==toMeta.content_sha256){
@@ -371,7 +380,7 @@ async function reconcile(db,from,to,resolve,at,discarded){
  const KEY={identity:'identity',metadata:'metadataState',fingerprint:'fingerprint',prediction:'prediction'};
  // ADR 0218 decision 6 / ADR 0214 decisions 9 and 11: a merge with a metadata lock on EITHER side must move or keep it with the release row and the history rows. That path
  // (PV1, AIR-631) does not exist yet, so such a merge refuses before any statement; it never drops, moves or overwrites a lock silently.
- if(fromDims.some(row=>row.dimension==='metadata'&&metadataLocked(row))||toDims.some(row=>row.dimension==='metadata'&&metadataLocked(row)))throw failed('film_person_metadata_locked');
+ if(!meta&&(fromDims.some(row=>row.dimension==='metadata'&&metadataLocked(row))||toDims.some(row=>row.dimension==='metadata'&&metadataLocked(row))))throw failed('film_person_metadata_locked');
  for(const row of fromDims){
   const other=held.get(row.dimension);
   const move=()=>out.push(['UPDATE film_dimension SET film_id=? WHERE film_id=? AND dimension=?',[to,from,row.dimension]]);
