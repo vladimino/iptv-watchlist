@@ -460,6 +460,9 @@ export const FILES={
  "prediction-lid-only-real-path.mjs": {
   "suite": "core"
  },
+ "prediction-lid-only-merge.mjs": {
+  "suite": "core"
+ },
  "film-readiness.mjs": {
   "suite": "core"
  },
