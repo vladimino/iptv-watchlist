@@ -24,7 +24,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 // ---- 1. Authority: four outcomes, an unavailable authority is never r2 ----
 {
  const w=world({flip:false});
- assert.deepEqual({...await Aux.readAuxAuthority(w.db,{PREDICTION_DB_REQUIRED:'on'})},{mode:'r2',proof:'explicit_r2',installed:true,generation:0,version:49,ready:false},'migrated marker reads explicit r2');
+ assert.deepEqual({...await Aux.readAuxAuthority(w.db,{PREDICTION_DB_REQUIRED:'on'})},{mode:'r2',proof:'explicit_r2',installed:true,generation:0,version:50,ready:false},'migrated marker reads explicit r2');
  assert.equal(await Aux.auxD1(w.db,{PREDICTION_DB_REQUIRED:'on'}),null,'r2 gives no D1 branch');
  const d=world();
  const live=await Aux.readAuxAuthority(d.db,{PREDICTION_DB_REQUIRED:'on'});

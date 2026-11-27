@@ -941,7 +941,7 @@ async function saveWatchlistRoot(env,value){
  const out=await PublishedEpg.putWatchlistRoot(env,value);
  return out.blocked?{skipped:'watchlist_root_not_writable'}:{etag:out.etag};
 }
-const saveJSON=async(env,key,value)=>{
+const saveJSON=async(env,key,value,context=undefined)=>{
  await epgStepGuard(env);
  if(EPG_CHECKPOINT_KEYS.has(key)){
   const gate=await epgCheckpointState(env);
@@ -961,7 +961,7 @@ const saveJSON=async(env,key,value)=>{
   if(routed)return routed;
  }
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
-  const routed=await DiscoveryAuthority.routeWrite(env,key,value);
+  const routed=await DiscoveryAuthority.routeWrite(env,key,value,context);
   if(routed.handled)return;
  }
  if(typeof PredictionD1!=='undefined'){

@@ -407,12 +407,21 @@ async function retryableFenceCollision(env,error,programmeRunId,lease){
  if(!(Number(gate.generation)>error.fenceGeneration))return false;
  return await renewDiscoveryLease(env,lease)===true;
 }
+// AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part versions of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that
+// already holds a retained Discovery membership only, under the revalidation's own Discovery lease. It fetches nothing and writes no canonical table. -> 'written' | 'unchanged' | 'absent' | 'failed'. The module exists in the Worker
+// scope only (offline imports of this file have none): without it, or before the schema is applied, the answer is 'absent' and the revalidation proceeds as before. A 'failed' answer is NOT swallowed: the caller must leave the
+// verified outcome undone so the key stays eligible and the observation is made again (a verified change is never lost to a failed enqueue); the module has already woken the producer in case the write landed.
+async function noteCatalogSourceChange(env,tmdbId,movie,lease){
+ if(typeof CatalogEnrichmentDiscovery==='undefined')return 'absent';
+ try{return (await CatalogEnrichmentDiscovery.emitSourceChanged(env,{tmdbId:String(tmdbId),movie,lease})).state;}catch{return 'failed';}
+}
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}
  if(!await publishedGenerationMatches(env,seenRunId))return false;
  const generation=await publishedPointer(env);
- if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);}
- if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films);return true;
+ if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films,{admission:{origin:'resolver',programmeRunId:seenRunId}});}
+ // AIR-684 (ADR 0219 decision 3): this is the resolver run's own publication of the catalog, the one writer that declares an authoritative origin; every other caller of the catalog writer passes none.
+ if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films,{admission:{origin:'resolver',programmeRunId:seenRunId}});return true;
 }
 // Owner-triggered poster hydration for catalog records that were stored without a poster: a permanent owner-only maintenance
 // route behind the Worker's Cloudflare Access, with no switch of its own (the former CATALOG_POSTER_HYDRATION is retired, ADR
@@ -1082,7 +1091,14 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const revalidatedFirst=new Set();
  const revalidateDrift=async(key,previous,candidate,plan)=>{
    try{
-    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
+    // AIR-684 (ADR 0224): the live revalidation request stays EXACTLY as it was until this Film is an approved observer (the enrichment schema applied and a retained Discovery membership). Only then does the same call also carry the tagged
+    // image lists, the request shape of the producer's own fetch (`TMDB_DETAIL_QUERY`): never a second request, and a deployment alone changes nothing.
+    // 'unknown' (the eligibility read itself failed) is never "no": the revalidation stays undone BEFORE any upstream request, so a retained member's drift event is not committed without its verified change.
+    const eligibility=typeof CatalogEnrichmentDiscovery==='undefined'?'no':await CatalogEnrichmentDiscovery.observerEligible(env,previous.tmdbId);
+    if(eligibility==='unknown'){revalidation.deferred++;return 'break';}
+    const observer=eligibility==='yes';
+    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles'+(observer?',images&include_image_language=ru,en,null':''));
+    if(observer&&await noteCatalogSourceChange(env,previous.tmdbId,movie,lease)==='failed'){revalidation.deferred++;return 'break';}
     const known=knownScorerCandidates(aliasIndex,candidate);
     // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
     // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.

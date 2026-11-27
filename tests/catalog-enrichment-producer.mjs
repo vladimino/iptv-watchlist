@@ -8,6 +8,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as S from '../src/catalog-enrichment-store.js';
 import * as PR from '../src/catalog-enrichment-producer.js';
+import * as D from '../src/catalog-enrichment-discovery.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-enrich-producer-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -22,7 +23,7 @@ const T='2026-11-26T10:00:00.000Z';
 const at=s=>new Date(Date.parse(T)+s*1000).toISOString();
 const FILM='film:tmdb:603';
 let n=0;
-async function world({lid='abc',tmdb='603',control=true}={}){
+async function world({lid='abc',tmdb='603',control=true,scope='rated'}={}){
  const file=path.join(root,'w-'+(n++)+'.sqlite');
  fs.copyFileSync(template,file);
  for(const text of [VERIFY,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1","UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1",BASELINE])assert.equal(sqlite(file,text).status,0);
@@ -30,7 +31,7 @@ async function world({lid='abc',tmdb='603',control=true}={}){
  const env={DB:d1Standin(file)};
  let generation=0;
  if(control){
-  assert.equal(sqlite(file,`INSERT INTO catalog_enrichment_control VALUES (1,'inactive',0,1,'${T}','owner');UPDATE catalog_enrichment_control SET state='active',generation=1,revision=2;INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,1,1,'${T}');INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:${tmdb||'0'}','rated','',1,'pending','${T}');`).status,0);
+  assert.equal(sqlite(file,`INSERT INTO catalog_enrichment_control VALUES (1,'inactive',0,1,'${T}','owner');UPDATE catalog_enrichment_control SET state='active',generation=1,revision=2;INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('${scope}',1,1,1,'${T}');INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:${tmdb||'0'}','${scope==='discovery'?'discovery':'rated'}','',1,'pending','${T}');`).status,0);
   generation=rows(file,'SELECT generation FROM catalog_enrichment_control')[0].generation;
  }
  const lease=await S.acquireLease(env,{leaseId:'lease-'+n+'-aaaaaaaa',now:T});
@@ -44,7 +45,7 @@ const extractYear=text=>/\((\d{4})\)/.exec(String(text))?.[1]?Number(/\((\d{4})\
 const parseFilm=html=>{const ld=/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html);if(!ld)throw new Error('Film metadata missing');const meta=JSON.parse(ld[1]);const person=(list,role)=>(list||[]).map(item=>{const slug=/\/(?:actor|director)\/([a-z0-9-]+)\//.exec(item.url||'')?.[1];return {id:role+'/'+(slug||item.name),original:item.name,name:item.name};});return {creditsComplete:true,original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};};
 const tools={parseFilm,attr,extractYear};
 const lbPage=({tmdb=['603'],actors=[{name:'Neo',url:'/actor/neo/'},{name:'Trinity',url:'/actor/trinity/'}],year=1999,runtime=136,synopsis='lb synopsis'}={})=>`<html><head><link rel="shortlink" href="https://boxd.it/abc"><link rel="canonical" href="https://letterboxd.com/film/the-matrix/"><meta property="og:title" content="The Matrix (1999)"><script type="application/ld+json">${JSON.stringify({name:'The Matrix',year,runtime,description:synopsis,image:'https://img/lb.jpg',genre:['Sci-Fi'],director:[{name:'Lana',url:'/director/lana/'}],actor:actors})}</script></head><body>${tmdb.map(id=>`<div data-tmdb-id="${id}" data-tmdb-type="movie"></div>`).join('')}</body></html>`;
-const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'tm synopsis',poster_path:'/p.jpg',genres:[{name:'Action'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
+const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'top-level overview (never proof of a language)',poster_path:'/p.jpg',genres:[{id:28,name:'боевик'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'tm synopsis'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]},images:{posters:[{iso_639_1:'en',file_path:'/en.jpg',width:900},{iso_639_1:'ru',file_path:'/ru.jpg',width:600}]},...over});
 function upstream({lb='page',tm=movie(),wd=[]}={}){
  const calls=[];
  const impl=async url=>{
@@ -75,7 +76,7 @@ const filmJson=file=>JSON.parse(rows(file,`SELECT film_json AS j FROM catalog_en
  const second=await step(w,up,at(11));
  assert.equal(second.state,'done');
  assert.equal(up.calls.length,4,'boxd.it + the film page, TMDB, Wikidata: at most four requests for the acquisition');
- assert.deepEqual(meta(w.file),{year:1999,runtime:136,synopsis:'lb synopsis',poster:'https://img/lb.jpg',url:'https://letterboxd.com/film/the-matrix/',genres_json:'["Sci-Fi"]'},'Letterboxd fills every blank core field first (precedence)');
+ assert.deepEqual(meta(w.file),{year:1999,runtime:136,synopsis:'tm synopsis',poster:'https://image.tmdb.org/t/p/w500/ru.jpg',url:'https://letterboxd.com/film/the-matrix/',genres_json:'["Sci-Fi"]'},'Letterboxd fills every blank core field first (the fixed provider order), EXCEPT the synopsis and the poster: a verified Russian TMDB value outranks the assumed-English synopsis and the unlabelled poster of Letterboxd on a blank field (ADR 0224)');
  assert.deepEqual(loc(w.file),[{source:'tmdb',value:'Матрица'}],'the tmdb source writes its own row from its own response; wikidata has none, letterboxd has no Russian title');
  assert.deepEqual(credits(w.file).map(c=>c.person_id),['person:actor/neo','person:actor/trinity','person:director/lana'],'credits come from ONE namespace, the Letterboxd one; no TMDB persons are added');
  assert.equal(rows(file0(w),"SELECT COUNT(*) AS n FROM person WHERE id LIKE 'person:tmdb_%'")[0].n,0);
@@ -102,10 +103,29 @@ function file0(w){return w.file;}
  sqlite(w.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
  const done=await step(w,up,at(11));
  assert.equal(done.state,'done');
- const fieldRows=rows(w.file,`SELECT field,tier,source,origin,anchor_scheme,anchor_value,agreement,observed_at FROM film_metadata_field WHERE film_id='${FILM}' ORDER BY field`);
+ const fieldRows=rows(w.file,`SELECT field,tier,source,origin,anchor_scheme,anchor_value,agreement,observed_at,language,language_basis FROM film_metadata_field WHERE film_id='${FILM}' ORDER BY field`);
  assert.deepEqual(fieldRows.map(row=>row.field),['genres','poster','runtime','synopsis','url','year'],'every field the core write filled is attributed');
- assert.ok(fieldRows.every(row=>row.tier==='automatic'&&row.source==='letterboxd'&&row.origin==='catalog_enrichment'&&row.anchor_scheme==='letterboxd'&&row.anchor_value==='abc'&&row.agreement==='confirmed'),'declared by the Letterboxd source under its anchor, agreement recorded');
+ assert.ok(fieldRows.every(row=>row.tier==='automatic'&&row.origin==='catalog_enrichment'&&row.agreement==='confirmed'),'declared by the producer, agreement recorded');
+ // ADR 0224 on the REAL writer: on a blank field the verified Russian TMDB synopsis and poster outrank the assumed-English synopsis and the unlabelled poster of Letterboxd, and are persisted with their verified tag
+ assert.deepEqual(fieldRows.filter(row=>['synopsis','poster'].includes(row.field)).map(row=>[row.field,row.source,row.anchor_scheme,row.anchor_value,row.language,row.language_basis]),[['poster','tmdb','tmdb','603','ru','explicit'],['synopsis','tmdb','tmdb','603','ru','explicit']]);
+ // every other field keeps the fixed provider order (Letterboxd under its anchor) and carries no language
+ assert.deepEqual(fieldRows.filter(row=>!['synopsis','poster'].includes(row.field)).map(row=>[row.field,row.source,row.anchor_scheme,row.anchor_value,row.language,row.language_basis]),['genres','runtime','url','year'].map(field=>[field,'letterboxd','letterboxd','abc',null,null]));
  assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_history')[0].n,0,'a fill adds no history');
+ {// Letterboxd is the only observation (TMDB unavailable): its synopsis is persisted as ASSUMED English by the real writer, never as an explicit tag, and no other field carries a language
+  const lb=await world();
+  await step(lb,upstream({tm:'transport'}));
+  sqlite(lb.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
+  await step(lb,upstream({tm:'transport'}),at(11));
+  const persisted=rows(lb.file,`SELECT field,source,language,language_basis FROM film_metadata_field WHERE film_id='${FILM}' ORDER BY field`);
+  assert.deepEqual(persisted.find(row=>row.field==='synopsis'),{field:'synopsis',source:'letterboxd',language:'en',language_basis:'assumed'});
+  assert.ok(persisted.filter(row=>row.field!=='synopsis').every(row=>row.language===null&&row.language_basis===null),'no other field carries a language');
+ }
+ {// provenance mode `off` and an absent schema: the declaration is ignored and today's values are written, no field row
+  const off=await world();
+  await step(off,upstream({}));await step(off,upstream({}),at(11));
+  assert.equal(rows(off.file,'SELECT COUNT(*) AS n FROM film_metadata_field')[0].n,0);
+  assert.equal(rows(off.file,`SELECT synopsis FROM film_metadata WHERE film_id='${FILM}'`)[0].synopsis,'tm synopsis','the flat values are the same at off');
+ }
  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,'the producer\'s own provenance rows wake nothing');
 }
 {
@@ -279,11 +299,16 @@ function file0(w){return w.file;}
   ('film:tmdb:900','core','letterboxd',0,'deferred_repair','repairable',7,'${FAR}','${T}','${OLD}');`);
  await step(rec,upstream({}));
  // this Film's translations are UNREADABLE: its core and credits are valid, its localization is not
- await step(rec,upstream({tm:movie({translations:{}})}),at(11));
+ // (a Russian entry without a string title: the title is malformed while the synopsis and the rest of the core observation are verified)
+ await step(rec,upstream({tm:movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{overview:'x'}}]}})}),at(11));
  const retry=part=>rows(rec.file,`SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='tmdb' AND part='${part}'`)[0].retry_at;
  assert.equal(retry('core'),null,'a valid core section wakes the deferred core items of other Films');
  assert.equal(retry('localization'),FAR,'an UNRELATED section does not wake it: this response\'s translations were unreadable');
  assert.equal(retry('credits'),FAR,'the bound: an item attempted a moment ago is not woken, so repeated successes cannot hot-loop it');
+ // a response whose translations section is missing leaves the core observation unverified: it wakes NO deferred core repair of another Film
+ sqlite(rec.file,`UPDATE catalog_enrichment_state SET retry_at='${FAR}',updated_at='${OLD}' WHERE film_id='film:tmdb:900'`);
+ await step(rec,upstream({tm:movie({translations:{}})}),at(12));
+ assert.equal(retry('core'),FAR,'an incomplete core observation is not a source recovery: it wakes nothing');
  assert.equal(rows(rec.file,"SELECT retry_at FROM catalog_enrichment_state WHERE film_id='film:tmdb:900' AND source='letterboxd'")[0].retry_at,FAR,'another source is not woken');
  // repeated identical malformed responses reach quarantine, and a good response recovers the part
  const rep=await world({lid:null});
@@ -414,5 +439,266 @@ function file0(w){return w.file;}
  const settled=rows(w.file,"SELECT part,status FROM catalog_enrichment_state WHERE part<>'film' AND status NOT IN ('due')");
  assert.deepEqual(settled,[],'and settled no part row as current: '+JSON.stringify(out.state));
  assert.ok((out.report?.units||[]).every(unit=>unit.state==='stale'),'every unit answered stale, none failed the Film');
+}
+
+// ---- AIR-684: the Discovery scope against the ACTUAL persisted state of the common producer ----
+// The observer (the Discovery revalidation, ru-RU) and the producer (its own fetch) share ONE pure version projection: the per-part `source_version` the producer stored on completion equals what the observer computes
+// from any response of the same movie, whatever the request language. Only VERIFIED sections have a version.
+{
+ const sv=file=>Object.fromEntries(rows(file,"SELECT part||':'||source||':'||slot AS k,source_version AS v,status FROM catalog_enrichment_state WHERE part<>'film'").map(r=>[r.k,{v:r.v,status:r.status}]));
+ const tmOnly=over=>upstream({lb:'404',tm:movie(over),wd:[]});
+ const done=async(w,up,from=10)=>{let out;for(let i=0;i<6;i++){out=await step(w,up,at(from+i));if(['idle','not_admitted'].includes(out.state))break;}return out;};
+ const wakes=[];
+ globalThis.CatalogEnrichmentRunner={hasRunnable:async()=>{wakes.push('has');return true;},kick:async()=>{wakes.push('kick');}};
+ const planEpoch=w=>rows(w.file,`SELECT plan_epoch FROM catalog_enrichment_state WHERE film_id='${FILM}' AND part='film'`)[0].plan_epoch;
+ const observe=async(w,m)=>{const out=await D.emitSourceChanged(w.env,{tmdbId:'603',movie:m,at:at(50)});return out;};
+ const pending=(w,kind='source_changed')=>rows(w.file,`SELECT part,state,version FROM enrichment_signal WHERE kind='${kind}' AND subject='${FILM}' ORDER BY part`);
+ const consumeAll=async(w,now=at(60))=>{const out=[];for(const signal of (await S.runnableSignals(w.env,{now})).filter(s=>s.kind==='source_changed')){out.push((await S.consumeSignal(w.env,{signal,generation:w.generation,leaseId:w.leaseId,now})).consumed);}return out;};
+
+ // 1. admission -> consume (the world does it) -> the common producer completes core, credits and the typed Russian title; the persisted versions are the observer's
+ const w=await world({lid:null,scope:'discovery'});
+ assert.deepEqual(rows(w.file,`SELECT scope FROM catalog_enrichment_member WHERE film_id='${FILM}'`),[{scope:'discovery'}],'the discovery admitted signal created the retained discovery membership');
+ const live=upstream({lb:'404'});
+ await done(w,live);
+ const after=sv(w.file);
+ assert.equal(after['core:tmdb:0'].status,'complete');assert.equal(after['credits:tmdb:0'].status,'complete');assert.equal(after['localization:tmdb:0'].status,'complete');
+ const observerRu=await D.tmdbPartVersions(movie({overview:'ru overview',poster_path:'/ru.jpg',genres:[{id:28,name:'Боевик'}]}),603);
+ assert.equal(after['core:tmdb:0'].v,observerRu.core,'core: the producer stored exactly the version an observer computes, whatever the request language');
+ assert.equal(after['localization:tmdb:0'].v,observerRu.localization,'localization');
+ assert.equal(after['credits:tmdb:0'].v,observerRu.credits,'credits: persisted on completion of the expected set');
+ assert.equal(rows(w.file,`SELECT COUNT(*) AS n FROM film_localization_source WHERE film_id='${FILM}'`)[0].n>=1,true);
+ const calls0=live.calls.filter(url=>url.startsWith('https://api.themoviedb.org/')).length;
+
+ // 2. an identical COMPLETE response of ANOTHER request language, from an enriched Film that has no prior observer row: nothing is written at all (no pending row, no wake, no plan epoch change), and nothing is refetched
+ const epoch0=planEpoch(w);wakes.length=0;
+ assert.deepEqual(await observe(w,movie({overview:'ru overview',poster_path:'/ru.jpg',genres:[{id:28,name:'Боевик'}]})),{state:'unchanged',parts:[]},'the applied state already says the same thing');
+ assert.deepEqual(pending(w),[],'no signal row');assert.deepEqual(wakes,[],'no wake');assert.equal(planEpoch(w),epoch0,'no plan epoch change');
+ assert.deepEqual(await consumeAll(w),[],'nothing to consume');
+ const idle=await step(w,live,at(70));
+ assert.equal(idle.state,'idle');assert.equal(live.calls.filter(url=>url.startsWith('https://api.themoviedb.org/')).length,calls0,'no refetch for an unchanged observation');
+
+ // 3. changed credits: only the credits part reopens and the producer fetches again; core and localization stay complete
+ const changedCredits=movie({credits:{cast:[{id:11,name:'T Neo',order:0},{id:99,name:'New',order:1}],crew:[{id:12,name:'T Lana',job:'Director'}]}});
+ assert.deepEqual((await observe(w,changedCredits)),{state:'written',parts:['credits']},'a changed credit set while the part is complete at another version');
+ assert.deepEqual(wakes,['has','kick'],'and it wakes the idle producer');
+ assert.deepEqual(await consumeAll(w,at(80)),[true]);
+ assert.equal(sv(w.file)['credits:tmdb:0'].status,'due');assert.equal(sv(w.file)['core:tmdb:0'].status,'complete');assert.equal(sv(w.file)['localization:tmdb:0'].status,'complete');
+ const refetch=upstream({lb:'404',tm:changedCredits});
+ await done(w,refetch,81);
+ assert.equal(sv(w.file)['credits:tmdb:0'].status,'complete');
+ assert.equal(sv(w.file)['credits:tmdb:0'].v,(await D.tmdbPartVersions(changedCredits,603)).credits,'the new credit set is the stored version');
+ assert.ok(credits(w.file).some(c=>c.person_id==='person:tmdb_99'||/99/.test(c.person_id)),'the new credit was written');
+
+ // 4. the first changed observation after completed enrichment (a runtime change) reopens core; the producer refetches and re-stores the version
+ assert.deepEqual((await observe(w,movie({runtime:150,credits:changedCredits.credits}))).parts,['core']);
+ await consumeAll(w,at(90));
+ assert.equal(sv(w.file)['core:tmdb:0'].status,'due','a real change since the completed enrichment is not lost');
+ await done(w,upstream({lb:'404',tm:movie({runtime:150,credits:changedCredits.credits})}),91);
+ assert.equal(sv(w.file)['core:tmdb:0'].v,(await D.tmdbPartVersions(movie({runtime:150}),603)).core);
+ assert.equal(meta(w.file).runtime,136,'a stored value is never overwritten by the refresh (fill-only)');
+
+ // 5. an identical INCOMPLETE coverage still progresses and is never dropped: an equal version with an incomplete part is written, consumed and the part stays due
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET status='due' WHERE part='localization' AND source='tmdb'");
+ assert.deepEqual(await observe(w,movie({runtime:150,credits:changedCredits.credits})),{state:'written',parts:['localization']});
+ await consumeAll(w,at(100));
+ assert.equal(sv(w.file)['localization:tmdb:0'].status,'due','an equal version with an incomplete part is not dropped');
+ // credits with a superseded slot: the applied check looks at the ACTIVE chunk rows only, and a superseded (not_applicable) row is never reopened by a verified change
+ sqlite(w.file,"INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at) VALUES ('"+FILM+"','credits','tmdb',7,'not_applicable','superseded_plan','"+T+"','"+T+"')");
+ const cv=(await D.tmdbPartVersions(movie({credits:changedCredits.credits}),603)).credits;
+ assert.equal((await observe(w,movie({credits:changedCredits.credits}))).parts.includes('credits'),false,'a superseded slot does not make an equal, complete credit set look stale');
+ sqlite(w.file,`UPDATE enrichment_signal SET state='pending',version=version+1,cause_digest='${'d'.repeat(64)}' WHERE kind='source_changed' AND subject='${FILM}' AND part='credits'`);
+ await consumeAll(w,at(101));
+ assert.equal(rows(w.file,"SELECT status FROM catalog_enrichment_state WHERE film_id='"+FILM+"' AND part='credits' AND slot=7")[0].status,'not_applicable','a superseded slot is not resurrected');
+ assert.equal(cv.length,64);
+ // the shared Russian-first projection: a synopsis-only change, a poster-only change, the appearance of a Russian value, a genre id change and an unmapped id are observed; response order and the top-level overview are not
+ const ru=(over={})=>movie({runtime:150,credits:changedCredits.credits,...over});
+ const w2=await world({lid:null,scope:'discovery'});
+ await done(w2,upstream({lb:'404',tm:ru()}));
+ const base=rows(w2.file,"SELECT source_version AS v,status FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0];
+ assert.equal(base.status,'complete');assert.equal(base.v,(await D.tmdbPartVersions(ru(),603)).core,'the producer stored the very version an observer computes');
+ wakes.length=0;
+ const same=ru({overview:'another top-level text',genres:[{id:28,name:'другое имя'}],images:{posters:[{iso_639_1:'ru',file_path:'/ru.jpg',width:600,vote_average:9.9},{iso_639_1:'en',file_path:'/en.jpg',width:900,vote_average:1}]}});
+ assert.equal((await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:same,at:at(50)})).state,'unchanged','the top-level overview, the genre names, the votes and the list order are not what is compared');
+ assert.deepEqual(wakes,[]);
+ const emit=async over=>(await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:ru(over),at:at(51)})).parts;
+ assert.deepEqual(await emit({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'revised synopsis'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]}}),['core'],'a synopsis-only change');
+ assert.deepEqual(await emit({images:{posters:[{iso_639_1:'ru',file_path:'/ru2.jpg',width:700},{iso_639_1:'en',file_path:'/en.jpg',width:900}]}}),['core'],'a poster-only change (the selected Russian poster)');
+ assert.deepEqual(await emit({genres:[{id:28,name:'x'},{id:878,name:'y'}]}),['core'],'a genre id change');
+ assert.deepEqual(await emit({genres:[{id:28,name:'x'},{id:424242,name:'new'}]}),['core'],'an unmapped id is part of the version');
+ // English fallback, then the appearance of a previously absent Russian value
+ const w3=await world({lid:null,scope:'discovery'});
+ const noRuSynopsis=ru({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:''}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]}});
+ await done(w3,upstream({lb:'404',tm:noRuSynopsis}));
+ assert.equal(meta(w3.file).synopsis,'english synopsis','Russian verified absent: the tagged English overview is the fallback');
+ assert.equal((await D.emitSourceChanged(w3.env,{tmdbId:'603',movie:noRuSynopsis,at:at(50)})).state,'unchanged');
+ assert.deepEqual((await D.emitSourceChanged(w3.env,{tmdbId:'603',movie:ru(),at:at(52)})).parts,['core'],'the appearance of a Russian synopsis reopens the part');
+ await consumeAll(w3,at(60));
+ assert.equal(rows(w3.file,"SELECT status FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].status,'due');
+ await done(w3,upstream({lb:'404',tm:ru()}),61);
+ assert.equal(meta(w3.file).synopsis,'english synopsis','fill-only: the refresh finds nothing blank; the Russian upgrade of a stored English value is AIR-633 (enforce), not this part');
+ assert.equal(rows(w3.file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v,(await D.tmdbPartVersions(ru(),603)).core,'the part completed at the observed version and stopped');
+ // an unmapped genre id completes the part WITH a visible gap and still has a version
+ const w4=await world({lid:null,scope:'discovery'});
+ await done(w4,upstream({lb:'404',tm:ru({genres:[{id:28,name:'x'},{id:424242,name:'new'}]})}));
+ assert.equal(rows(w4.file,"SELECT status FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].status,'complete_with_gaps');
+ assert.match(rows(w4.file,"SELECT gaps_json FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].gaps_json,/genres_unmapped/);
+ assert.ok(rows(w4.file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v,'a partial mapping still has a version: the table revision reopens it');
+ assert.deepEqual(JSON.parse(meta(w4.file).genres_json),['Боевик'],'only mapped words are written, in the existing vocabulary');
+}
+{
+ // 6. verified ABSENCE of a Russian title persists its own comparable version and is dropped without a fetch; a missing or malformed section emits nothing
+ const w=await world({lid:null,scope:'discovery'});
+ const noRu=movie({translations:{translations:[{iso_639_1:'de',iso_3166_1:'DE',data:{title:'Matrix'}}]}});
+ const up=upstream({lb:'404',tm:noRu});
+ for(let i=0;i<4;i++)await step(w,up,at(10+i));
+ const row=rows(w.file,"SELECT status,source_version AS v FROM catalog_enrichment_state WHERE part='localization' AND source='tmdb'")[0];
+ assert.equal(row.status,'complete_with_gaps');
+ assert.equal(row.v,(await D.tmdbPartVersions(noRu,603)).localization,'the verified absence has a persisted comparable version');
+ assert.deepEqual(await D.emitSourceChanged(w.env,{tmdbId:'603',movie:noRu,at:at(50)}),{state:'unchanged',parts:[]},'the same verified absence is the applied state: nothing is written');
+ const calls=up.calls.length;
+ assert.equal(rows(w.file,"SELECT status FROM catalog_enrichment_state WHERE part='localization' AND source='tmdb'")[0].status,'complete_with_gaps');
+ // a Russian title that APPEARS later is a change of the verified coverage
+ assert.deepEqual((await D.emitSourceChanged(w.env,{tmdbId:'603',movie:movie(),at:at(55)})).parts,['core','localization'],'a Russian title and a Russian synopsis that appear after a verified absence');
+ // missing or malformed sections are not verified coverage: nothing is signalled for them
+ const broken=movie({credits:undefined,translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:null}]},runtime:111});
+ assert.deepEqual(await D.emitSourceChanged(w.env,{tmdbId:'603',movie:broken,at:at(70)}),{state:'unchanged',parts:[]},'an unreadable translations section leaves both the title and the comparable core unverified; a missing credits section is unverified too');
+ const malformed=movie({credits:{cast:[{id:11,name:'A',order:0},{name:'no id'}],crew:[{id:12,name:'D',job:'Director'}]},runtime:112});
+ assert.equal((await D.tmdbPartVersions(malformed,603)).credits,null,'a present supported-role entry without an id makes the section unreadable instead of being filtered out of a "complete" set');
+ assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{name:'D',job:'Director'}]}}),603)).credits,null,'a director without an id');
+ assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[null]}}),603)).credits,null,'a crew entry that is not an object');
+ assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{id:5,job:'Editor'}]}}),603)).credits,null,'a crew list that names no recognized director is not a verified credit set');
+ assert.ok((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{id:12,job:'Director'},{job:'Editor'}]}}),603)).credits,'another job beside a recognized director is not judged');
+ // genre ids: a missing or malformed list is unverified coverage (no core version), a present empty list is a valid empty set
+ assert.equal((await D.tmdbPartVersions(movie({genres:undefined}),603)).core,null,'a missing genre list');
+ assert.equal((await D.tmdbPartVersions(movie({genres:[{id:28},{name:'no id'}]}),603)).core,null,'a malformed genre entry');
+ const emptyGenres=await D.tmdbPartVersions(movie({genres:[]}),603);
+ assert.ok(/^[0-9a-f]{64}$/.test(emptyGenres.core),'a valid empty genre list is verified coverage');
+ assert.notEqual(emptyGenres.core,(await D.tmdbPartVersions(movie({genres:[{id:28,name:'A'}]}),603)).core);
+ assert.deepEqual((await D.emitSourceChanged(w.env,{tmdbId:'603',movie:malformed,at:at(71)})).parts,['core','localization'].filter(part=>part==='core'||false),'only the verified sections of a response with a malformed credit entry are signalled');
+ assert.equal(up.calls.length,calls);
+}
+// ---- AIR-684 (review): an INCOMPLETE core observation is never settled, never given a version, never clears a counter and never wakes a repair; valid independent fields still fill ----
+{
+ const core=file=>PR.rowView(rows(file,"SELECT * FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0]);
+ const incomplete={'missing images':{images:undefined},'malformed translations':{translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{overview:{}}}]}},'ambiguous synopsis':{translations:{translations:[{iso_639_1:'ru',iso_3166_1:'UA',data:{title:'Т',overview:'Один'}},{iso_639_1:'ru',iso_3166_1:'BY',data:{title:'Т',overview:'Два'}}]}},
+  'missing genres':{genres:undefined},'missing release date':{release_date:undefined},'missing runtime':{runtime:undefined},'unrecognized crew':{credits:{cast:[{id:11,name:'N',order:0}],crew:[{id:12,name:'W',job:'Writer'}]}}};
+ for(const [name,over] of Object.entries(incomplete)){
+  // a PARTIALLY BLANK Film: the valid sections of the response still fill their fields, the part is repairable and has no version
+  const w=await world({lid:null});
+  await step(w,upstream({lb:'404'}));
+  const out=await step(w,upstream({lb:'404',tm:movie(over)}),at(11));
+  const row=core(w.file);
+  if(name==='unrecognized crew')continue; // that one concerns credits, not the core observation (below)
+  assert.equal(out.state,'done',name);
+  assert.notEqual(row.status,'complete',name+': the part is not settled on an incomplete observation');assert.notEqual(row.status,'complete_with_gaps',name);
+  assert.equal(row.sourceVersion,null,name+': no version');
+  assert.deepEqual([row.failures,row.failureClass,row.reason],[1,'repairable','incomplete_core_coverage'],name+': a counted repairable failure with the existing backoff');
+  assert.ok(row.retryAt>at(11),name+': backed off');
+  assert.equal(meta(w.file)?.url,'https://www.themoviedb.org/movie/603',name+': the independent url field still fills');
+  if(!['missing release date','missing runtime'].includes(name))assert.equal(meta(w.file).year,1999,name+': a valid year still fills');
+  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,name+': nothing is signalled or woken');
+ }
+ // a FULLY POPULATED Film (every core field stored): an incomplete observation is repairable too, never a silent completion
+ const full=await world({lid:null});
+ await step(full,upstream({lb:'404'}));
+ sqlite(full.file,"UPDATE catalog_enrichment_state SET status='due',source_version=NULL,failures=0 WHERE part='core' AND source='tmdb'");
+ await step(full,upstream({lb:'404',tm:movie({images:undefined})}),at(12));
+ assert.deepEqual([core(full.file).status,core(full.file).sourceVersion,core(full.file).failures],['due',null,1],'a populated Film: still repairable, no version');
+ // repeated: six identical incomplete responses reach the existing quarantine, then a valid response recovers (no new retry mechanism)
+ const rep=await world({lid:null});
+ await step(rep,upstream({lb:'404'}));
+ for(let i=0;i<6;i++){
+  sqlite(rep.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core' AND source='tmdb'");
+  await step(rep,upstream({lb:'404',tm:movie({images:undefined})}),at(20+i));
+ }
+ const quarantined=core(rep.file);
+ assert.deepEqual([quarantined.status,quarantined.failures,quarantined.failureClass],['deferred_repair',6,'repairable'],'repeated incomplete observations reach the existing quarantine');
+ sqlite(rep.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core' AND source='tmdb'");
+ await step(rep,upstream({lb:'404',tm:movie()}),at(40));
+ const healed=core(rep.file);
+ assert.deepEqual([healed.status,healed.failures],['complete',0],'a valid observation recovers the part and clears its counter');
+ assert.equal(healed.sourceVersion,(await D.tmdbPartVersions(movie(),603)).core,'and it has the version of what was verified');
+ // an incomplete response must not erase the VERSION of an already settled part, nor touch an unfetched source: mixed-source rows
+ const mix=await world();
+ await step(mix,upstream({}));await step(mix,upstream({}),at(11));
+ const before=Object.fromEntries(rows(mix.file,"SELECT source,status,source_version AS v,failures FROM catalog_enrichment_state WHERE part='core'").map(r=>[r.source,r]));
+ assert.ok(before.letterboxd.v&&before.tmdb.v,'both sources settled with a version');
+ sqlite(mix.file,"UPDATE catalog_enrichment_state SET status='due' WHERE part='core' AND source='tmdb'");
+ const calls=await step(mix,upstream({tm:movie({images:undefined})}),at(30));
+ const after=Object.fromEntries(rows(mix.file,"SELECT source,status,source_version AS v,failures FROM catalog_enrichment_state WHERE part='core'").map(r=>[r.source,r]));
+ assert.deepEqual(after.letterboxd,before.letterboxd,'the unfetched Letterboxd row keeps its version, status and counters');
+ assert.equal(after.tmdb.v,before.tmdb.v,'the failed observation does not erase the settled version of its own source either');
+ assert.equal(after.tmdb.failures,1);assert.equal(calls.report.fetched.includes('letterboxd'),false,'only the due source was fetched');
+ // a field with an explicit absence is VERIFIED and settles (the empty-list and null cases are not malformed)
+ const blank=await world({lid:null});
+ await step(blank,upstream({lb:'404'}));
+ await step(blank,upstream({lb:'404',tm:movie({release_date:'',runtime:0,genres:[],poster_path:null,images:{posters:[]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:''}}]}})}),at(11));
+ assert.equal(core(blank.file).status,'complete_with_gaps','explicit absences settle the part with its gaps');assert.ok(core(blank.file).sourceVersion);
+ // the approved unmapped-genre case stays distinct: a verified id list with a mapping gap settles WITH a version and the visible gap
+ const gap=await world({lid:null});
+ await step(gap,upstream({lb:'404'}));
+ await step(gap,upstream({lb:'404',tm:movie({genres:[{id:28,name:'x'},{id:424242,name:'new'}]})}),at(11));
+ assert.equal(core(gap.file).status,'complete_with_gaps');assert.ok(core(gap.file).sourceVersion);
+ // the declarations the producer hands to the writer BEFORE it runs (`metadata.declared`, the shape the AIR-631 writer reads), each bound to the language and basis its observation carried
+ const decl=await world({lid:null});
+ await step(decl,upstream({lb:'404'}));
+ const written=await step(decl,upstream({lb:'404'}),at(11));
+ const declared=Object.fromEntries((written.report.declarations||[]).map(item=>[item.field,item]));
+ assert.deepEqual([declared.synopsis?.language,declared.synopsis?.languageBasis,declared.synopsis?.source],['ru','explicit','tmdb'],'the synopsis is declared with its verified Russian tag');
+ assert.deepEqual([declared.poster?.language,declared.poster?.languageBasis],['ru','explicit'],'the poster carries the tag of the selected image');
+ for(const field of ['year','runtime','url','genres'])if(declared[field])assert.equal('language' in declared[field],false,field+': no language is declared for a field that carries none');
+ assert.deepEqual([declared.year?.source,declared.year?.anchor,declared.year?.observedAt],['tmdb',{scheme:'tmdb',value:'603'},at(11)],'source, anchor and observation time are declared');
+ // a Letterboxd synopsis is declared as ASSUMED English (the owner-approved default); a field with an unknown poster language declares none
+ const lbOnly=await world();// TMDB is unavailable (transport): only the Letterboxd observation can fill
+ await step(lbOnly,upstream({tm:'transport'}));
+ const lbWrote=await step(lbOnly,upstream({tm:'transport'}),at(11));
+ const lbDeclared=Object.fromEntries((lbWrote.report.declarations||[]).map(item=>[item.field,item]));
+ assert.deepEqual([lbDeclared.synopsis?.source,lbDeclared.synopsis?.language,lbDeclared.synopsis?.languageBasis],['letterboxd','en','assumed'],'Letterboxd synopsis: assumed English, never an explicit tag');
+ assert.equal('language' in (lbDeclared.poster||{}),false,'a Letterboxd poster carries no language');
+ // the mixed-source blank-field case on the real producer: Russian TMDB wins the synopsis and the poster, Letterboxd keeps the other fields, and the agreement requirement still holds
+ const mixed=await world();
+ await step(mixed,upstream({}));const mixedWrote=await step(mixed,upstream({}),at(11));
+ const md=Object.fromEntries((mixedWrote.report.declarations||[]).map(item=>[item.field,item.source]));
+ assert.deepEqual([md.synopsis,md.poster,md.year,md.url],['tmdb','tmdb','letterboxd','letterboxd'],'the selected value and its declaration implement the language rule only for synopsis and poster');
+ assert.equal(rows(mixed.file,`SELECT synopsis FROM film_metadata WHERE film_id='${FILM}'`)[0].synopsis,'tm synopsis');
+}
+// ---- AIR-684: the producer on a RECORDED TMDB response (603, `ru-RU`, captured once under the owner's approval): the whole path from the real response shape to the stored rows and the observer's versions ----
+{
+ const recorded=JSON.parse(fs.readFileSync('tests/fixtures/tmdb-recorded/603-ru.json','utf8'));
+ const w=await world({lid:null,scope:'discovery'});
+ const up=upstream({lb:'404',tm:recorded});
+ for(let i=0;i<8;i++){const out=await step(w,up,at(10+i));if(['idle','not_admitted'].includes(out.state))break;}
+ const st=Object.fromEntries(rows(w.file,"SELECT part||':'||source||':'||slot AS k,status,source_version AS v FROM catalog_enrichment_state WHERE part<>'film'").map(r=>[r.k,r]));
+ assert.equal(st['core:tmdb:0'].status,'complete');assert.equal(st['localization:tmdb:0'].status,'complete');
+ const m=meta(w.file);
+ const ruOverview=recorded.translations.translations.find(entry=>entry.iso_639_1==='ru'&&entry.iso_3166_1==='RU').data.overview.trim();
+ assert.deepEqual([m.year,m.runtime,m.synopsis],[1999,136,ruOverview],'the real response filled the blank fields: the tagged Russian synopsis');
+ assert.deepEqual(JSON.parse(m.genres_json),['Боевик','Фантастика'],'genres through the id table, in the existing vocabulary');
+ assert.ok(m.poster.startsWith('https://image.tmdb.org/t/p/w500/')&&m.poster.endsWith('/2GfsfNLkJo2oOGTS9VZ4cPNM6tu.jpg'),'the stable selector picked the widest Russian poster by path');
+ assert.equal(rows(w.file,`SELECT COUNT(*) AS n FROM film_person_credit WHERE film_id='${FILM}'`)[0].n,recorded.credits.cast.length+2,'the whole recorded cast and both directors');
+ assert.equal(st['core:tmdb:0'].v,(await D.tmdbPartVersions(recorded,603)).core,'observer and producer: the same core version from the recorded response');
+ assert.equal(st['localization:tmdb:0'].v,(await D.tmdbPartVersions(recorded,603)).localization);
+ // the same recorded response observed again: nothing is written, nothing wakes, no epoch change
+ assert.deepEqual(await D.emitSourceChanged(w.env,{tmdbId:'603',movie:recorded,at:at(60)}),{state:'unchanged',parts:[]},'an identical complete observation of the recorded response is a no-op');
+}
+// ---- AIR-684 (review): a verified OTHER-language tag of the last-resort poster, end to end on the real writer ----
+{
+ const onlyFrench=movie({images:{posters:[{iso_639_1:'fr',file_path:'/p.jpg',width:100}]}});
+ const unlisted=movie({images:{posters:[]}});
+ // the observation keeps the tag and the digest tells it from the same path without one
+ assert.notEqual((await D.tmdbPartVersions(onlyFrench,603)).core,(await D.tmdbPartVersions(unlisted,603)).core,'a verified tag and an unknown language are different observations of the identical path');
+ const w=await world({lid:null,scope:'discovery'});
+ await step(w,upstream({lb:'404'}));
+ sqlite(w.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
+ const out=await step(w,upstream({lb:'404',tm:onlyFrench}),at(11));
+ assert.equal(out.state,'done','the write is not failed by a tag the schema cannot hold');
+ assert.equal(meta(w.file).poster,'https://image.tmdb.org/t/p/w500/p.jpg','the poster is still filled');
+ const poster=rows(w.file,`SELECT source,language,language_basis FROM film_metadata_field WHERE film_id='${FILM}' AND field='poster'`)[0];
+ assert.deepEqual(poster,{source:'tmdb',language:null,language_basis:null},'persisted with NO language until the additive schema support: never an invented ru or en');
+ assert.deepEqual(out.report.languageNotDeclared,[{field:'poster',language:'fr',source:'tmdb'}],'the verified tag the writer cannot hold is reported, not lost silently');
+ assert.equal(out.report.declarations.find(item=>item.field==='poster').language,undefined,'the declaration carries no language');
+ assert.equal(rows(w.file,`SELECT COUNT(*) AS n FROM film_metadata_history WHERE film_id='${FILM}'`)[0].n,0,'a fill adds no history');
+ assert.equal(core_version_present(w.file),true,'the part still settles with its version');
+ function core_version_present(file){return !!rows(file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v;}
 }
 console.log('catalog enrichment producer: ok');
