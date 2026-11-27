@@ -521,6 +521,12 @@ function workflowPlan(input){
  const {published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites,used}=input||{};
  const spent=(used||0)>=DISCOVERY_WORKFLOW_INVOCATION_BUDGET;
  if((uncertainWrites||0)>=DISCOVERY_WORKFLOW_WRITE_LIMIT)return {action:'stop',reason:'write_uncertain'};
+ // AIR-687: a publication that is only UNCONFIRMED (the pointer is missing, or not `published` yet and still names this run) is not a different published run. The series keeps a safe recheck, with no candidate write,
+ // until the pointer is readable again; the terminal `stale_generation` below stays for a pointer that names another run (an EPG commit in flight or a newer publication). Bounded by the instance step cap.
+ if(pinned&&!published&&record&&record.programmeRunId===pinned&&(input?.publicationRun==null||input.publicationRun===pinned)){
+  const due=Date.parse(record.retryAt||record.nextCatchUpAt||0);
+  return {action:'wait',until:Math.max(Number.isFinite(due)?due:0,now+DISCOVERY_FENCE_COLLISION_DEFER_MS),reason:'generation_unpublished'};
+ }
  if(!pinned||!published||pinned!==published||(record&&record.programmeRunId!==pinned))return {action:'stop',reason:'stale_generation'};
  if(!record)return {action:'stop',reason:'no_continuation'};
  if(lease?.expiresAt>now)return {action:'wait',until:lease.expiresAt,reason:'busy'};
@@ -544,10 +550,11 @@ function workflowPlan(input){
 async function workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,used){
  const generation=await loadJSON(env,EPG_GENERATION_KEY);
  const published=publishedProgrammeRunId(generation);
+ const publicationRun=generation?.programmeRunId||null;
  const stored=await readContinuation(env);
  const lease=await loadJSON(env,'epg/resolver-lease.json');
  const last=await loadJSON(env,'epg/discovery-status.json');
- return {published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
+ return {published,publicationRun,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
 }
 async function settleWorkflowIfOwner(env,ownId,patch){
  let state=await readWorkflowState(env);
@@ -1208,8 +1215,9 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
   return {stopped,reason:final,chunks:count,instanceId};
  };
  const recoverAfterStepFailure=async()=>{
-  const arming=await persist('recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks),result=>result?.armed===true?'saved':isWindowBusy(result?.reason)?'window':result?.reason==='not_owner'?'lost':'conflict_final');
-  // The arming step already retries its own lost compare-and-swap three times (ADR 0098): a further conflict is the existing, explicit stop.
+  const arming=await persist('recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks),result=>result?.armed===true?'saved':isWindowBusy(result?.reason)?'window':result?.reason==='not_owner'?'lost':result?.reason==='write_conflict'?'conflict':'conflict_final');
+  // AIR-687: the arming step retries its own lost compare-and-swap three times (ADR 0098) and `armedFor` makes a retry after a landed write find it, so a `write_conflict` is the same same-owner contention as every other checkpoint: it
+  // takes the owner-gated backoff of `persist` (re-read, durable sleep) instead of ending the instance for the reconcile. Only the step cap still ends it, as the existing, explicit stop below.
   if(arming.kind==='deferred'&&arming.cause==='conflict')return {stopped:true,reason:'recovery_write_conflict',chunks,instanceId:ownId};
   if(arming.kind==='deferred')return deferredExit('recovery_unarmed',arming.cause);
   const armed=arming.result;

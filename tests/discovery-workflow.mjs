@@ -776,12 +776,23 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
    assert.equal(losses,1,'the stop CAS lost once');
    assert.equal(ended.reason,'recovered');assert.equal(creates.length,1);
    assert.equal(t.sleeps.length>=1&&t.sleeps.every(item=>item.at-Date.parse(oldDue)>=299000),true,'the new 5 min backoff, not the old due');
-   // Three lost CAS in a row: no proof of arming, so no sleep and no create; the cron stays the fallback and the record is untouched.
-   withOldRecovery();creates.length=0;lose=3;losses=0;
+   // AIR-687: a lost CAS burst past the arming step's own three tries is same-owner contention, not the end: the arming takes the owner-gated backoff of `persist` (re-read, durable sleep), `armedFor` keeps the failure counted once,
+   // and the existing dueAt successor recovery follows without the cron and with exactly one create. Three, and seven (past the immediate retries), lost CAS in a row.
+   for(const burst of [3,7]){
+    withOldRecovery();creates.length=0;lose=burst;losses=0;
+    t=startRun({onSleep:advanceTo});
+    ended=await t.run();
+    assert.equal(ended.reason,'recovered','burst '+burst+': '+JSON.stringify(ended));assert.equal(creates.length,1,'burst '+burst+': exactly one successor');
+    assert.equal(record().recovery?.attempts??2,2,'burst '+burst+': the failure is counted once');
+    assert.ok(t.sleeps.length>=1,'burst '+burst+': the arming and the successor wait durably, not for the cron');
+   }
+   // A contention that outlasts the step cap ends as the existing, explicit stop: nothing armed, nothing created, the record untouched.
+   withOldRecovery();creates.length=0;lose=99999;losses=0;
    t=startRun({onSleep:advanceTo});
    ended=await t.run();
-   assert.equal(ended.reason,'recovery_write_conflict');assert.equal(t.sleeps.length,0);assert.equal(creates.length,0);
+   assert.equal(ended.reason,'recovery_write_conflict');assert.equal(creates.length,0);
    assert.equal(record().recovery.attempts,1);assert.equal(record().recovery.dueAt,oldDue);assert.equal(record().phase,'running');
+   lose=0;
    // A retry of the arming step after its write landed counts the failure once.
    withOldRecovery();creates.length=0;lose=0;
    t=startRun();
@@ -854,6 +865,40 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
   assert.ok(h.names.indexOf(h.names.find(name=>name.startsWith('window-sleep')))===-1,'a sleep is not a step name');
   assert.deepEqual(stateAtRollover,{chunks:1,recovery:null,phase:'running'},'the count is persisted after the window and nothing is charged');
   assert.equal(h.names.filter(name=>name.startsWith('chunk')).length,1,'no second chunk is run while the window is held');
+
+  // (a2) AIR-687: an UNCONFIRMED publication is not a different published run. The pointer is missing (then not `published` yet but still this run) at the next two plans: the executor keeps a safe recheck with no candidate write
+  // (the plan waits as `generation_unpublished`, never the terminal `stale_generation`), and once the pointer names the SAME run again the work resumes, with no cron and no successor.
+  {
+   const pointerKey='epg/published-generation.json';
+   fresh();
+   let plans=0;const states=[];
+   h=harness({before:async name=>{
+    if(name.startsWith('plan')){
+     plans++;
+     if(plans===1){context.PublishedEpg.currentGeneration=async()=>null;records.delete(pointerKey);etags.delete(pointerKey);}
+     else if(plans===2)set(pointerKey,{phase:'candidate',programmeRunId:GENERATION});
+     else if(plans===3){armPublishedEpg(GENERATION);set(pointerKey,{phase:'published',programmeRunId:GENERATION});}
+     states.push({plan:plans,decided:decided(),phase:record().phase});
+    }
+   }});
+   ended=await run(h,{chunkLimit:1});
+   assert.equal(ended.reason,'rollover',JSON.stringify(ended));assert.equal(ended.deferred,undefined);assert.equal(creates.length,1,'the planned rollover successor only, no recovery successor');
+   assert.equal(decided(),24,'exactly one chunk ran, after the pointer was confirmed again');
+   assert.deepEqual(states.slice(0,3).map(item=>item.decided),[0,0,0],'no candidate was written while the publication was unconfirmed');
+   assert.ok(h.slept.filter(item=>item.name.startsWith('sleep')).length>=2,'a safe durable recheck at each unconfirmed plan: '+h.slept.map(item=>item.name).join(','));
+   assert.notEqual(record().reason,'stale_generation');assert.equal(record().recovery??null,null);
+   // A pointer that names ANOTHER run (an EPG commit in flight or a newer publication) is still terminal.
+   fresh();
+   h=harness({before:async name=>{if(name.startsWith('plan')){context.PublishedEpg.currentGeneration=async()=>null;set(pointerKey,{phase:'candidate',programmeRunId:OTHER});}}});
+   ended=await run(h,{chunkLimit:1});
+   assert.equal(ended.reason,'stale_generation');assert.equal(decided(),0);
+   // A temporary readback failure at the plan is a recognised step failure: the existing autonomous recovery arms and creates the successor without the cron.
+   fresh();creates.length=0;
+   let failedOnce=false;
+   h=harness({failOn:name=>{if(name.startsWith('plan')&&!failedOnce){failedOnce=true;return true;}return false;}});
+   ended=await run(h,{chunkLimit:1});
+   assert.equal(ended.reason,'recovered',JSON.stringify(ended));assert.equal(creates.length,1,'one successor from the existing recovery');assert.equal(ended.deferred,undefined);
+  }
 
   // (b) A wait and a busy checkpoint refused by a window sleep to the later of their own time and the expiry.
   fresh();

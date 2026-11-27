@@ -377,15 +377,17 @@ for(const [label,basis,obstruct] of [
 // key, the refused chunk's real counts travel into the re-evaluation checkpoint so the report counts them once, and the retry neither loses nor repeats them. A replay of the same checkpoint adds nothing.
 {
  published.run=RUN;
- const w=await world({durations:[90,96],decision:null,fillers:400});
+ const w=await world({durations:[90,96],decision:verified({anchor:[90]}),fillers:400});
+ const seeded=1;// the verified decision seeded before the chunk: its replay assigns the slots first, the fillers are the candidates
  const wf=loadWorkflow(w);const meter={statements:0,batches:0},tally={total:0};
  const decisions=()=>count(w.file,'discovery_decision'),shows=()=>count(w.file,'published_epg_show');
- w.hook.left=1;w.hook.fn=(statements,file)=>{if(w.hook.left>0&&statusBatch(statements)&&count(file,'discovery_decision')>0){w.hook.left--;sql(file,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");}};
+ w.hook.left=1;w.hook.fn=(statements,file)=>{if(w.hook.left>0&&statusBatch(statements)&&count(file,'discovery_decision')>seeded){w.hook.left--;sql(file,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");}};
  const settle=async(outcome,chunks)=>wf.settleWorkflowIfOwner(w.env,'inst-0',record=>wf.workflowProgressPatch(record,{outcome,pinned:RUN,series:0,chunks,meter,tally,chunkKey:'inst-0:'+chunks,ownVersion:{}}));
  const refused=await wf.runWorkflowChunk(w.env,meter);
  assert.equal(refused.summary.fenceRevalidation,true,JSON.stringify(refused.summary).slice(0,300));
- const durable=decisions();
+ const durable=decisions(),slotsDurable=shows();
  assert.ok(durable>0,'the decisions of the refused chunk are already durable: '+durable);
+ assert.equal(slotsDurable,1,'and so is its slot assignment (the replay of the verified decision, anchored on one airing): '+slotsDurable);
  assert.ok(refused.summary.checked>0&&refused.usefulProgress===true,'the real work is reported, not zero: '+refused.summary.checked);
  const record=await recordOf(w);
  assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');
@@ -401,7 +403,52 @@ for(const [label,basis,obstruct] of [
  assert.equal(decisions(),durable+retried.summary.checked,'the retry adds only new decisions: none lost, none repeated');
  assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT observation_key FROM discovery_decision GROUP BY observation_key)")[0].n,decisions(),'no duplicate decision');
  assert.equal(report.checked,refused.summary.checked+retried.summary.checked,'the report neither loses nor repeats a contribution');
- assert.equal(report.checked,decisions(),'and equals the durable decisions');
+ assert.equal(report.checked,decisions()-seeded,'and equals the durable decisions made by the chunks');
+ assert.equal(shows(),slotsDurable,'the retry neither loses nor repeats a slot assignment');
+ assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT channel_id,start_ms FROM published_epg_show GROUP BY channel_id,start_ms)")[0].n,shows(),'no duplicate slot');
  clock.offset=0;
+}
+// N. An UNKNOWN acknowledgement: a batch COMMITS and the client then loses the answer (a network error after the commit). This is a typed `discovery_unavailable`, not a fence, and the existing contracts are shown, not rebuilt.
+// N1, the decision batch: the chunk's own per-key reconciliation (the readback of the committed state, the idempotent write) absorbs it: every committed decision is counted exactly once, none is lost or repeated.
+// N2, the final checkpoint after durable decisions: the fail-closed contract: the chunk is recorded as an error (no false progress) and waits for its gate; the next chunk's readback continues, with unique decisions and slots.
+for(const [label,pattern] of [['N1 decision batch',/^\s*(INSERT|UPDATE|DELETE)\b[^;]*discovery_decision/i],['N2 final checkpoint',/^\s*(INSERT|UPDATE|DELETE)\b[^;]*discovery_checkpoint/i]]){
+ await withHostClock(async()=>{
+  published.run=RUN;
+  const w=await world({durations:[90,96],decision:null,fillers:400});
+  const wf=loadWorkflow(w);const meter={statements:0,batches:0},tally={total:0};
+  const decisions=()=>count(w.file,'discovery_decision'),shows=()=>count(w.file,'published_epg_show');
+  const real=w.env.DB;let armed=1;
+  w.env.DB={...real,batch:async statements=>{
+   const result=await real.batch(statements);
+   if(armed>0&&statements.some(item=>pattern.test(item.text))&&(label.startsWith('N1')||decisions()>0)){armed--;throw new Error('network connection lost');}
+   return result;
+  }};
+  const settle=async(outcome,chunks)=>wf.settleWorkflowIfOwner(w.env,'inst-0',record=>wf.workflowProgressPatch(record,{outcome,pinned:RUN,series:0,chunks,meter,tally,chunkKey:'inst-0:'+chunks,ownVersion:{}}));
+  const first=await wf.runWorkflowChunk(w.env,meter);
+  assert.equal(armed,0,label+': the acknowledgement was lost');
+  const committed=decisions();
+  assert.ok(committed>0,label+': the batch committed although its acknowledgement was lost: '+committed);
+  if(label.startsWith('N1')){
+   assert.equal(first.summary.error,null,'reconciled inside the chunk');assert.equal(first.usefulProgress,true);
+   assert.equal(first.summary.checked,committed,'each committed decision is counted exactly once: none lost, none repeated');
+  }else{
+   assert.equal(first.usefulProgress,false,'an unconfirmed chunk is never reported as progress');
+   const record=await recordOf(w);
+   assert.equal(record.stage,'error');assert.equal(record.reason,'discovery_unavailable','the established fail-closed contract');
+   assert.ok(Date.parse(record.nextCatchUpAt)>Date.now(),'it waits for its gate');
+   clock.offset+=Date.parse(record.nextCatchUpAt)-Date.now()+1000;
+  }
+  await settle(first,1);
+  const next=await wf.runWorkflowChunk(w.env,meter);
+  assert.equal(next.usefulProgress,true,label+': '+JSON.stringify(next.summary).slice(0,300));
+  assert.ok(decisions()>committed,label+': the queue moved on: '+committed+' -> '+decisions());
+  assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT observation_key FROM discovery_decision GROUP BY observation_key)")[0].n,decisions(),label+': no duplicate decision');
+  assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT channel_id,start_ms FROM published_epg_show GROUP BY channel_id,start_ms)")[0].n,shows(),label+': no duplicate slot');
+  await settle(next,2);
+  const report=(await wf.readWorkflowState(w.env)).record.report;
+  assert.ok(report.checked<=decisions(),label+': the report never exceeds the durable decisions');
+  if(label.startsWith('N1'))assert.equal(report.checked,decisions(),'N1: the report equals the durable decisions');
+  else assert.equal(report.checked,next.summary.checked,'N2: only confirmed work is reported (the unconfirmed chunk\'s committed decisions show in the queue counts: a known undercount of the hourly breakdown, never a double count)');
+ });
 }
 console.log('discovery fence collision ok');
