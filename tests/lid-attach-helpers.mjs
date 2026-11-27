@@ -1,4 +1,4 @@
-// AIR-675 / ADR 0217 (Accepted) decision 7, the helper changes of the attach card, on the real migrations (a sqlite D1 stand-in): (1) the writer control allowlist admits `lid_tmdb_attach` only from schema 51, with the
+// AIR-675 / ADR 0217 (Accepted) decision 7, the helper changes of the attach card, on the real migrations (a sqlite D1 stand-in): (1) the writer control allowlist admits `lid_tmdb_attach` only from schema 52, with the
 // same compare-and-swap, drain evidence and append-only history as the other writers; (2) the live shape of the evidence helper accepts the ONE Film-bound `film_has_id(film, tmdb_movie)` page-check row of the attach
 // (owner_action, rooted in the attach root) and nothing wider, and refuses a row whose subject is not the batch's Film; (3) the keyed receipt reservation accepts the intent compare-and-swap in exactly one shape.
 import assert from 'node:assert/strict';
@@ -16,7 +16,7 @@ const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-attach
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
 const build=upTo=>{const file=path.join(root,'t'+upTo+'.sqlite');sqlite(file,files.filter(name=>Number(name.slice(0,4))<=upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));return file;};
-const t49=build(50),t50=build(51);
+const t49=build(51),t50=build(52);
 let n=0;
 const copy=source=>{const file=path.join(root,'w-'+(n++)+'.sqlite');fs.copyFileSync(source,file);return file;};
 const code=expected=>error=>{assert.equal(error.code,expected,String(error?.stack||error));return true;};
@@ -24,16 +24,16 @@ const OPERATION={reason:'AIR-675 test',deployedVersion:'v1',evidenceLink:'https:
 const T0=Date.parse('2026-11-27T10:00:00.000Z'),iso=ms=>new Date(T0+ms).toISOString();
 
 // ===== 1. the writer control =====
-assert.equal(ATTACH_WRITER,'lid_tmdb_attach');assert.equal(ATTACH_WRITER_SCHEMA,51);
+assert.equal(ATTACH_WRITER,'lid_tmdb_attach');assert.equal(ATTACH_WRITER_SCHEMA,52);
 assert.ok(WRITERS.includes('lid_tmdb_attach')&&WRITERS.length===6,'the allowlist is the five delivered writers and the attach');
 {
- // schema 50: the sixth writer is not ready, reads `off`, and cannot be changed (its CHECK does not exist yet): nothing is written
+ // schema 51: the sixth writer is not ready, reads `off`, and cannot be changed (its CHECK does not exist yet): nothing is written
  const file=copy(t49),env={DB:d1Standin(file)};
  assert.equal(await attachWriterSchemaReady(env),false);
  assert.deepEqual(await readWriter(env,ATTACH_WRITER),{writer:ATTACH_WRITER,state:'off',generation:0,coverageFrom:null,updatedAt:null,present:false});
  await assert.rejects(()=>changeWriter(env,{writer:ATTACH_WRITER,kind:'activate',expectedGeneration:0,...OPERATION,now:iso(0)}),code('identity_evidence_writer_unavailable'));
  assert.deepEqual(await readWriterChanges(env,ATTACH_WRITER),[]);
- // the delivered writers still work at 50
+ // the delivered writers still work at 51
  assert.equal((await changeWriter(env,{writer:'discovery_decision',kind:'activate',expectedGeneration:0,...OPERATION,now:iso(0)})).state,'pending');
 }
 {
@@ -43,7 +43,7 @@ assert.ok(WRITERS.includes('lid_tmdb_attach')&&WRITERS.length===6,'the allowlist
  assert.equal(await attachWriterSchemaReady({}),false);
 }
 {
- // schema 51: the full life of the writer through the operator (compare-and-swap, drain evidence, coverage start, deactivation, break), atomic history
+ // schema 52: the full life of the writer through the operator (compare-and-swap, drain evidence, coverage start, deactivation, break), atomic history
  const file=copy(t50),env={DB:d1Standin(file)};
  assert.equal(await attachWriterSchemaReady(env),true);
  assert.equal((await readWriter(env,ATTACH_WRITER)).state,'off');

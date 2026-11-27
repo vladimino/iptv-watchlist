@@ -3,7 +3,7 @@
 // Behind the same owner authorization as the other admin writes (the Worker verifies the Access JWT, the audience `ADMIN_ACCESS_AUD`, the expiry and the owner subject `ADMIN_OWNER_EMAIL`, plus its own Origin, the action header
 // `X-IPTV-Admin-Action: letterboxd_lid_recheck` and a JSON content type; unconfigured is closed, 503). One lid per request; a repeat with the SAME requestId makes progress (a settled intent is answered by readback, no fetch). Natural sync
 // never attaches, and nothing calls this route automatically: no cron, Workflow, Task or self-fetch.
-// It refuses BEFORE its first effect (no source request, no write, no intent row) while the admission marker is not `d1`, while migrations 0048, 0050 or 0051 are not applied, and while the identity evidence writer `lid_tmdb_attach`
+// It refuses BEFORE its first effect (no source request, no write, no intent row) while the admission marker is not `d1`, while migrations 0048, 0051 or 0052 are not applied, and while the identity evidence writer `lid_tmdb_attach`
 // is not actually `on` (never enabled by this route). The coordinator, the intent, the attach and the Ratings link handoff are `LetterboxdLidAttach` (src/letterboxd-lid-attach.js).
 const LID_RECHECK_ACTION='letterboxd_lid_recheck';
 const LID_RECHECK_BODY_LIMIT=1024;

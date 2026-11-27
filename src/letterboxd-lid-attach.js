@@ -1,10 +1,10 @@
 // AIR-675 / ADR 0217 (Accepted) decisions 7 and 8 (delivery step 6, choices L1 and M1), DORMANT: the owner RE-CHECK of a lid-only Film and the TMDB ATTACH. A lid-only Film `film:lb:<lid>` (AIR-672) may later be shown to have a TMDB movie.
 // The owner asks for one verification, one lid per request: `POST /api/admin/letterboxd/lid-recheck {lid, requestId}` (`src/admin/lid-recheck.js`). Natural sync never attaches and nothing re-checks automatically.
-// Nothing in this module runs from a live path: the route refuses before its first effect (no fetch, no write) while the admission marker is not `d1`, while migrations 0050 and 0051 are not applied, and while the identity evidence
+// Nothing in this module runs from a live path: the route refuses before its first effect (no fetch, no write) while the admission marker is not `d1`, while migrations 0051 and 0052 are not applied, and while the identity evidence
 // writer `lid_tmdb_attach` is not actually `on` (never enabled automatically). A deploy applies nothing and activates nothing.
 //
 // The protocol (ADR 0217 decision 8):
-//   intent    `lid_recheck_intent` (migration 0050): the durable, compare-and-swap record of ONE request. The same `requestId` with another lid is `request_conflict`; a settled intent is answered by readback only, with no fetch.
+//   intent    `lid_recheck_intent` (migration 0051): the durable, compare-and-swap record of ONE request. The same `requestId` with another lid is `request_conflict`; a settled intent is answered by readback only, with no fetch.
 //   reconcile the ONE common operation key `admission:lid:<lid>` (ADR 0207 decision 3): a live attempt is waited on, any other unresolved receipt is abandoned, an applied one is validated against current state. Only when no canonical
 //             effect is settled and no attempt can still land is a bounded page and TMDB check reacquired, as a new attempt.
 //   reserve   the receipt reservation and the intent compare-and-swap (`attempt_request_id`, `revision`) are ONE batch (`reserveExtra` of the keyed receipt): two requests with one `requestId` cannot both own the intent.
@@ -73,7 +73,7 @@ async function updateIntent(env,{requestId,revision,set,params,openOnly=true,noO
 const settleTerminal=(env,{requestId,revision,outcome,at,extraWhere='',extraParams=[]})=>updateIntent(env,{requestId,revision,set:"state='settled',outcome=?",params:[outcome,at],noOutcome:true,extraWhere,extraParams});
 
 // ---- gates (read only; nothing is written or fetched before they pass) ----
-// -> {authority, writer}. Typed refusals: `letterboxd_admission_closed` (the admission marker is not `d1`), `admission_unavailable` (migration 0048 or 0050 is not applied), `evidence_writer_inactive` (migration 0051 is not applied, or the
+// -> {authority, writer}. Typed refusals: `letterboxd_admission_closed` (the admission marker is not `d1`), `admission_unavailable` (migration 0048 or 0051 is not applied), `evidence_writer_inactive` (migration 0052 is not applied, or the
 // writer `lid_tmdb_attach` is `off`, `pending` or absent; never an attach before `on`, never an automatic enablement).
 export async function attachGates(env){
  const authority=await readAdmissionAuthority(env);
