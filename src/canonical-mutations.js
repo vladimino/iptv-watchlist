@@ -7,7 +7,7 @@
 // watchlist link, a fingerprint or a prediction (a reviewed or owner value is never touched). Credits are keyed upserts: an existing
 // (film, person, role) keeps its ordinal, a new one is appended or takes a free explicit ordinal, nothing is renumbered, and the
 // D1-only TMDB credits (AIR-286) are never deleted by a roster write.
-import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {assertWritable,database,dropGateReuse,failed,many,one,readAuthority,readWriterGate} from './film-person-authority.js';
 import {bindProducerFence,fenceStatements} from './canonical-producer-fence.js';
 import {readControl,reconcileMetadata} from './film-metadata-provenance.js';
 
@@ -81,6 +81,7 @@ async function commit(env,gate,statements,entities,tail=[]){
  if(statements.length>MUTATION_STATEMENT_CAP||tail.length>2)throw failed('film_person_bounded');
  try{await db.batch([...statements,...tail].map(([sql,params])=>db.prepare(sql).bind(...params)));}
  catch(error){
+  dropGateReuse(env);
   const message=String(error?.message||error);
   if(/CHECK constraint failed/i.test(message)){
    let again;
@@ -162,7 +163,7 @@ export async function mutateFilm(env,input){
  const tail=receiptTail(input.receiptMark,{kind:'film',id});
  if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
  const evidence=evidenceOf(input.evidence);
- const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const gate=bindProducerFence(env,assertWritable(await readWriterGate(env)));
  const db=database(env);
  const redirect=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]);
  if(redirect)throw failed('film_person_redirect');
@@ -205,7 +206,7 @@ export async function mutatePerson(env,input){
  if(input.presence!==undefined&&input.presence!=='existing'&&input.presence!=='absent')throw failed('film_person_invalid');
  if(input.uniqueTrusted!==undefined&&input.uniqueTrusted!==true)throw failed('film_person_invalid');
  const tail=receiptTail(input.receiptMark,{kind:'person',id});
- const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const gate=bindProducerFence(env,assertWritable(await readWriterGate(env)));
  const entities=[{kind:'person',id,expected}];
  const statements=head(gate,entities);
  // ADR 0211 decision 3 (AIR-605): optional caller guards, the same bounded shape as mutateFilm's, asserted INSIDE the batch (an invalidated Film plan, a stale epoch, a lost lease or a moved control generation refuse the Person unit).
@@ -238,7 +239,7 @@ export async function mergeFilms(env,input){
  const from=filmId(input?.from),to=filmId(input?.to),at=text(input?.at);
  if(from===to)throw failed('film_person_invalid');
  const expectedFrom=revisionOf(input?.expected?.from),expectedTo=revisionOf(input?.expected?.to);
- const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const gate=bindProducerFence(env,assertWritable(await readWriterGate(env)));
  const db=database(env);
  const existing=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[from]);
  if(existing){

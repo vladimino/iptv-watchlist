@@ -5,7 +5,7 @@
 //   handover   the statement budget: the caller creates the successor;   paused / generation_moved   the control;   lease_lost / lease_held   the lease;   yield   the EPG publication window (injected predicate).
 // There are NO throughput quotas here (no 2-Film bound, no tick deadline): the only budgets are safety budgets: statements (failing and replayed calls included), steps and the lease. A local stop never counts toward the
 // 72 h fallback and sets no cooldown: the producer step handles outcomes, this module only schedules.
-import {database,many,one} from './film-person-authority.js';
+import {createGateReuse,database,many,one} from './film-person-authority.js';
 import {acquireLease,consumeSignal,readControl,releaseLease,renewLease,runnableSignals} from './catalog-enrichment-store.js';
 import {nextClass,priorityClass} from './catalog-enrichment-plan.js';
 import {processFilm,CODE_VERSION} from './catalog-enrichment-producer.js';
@@ -187,11 +187,13 @@ export async function earliestWake(env,{now}){
 }
 
 // One run. opts: {runId, clock:()=>iso, tools, fetchImpl, coordinator, budget, shouldYield?:async()=>boolean, maxFilms?}. -> {stop, wakeAt?, counts}
-export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),tools,fetchImpl:rawFetch,coordinator=null,budget=BUDGET,shouldYield=null,maxFilms=Infinity}){
+export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),tools,fetchImpl:rawFetch,coordinator=null,budget=BUDGET,shouldYield=null,maxFilms=Infinity,gateReuse=true}){
  // every request the sources actually send, a redirect hop included, is counted at the fetch boundary (a cooldown skip sends none)
  const sent={n:0};
  const fetchImpl=rawFetch?(...args)=>{sent.n++;return rawFetch(...args);}:rawFetch;
  const {env,counter}=countingEnv(rawEnv);
+ // AIR-688: ONE time-bounded gate scope per drain (see createGateReuse); `gateReuse:false` is the measured baseline. Every batch still asserts the marker in its own transaction.
+ if(gateReuse)env.gateReuse=createGateReuse();
  // The background share is measured in COMMITTED units across runs (a handover must not reset it): the recent runs' outbox entries are the baseline.
  let baseLive=0,baseBackground=0;
  let holdSuspected=false,newest=true;

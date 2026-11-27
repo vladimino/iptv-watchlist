@@ -12,7 +12,7 @@ import {pathToFileURL} from 'node:url';
 const SOURCE='src/canonical-film-writers.js';
 const source=fs.readFileSync(SOURCE,'utf8');
 const MUTANTS=[
- ['the marker gate is skipped',"const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});\n const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));","const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});\n const gate={generation:2};",'1'],
+ ['the marker gate is skipped',"const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});\n const gate=fenced.bindProducerFence(env,assertWritable(await readWriterGate(env)));","const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});\n const gate={generation:2};",'1'],
  ['the caller revision is ignored',"const entities=[{kind:'film',id,expected}];\n const statements=fenced.head(gate,entities);","const entities=[{kind:'film',id,expected:snapshot.revision}];\n const statements=fenced.head(gate,entities);",'2'],
  ['a replay opens a batch',"if(plan.noop)return {id,revision:snapshot.revision,written:false","if(false)return {id,revision:snapshot.revision,written:false",'2'],
  ['a blank title overwrites',"if(!blank(filmIn.originalTitle)){","if(filmIn.originalTitle!==undefined&&filmIn.originalTitle!==null){",'6'],

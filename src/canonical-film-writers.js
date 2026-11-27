@@ -15,7 +15,7 @@
 // - Idempotency (owner decision 5): every call carries a stable requestId. Without a receipt table the replay is a no-op by CONTENT: if D1 already holds
 //   exactly the rows the call would write (updated_at aside), no batch is opened. A durable per-request receipt for these writes would need a table beyond the
 //   existing ones; that is documented in ADR 0120 and NOT added here (no migration in this change).
-import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {assertWritable,database,failed,many,one,readWriterGate} from './film-person-authority.js';
 import {fenced,metadataLocked,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
 import {resolveLocalization} from './localization-sources.js';
 import {planMetadataClear,planMetadataProvenance,readProvenance} from './film-metadata-provenance.js';
@@ -308,7 +308,7 @@ export async function writeFilmFacts(env,input){
  const id=fenced.filmId(input?.id),expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at);
  fenced.text(input.requestId);
  const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
- const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const gate=fenced.bindProducerFence(env,assertWritable(await readWriterGate(env)));
  // ADR 0203 (AIR-582): once the membership marker says `sync`, the Letterboxd Sync `membership` effect is the ONLY writer of `watchlist_film`. A facts input that still carries `watchlist` (set, clear or release) is refused
  // here, at the writer every Producer path goes through, so a stale plan or a receipt replay can never become a second writer. The marker is also re-asserted INSIDE the batch below while it is `producer`.
  const membership=input.watchlist!==undefined?await membershipMarker(env):{present:false};
@@ -378,7 +378,7 @@ export async function membershipMarker(env){
 export async function setFilmMembership(env,input){
  const id=fenced.filmId(input?.id),at=fenced.text(input.at);
  if(typeof input.member!=='boolean'||!Number.isInteger(input.version)||input.version<1)throw failed('film_person_invalid');
- const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const gate=fenced.bindProducerFence(env,assertWritable(await readWriterGate(env)));
  const marker=await membershipMarker(env);
  // `baseline: true` is the ONE-TIME baseline reconciliation (ADR 0203): it may also run while the marker is still `producer` (before the owner's switch, with the Producer held); every other caller needs `sync`.
  if(!marker.present||(marker.mode!=='sync'&&!(input.baseline===true&&marker.mode==='producer')))throw failed('film_person_membership_closed');
