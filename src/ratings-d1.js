@@ -214,12 +214,15 @@ function effectGuardStatements(env){
 // ADR 0222 / PR #1018 review: an env may carry `admissionGuards`, the operation-history assertions (`guard.statement` of the Letterboxd admission coordinator) of the identity the caller observed. Every Ratings commit made through it
 // asserts them in its own batch, so an irreversible effect (a link, a fact, a claim) planned against a history that has since moved is refused whole, never half done. Internal code only, never request input; only that
 // exact assertion shape is accepted.
-const ADMISSION_GUARD=/^INSERT INTO film_person_cas \(id,ok\) VALUES \(1,\(SELECT CASE WHEN EXISTS \(SELECT 1 FROM film_person_cas WHERE id=1\) AND \(\(SELECT COUNT\(\*\) FROM canonical_write_receipt WHERE origin=\? AND operation_key=\?\)=\? AND /;
+// AIR-672 / ADR 0217 decision 5b: the same carrier also accepts, and only in its exact shape, the OWNED-ATTEMPT assertion of `ownedAttemptCondition` (the receipt of the key is `pending` with this request id and attempt, and its window has not passed AT THE TIME THE DATABASE EXECUTES the batch).
+const ADMISSION_GUARD=/^INSERT INTO film_person_cas \(id,ok\) VALUES \(1,\(SELECT CASE WHEN EXISTS \(SELECT 1 FROM film_person_cas WHERE id=1\) AND (?:\(\(SELECT COUNT\(\*\) FROM canonical_write_receipt WHERE origin=\? AND operation_key=\?\)=\? AND |\(EXISTS \(SELECT 1 FROM canonical_write_receipt WHERE origin=\? AND operation_key=\? AND request_id=\? AND state='pending' AND attempts=\? AND next_attempt_at>strftime\('%Y-%m-%dT%H:%M:%fZ','now'\)\)\) THEN 1 ELSE 0 END\)\) ON CONFLICT\(id\) DO UPDATE SET ok=excluded\.ok$)/;
 function admissionGuardStatements(env){
  const list=env?.admissionGuards;
  if(list===undefined||list===null)return [];
  if(!Array.isArray(list)||list.length>64)throw failed('ratings_domain_fence');
- return list.map(item=>{
+ return list.map(entry=>{
+  // AIR-672: an item may be a function, called each time a batch is built, so a deadline is compared with the time of the effect and not with a time frozen earlier.
+  const item=typeof entry==='function'?entry():entry;
   if(!Array.isArray(item)||typeof item[0]!=='string'||!ADMISSION_GUARD.test(item[0])||!Array.isArray(item[1])||item[1].length>100)throw failed('ratings_domain_fence');
   return [item[0],item[1]];
  });
