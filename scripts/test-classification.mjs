@@ -421,7 +421,7 @@ export const FILES={
  "catalog-enrichment-discovery.mjs": {
   "suite": "core"
  },
- "migration-0048-discovery-enrichment.mjs": {
+ "migration-0049-discovery-enrichment.mjs": {
   "suite": "core"
  },
  "catalog-enrichment-bootstrap.mjs": {

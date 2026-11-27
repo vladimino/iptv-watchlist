@@ -1,4 +1,4 @@
--- Schema v48: the Discovery scope of the Catalog Enrichment Producer (AIR-684, card C3c-D; ADR 0219 decisions 3, 9 and 11, on the common structures of 0047). ADDITIVE and DORMANT:
+-- Schema v49: the Discovery scope of the Catalog Enrichment Producer (AIR-684, card C3c-D; ADR 0219 decisions 3, 9 and 11, on the common structures of 0047). ADDITIVE and DORMANT:
 --  1. `discovery_transfer.origin` and `origin_batches`: the explicit provenance of a loading transfer. `origin = 'resolver'` is declared ONLY by the resolver run that publishes the catalog (`context.admission`); every other
 --     writer (an import, a restore, an operator tool, an old Worker version) leaves it NULL and is non-authoritative. `origin_batches` is the `batches` value the loading statement stamped with it, so a stale origin that an
 --     old-version statement did not refresh is recognised and dropped at the next loading start. The transfer identity stays the existing `programme_run_id`.
@@ -8,14 +8,14 @@
 --     signals of a RESOLVER publication whose admission row is current (only when the scope is activated at that commit) and deletes every other staged signal of that commit, then clears the origin.
 -- The signals are written ONLY into the existing inbox `enrichment_signal` inside the causal statement's transaction. No existing row changes; the discovery scope row is not created here (activation is C3c-A) so nothing is
 -- emitted until an owner operation activates it. NOT applied by a deploy: applying it is a separate owner GO (AIR-685).
--- It follows a complete version 47 and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file. The version becomes 48 and never goes down.
--- If another change takes number 48 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern (tests/migration-pattern-limit.mjs scans this file).
+-- It follows a complete version 48 and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file. The version becomes 49 and never goes down.
+-- If another change takes number 49 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern (tests/migration-pattern-limit.mjs scans this file).
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
  (SELECT COUNT(*) FROM schema_contract) = 1
- AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 47)
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 48)
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'catalog_enrichment_scope')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'enrichment_signal')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'discovery_transfer')
@@ -78,6 +78,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 48,
-    note = 'Schema v48: the Discovery scope of the Catalog Enrichment Producer (transfer origin, gated admission triggers, staged-signal settlement; dormant). Version 48 follows a complete version 47.'
-WHERE id = 1 AND version = 47;
+SET version = 49,
+    note = 'Schema v49: the Discovery scope of the Catalog Enrichment Producer (transfer origin, gated admission triggers, staged-signal settlement; dormant). Version 49 follows a complete version 48.'
+WHERE id = 1 AND version = 48;
