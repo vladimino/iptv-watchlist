@@ -22,6 +22,8 @@ Metadata records follow the D1 cache, which is served only while its schema v6 m
 
 Errors: `405` for any method but GET, `503` when the Worker has no `DB` binding, `404` for an unknown route, person or film.
 
+**Accepted, not yet delivered:** [ADR 0223](../../adr/0223-retire-unused-d1-catalog-http-views.md) (Accepted) will retire `persons`, `persons/<role>/<key>`, `persons/review` and `films/<id>` with a typed `410`, keep the identity route and `d1PersonReview`, and narrow `status`. Until that retirement is delivered, every route in the table above behaves as documented.
+
 ## Limits
 
 - These routes stay read-only. Only the explicit local stand-in (a Film/Person domain that is not installed) answers `authoritative:false`. The marker-gated canonical bulk read model is in `src/canonical-read-model.js` ([Film/Person reference](../domain/film-person.md)).

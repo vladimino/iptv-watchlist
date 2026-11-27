@@ -17,6 +17,8 @@ export const decisionAfterRevalidation=revalidatedDecision;
 const TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 export const DISCOVERY_TABLES=TABLES;
 const FENCE_SQL='UPDATE discovery_cas SET ok=changes() WHERE id=1';
+// AIR-687: recognises (never builds) the generation fence statement of a batch; it is a pattern, not a generation bump.
+const GENERATION_FENCE_PATTERN=/^UPDATE discovery_authority SET generation\s*=\s*generation\+1 WHERE id=1 AND mode='d1' AND cutover='open' AND generation=\?/;
 // ADR 0142 decision 4: an assigned row (`basis = 'discovery'`, `match_reason` = the observation key) of the published run lives only while the stored
 // decision of its observation is `verified` with the TMDB identity of the Film the row names. A decision write that changes that identity (the status
 // leaves `verified`, the TMDB id or the Film changes) ends its batch with this statement, so the rows go in the same batch as the decision and a batch
@@ -196,7 +198,13 @@ async function commit(db,statements){
  try{await db.batch(prepared);}
  catch(error){
   const message=String(error?.message||error);
-  if(/CHECK constraint failed/i.test(message))throw failed('discovery_fence',error);
+  if(/CHECK constraint failed/i.test(message)){
+   const refused=failed('discovery_fence',error);
+   // AIR-687: the generation this batch's own fence statement expected (its first bound parameter), so a caller can tell a moved counter from a CHECK that failed for another reason.
+   const fenced=statements.find(([text])=>typeof text==='string'&&GENERATION_FENCE_PATTERN.test(text));
+   if(fenced&&Number.isInteger(fenced[1]?.[0]))refused.fenceGeneration=fenced[1][0];
+   throw refused;
+  }
   if(/UNIQUE constraint failed/i.test(message))throw failed('discovery_conflict',error);
   throw failed('discovery_unavailable',error);
  }
