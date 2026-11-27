@@ -764,3 +764,31 @@ Owner-only management of the EPG Channel snapshot ([ADR 0187](../../adr/0187-epg
 **Revision and retries.** A write at a revision that is no longer current is 409 `stale_revision` with `currentRevision`, and writes nothing. A retry is safe: an import whose whole-plan digest equals the stored one, and an override or owner category already stored exactly as requested (policy or category and note), answer 200 `{idempotent: true, changed: false}` with no write, whatever revision the caller read. A failed batch is 503 `storage_unavailable` with `outcome: 'unknown'`; a write whose readback failed is 503 `readback_failed`. Reload the snapshot before repeating either. Nothing is retried by the Worker.
 
 **Rollback.** Removing the route or the page changes no data and no EPG authority. Stored revisions, categories and decisions stay until a later owner-approved import or edit.
+
+## Catalog Enrichment control: `/api/admin/settings`
+
+The authenticated control and readback of the dormant [Catalog Enrichment Producer](../domain/catalog-enrichment.md). It is the control plane only: it starts no run, no check and no Task, and **activation is not reachable from it** (an owner production operation). The page that shows it (`/admin/settings`) is a separate delivery.
+
+### `GET /api/admin/settings`
+
+A pure read of the **effective** state, registered in the GET write baseline ([read side effects](read-side-effects.md)). With the schema absent it answers `{configured: false, reason: 'schema_missing', state: 'inactive'}`. Otherwise it returns:
+
+- `control`: `state`, `generation`, `revision`, `updatedAt`, `updatedBy` (an absent row reads as `inactive`), and `scopes`;
+- `lastRun`: the newest outbox entry, and `draining`, set while the control is `paused` and the newest run has not been written as stopped;
+- `signals` (pending count and oldest), `due` (Films with due work and the oldest `due_since`) and the active `cooldowns` of the shared upstream scopes;
+- `attention`: at most 50 state rows in `identity_disagreement`, `needs_attention` or `deferred_repair`, newest first, each with its `reason`, failure class and signature, `pendingSince`, `retryAt`, the owner-review lists the producer keeps for the Film (`fallbackFill`, `unconfirmedAgreement`, `writtenUnderSupersededAnchor`, `disagreement`) and a ready `retry` action; `attentionTruncated` says whether more exist.
+
+### `POST /api/admin/settings/catalog-enrichment`
+
+| Request | Effect |
+| --- | --- |
+| `{action: 'pause' \| 'resume', expectedRevision, requestId}` | One compare-and-swap on the control row's `revision` through the producer's own control function; every applied change raises `generation` too |
+| `{action: 'retry', filmId, part?, source?, expectedRows, requestId}` | Resets the selected rows to `due`, raises their `refresh_epoch` and the Film's `plan_epoch`, keeps `due_since`, clears failures; a Film in `identity_disagreement` becomes `active` and its anchors are checked again. It writes no metadata and never changes the control revision, so it does not race pause or resume |
+
+`expectedRows` carries, for each row the owner saw, its `part`, `source`, `slot`, `status` and `updatedAt`. A moved row refuses the whole request (`409 stale_rows`) before anything is written, and this holds against a competing writer between the route's first read and its batch: the first statement of the batch asserts, in the same transaction as the effects, that every selected row (targets or not) still has the status and `updatedAt` the owner saw, using the existing batch fence (`film_person_cas`), so a moved row rolls the whole batch back and neither the other targets nor the Film plan epoch change for a refused request. The assertion is one statement over a bound JSON array (two variables whatever the number of rows), so the largest supported request of 60 rows stays far below the 100 variables D1 allows per statement. The outcome is classified by evidence, never by a guess: a returned batch means the whole request committed and is `applied` whatever another writer did afterwards (the readback only shows the current, possibly newer, state, and an unreadable readback is `readback: null` with `readbackUnavailable`); a failed assertion is a confirmed rollback (`409 stale_rows`, `rejected`); when the batch's answer was lost, the only proof of a commit is this attempt's own token: a unique server-side value (never the client `requestId`, which may be reused for different operations) written to the Film row (`ownerRetry`) in the same transaction as the effects, and nothing else counts as evidence. Without it the outcome is `unknown`, never `rejected` and never `applied`: rows that look unchanged do not prove the write will never settle, and a later tick or retry can overwrite the marker. A row that is not retryable is `nothing_to_retry`. A retry of one row moves the `updatedAt` of the Film row too, so the owner reloads before the next retry of that row.
+
+Requirements, all checked before anything is read or written: the method, the Worker's own `Origin`, the header `X-IPTV-Admin-Action: catalog_enrichment_settings`, a JSON content type, then the Access JWT **verified in the Worker** (signature, issuer, audience `ADMIN_ACCESS_AUD`, expiry, a user subject, through the verifier `/mcp` uses) and the owner (`ADMIN_OWNER_EMAIL`). An unconfigured verifier or owner is closed (`503`). Other admin routes check only that the header is present; hardening them is not part of this route.
+
+**Readback.** After a write the route reads the row back and answers `applied` (`200`, with the new state), `rejected` (`409`, with the current state) or, when the readback fails, `503` with `outcome: unknown`. An absent schema answers `503 schema_missing`.
+
+Errors are `400` for a malformed body (`invalid_action`, `invalid_request_id`, `invalid_expected_revision`, `invalid_film`, `invalid_part`, `invalid_source`, `invalid_expected_rows`, `unknown_field`, `invalid_json`), `403` for the gates and `415` for a non-JSON content type.

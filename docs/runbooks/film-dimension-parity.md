@@ -7,11 +7,11 @@ Stage 1 of [ADR 0218](../adr/0218-film-lifecycle-dimensions-revision.md) ([AIR-6
 | Part | Path | Role |
 | --- | --- | --- |
 | Pure classifier | `src/domain/film-dimension-parity.js` | derived facts and the class of one row; no I/O |
-| Page reader | `src/film-dimension-parity.js` | one bounded page of Films from a D1-shaped binding; SELECT only |
+| Page reader | `src/film-dimension-parity.js` | one bounded page of Films (or exactly the Films named by the option `ids`) from a D1-shaped binding; SELECT only |
 | Offline report | `scripts/film-dimension-parity.mjs` | pages through a private SQLite copy opened with `sqlite3 -readonly` |
 | Tests | `tests/film-dimension-parity.mjs` | real SQLite fixtures built from every migration |
 
-Nothing in the Worker imports these modules. No route, MCP tool, Workflow or cron calls them.
+Nothing in the Worker imports these modules. No route, MCP tool, Workflow or cron calls them. The only importer in `src` is the dormant stage-6 [retirement](film-dimension-retirement.md), which classifies the Films of an exact allowlist through the `ids` option.
 
 ## Classes
 
@@ -31,7 +31,7 @@ A copy's stored status is never compared as truth. The difference with the deriv
 - **Metadata:** presence and usability are separate axes. A stored non-null value is `present` whatever its type, with `usable` and a diagnostic (`malformed`, `wrong_type`, `empty`, `not_positive`) under the ADR 0218 decision 4 rules; a null is `unknown` (`null_unproved`). `film_metadata_field` (ADR 0214 PV1) is not live, so no field is ever proved `absent`. Confidence is `unattributed`; no provenance record is trusted to raise it. Freshness is `unknown`.
 - **Localization:** the existing `resolveLocalization` over `owner_review_entry` (the Film and its redirect ancestors), the applied reviewed row and the source rows; the stored provisional row is a legacy candidate of its own source, exactly as at runtime.
 - **Fingerprint and prediction:** read under authorized storage ids only. The reader does **not** read the ratings link index, so candidate coverage is `incomplete` (`ratings_evidence_not_read`) and nothing is ever proved absent or `none`. A known conflict between storage ids stays `conflict`. Compatibility is `incompatible` only for a pointer bound to another fingerprint hash or an invalidated fingerprint; otherwise `unknown` (the ADR-0035 registry and the profile rule are not read).
-- The marker generations of Film/Person, prediction and owner review are read before and after each page; a move refuses the page.
+- The marker generations of Film/Person, prediction and owner review are read before and after each page; a move refuses the page. The result also returns them as `pins` (numbers, not labels), the tokens a later writer must assert inside its own batch to keep a classification from outliving the state it judged.
 
 ## Running it on an offline copy
 
@@ -49,4 +49,4 @@ Measured on the SQLite stand-in with one row per dimension per Film, 25 November
 
 ## Not done here
 
-No live census, no retirement (stage 6), no projection reconciliation (stage 4), and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)). The import change of stage 2 is delivered separately ([AIR-661](https://trello.com/c/1Rv634jd); [D1 schema contract](../reference/data/d1-schema.md)): it keeps every `control` and `unknown_legacy` row this reader reports and every `stale_copy` metadata, fingerprint and prediction row, so a parity run before and after an offline import sees the same classes for them.
+No live census, no retirement run (the stage-6 code is dormant: [retirement runbook](film-dimension-retirement.md)), no projection reconciliation (stage 4), and no readiness predicates (stage 5, [AIR-665](https://trello.com/c/EgOYnLRE)). The import change of stage 2 is delivered separately ([AIR-661](https://trello.com/c/1Rv634jd); [D1 schema contract](../reference/data/d1-schema.md)): it keeps every `control` and `unknown_legacy` row this reader reports and every `stale_copy` metadata, fingerprint and prediction row, so a parity run before and after an offline import sees the same classes for them.

@@ -13,6 +13,8 @@ export const PREFIX_ROUTES={
  '/api/admin/identity-work/owner-action':['/api/admin/identity-work/owner-action'],
  '/api/admin/identity-work':['/api/admin/identity-work','/api/admin/identity-work?type=letterboxd_rated_candidate&limit=5'],
  '/api/admin/channels/':['/api/admin/channels','/api/admin/channels?q=sport&queue=unclassified&limit=5'],
+ '/api/admin/settings':['/api/admin/settings'],
+ '/api/admin/settings/catalog-enrichment':['/api/admin/settings/catalog-enrichment'],
  '/api/admin/posters':['/api/admin/posters','/api/admin/posters?limit=3&cursor=a'],
  '/api/admin/prediction-recovery':['/api/admin/prediction-recovery?film=w1'],
  '/api/admin/prediction-recovery-intent/':['/api/admin/prediction-recovery-intent/preview?films=w1,w2&mode=prediction_only','/api/admin/prediction-recovery-intent/preview?films=w1&mode=fingerprint_and_prediction&ttlHours=24','/api/admin/prediction-recovery-intent/cohort?id=pr_000000000000000000000000'],

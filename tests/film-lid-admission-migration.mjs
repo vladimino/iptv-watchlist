@@ -1,5 +1,5 @@
-// AIR-672 / ADR 0217 (Accepted) step 3: migration 0047 and the immutable `film_lid_admission` row (K2), on the sqlite3-CLI D1 stand-in. No Worker, R2, network or production.
-// Covered: the refusal of a wrong predecessor and what a refused file creates; the accepted file (an empty table, version 47, nothing else changed); every CHECK of an admitted row (only `absent`/`complete`,
+// AIR-672 / ADR 0217 (Accepted) step 3: migration 0048 and the immutable `film_lid_admission` row (K2), on the sqlite3-CLI D1 stand-in. No Worker, R2, network or production.
+// Covered: the refusal of a wrong predecessor and what a refused file creates; the accepted file (an empty table, version 48, nothing else changed); every CHECK of an admitted row (only `absent`/`complete`,
 // shortlink equal to the lid, the lid key, optional year); keep-first (a second row for the lid, any UPDATE of a proof column, DELETE) and the one allowed change: `film_id` (a merge).
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 
-const NEW='0047_film_lid_admission.sql',PREVIOUS='0046_letterboxd_admission_authority.sql';
+const NEW='0048_film_lid_admission.sql',PREVIOUS='0047_catalog_enrichment.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
-assert.ok(files.includes(NEW),'0047 exists');
-assert.equal(files[files.indexOf(NEW)-1],PREVIOUS,'0047 follows 0046');
+assert.ok(files.includes(NEW),'0048 exists');
+assert.equal(files[files.indexOf(NEW)-1],PREVIOUS,'0048 follows 0047');
 const chain=files.slice(0,files.indexOf(NEW));
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lid-admission-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -42,15 +42,15 @@ const row=(over={})=>{
  const before45=objects(stale);
  refused(stale,read(NEW));
  assert.equal(objects(stale),before45,'a refused file creates nothing');
- assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),45);
- const noMarker=copy(t46);ok(noMarker,'DROP TABLE letterboxd_admission_authority');
+ assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),46);
+ const noMarker=copy(t46);ok(noMarker,'DROP TABLE catalog_enrichment_scope');
  refused(noMarker,read(NEW));
  const noTrigger=copy(t46);ok(noTrigger,'DROP TRIGGER schema_contract_no_downgrade');
  refused(noTrigger,read(NEW));
  const taken=copy(t46);ok(taken,'CREATE TABLE film_lid_admission_x (a INTEGER)');
  refused(taken,read(NEW));
  assert.equal(objects(t47),before+4,'exactly the table, its primary-key index and its two triggers are new');
- assert.equal(one(t47,'SELECT version FROM schema_contract WHERE id=1'),47);
+ assert.equal(one(t47,'SELECT version FROM schema_contract WHERE id=1'),48);
  assert.equal(one(t47,'SELECT COUNT(*) FROM film_lid_admission'),0,'the table is empty');
  refused(copy(t47),read(NEW),/./);
 }
@@ -87,4 +87,4 @@ const fresh=()=>{const file=copy(t47);ok(file,"INSERT INTO film (id,contract_ver
  assert.equal(one(f,"SELECT proof_digest FROM film_lid_admission WHERE lid='abc12'"),HEX);
  refused(f,"UPDATE film_lid_admission SET film_id='tmdb:7' WHERE lid='abc12'",/CHECK/i);
 }
-console.log('Film lid admission (AIR-672, migration 0047) passed.');
+console.log('Film lid admission (AIR-672, migration 0048) passed.');

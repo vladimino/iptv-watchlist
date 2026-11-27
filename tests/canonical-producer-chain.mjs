@@ -20,7 +20,7 @@ const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const template=path.join(root,'t.sqlite');
 assert.equal(sqlite(template,chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
-assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),47,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority) then 0032 (dormant EPG Channel authority), 0035 (dormant import receipts), 0036 (lookup indexes), 0037 (dormant Watchlist membership projection), 0038 (Producer outcome outbox, ADR 0208), 0039 (dormant receipt operation key, AIR-600), 0040 (retirement ledger movie_id index, AIR-667), 0041 (dormant identity evidence ledger, ADR 0213), 0042 (dormant identity evidence writer control, ADR 0215), 0043 (film_redirect target index, AIR-647)');
+assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),48,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority) then 0032 (dormant EPG Channel authority), 0035 (dormant import receipts), 0036 (lookup indexes), 0037 (dormant Watchlist membership projection), 0038 (Producer outcome outbox, ADR 0208), 0039 (dormant receipt operation key, AIR-600), 0040 (retirement ledger movie_id index, AIR-667), 0041 (dormant identity evidence ledger, ADR 0213), 0042 (dormant identity evidence writer control, ADR 0215), 0043 (film_redirect target index, AIR-647)');
 assert.equal(Number(one(template,'SELECT COUNT(*) FROM canonical_producer_chain')),0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 let n=0;
@@ -509,7 +509,8 @@ assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0},{film_id:'film:tmdb:8',trusted:0,conflicting:1}]}),{refused:'producer_identity_ambiguous'});
 assert.equal(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9']])}).target,'film:tmdb:9');
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9'],['film:tmdb:9','film:tmdb:10']])}),{refused:'producer_identity_redirect_chain'});
-assert.equal(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}).target,'film:tmdb:6');
+assert.deepEqual(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}),{refused:'producer_identity_ambiguous'},'AIR-671: the minting spelling of an unclaimed movie id is not followed through a redirect');
+assert.equal(resolveIdentity('film:tmdb:5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}).target,'film:tmdb:6','an explicit Film id still follows its redirect');
 
 // Historical mixed fixture (21.11): 386 canonical film:<lid> + 9 existing film:tmdb:<n> with trusted Letterboxd claims -> 395 unique existing owners, 0 shadow Films.
 {

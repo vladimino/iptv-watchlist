@@ -134,8 +134,8 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  const file=fresh();const before2=snapshot(file);
  await assert.rejects(()=>run(file,'Ab1',{options:{onBatch:async()=>{sqlite(file,"UPDATE film_person_authority SET generation=generation+1 WHERE id=1");}}}).then(r=>{if(r.out.outcome==='admitted_lid_only')throw new Error('landed');return r;}));
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM film_lid_admission')[0].n,0);void before2;
- // while migration 0047 is not applied the kind refuses before any effect
- const old=path.join(root,'v46.sqlite');sqlite(old,files.filter(name=>name<'0047').map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));sqlite(old,OPEN);
+ // while migration 0048 is not applied the kind refuses before any effect
+ const old=path.join(root,'v46.sqlite');sqlite(old,files.filter(name=>name<'0048').map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));sqlite(old,OPEN);
  sqlite(old,"UPDATE letterboxd_admission_authority SET mode='closed',generation=1;UPDATE letterboxd_admission_authority SET mode='d1',generation=2,activated_at='"+STAMP+"'");
  const c2=await checker();
  await assert.rejects(()=>admitVerifiedLidOnly(envOf(old),{lid:'Ab1',route:'watchlist_admission',reacquire:c2.reacquire,now:clock()}),code('admission_unavailable'));assert.equal(c2.calls.n,0);

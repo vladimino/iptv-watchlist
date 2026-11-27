@@ -1,9 +1,9 @@
--- Schema v47: the lid-only admission row `film_lid_admission` (AIR-672, delivery step 3 of ADR 0217, Accepted; choices I1, J1 and K2 of the owner's disposition of 25 Nov 2026).
+-- Schema v48: the lid-only admission row `film_lid_admission` (AIR-672, delivery step 3 of ADR 0217, Accepted; choices I1, J1 and K2 of the owner's disposition of 25 Nov 2026).
 -- ONE additive STRICT table and two triggers. No data migration. DORMANT and INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it is a separate,
 -- action-specific owner approval, in the owner's coordinated pending-migration window (AIR-648) and the exact schema chain (ADR 0217 delivery step 7a). No delivered writer reads or writes the table before
 -- the admission activation (ADR 0217 delivery step 9, owner L3 GO), so the apply changes no behaviour. The only rows it writes is the schema_contract version.
--- It follows a complete version 46 and refuses anything else before the table is created: the first statement inserts a row that CHECK (id = 1) forbids (id 0) and so aborts the file (a second apply, a
--- missing schema_contract row and a wrong version included). The version becomes 47 and never goes down.
+-- It was written as 0047 and renumbered to 0048 at merge because AIR-605's 0047 (the Catalog Enrichment Producer schema) landed first. It follows a complete version 47 and refuses anything else before the table is created: the first statement inserts a row that CHECK (id = 1) forbids (id 0) and so aborts the file (a second apply, a
+-- missing schema_contract row and a wrong version included). The version becomes 48 and never goes down.
 --
 -- One row is the immutable, recomputable PAGE-CHECK PROOF of one lid-only Film (ADR 0217 decision 7, K2): the proof of a complete validated Letterboxd film page with a positively absent TMDB relation (H1).
 --   * `lid` is the primary key: one Film per lid, a keep-first fact (the same invariant `film_external_id_one_trusted` gives the trusted `letterboxd` claim, now also on this row).
@@ -17,18 +17,18 @@
 -- The id-block outcome of an admitted row is `absent` and the completeness outcome is `complete`; the CHECKs say so, because only `tmdb_none` ever admits. A state that is not an admission is never a row.
 -- Identifiers, short lowercase codes and ISO-8601 UTC times only. D1 evaluates a LIKE or GLOB pattern of at most 50 bytes, so every CHECK keeps its patterns short (see 0021).
 
--- Accepted is exactly one schema_contract row at version 46 AND the objects this file depends on, by name (PRESENCE checks, not a claim of full schema integrity): the Film admission table the lid-only row
--- sits beside, the receipt table with the 0039 `operation_key` column, the 0046 admission authority marker, the Film external id table with its trusted-owner index, the redirect table, the shared no-downgrade
+-- Accepted is exactly one schema_contract row at version 47 AND the objects this file depends on, by name (PRESENCE checks, not a claim of full schema integrity): the Film admission table the lid-only row
+-- sits beside, the receipt table with the 0039 `operation_key` column, the 0046 admission authority marker, the 0047 Catalog Enrichment scope table, the Film external id table with its trusted-owner index, the redirect table, the shared no-downgrade
 -- trigger, and no object of the new name.
 INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
  (SELECT COUNT(*) FROM schema_contract) = 1
- AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 46)
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 47)
  AND (
   SELECT COUNT(*) FROM sqlite_master
-  WHERE type = 'table' AND name IN ('film_rated_admission', 'canonical_write_receipt', 'letterboxd_admission_authority', 'film_external_id', 'film_redirect')
- ) = 5
+  WHERE type = 'table' AND name IN ('film_rated_admission', 'canonical_write_receipt', 'letterboxd_admission_authority', 'film_external_id', 'film_redirect', 'catalog_enrichment_scope')
+ ) = 6
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'canonical_write_receipt' AND sql LIKE '%operation_key%')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'film_external_id_one_trusted')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'schema_contract_no_downgrade')
@@ -79,6 +79,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 47,
-    note = 'Schema v47: the lid-only admission row film_lid_admission (AIR-672, ADR 0217 K2: keep-first, immutable except film_id, no delete). Empty; no data change. Version 47 follows a complete version 46.'
-WHERE id = 1 AND version = 46;
+SET version = 48,
+    note = 'Schema v48: the lid-only admission row film_lid_admission (AIR-672, ADR 0217 K2: keep-first, immutable except film_id, no delete). Empty; no data change. Version 48 follows a complete version 47.'
+WHERE id = 1 AND version = 47;

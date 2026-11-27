@@ -352,6 +352,9 @@ export const FILES={
  "canonical-producer-events.mjs": {
   "suite": "core"
  },
+ "canonical-producer-movie-ref.mjs": {
+  "suite": "core"
+ },
  "canonical-producer-run-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
@@ -383,6 +386,48 @@ export const FILES={
   "suite": "core"
  },
  "migration-0043-film-redirect-index.mjs": {
+  "suite": "core"
+ },
+ "migration-0047-catalog-enrichment.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-plan.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-store.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-units.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-sources.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-producer.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-drain.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-settings.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-workflow.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-letterboxd-credits.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-monitor.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-events.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-wake.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-bootstrap.mjs": {
   "suite": "core"
  },
  "upstream-cooldown.mjs": {
@@ -983,6 +1028,9 @@ export const FILES={
   "suite": "core"
  },
  "film-dimension-parity.mjs": {
+  "suite": "core"
+ },
+ "film-dimension-retirement.mjs": {
   "suite": "core"
  },
  "film-localization-projection-mutation.mjs": {

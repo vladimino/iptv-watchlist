@@ -100,6 +100,8 @@ async function planLink(db,input){
  const plan=await planFilm(db,{...input,film:survivor,watchlist,releasing:[redirect?.from,...releasingOf(input.releasing)].filter(Boolean)});
  const retirement=redirect?await planRetirement(db,redirect):null;
  if(retirement&&!retirement.release)plan.keepHistory=true;
+ // read BEFORE the transaction (no read is allowed inside it): does the Catalog Enrichment schema (v47) exist, so the retired Film's rows can be transferred before the delete
+ if(retirement?.release)retirement.enrichment=!!await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='catalog_enrichment_member'");
  return {plan,retirement};
 }
 
@@ -231,6 +233,13 @@ async function retireFilm(db,retirement){
  // The race twin of the plan check (planRetirement): a protected row that appeared after the plan makes this insert violate NOT NULL, which
  // aborts the caller's transaction before anything of the retired Film is deleted.
  await db.run(`INSERT INTO film_redirect (from_id,to_film_id,at) SELECT ?,NULL,? WHERE EXISTS (SELECT 1 FROM film_dimension WHERE film_id=? AND ${PROTECTED_ROW_SQL})`,[retirement.from,retirement.at,retirement.from]);
+ // Catalog Enrichment (schema 47): the retained membership moves to the survivor and the retired Film's state rows go before the delete (both reference the Film).
+ if(retirement.to&&retirement.enrichment){
+  await db.run('INSERT OR IGNORE INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) SELECT ?,scope,admitted_at,signal_key FROM catalog_enrichment_member WHERE film_id=?',[retirement.to,retirement.from]);
+  await db.run("INSERT OR IGNORE INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,plan_epoch) SELECT ?,'film','*',0,'active','check_anchors',?,?,0 WHERE EXISTS (SELECT 1 FROM catalog_enrichment_member WHERE film_id=?)",[retirement.to,retirement.at,retirement.at,retirement.to]);
+  await db.run('DELETE FROM catalog_enrichment_state WHERE film_id=?',[retirement.from]);
+  await db.run('DELETE FROM catalog_enrichment_member WHERE film_id=?',[retirement.from]);
+ }
  await db.run('DELETE FROM film_person_credit WHERE film_id=?',[retirement.from]);
  await db.run('DELETE FROM film_metadata WHERE film_id=?',[retirement.from]);
  await db.run('DELETE FROM film_alias WHERE film_id=?',[retirement.from]);

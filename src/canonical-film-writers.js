@@ -23,6 +23,8 @@ export const FILM_FACTS_SOURCE_CAP=10;
 // Owner-approved order (11 Nov 2026) for the selection/overwrite of original_title ONLY, highest first; it is not a ranking of any other field. A value of an unlisted source can fill an empty field but never overwrite anything.
 export const TITLE_SOURCE_ORDER=Object.freeze(['owner','dictionary','tmdb','letterboxd','watchlist','epg','discovery']);
 const TMDB_IDENTITY=/^tmdb:[1-9]\d{0,11}$/;
+// ADR 0217 decision 8d: the spelling `film:tmdb:<n>` is a MINTING namespace, never proof of ownership.
+const SPELLED_TMDB=/^film:tmdb:([1-9]\d{0,11})$/;
 const SOURCE=/^[a-z][a-z0-9_]{0,39}$/;
 const RESERVED=new Set(['owner','dictionary','reviewed']);
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -279,6 +281,11 @@ export async function writeFilmFacts(env,input){
  if(membership.present&&membership.mode==='sync')throw failed('film_person_membership_owned');
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
+ // ADR 0217 decision 8d (AIR-671): a write that would CREATE `film:tmdb:<n>` asserts, INSIDE the fenced batch below, that no row of the movie id exists (any trust, any Film), so a plan made before an attach (or a Discovery admission)
+ // fails the whole batch closed (`film_person_precondition`) and never mints a duplicate. The only row of the movie id a creating write tolerates is the target's own trusted, non-conflicting one (a concurrent admission of the same movie);
+ // a Film created by another batch in the meantime does not lift the requirement (the revision CAS refuses it as well). The writer takes an EXPLICIT Film target and never resolves a movie reference: that is done at the source boundary
+ // (`resolveSourceIdentities`, which also puts the exact owner proof into `guards`, asserted in this same batch).
+ const mint=snapshot.film?null:SPELLED_TMDB.exec(id)?.[1]??null;
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
  // included) with `film_person_precondition`. Without the option nothing changes: the upsert creates the Film, as the EPG Film producer relies on.
  if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');
@@ -286,6 +293,7 @@ export async function writeFilmFacts(env,input){
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
+ if(mint!==null)statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))"),[mint,id]]);
  if(input.requireExisting===true)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
  if(membership.present)statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM watchlist_membership_authority WHERE id=1 AND mode='producer')"),[]]);
  // AIR-572: caller-supplied proof conditions (the Producer's Letterboxd claim / owner / redirect proof of this Film target), asserted INSIDE the same
