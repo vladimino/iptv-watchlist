@@ -710,4 +710,150 @@ function canonicalOf(value){return JSON.stringify(value,Object.keys(value).sort(
  const spec=R.filmDimensionRetireOperation();
  assert.equal(spec.operation,'film_dimension_retire');
 }
+// ---- 16. A deletion is never issued on a checkpoint that cannot be read back (review 2, P1) ----
+{
+ const file=database();
+ copyFilm(file,'film:a','1');
+ const env={DB:d1Standin(file)};
+ const list=(await plan(env)).allowlist,go=await goOf(list);
+ const snapshot=()=>[everything(file),receipts(file).length];
+ const before=snapshot();
+ const base=memory();
+ await assert.rejects(()=>R.applyDimensionRetirement(env,{runId:'p1',allowlist:list,go,checkpoint:{record:base.record,settle:base.settle},coverage,now:clock}),code('film_person_invalid'),'record and settle without lookup: refused at entry');
+ assert.deepEqual(snapshot(),before);
+ assert.equal(base.log.records.length,0,'nothing was even recorded');
+ const other=await fabricate(file,'film:a',['metadata'],{approval:go,proof:{filmPerson:2,prediction:null,claims:'x',retired:'[]',metadata:'x',guards:[]}});
+ const lookups={
+  'record resolves but lookup finds nothing':[async()=>null,R.RETIRE_INTENT_UNRECORDED],
+  'lookup returns a different, valid intent':[async()=>other,R.RETIRE_INTENT_UNRECORDED],
+  'lookup returns a malformed record':[async()=>({version:1,id:'film:a'}),R.RETIRE_INTENT_UNRECORDED],
+  'lookup throws':[async()=>{throw new Error('disk gone');},R.RETIRE_CHECKPOINT_FAILED],
+ };
+ for(const [label,[lookup,expected]] of Object.entries(lookups)){
+  const port=memory();
+  const run=await R.applyDimensionRetirement(env,{runId:'p2',allowlist:list,go,checkpoint:{record:port.record,settle:port.settle,lookup},coverage,now:clock});
+  assert.deepEqual([run.written.length,run.uncertain.length,run.stopped,run.error.id],[0,0,expected,'film:a'],label);
+  assert.deepEqual(snapshot(),before,label+': no row deleted, no revision bump, no receipt');
+  assert.deepEqual(port.log.settles,[],label+': no outcome to settle');
+  assert.deepEqual(run.remaining.map(keyOf),list.map(keyOf),label+': every entry is still to do');
+  accounted(run,list);
+ }
+ // and a port that can read back what it recorded is what makes the same pass write
+ const good=await apply(env,list);
+ assert.equal(good.written.length,1);
+}
+
+// ---- 17. Accounting is by row: a Film that stops with mixed results never counts a row twice, and continues explicitly (review 2, P1) ----
+{
+ // three rows approved, one moved before the apply, the others eligible, the checkpoint refuses the record
+ const file=database();
+ copyFilm(file,'film:a','1');copyFilm(file,'film:b','2');
+ const env={DB:d1Standin(file)};
+ const list=(await plan(env)).allowlist,go=await goOf(list);
+ exec(file,"UPDATE film_dimension SET last_error='x',attempts=3 WHERE film_id='film:a' AND dimension='fingerprint'");
+ const failing=await R.applyDimensionRetirement(env,{runId:'mix-1',allowlist:list,go,checkpoint:memory({failRecord:true}),coverage,now:clock});
+ assert.deepEqual([failing.stopped,failing.cursor,failing.moved.map(keyOf)],[R.RETIRE_CHECKPOINT_FAILED,'',['film:a/fingerprint']]);
+ assert.deepEqual(failing.remaining.map(keyOf),['film:a/metadata','film:a/prediction','film:b/fingerprint','film:b/metadata','film:b/prediction'],'only rows with no disposition are remaining: the moved one is not');
+ accounted(failing,list);
+ // continuation from the cursor under the same GO, with a working checkpoint: the Film is processed again as a whole
+ const next=await R.applyDimensionRetirement(env,{runId:'mix-2',allowlist:list,go,checkpoint:memory(),coverage,after:failing.cursor,now:clock});
+ assert.deepEqual([next.stopped,next.written.map(item=>item.id+':'+item.rows.map(row=>row.dimension)),next.moved.map(keyOf)],[null,['film:a:metadata,prediction','film:b:fingerprint,metadata,prediction'],['film:a/fingerprint']]);
+ accounted(next,list);
+ assert.deepEqual(names(file,'film:a'),['fingerprint','identity','localization'],'the moved row is still there, the rest is gone');
+ // an intent that failed before construction: the same accounting
+ const file1=database();
+ copyFilm(file1,'film:a','1');
+ const env1={DB:d1Standin(file1)};
+ const list1=(await plan(env1)).allowlist,go1=await goOf(list1);
+ exec(file1,"UPDATE film_dimension SET last_error='x',attempts=3 WHERE film_id='film:a' AND dimension='metadata'");
+ const dropped=await R.applyDimensionRetirement(env1,{runId:'mix-3',allowlist:list1,go:go1,checkpoint:{...memory(),record:async()=>{throw new Error('no space');}},coverage,now:clock});
+ assert.deepEqual([dropped.moved.map(keyOf),dropped.remaining.map(keyOf)],[['film:a/metadata'],['film:a/fingerprint','film:a/prediction']]);
+ accounted(dropped,list1);
+ // a delete that may have committed, beside a moved row: uncertain rows are not remaining, and the Film is not passed over
+ const file2=database();
+ copyFilm(file2,'film:a','1');copyFilm(file2,'film:b','2');
+ const list2=(await plan({DB:d1Standin(file2)})).allowlist,go2=await goOf(list2);
+ exec(file2,"UPDATE film_dimension SET last_error='x',attempts=3 WHERE film_id='film:a' AND dimension='fingerprint'");
+ const port=memory();
+ const lost=await R.applyDimensionRetirement({DB:lossy(file2)},{runId:'mix-4',allowlist:list2,go:go2,checkpoint:port,coverage,now:clock});
+ assert.deepEqual([lost.uncertain.length,lost.moved.map(keyOf),lost.cursor],[1,['film:a/fingerprint'],'']);
+ assert.deepEqual(lost.remaining.map(keyOf),['film:b/fingerprint','film:b/metadata','film:b/prediction']);
+ accounted(lost,list2);
+ const clean={DB:d1Standin(file2)};
+ assert.equal((await R.recoverDimensionRetirement(clean,{intent:lost.uncertain[0],checkpoint:port})).state,'applied','recovery first, never a replay');
+ const after=await R.applyDimensionRetirement(clean,{runId:'mix-5',allowlist:list2,go:go2,checkpoint:memory(),coverage,after:lost.cursor,now:clock});
+ assert.deepEqual([after.written.map(item=>item.id),after.moved.map(keyOf)],[['film:b'],['film:a/fingerprint','film:a/metadata','film:a/prediction']],'the recovered Film is found already retired, never written twice');
+ assert.deepEqual(after.moved.filter(item=>item.dimension!=='fingerprint').map(item=>item.reason),['row_absent','row_absent']);
+ accounted(after,list2);
+ assert.equal(receipts(file2).filter(item=>item.state==='applied').length,2,'one applied receipt per retired Film');
+ // an outcome that could not be settled: written, the pass stops, and the continuation finds the rows absent
+ const file3=database();
+ copyFilm(file3,'film:a','1');copyFilm(file3,'film:b','2');
+ const env3={DB:d1Standin(file3)};
+ const list3=(await plan(env3)).allowlist,go3=await goOf(list3);
+ const unsettled=await R.applyDimensionRetirement(env3,{runId:'mix-6',allowlist:list3,go:go3,checkpoint:memory({failSettle:true}),coverage,now:clock});
+ assert.deepEqual([unsettled.written.length,unsettled.cursor,unsettled.stopped],[1,'','retire_checkpoint_settle_failed']);
+ accounted(unsettled,list3);
+ const resume=await R.applyDimensionRetirement(env3,{runId:'mix-7',allowlist:list3,go:go3,checkpoint:memory(),coverage,after:unsettled.cursor,now:clock});
+ assert.deepEqual([resume.written.map(item=>item.id),resume.moved.map(item=>item.reason)],[['film:b'],['row_absent','row_absent','row_absent']]);
+ accounted(resume,list3);
+}
+
+// ---- 18. The budget covers every D1 execution of the pass and is enforced, not only metered (review 2) ----
+{
+ const budgets=[1,2,3,4,5,8,13,21,34,55,89,144,233,377,1000];
+ let completed=null,started=null;
+ for(const budget of budgets){
+  const file=database();
+  copyFilm(file,'film:a','1');copyFilm(file,'film:b','2');
+  const list=(await plan({DB:d1Standin(file)})).allowlist,go=await goOf(list);
+  const stand=d1Standin(file);
+  const run=await R.applyDimensionRetirement({DB:stand},{runId:'bud-'+budget,allowlist:list,go,checkpoint:memory(),coverage,queryBudget:budget,now:clock});
+  const received=stand.calls.queries+stand.calls.batches;
+  assert.ok(received<=budget,'the binding received '+received+' executions on a budget of '+budget);
+  assert.equal(run.d1Queries,received,'the meter equals what the binding actually received, the authority read included');
+  assert.equal(run.d1QueryLimit,budget);
+  accounted(run,list);
+  // the report is the database: written Films are retired, untouched Films keep every row, only an uncertain Film may be either
+  for(const id of ['film:a','film:b']){
+   const length=names(file,id).length;
+   if(run.written.some(item=>item.id===id))assert.equal(length,2,id+' reported written');
+   else if(!run.uncertain.some(item=>item.id===id))assert.equal(length,5,id+' reported untouched on budget '+budget);
+  }
+  if(budget===1)assert.deepEqual([run.stopped,run.written.length,run.remaining.length],['d1_query_budget',0,6],'a budget that cannot cover the authority read starts nothing');
+  if(started===null&&run.written.length>0)started=budget;
+  if(run.stopped===null){completed=budget;break;}
+  assert.ok(run.stopped==='d1_query_budget'||run.uncertain.length>0,'a pass ends early only on the counted budget: '+run.stopped);
+ }
+ assert.ok(started!==null&&completed!==null&&started<=completed,'a larger budget eventually writes and completes: '+started+'/'+completed);
+ // The pass reserves margin before it starts a Film, so a refusal inside a Film's own write needs a limit the pass does not know about: an outer meter that enforces a provider limit lower than
+ // the pass's budget. A refusal there is an unknown outcome, never a guess: the intent is uncertain, nothing is settled as applied, and recovery decides from the receipt and the rows.
+ const {countedEnv}=await load('film-localization-reconciler.js');
+ const file=database();
+ copyFilm(file,'film:a','1');
+ const list=(await plan({DB:d1Standin(file)})).allowlist,go=await goOf(list);
+ const seen=new Set();
+ for(let outer=20;outer<=70;outer++){
+  const f=database();copyFilm(f,'film:a','1');
+  const port=memory();
+  const {env:limited}=countedEnv({DB:d1Standin(f)},{limit:outer});
+  const run=await R.applyDimensionRetirement(limited,{runId:'edge-'+outer,allowlist:list,go,checkpoint:port,coverage,now:clock});
+  accounted(run,list);
+  if(run.uncertain.length){
+   seen.add('uncertain');
+   // The receipt layer reads its own schema status and reports a refused read as `receipt_schema_missing`, so the name varies with where the limit hit; the classification does not: unknown.
+   assert.ok(run.stopped!==null,'the pass stops: '+run.stopped);
+   assert.equal(port.log.settles.at(-1)[1].state,'unknown');
+   const state=await R.recoverDimensionRetirement({DB:d1Standin(f)},{intent:run.uncertain[0],checkpoint:port});
+   assert.ok(['applied','not_applied','unknown'].includes(state.state));
+   assert.equal(receipts(f).filter(item=>item.state==='applied').length,state.state==='applied'?1:0,'recovery agrees with the receipts at limit '+outer);
+   assert.equal(names(f,'film:a').length,state.state==='applied'?2:5,'and with the rows at limit '+outer);
+   seen.add(state.state);
+  }else if(run.written.length)seen.add('written');
+  else seen.add('refused:'+run.stopped);
+ }
+ assert.ok(seen.has('uncertain'),'a refusal inside the Film own write was exercised: '+[...seen]);
+ assert.ok(seen.has('written'),'and a larger limit completes: '+[...seen]);
+}
+
 console.log('film-dimension-retirement ok');

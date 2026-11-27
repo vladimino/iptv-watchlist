@@ -10,8 +10,9 @@
 //   that is not listed is never read for deletion, and a listed row whose stored bytes (rowDigest) or classification moved since the dry run is skipped and reported (`moved`), never retried blind.
 //   The module imposes no Film-count ceiling: the approved allowlist is the scope. Every entry ends in exactly one bucket (written, uncertain, moved, remaining, before the cursor).
 // - PRE-IMAGE BEFORE DELETE. Per Film the immutable intent is the pre-image plus the approval and the proof it was issued under: {id, runId, requestId, digest, at, plannedRevision, postRevision,
-//   approval, proof, rows:[{dimension, preImage}]}. An apply REQUIRES a durable `checkpoint` port and fails closed: `checkpoint.record(intent)` must resolve BEFORE the delete is permitted;
-//   `checkpoint.settle(intent, result)` records the outcome; `checkpoint.lookup(requestId)` returns a recorded intent. The caller (the operation) chooses the storage.
+//   approval, proof, rows:[{dimension, preImage}]}. An apply REQUIRES the full durable `checkpoint` port and fails closed: `checkpoint.record(intent)` must resolve AND `checkpoint.lookup(requestId)`
+//   must return exactly that intent BEFORE the delete is permitted (a checkpoint that cannot be read back could never satisfy recovery or resume); `checkpoint.settle(intent, result)` records the outcome.
+//   The caller (the operation) chooses the storage.
 // - THE PROOF IS FENCED THROUGH THE DELETE. Classification reads several domains; the Film revision and the row image fence only the target Film. The intent therefore carries the read-set TOKENS the
 //   proof stood on, and the ONE batch asserts every one of them again, so a change in any of them after the classification (after the checkpoint, before the commit) rolls the Film back whole:
 //   the Film/Person marker generation the parity page was read under; the target's own identity read-set (its external-id claims, the retirement decisions of its tmdb ids, and that no other Film
@@ -26,7 +27,8 @@
 // - RESTORE. Only an empty `(film_id, dimension)` slot, and only while the Film is still at exactly the recorded post-delete revision; any other state is reported and the newer state is retained.
 //   Code revert is not data rollback: a deploy removes this module and restores no row.
 // - NO INVENTED CEILINGS. The only bounds are real ones: the parity reader's own page (PARITY_PAGE_MAX Films per call), the statement cap of one fenced batch, the D1 provider limit of 1,000
-//   queries per Worker invocation (counted, a stop is normal continuation with explicit `remaining`), and the optional `maxFilms` the approved operation chooses for itself.
+//   queries per Worker invocation (every execution of the pass is counted and the limit is ENFORCED by the meter; a stop is normal continuation with explicit row-level `remaining`), and the optional
+//   `maxFilms` the approved operation chooses for itself.
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
 import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf} from './canonical-receipts.js';
@@ -39,8 +41,9 @@ export const RETIRE_ORIGIN='dimension_retirement';
 // The only dimensions this stage may ever retire (ADR 0218 decision 7 stage 6).
 export const RETIRABLE_DIMENSIONS=Object.freeze(['fingerprint','metadata','prediction']);
 // D1 allows 1,000 queries per Worker invocation on Paid and counts a db.batch() as ONE query (https://developers.cloudflare.com/d1/platform/limits/, as measured in src/film-localization-reconciler.js).
-// A call COUNTS its own D1 calls and stops before the next Film when the next one would not fit: a counted stop against the provider limit, not a product quota. The per-Film estimate seeds the first
-// Film (a fixture measured 11 to 14 queries per applied Film) and is replaced by the largest cost actually seen; the fixed reserve covers the parity read of a chunk.
+// A call COUNTS every D1 execution it makes and the shared meter ENFORCES the budget: an execution beyond it is refused locally and never sent. Before a Film the pass stops when the next one would
+// not fit, a counted stop against the provider limit, not a product quota. The per-Film estimate seeds the first Film (a fixture measured at most 13 queries per applied Film) and is replaced by the
+// largest cost actually seen; the chunk reserve covers the parity read of a chunk. Both are PLANNING MARGINS that choose where to stop; they are not the bound, the refusal is.
 export const RETIRE_D1_QUERY_LIMIT=1000;
 const FILM_QUERY_ESTIMATE=16,CHUNK_READ_RESERVE=100;
 export const RETIRE_INTENT_REQUIRED='retire_intent_required';
@@ -431,7 +434,7 @@ async function commitIntent(env,port,intent,{clock,policy}){
   const outcome=await writeIntent(env,intent,{clock,policy});
   if(appliedOf(outcome,intent))state='applied';
   else{state='unknown';errorClass=outcome?.errorClass||outcome?.reason||outcome?.state||'unclassified';receiptState=outcome?.state??null;}
- }catch(error){errorClass=error?.code||'unclassified';state=REPLAN.has(errorClass)?'not_applied':'unknown';}
+ }catch(error){errorClass=budgetRefused(error)?'d1_query_budget':error?.code||'unclassified';state=REPLAN.has(errorClass)?'not_applied':'unknown';}
  let settleError=null;
  try{await port.settle(intent,{state,errorClass,receiptState,...(state==='applied'?{revision:intent.postRevision}:{})});}catch(error){settleError=error?.code||'retire_checkpoint_settle_failed';}
  return {state,errorClass,settleError};
@@ -476,41 +479,61 @@ export async function resumeDimensionRetirement(env,{intent: given,allowlist: li
  return {...await commitIntent(env,port,intent,{clock,policy}),intent};
 }
 
+// The refusal of an execution beyond the budget reaches the pass wrapped by whichever reader or writer was running; it is recognised anywhere in the cause chain.
+const budgetRefused=error=>{for(let item=error,depth=0;item&&depth<8;item=item.cause,depth++)if(item.code==='d1_query_budget')return true;return false;};
 const budgetOf=value=>{
  if(value===undefined||value===null)return RETIRE_D1_QUERY_LIMIT;
  if(!Number.isInteger(value)||value<1||value>RETIRE_D1_QUERY_LIMIT)throw failed('film_person_invalid');
  return value;
 };
-// APPLY: one pass over the Films of the exact allowlist. input: {runId, allowlist, go:{reference,allowlistDigest}, checkpoint:{record,settle}, coverage?, after?, maxFilms?, queryBudget?, now?, policy?}.
-// Everything is validated before anything is read for writing: the allowlist, the GO digest binding the exact allowlist, the checkpoint port, the marker. Films are processed in id order after `after`
-// (the cursor of a previous pass); for each, the stored rows, the revision and the proof tokens are read BEFORE the stage-1 classification. A listed row whose bytes, classification or proof
-// moved is skipped as `moved` (a NEW dry run and GO replan it); the rest becomes ONE immutable intent carrying the approval and the proof it stands on: `checkpoint.record(intent)` must resolve
-// before the delete is permitted, then ONE receipted atomic fenced batch that asserts the proof again, then `checkpoint.settle`.
-// The scope is the allowlist. A pass ends early only for a real reason, named in `stopped`: `d1_query_budget` (the counted provider limit, `queryBudget` can only lower it), `films_limit` (the
-// `maxFilms` the approved operation chose), or a failure; every allowlist entry is in exactly ONE of `written`, `uncertain`, `moved`, `remaining` or `beforeCursor`, and `cursor` is the last Film fully
-// processed: pass it as `after` with the same allowlist and GO to continue. A Film whose delete may have committed is in `uncertain` with its intent (recover it, never replan it); no blind retry.
+// APPLY: one pass over the Films of the exact allowlist. input: {runId, allowlist, go:{reference,allowlistDigest}, checkpoint:{record,settle,lookup}, coverage?, after?, maxFilms?, queryBudget?, now?, policy?}.
+// Everything is validated before anything is read: the allowlist, the GO digest binding the exact allowlist, the FULL checkpoint port (a port that cannot return what it recorded could never satisfy
+// recovery or resume, so it is refused at entry, before any delete), the budget. Films are processed in id order after `after` (the cursor of a previous pass); for each, the stored rows, the revision
+// and the proof tokens are read BEFORE the stage-1 classification. A listed row whose bytes, classification or proof moved is skipped as `moved` (a NEW dry run and GO replan it); the rest becomes ONE
+// immutable intent carrying the approval and the proof it stands on: `checkpoint.record(intent)` must resolve AND `checkpoint.lookup` must return exactly that intent before the delete is permitted
+// (nothing is deleted on a checkpoint that cannot be read back), then ONE receipted atomic fenced batch that asserts the proof again, then `checkpoint.settle`.
+// BUDGET. The pass meters EVERY D1 execution it makes (the authority read, the parity read, the proof reads, the receipts and the batches) through the shared counter, and that counter ENFORCES the
+// budget: an execution beyond `queryBudget` (at most the provider's 1,000 per invocation) is refused locally and never sent. The estimates (16 per Film, 100 per chunk read) are only planning margins
+// for stopping BEFORE a Film that would not fit; the refusal is the bound. A pass that cannot start, or whose chunk read is refused, ends with `stopped: 'd1_query_budget'` and everything in `remaining`.
+// ACCOUNTING IS BY ROW. Every allowlist entry is in exactly ONE of `written`, `uncertain`, `moved`, `remaining` or `beforeCursor`, whatever happens to its Film: a row already reported `moved` stays
+// `moved` when another row of the same Film then fails to be issued, and only the rows without a disposition are `remaining`. `cursor` is the last Film fully processed, so a stopped Film is after it.
+// CONTINUATION. Pass `cursor` as `after` with the same allowlist and GO. A Film that stopped with mixed results is processed again as a whole: its rows that were `moved` are evaluated again against the
+// present state and are deleted only if they are now exactly the rows the allowlist digest names; its `remaining` rows are processed. A Film in `uncertain` (a delete that may have committed, or an
+// outcome that could not be settled) is NEVER replayed by apply: recover it first (recoverDimensionRetirement, then resumeDimensionRetirement for a `not_applied` one); a continuation then finds its rows
+// absent (reported `moved` with `row_absent`) or still present, and acts only on a fresh intent under the same fences. No blind retry.
 export async function applyDimensionRetirement(env,{runId,allowlist: given,go,checkpoint,coverage=null,after,maxFilms,queryBudget,now,policy}={}){
  if(typeof runId!=='string'||!runId.trim()||runId.length>200)throw failed('film_person_invalid');
- const allowlist=checkAllowlist(given),port=portOf(checkpoint,['record','settle']),approval=await checkGo(go,allowlist);
+ const allowlist=checkAllowlist(given),port=portOf(checkpoint,['record','settle','lookup']),approval=await checkGo(go,allowlist);
  if(maxFilms!==undefined&&(!Number.isInteger(maxFilms)||maxFilms<1))throw failed('film_person_invalid');
  const limit=budgetOf(queryBudget),start=cursorOf(after),clock=clockOf(now);
- assertWritable(await readAuthority(env));
  const listed=new Map();
  for(const item of allowlist){if(!listed.has(item.id))listed.set(item.id,new Map());listed.get(item.id).set(item.dimension,item.rowDigest);}
  const ids=[...listed.keys()].sort(),pending=ids.filter(id=>id>start);
  const out={examined:0,written:[],uncertain:[],moved:[],remaining:[],beforeCursor:allowlist.filter(item=>item.id<=start).map(item=>({id:item.id,dimension:item.dimension})),cursor:start,stopped:null,approval,d1Queries:0,d1QueryLimit:limit,maxQueriesPerFilm:0};
+ const disposed=new Set(),keyOf=(id,dimension)=>id+'\u0000'+dimension;
+ const moved=(id,dimension,code,reason)=>{disposed.add(keyOf(id,dimension));out.moved.push({id,dimension,code,...(reason?{reason}:{})});};
+ const issued=(list,bucket)=>{for(const row of list.rows)disposed.add(keyOf(list.id,row.dimension));bucket.push(list);};
+ const stop=(id,code,extra={})=>{out.stopped=code;if(id!==null&&code!=='d1_query_budget'){out.failedId=id;out.error={id,code,...extra};}};
+ const finish=counter=>{
+  // Explicit accounting by row: whatever has no disposition is named, never silently dropped, and never named twice.
+  for(const id of pending)for(const dimension of listed.get(id).keys())if(!disposed.has(keyOf(id,dimension)))out.remaining.push({id,dimension});
+  out.d1Queries=counter.n;
+  return out;
+ };
+ const {env:counted,counter}=countedEnv(env,{limit});
+ // The authority read is a D1 execution of this pass like any other: it is counted, and refused when the budget cannot cover it.
+ try{assertWritable(await readAuthority(counted));}
+ catch(error){if(budgetRefused(error)){stop(null,'d1_query_budget');return finish(counter);}throw error;}
  const done=new Set();
- const stop=(id,code,extra={})=>{out.stopped=code;if(id!==null){out.failedId=id;out.error={id,code,...extra};}};
- const {env:counted,counter}=countedEnv(env);
  const perFilm=()=>Math.max(out.maxQueriesPerFilm,FILM_QUERY_ESTIMATE);
  chunks:for(let queue=[...pending];queue.length&&!out.stopped;){
   if(maxFilms!==undefined&&done.size>=maxFilms){stop(null,'films_limit');break;}
-  // The chunk is as large as the counted budget allows: the parity read of the chunk plus every Film's own cost must fit what is left of the provider limit.
+  // The chunk is as large as the planning margins say the budget allows; the enforced counter is what actually bounds it.
   const room=limit-counter.n-CHUNK_READ_RESERVE,take=Math.min(PARITY_PAGE_MAX,Math.floor(room/perFilm()),queue.length,maxFilms===undefined?Infinity:maxFilms-done.size);
   if(take<1){stop(null,'d1_query_budget');break;}
   const chunk=queue.splice(0,take);
   let read;
-  try{read=await readFilms(counted,chunk,{coverage});}catch(error){stop(null,error?.code||'unclassified');break;}
+  try{read=await readFilms(counted,chunk,{coverage});}catch(error){stop(null,budgetRefused(error)?'d1_query_budget':error?.code||'unclassified');break;}
   for(const id of chunk){
    if(counter.n+perFilm()>limit){stop(null,'d1_query_budget');break chunks;}
    const before=counter.n;
@@ -518,30 +541,29 @@ export async function applyDimensionRetirement(env,{runId,allowlist: given,go,ch
    const revision=read.revisions.get(id)??0,rows=[];
    for(const [dimension,pinned] of [...listed.get(id)].sort((a,b)=>a[0]<b[0]?-1:1)){
     const decision=evaluate(read,id,dimension);
-    if(!decision.eligible){out.moved.push({id,dimension,code:RETIRE_ROW_CHANGED,reason:decision.reason});continue;}
-    if(await rowDigest(decision.row)!==pinned){out.moved.push({id,dimension,code:RETIRE_ROW_CHANGED,reason:'row_digest'});continue;}
+    if(!decision.eligible){moved(id,dimension,RETIRE_ROW_CHANGED,decision.reason);continue;}
+    if(await rowDigest(decision.row)!==pinned){moved(id,dimension,RETIRE_ROW_CHANGED,'row_digest');continue;}
     rows.push({dimension,preImage:completeImage(imageOf(decision.row))});
    }
    if(!rows.length){done.add(id);out.cursor=id;continue;}
    let intent;
    try{intent=await intentOf({runId,at:clock(),revision,rows,id,approval,proof:proofOfRows(read,id,rows)});}catch(error){stop(id,error?.code||'unclassified');break chunks;}
-   // Fail closed: nothing is deleted for this Film unless its pre-image is durably recorded.
+   // Fail closed: nothing is deleted for this Film unless its pre-image is durably recorded AND the checkpoint returns exactly that intent. A checkpoint that cannot be read back could never
+   // satisfy recovery or resume, so the delete is not permitted on it. The rows of this Film that were not moved stay `remaining`.
    try{await port.record(intent);}catch(error){stop(id,RETIRE_CHECKPOINT_FAILED,{cause:error?.code||null});break chunks;}
+   try{await recordedIntent(port,intent);}catch(error){stop(id,error?.code||RETIRE_CHECKPOINT_FAILED);break chunks;}
    const result=await commitIntent(counted,port,intent,{clock,policy});
    out.maxQueriesPerFilm=Math.max(out.maxQueriesPerFilm,counter.n-before);
-   if(result.state==='applied')out.written.push(intent);
-   else if(result.state==='not_applied')out.moved.push(...intent.rows.map(row=>({id,dimension:row.dimension,code:result.errorClass})));
-   else out.uncertain.push(intent);
+   if(result.state==='applied')issued(intent,out.written);
+   else if(result.state==='not_applied')for(const row of intent.rows)moved(id,row.dimension,result.errorClass);
+   else issued(intent,out.uncertain);
    done.add(id);
    if(result.settleError){stop(id,'retire_checkpoint_settle_failed',{cause:result.settleError});break chunks;}
    if(result.state==='unknown'){stop(id,result.errorClass||'unclassified');break chunks;}
    out.cursor=id;
   }
  }
- // Explicit, resumable accounting: whatever was not processed is named, never silently dropped.
- for(const id of pending)if(!done.has(id))for(const dimension of listed.get(id).keys())out.remaining.push({id,dimension});
- out.d1Queries=counter.n;
- return out;
+ return finish(counter);
 }
 
 // RESTORE: one receipted, atomic, fenced restore of ONE Film from its apply intent (the restore token). The token is validated and bound BEFORE any receipt is reserved: a complete, self-consistent
