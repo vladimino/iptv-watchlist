@@ -37,6 +37,10 @@ One existing Film with 75 actors and a director (two credit chunks), one unresol
 | TMDB requests for the Film that is also rated | 1 |
 | Delayed anchor after the claim event | 1 request, resolved in the next run |
 
+## Declaration path on a scratch combined tree (dated, not part of this change)
+
+On 27 Nov 2026 this branch was merged in a temporary worktree with the AIR-631 branch (#1039, head `bf891d2`), my migration renumbered there to 0050, and the AIR-631 producer scenario run with its provenance control at `enforce` on a scratch database (synthetic films, nothing applied anywhere, the worktree discarded). The writer accepted `metadata.declared` as built here and persisted, for a Film with both complete observations and a confirmed agreement: `synopsis` and `poster` from `tmdb:603` with `language = ru`, `language_basis = explicit`; `year`, `runtime`, `url` and `genres` from `letterboxd:abc` with no language. With TMDB unavailable, the Letterboxd synopsis was persisted as `language = en`, `language_basis = assumed` and every other field without a language. At mode `off` no field row was written and the flat values were written as before. That scenario's own assertion (every field attributed to Letterboxd) holds only for the former provider order and changes with the language rule; the reconciliation of the two branches owns it. This is evidence of the path, not a replacement for the proof on the reconciled branches.
+
 ## Limits
 
 - **Recorded `ru-RU` credits fixture: not delivered.** A recorded response needs a permitted capture and no production TMDB probe is authorized. The director detection uses an explicit, tested set of job strings and reports a crew list without a recognized director as the gap `directors_not_recognized`; whether TMDB localizes `job` under `language=ru-RU` is unproven and stays an open acceptance condition until a captured fixture exists.
