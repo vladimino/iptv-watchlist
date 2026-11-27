@@ -1,0 +1,42 @@
+# Catalog Enrichment Producer: Discovery scope acceptance for AIR-684, 27 Nov 2026
+
+**What this is.** A map from the Discovery-specific acceptance of [ADR 0219](../../adr/0219-discovery-film-enrichment-and-refresh.md) (decision 3 and the planned scenarios) to the executable test that covers it, and the numbers the offline harness printed for the Discovery path. It is **not** a production measurement: a scratch sqlite database built from the real migrations, a synthetic catalog, injected fetches, no Cloudflare, TMDB or production D1 call, and no pilot. The costs are reported, never used as a quota.
+
+| Scenario (ADR 0219) | Covered by |
+| --- | --- |
+| Activation and publication race: an insert before the first activation is history, after it is stream; a row staged before the activation and published after it is stream; a row published before it is history | `migration-0048-discovery-enrichment` section 3a, 3c (schema); `catalog-enrichment-discovery` A1, A5 (the actual `replaceCatalog`) |
+| No-op admission, a new admission of an existing Film, a delayed canonical admission | `catalog-enrichment-drain` Discovery section (existing Film 701, delayed anchor 702 resolved on the claim event, no spin while unresolved) |
+| Competing identities, TV collisions | `catalog-enrichment-discovery` A1 (a TV row with a movie id is never staged or signalled); `migration-0048-discovery-enrichment` section 3a |
+| Repeated, staged and aborted events; transfer recovery | `catalog-enrichment-discovery` A2, A6 (retry settles by identity, an interrupted transfer stays inert and not runnable); `migration-0048-discovery-enrichment` sections 3d to 3g |
+| Old-version writers and import or restore | `migration-0048-discovery-enrichment` sections 3e to 3g (no origin, a stale origin, a later unrelated transfer never promotes); `catalog-enrichment-discovery` A4, B2 (before the apply the code is the former code) |
+| Resolver publication versus import with the actual writers, drained by the producer | `catalog-enrichment-drain` Discovery section (transfer path 740 and 741) |
+| Guarded effect and acknowledgement; no self-wake | `catalog-enrichment-drain` Discovery section (a moved control generation records no member and no acknowledgement; zero pending inbox rows after the producer's own write cycle) |
+| Overlap with rated; one state set, one TMDB response | `catalog-enrichment-drain` Discovery section (Film 710) |
+| Disabled and re-enabled scope: records while disabled, held, caught up on re-enable; superseded admission keeps its membership | `catalog-enrichment-drain` Discovery section (Films 720 and 701) |
+| Source-change proof (verified per-part version, one pure projection shared with the producer) | `catalog-enrichment-plan` (versions); `catalog-enrichment-discovery` C (unit); `catalog-enrichment-producer` Discovery section against the producer's persisted `source_version` of every part: identical complete response (no refetch), changed credits, a changed runtime after completed enrichment, an equal version with an incomplete part, verified absence, missing or malformed sections, another request language |
+| The real revalidation path: durable signal, wake from an idle producer, unchanged observation wakes nothing, a failed enqueue keeps the key retryable, a lost lease applies nothing | `discovery-revalidation` (the last section, on the real chain) |
+| Credits without a storage cap, typed Russian title | `catalog-enrichment-drain` Discovery section (75 actors and a director: 76 credits in two chunks, Russian title of the producer's own TMDB response) |
+| Mixed live and background progress, bounded examined work, no artificial quota | `catalog-enrichment-drain` (priority end to end, with the discovery scope rows; unchanged by this change) |
+| Dormancy | the migration creates no scope row; nothing is emitted before an owner activation; the code is the former code before the apply (`catalog-enrichment-discovery` B2) |
+
+## Measured on the Discovery path (offline, synthetic, one run of the harness)
+
+One existing Film with 75 actors and a director (two credit chunks), one unresolved admission in the same run:
+
+| Measure | Value |
+| --- | --- |
+| Signals consumed in the first run | 2 (one resolved, one left pending: unresolved) |
+| Films enriched in the first run | 1 |
+| D1 statements in that run | 3134 (almost all the 75 Person units and the credit chunks) |
+| Receipted units in that run | 80 |
+| TMDB requests for the Film | 1 (core, credits and translations share one response) |
+| Wall time of that run on the scratch database | about 0.7 s |
+| Members after the whole scenario | `discovery` 6, `rated` 1 |
+| TMDB requests for the Film that is also rated | 1 |
+| Delayed anchor after the claim event | 1 request, resolved in the next run |
+
+## Limits
+
+- Synthetic data and a local sqlite stand-in: the figures are not D1 latencies and say nothing about EPG contention or production volume.
+- Per-scope latency and oldest-due age in production come from the existing Monitor facts after an owner activation; none is measured here.
+- The apply (AIR-685) and the activation (C3c-A) are separate owner operations and are not exercised against any real database.

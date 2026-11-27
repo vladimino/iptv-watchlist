@@ -407,12 +407,13 @@ async function retryableFenceCollision(env,error,programmeRunId,lease){
  if(!(Number(gate.generation)>error.fenceGeneration))return false;
  return await renewDiscoveryLease(env,lease)===true;
 }
-// AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part digests of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that already
-// holds a retained Discovery membership only. Best effort and silent: the module is in the Worker scope only (offline imports of this file have none), a Film outside the scope or an absent schema writes nothing, and a failure never
-// fails or delays the chunk (the producer's own events and the reconcile recover a missed signal). It fetches nothing and writes no canonical table.
-async function noteCatalogSourceChange(env,tmdbId,movie){
- if(typeof CatalogEnrichmentDiscovery==='undefined')return;
- try{await CatalogEnrichmentDiscovery.emitSourceChanged(env,{tmdbId:String(tmdbId),movie});}catch{/* never a Discovery failure */}
+// AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part versions of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that
+// already holds a retained Discovery membership only, under the revalidation's own Discovery lease. It fetches nothing and writes no canonical table. -> 'written' | 'unchanged' | 'absent' | 'failed'. The module exists in the Worker
+// scope only (offline imports of this file have none): without it, or before the schema is applied, the answer is 'absent' and the revalidation proceeds as before. A 'failed' answer is NOT swallowed: the caller must leave the
+// verified outcome undone so the key stays eligible and the observation is made again (a verified change is never lost to a failed enqueue); the module has already woken the producer in case the write landed.
+async function noteCatalogSourceChange(env,tmdbId,movie,lease){
+ if(typeof CatalogEnrichmentDiscovery==='undefined')return 'absent';
+ try{return (await CatalogEnrichmentDiscovery.emitSourceChanged(env,{tmdbId:String(tmdbId),movie,lease})).state;}catch{return 'failed';}
 }
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}
@@ -1091,7 +1092,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const revalidateDrift=async(key,previous,candidate,plan)=>{
    try{
     const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
-    await noteCatalogSourceChange(env,previous.tmdbId,movie);
+    if(await noteCatalogSourceChange(env,previous.tmdbId,movie,lease)==='failed'){revalidation.deferred++;return 'break';}
     const known=knownScorerCandidates(aliasIndex,candidate);
     // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
     // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.

@@ -117,49 +117,85 @@ const catalog=(...ids)=>Object.fromEntries(ids.map(id=>['tmdb_'+id,film(id)]));
  assert.equal(sql(file,'SELECT version FROM schema_contract')[0].version,47);
 }
 
-// ---- C. the source_changed emitter ----
+// ---- C. the source_changed emitter: unit level (the parity with the producer's persisted state and the real revalidation path are proved in tests/catalog-enrichment-producer.mjs and tests/discovery-revalidation.mjs) ----
 const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'ru synopsis',poster_path:'/p.jpg',genres:[{name:'Боевик'}],credits:{cast:[{id:11,name:'A',order:0},{id:13,name:'B',order:1}],crew:[{id:12,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
 {
- const digests=await D.tmdbPartDigests(movie(),603);
- assert.ok(['core','credits','localization'].every(part=>/^[0-9a-f]{64}$/.test(digests[part])));
- assert.equal(await D.tmdbPartDigests(movie({id:604}),603),null,'a document of another movie is not read');
- assert.equal(await D.tmdbPartDigests(movie(),'abc'),null);
- // parity: the localization digest IS the producer's source version for the same response; the core digest ignores what the request language changes
+ const versions=await D.tmdbPartVersions(movie(),603);
+ assert.ok(['core','credits','localization'].every(part=>/^[0-9a-f]{64}$/.test(versions[part])));
+ assert.equal(await D.tmdbPartVersions(movie({id:604}),603),null,'a document of another movie is not read');
+ assert.equal(await D.tmdbPartVersions(movie(),'abc'),null);
+ // the same pure projection as the producer: each part IS what Plan computes from the parsed response
  const parsed=parseTmdb(movie(),'603');
- assert.equal(digests.localization,await Plan.digestOf({source:'tmdb',anchor:'603',title:parsed.title.value}),'digest parity with the producer for the localization part');
- const other=await D.tmdbPartDigests(movie({overview:'en synopsis',poster_path:'/q.jpg',genres:[{name:'Action'}]}),603);
- assert.equal(other.core,digests.core,'a synopsis, genre or poster of another request language is not a change');
- assert.notEqual((await D.tmdbPartDigests(movie({runtime:137}),603)).core,digests.core,'a runtime change is');
- assert.notEqual((await D.tmdbPartDigests(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[]}}),603)).credits,digests.credits,'a changed credit set is');
- assert.notEqual((await D.tmdbPartDigests(movie({credits:undefined}),603)).credits,digests.credits,'an unreadable credits section is not "no credits"');
- assert.notEqual((await D.tmdbPartDigests(movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Другая'}}]}}),603)).localization,digests.localization);
+ assert.equal(versions.core,await Plan.coreVersion('tmdb','603',parsed.fields));
+ assert.equal(versions.credits,await Plan.creditsVersion('tmdb','603',parsed.credits));
+ assert.equal(versions.localization,await Plan.localizationVersion('tmdb','603',parsed.title));
+ // the request language does not move any part: a localized synopsis, genre or poster is not a change
+ assert.deepEqual(await D.tmdbPartVersions(movie({overview:'en synopsis',poster_path:'/q.jpg',genres:[{name:'Action'}]}),603),versions);
+ // real changes do
+ assert.notEqual((await D.tmdbPartVersions(movie({runtime:137}),603)).core,versions.core);
+ assert.notEqual((await D.tmdbPartVersions(movie({release_date:'2000-01-01'}),603)).core,versions.core);
+ assert.notEqual((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[]}}),603)).credits,versions.credits,'a changed credit set');
+ assert.notEqual((await D.tmdbPartVersions(movie({credits:{cast:[{id:13,name:'B',order:0},{id:11,name:'A',order:1}],crew:[{id:12,name:'D',job:'Director'}]}}),603)).credits,versions.credits,'a reordered one (the chunks depend on the order)');
+ assert.notEqual((await D.tmdbPartVersions(movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Другая'}}]}}),603)).localization,versions.localization);
+ // a valid empty credit set and a verified absence of a Russian title ARE verified coverage with a version of their own
+ const empty=await D.tmdbPartVersions(movie({credits:{cast:[],crew:[]},translations:{translations:[{iso_639_1:'de',iso_3166_1:'DE',data:{title:'Matrix'}}]}}),603);
+ assert.ok(/^[0-9a-f]{64}$/.test(empty.credits)&&/^[0-9a-f]{64}$/.test(empty.localization));
+ assert.notEqual(empty.credits,versions.credits);assert.notEqual(empty.localization,versions.localization);
+ // missing, malformed or unsupported sections are NOT verified coverage: no version, never "no data"
+ const noCredits=await D.tmdbPartVersions(movie({credits:undefined}),603);
+ assert.equal(noCredits.credits,null);assert.equal(noCredits.core,versions.core);assert.equal(noCredits.localization,versions.localization);
+ assert.equal((await D.tmdbPartVersions(movie({credits:{cast:'x',crew:[]}}),603)).credits,null,'a malformed credits section');
+ assert.equal((await D.tmdbPartVersions(movie({translations:undefined}),603)).localization,null,'a missing translations section');
+ assert.equal((await D.tmdbPartVersions(movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:null}]}}),603)).localization,null,'a malformed translation');
+ assert.equal((await D.tmdbPartVersions(movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'UA',data:{title:'A'}},{iso_639_1:'ru',iso_3166_1:'BY',data:{title:'B'}}]}}),603)).localization,null,'an ambiguous selection is an owner decision, not a version');
 }
 {
  const {file,env}=await setup({activate:true});
- const db=env.DB;
  const FILM='film:tmdb:603';
  sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('${FILM}',2,NULL,'M','${T}');INSERT INTO film_external_id VALUES ('${FILM}','tmdb','603',1,0,NULL)`);
- const changed=()=>sql(file,"SELECT part,state,version,acked_version FROM enrichment_signal WHERE kind='source_changed' ORDER BY part");
- // no retained membership: nothing is written
- assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T}),{emitted:false});
- assert.deepEqual(changed(),[],'a Film with no Discovery membership has no signal');
- sql(file,`INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('${FILM}','discovery','${T}','k')`);
- assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T})).emitted,true);
- assert.deepEqual(changed(),[{part:'core',state:'consumed',version:1,acked_version:1},{part:'credits',state:'consumed',version:1,acked_version:1},{part:'localization',state:'pending',version:1,acked_version:0}],
-  'first sight: core and credits are a consumed baseline (not a change); localization is pending and dropped by the producer without a fetch when the applied source version equals the digest');
- // an identical observation writes nothing
- assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T})).emitted,false,'an identical digest writes and wakes nothing');
- assert.deepEqual(changed().map(r=>r.version),[1,1,1]);
- // a real change re-arms exactly the changed part
- assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[]}}),at:T})).emitted,true);
- assert.deepEqual(changed(),[{part:'core',state:'consumed',version:1,acked_version:1},{part:'credits',state:'pending',version:2,acked_version:1},{part:'localization',state:'pending',version:1,acked_version:0}]);
- // a redirected or conflicting identity, and another movie, write nothing
- assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({id:999}),at:T}),{emitted:false,reason:'not_this_movie'});
- // a pending credits signal is runnable (the member exists) and the producer's consume reopens the part
- assert.deepEqual((await S.runnableSignals(env,{now:'2026-11-27T11:00:00.000Z'})).filter(s=>s.kind==='source_changed').map(s=>s.part),['credits','localization']);
- // before the apply (schema 47) the emitter ends quietly
+ const changed=()=>sql(file,"SELECT part,state,version,acked_version FROM enrichment_signal WHERE kind='source_changed' AND subject='film:tmdb:603' ORDER BY part");
+ const wakes=[];
+ globalThis.CatalogEnrichmentRunner={hasRunnable:async()=>{wakes.push('has');return true;},kick:async()=>{wakes.push('kick');}};
+ try{
+  // no retained membership: nothing is written, nothing wakes
+  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T}),{state:'unchanged',parts:[]});
+  assert.deepEqual(changed(),[]);assert.deepEqual(wakes,[]);
+  sql(file,`INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('${FILM}','discovery','${T}','k')`);
+  // the first observation of a Film that holds a membership IS signalled (the producer, not the observer, decides from its stored source version whether it needs a fetch)
+  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T}),{state:'written',parts:['core','credits','localization']});
+  assert.deepEqual(changed().map(r=>[r.part,r.state,r.version]),[['core','pending',1],['credits','pending',1],['localization','pending',1]]);
+  assert.deepEqual(wakes,['has','kick'],'woken after the write');
+  // an identical observation changes nothing and wakes nothing (the count is the batch's own changes(), not a scan)
+  wakes.length=0;
+  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T}),{state:'unchanged',parts:[]});
+  assert.deepEqual(wakes,[]);assert.deepEqual(changed().map(r=>r.version),[1,1,1]);
+  // an unrelated change elsewhere cannot make this attempt look written
+  sql(file,`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) VALUES ('source_changed','film:other','tmdb','core',1,0,'pending','${'1'.repeat(64)}','discovery_revalidation','${T}',0)`);
+  assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie(),at:T})).state,'unchanged');
+  // a real change re-arms exactly the changed part
+  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[]}}),at:T}),{state:'written',parts:['credits']});
+  assert.deepEqual(sql(file,"SELECT part,version FROM enrichment_signal WHERE kind='source_changed' AND subject='film:tmdb:603' ORDER BY part").map(r=>[r.part,r.version]),[['core',1],['credits',2],['localization',1]]);
+  // a missing credits section is not verified coverage: it writes no credits signal and cannot re-arm one
+  const before=changed().find(r=>r.part==='credits').version;
+  assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({credits:undefined}),at:T})).state,'unchanged');
+  assert.equal(changed().find(r=>r.part==='credits').version,before);
+  // another movie, a lost lease, a redirected Film and a conflicting claim write nothing
+  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({id:999}),at:T}),{state:'absent',parts:[]});
+  const gone={id:'lease-gone',expiresAt:Date.now()-1000};
+  assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({runtime:150}),at:T,lease:gone})).state,'unchanged','a Discovery lease that is not held applies nothing');
+  sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:target',2,NULL,'T','${T}');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('${FILM}','film:target','${T}')`);
+  assert.equal((await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({runtime:151}),at:T})).state,'unchanged','a redirected Film');
+  // a failed write is REPORTED (never swallowed) and the producer is still woken in case it landed
+  wakes.length=0;
+  const real=env.DB;
+  env.DB={...real,prepare:sqlText=>{if(/INSERT INTO enrichment_signal/.test(sqlText))throw new Error('D1 down');return real.prepare(sqlText);},batch:real.batch.bind(real)};
+  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({runtime:152}),at:T}),{state:'failed',parts:[]});
+  assert.deepEqual(wakes,['has','kick'],'woken after an uncertain outcome');
+  env.DB=real;
+ }finally{delete globalThis.CatalogEnrichmentRunner;}
+ // before the apply of the producer schema the emitter ends quietly
  const old=await setup({schema:46});
- assert.deepEqual(await D.emitSourceChanged(old.env,{tmdbId:'603',movie:movie(),at:T}),{emitted:false,reason:'schema_absent'});
+ assert.deepEqual(await D.emitSourceChanged(old.env,{tmdbId:'603',movie:movie(),at:T}),{state:'absent',parts:[]});
 }
 
 // ---- D. the activation preflight ----

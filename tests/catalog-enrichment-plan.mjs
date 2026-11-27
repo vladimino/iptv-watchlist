@@ -231,5 +231,29 @@ function CORE_ALL(waiting,reason){return P.CORE_FIELDS.every(field=>waiting[fiel
  assert.equal(holds(P.controlGuard(1)),false,'a resume raises the generation too: the stale plan stays refused');
  assert.equal(holds(P.controlGuard(3)),true);
 }
+// ---- AIR-684: the source version projection shared by the producer and every observer (ADR 0219 decision 2) ----
+{
+ const fields={year:1999,runtime:136,synopsis:'a',poster:'https://img/a.jpg',url:'https://www.themoviedb.org/movie/603',genres:['Action']};
+ const core=await P.coreVersion('tmdb','603',fields);
+ assert.match(core,/^[0-9a-f]{64}$/);
+ assert.equal(await P.coreVersion('tmdb','603',{...fields,synopsis:'другое',poster:'https://img/b.jpg',genres:['Боевик']}),core,'a localized synopsis, poster or genre name is not a change of the core version');
+ assert.notEqual(await P.coreVersion('tmdb','603',{...fields,runtime:137}),core);
+ assert.notEqual(await P.coreVersion('tmdb','604',fields),core,'the anchor is part of the identity');
+ assert.notEqual(await P.coreVersion('letterboxd','603',fields),core,'and so is the source');
+ const items=[{role:'director',key:'12',name:'D'},{role:'actor',key:'11',name:'A'}];
+ const credits=await P.creditsVersion('tmdb','603',{status:'ok',items});
+ assert.match(credits,/^[0-9a-f]{64}$/);
+ assert.notEqual(await P.creditsVersion('tmdb','603',{status:'ok',items:[items[1],items[0]]}),credits,'the order is part of the set (the chunks follow it)');
+ assert.notEqual(await P.creditsVersion('tmdb','603',{status:'ok',items:[]}),credits);
+ assert.match(await P.creditsVersion('tmdb','603',{status:'ok',items:[]}),/^[0-9a-f]{64}$/,'a valid empty set is verified coverage');
+ assert.equal(await P.creditsVersion('tmdb','603',{status:'unreadable',items:[]}),null,'an unreadable section has no version');
+ assert.equal(await P.creditsVersion('tmdb','603',undefined),null);
+ assert.notEqual(await P.creditsVersion('letterboxd','x',{status:'ok',items:[{role:'actor',key:null,name:'One',nameOnly:true}]}),await P.creditsVersion('letterboxd','x',{status:'ok',items:[{role:'actor',key:null,name:'Two',nameOnly:true}]}),'a name-only credit is told by its name');
+ const value=await P.localizationVersion('tmdb','603',{status:'value',value:'Матрица'});
+ assert.equal(value,await P.digestOf({source:'tmdb',anchor:'603',title:'Матрица'}),'the value version keeps the form already stored by the producer');
+ const absent=await P.localizationVersion('tmdb','603',{status:'absent'});
+ assert.match(absent,/^[0-9a-f]{64}$/);assert.notEqual(absent,value);
+ for(const status of ['unreadable','ambiguous','unsupported'])assert.equal(await P.localizationVersion('tmdb','603',{status}),null,status+' coverage has no version');
+}
 assert.ok(fs.existsSync('src/catalog-enrichment-plan.js'));
 console.log('catalog enrichment plan: ok');

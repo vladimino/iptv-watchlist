@@ -1,59 +1,82 @@
 // AIR-684 (card C3c-D; ADR 0219 decisions 2, 3 and 4). The DISCOVERY-SPECIFIC intake of the Catalog Enrichment Producer. The common mechanism (inbox, scope row, retained member, drainer, producer step) is AIR-605's and is not
 // copied here; this module only adds what is Discovery's own:
-//   - `tmdbPartDigests`: the verified per-part digests of ONE TMDB response of a Film (core, credits, localization), a pure function of the parsed response and the anchor, with the SAME parser the producer's own
-//     fetcher uses (`parseTmdb`), so a Discovery revalidation and the producer's fetch cannot disagree about what a part is;
-//   - `emitSourceChanged`: the `source_changed` emitter of the Discovery revalidation: one inbox row per part, written ONLY for a Film that already holds a retained Discovery membership, so it records nothing before the scope
-//     is activated and nothing for a Film that belongs to no scope; an identical digest writes nothing and wakes nothing (the cause digest is the change token);
+//   - `tmdbPartVersions`: the verified per-part versions of ONE TMDB response (core, credits, localization) from the producer's own pure projection (`Plan.coreVersion` and its siblings, which the producer stores as
+//     `source_version` when a part is complete) and its own parser (`parseTmdb`), so an observer and the producer cannot disagree about what a part is; only VERIFIED sections have one;
+//   - `emitSourceChanged`: the `source_changed` emitter of the Discovery revalidation: one inbox row per verified part, written ONLY for a Film that already holds a retained Discovery membership (so nothing
+//     before the scope is activated and nothing for a Film of no scope) and only while the revalidation's Discovery lease is held; an identical digest writes nothing and wakes nothing; a failed write is REPORTED so the caller keeps
+//     the verified outcome retryable;
 //   - `activationPreflight`: the READ-ONLY proof C3c-A needs before it sets `activated` (compatible emitter and settlement deployed, no transfer loading, no stale staged signal, no unexpected membership).
 // DORMANT: nothing reads the preflight in the Worker, and the emitter is a no-op without the scope tables, without the Discovery scope's retained members and without an active producer; it never fetches, never writes a canonical
-// table and never touches the control. The language of the Discovery detail request is `ru-RU`, so the CORE digest covers only the language-independent fields (year and runtime): a synopsis, genre names and a poster path vary
-// with the request language and would raise a false change; a real change of those is found by the producer's own fetch. Credits (the role and the provider key of each credit) and the translations list do not depend on it.
+// table and never touches the control. The Discovery detail is requested in `ru-RU`, so the core version covers only what a request language cannot change (year, runtime, url): a localized synopsis, genre name or poster path is
+// not a change (the producer still writes every approved field). A part whose section is not verified is never signalled; the first observation is compared by the PRODUCER against its stored `source_version`, never assumed.
 import {parseTmdb} from './catalog-enrichment-sources.js';
-import {digestOf} from './catalog-enrichment-plan.js';
+import {coreVersion,creditsVersion,localizationVersion} from './catalog-enrichment-plan.js';
 import {database,failed,many,one} from './film-person-authority.js';
 
 const TMDB_ID=/^[1-9]\d{0,11}$/;
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-// -> {core, credits, localization} (SHA-256 hex) of a TMDB movie detail with `credits` and `translations`, or null when the document is not that movie's.
-export async function tmdbPartDigests(movie,tmdbId){
+// The verified per-part versions of one TMDB movie response, from the SAME pure projection the producer stores as `source_version` (`Plan.coreVersion`, `creditsVersion`, `localizationVersion`) and the SAME parser as its
+// fetcher. -> {core, credits, localization} where a part whose section is not VERIFIED (unreadable credits, an unreadable, ambiguous or unsupported translations section) is null, or null as a whole when the document is not
+// that movie's. A null part is never signalled.
+export async function tmdbPartVersions(movie,tmdbId){
  if(!TMDB_ID.test(String(tmdbId)))return null;
  const parsed=parseTmdb(movie,String(tmdbId));
  if(!parsed)return null;
  const anchor=String(tmdbId);
- // core: only what the request language cannot change. credits: an unreadable section has its own digest, never "no credits". localization: exactly what the producer applies as the part's source version.
- const core=await digestOf({source:'tmdb',part:'core',anchor,fields:{year:parsed.fields.year,runtime:parsed.fields.runtime}});
- const credits=await digestOf({source:'tmdb',part:'credits',anchor,status:parsed.credits.status,items:parsed.credits.items.map(item=>[item.role,item.key])});
- const title=parsed.title;
- const localization=await digestOf(title.status==='value'?{source:'tmdb',anchor,title:title.value}:{source:'tmdb',part:'localization',anchor,status:title.status});
- return {core,credits,localization};
+ return {core:await coreVersion('tmdb',anchor,parsed.fields),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
 }
-// The statements of one verified observation. A part is written only for a Film that holds a Discovery membership AT THE TIME OF THE WRITE; the same upsert as every emitter (a new row is version 1, an existing row is raised and pending
-// again), except that an identical digest changes nothing, so a repeated revalidation of an unchanged Film writes and wakes nothing.
-export function sourceChangedStatements({tmdbId,digests,at}){
- if(!TMDB_ID.test(String(tmdbId))||!digests||!ISO.test(String(at)))throw failed('film_person_invalid');
- return ['core','credits','localization'].map(part=>{
-  if(!/^[0-9a-f]{64}$/.test(String(digests[part]||'')))throw failed('film_person_invalid');
-  // The FIRST sight of a part is not a change. Localization has a stored source version with the same digest the producer applies, so its first signal is `pending` and the producer drops it without a fetch when the part
-  // is complete for that version. Core and credits keep no comparable stored digest, so their first sight is recorded as an already CONSUMED baseline (no refresh); only a later DIFFERENT digest re-arms them.
-  const baseline=part!=='localization';
-  return [`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) SELECT 'source_changed',e.film_id,'tmdb',?,1,?,?,?,'discovery_revalidation',?,0 FROM film_external_id e JOIN catalog_enrichment_member m ON m.film_id=e.film_id AND m.scope='discovery' WHERE e.scheme='tmdb' AND e.value=? AND e.trusted=1 AND e.conflicting=0 AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest`,[part,baseline?1:0,baseline?'consumed':'pending',digests[part],at,String(tmdbId)]];
- });
+// One statement per verified part, each followed by `SELECT changes()` so the caller reads the rows THIS batch changed (never a count over the catalog). A part is written only for a Film that holds a Discovery membership at the
+// time of the write and still holds the trusted, non-conflicting, non-redirected claim; with a `lease`, only while the Discovery lease of this revalidation is still held. The upsert re-arms an existing row only when the digest
+// differs, so an observation identical to the stored one changes nothing. The producer decides, from its own stored `source_version` and part status, whether a signal needs a fetch: equal and complete is dropped without one.
+export function sourceChangedStatements({tmdbId,versions,at,lease=null}){
+ if(!TMDB_ID.test(String(tmdbId))||!versions||!ISO.test(String(at)))throw failed('film_person_invalid');
+ const held=lease?' AND EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?)':'';
+ const out=[];
+ for(const part of ['core','credits','localization']){
+  const digest=versions[part];
+  if(digest==null)continue;
+  if(!/^[0-9a-f]{64}$/.test(String(digest)))throw failed('film_person_invalid');
+  out.push([`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) SELECT 'source_changed',e.film_id,'tmdb',?,1,0,'pending',?,'discovery_revalidation',?,0 FROM film_external_id e JOIN catalog_enrichment_member m ON m.film_id=e.film_id AND m.scope='discovery' WHERE e.scheme='tmdb' AND e.value=? AND e.trusted=1 AND e.conflicting=0 AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id)${held} ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest`,[part,digest,at,String(tmdbId),...(lease?[lease.id,Date.parse(at)]:[])]]);
+  out.push(['SELECT changes() AS n',[]]);
+ }
+ return out;
 }
 const absent=error=>/no such (table|column)/i.test(String(error?.cause?.message||error?.message||error));
-// Best effort and never a failure of the Discovery chunk: a verified response of a Film the producer does not hold, an absent schema (before the apply) and a transient D1 error all end quietly; the producer's own refresh events and
-// the reconcile recover a missed signal. -> {emitted:boolean, reason?}
-export async function emitSourceChanged(env,{tmdbId,movie,at=new Date().toISOString()}){
+// The causal wake, AFTER the write (never inside the batch): only when work is runnable; no runner (an old version, the producer dormant) is a no-op, and a lost wake is recovered by the reconcile cron.
+async function wake(env){
+ if(typeof CatalogEnrichmentRunner==='undefined')return;
+ try{if(await CatalogEnrichmentRunner.hasRunnable(env,{now:new Date().toISOString()}))await CatalogEnrichmentRunner.kick(env);}catch{/* the reconcile recovers a lost wake */}
+}
+// The Discovery revalidation's source_changed emitter. -> {state, parts}:
+//   'written'    at least one signal row was inserted or re-armed by this batch (counted from the batch's own `changes()`), the producer was woken;
+//   'unchanged'  the observation is identical to what is stored, or the Film holds no Discovery membership, or the lease is gone: nothing was written and nothing woke;
+//   'absent'     the schema of the Catalog Enrichment Producer is not applied or the document is not this movie's: nothing to do, the caller proceeds;
+//   'failed'     the batch failed (the outcome is unknown: it may have landed): the CALLER must keep the verified outcome retryable and ask again, and the producer is woken anyway so a landed write is never left idle.
+export async function emitSourceChanged(env,{tmdbId,movie,at=new Date().toISOString(),lease=null}){
  const handle=database(env);
- if(!handle||typeof handle.batch!=='function')return {emitted:false,reason:'no_database'};
- let digests;
- try{digests=await tmdbPartDigests(movie,tmdbId);}catch{return {emitted:false,reason:'unreadable'};}
- if(!digests)return {emitted:false,reason:'not_this_movie'};
- try{
-  const before=await one(handle,"SELECT COALESCE(SUM(version),0) AS v, COUNT(*) AS n FROM enrichment_signal WHERE kind='source_changed' AND source='tmdb' AND cause_ref='discovery_revalidation'");
-  await handle.batch(sourceChangedStatements({tmdbId,digests,at}).map(([sql,params])=>handle.prepare(sql).bind(...params)));
-  const after=await one(handle,"SELECT COALESCE(SUM(version),0) AS v, COUNT(*) AS n FROM enrichment_signal WHERE kind='source_changed' AND source='tmdb' AND cause_ref='discovery_revalidation'");
-  return {emitted:Number(after?.v)!==Number(before?.v)||Number(after?.n)!==Number(before?.n)};
- }catch(error){return {emitted:false,reason:absent(error)?'schema_absent':'unavailable'};}
+ if(!handle||typeof handle.batch!=='function')return {state:'absent',parts:[]};
+ let versions;
+ try{versions=await tmdbPartVersions(movie,tmdbId);}catch{return {state:'absent',parts:[]};}
+ if(!versions)return {state:'absent',parts:[]};
+ const statements=sourceChangedStatements({tmdbId,versions,at,lease});
+ if(!statements.length)return {state:'unchanged',parts:[]};
+ let results;
+ try{results=await handle.batch(statements.map(([sql,params])=>handle.prepare(sql).bind(...params)));}
+ catch(error){
+  if(absent(error))return {state:'absent',parts:[]};
+  await wake(env);
+  return {state:'failed',parts:[]};
+ }
+ const parts=[];
+ let index=0;
+ for(const part of ['core','credits','localization']){
+  if(versions[part]==null)continue;
+  const row=results?.[index+1]?.results?.[0];
+  if(Number(row?.n)>0)parts.push(part);
+  index+=2;
+ }
+ if(parts.length){await wake(env);return {state:'written',parts};}
+ return {state:'unchanged',parts:[]};
 }
 
 // ---- the activation preflight (C3c-A reads it before it sets `activated`) ----

@@ -221,6 +221,18 @@ export function selectRussianTitle(translations){
  return regional.length===1?{status:'value',value:regional[0]}:{status:'ambiguous'};
 }
 
+// ---- source versions (ADR 0219 decision 2) ----
+// ONE pure projection of what a verified response says about a part, used by BOTH the producer (it stores the result as the part's `source_version` when the part is complete) and every observer of the same source
+// (the Discovery revalidation), so the two cannot disagree about what a part is. A part whose section is not VERIFIED (an unreadable or unsupported section, a failed response) has no version (null): it is never
+// signalled, never compared and never read as "no data". `anchor` is the identity the response was fetched for.
+// core: only the fields a request language cannot change (year, runtime, url). The synopsis, the genre names and the poster path depend on the request language (the Discovery detail is requested in `ru-RU`, the producer's
+// fetch is not), so a localized text is NOT a change; the producer still writes every approved field. A real change of those fields is reached by the producer's own events (anchor, owner refresh), not by this signal.
+export const coreVersion=(source,anchor,fields)=>digestOf({source,anchor,part:'core',fields:{year:fields?.year??null,runtime:fields?.runtime??null,url:fields?.url??null}});
+// localization: the selected typed title, or its verified absence. Ambiguous, unreadable and unsupported coverage has none.
+export const localizationVersion=(source,anchor,title)=>title?.status==='value'?digestOf({source,anchor,title:title.value}):title?.status==='absent'?digestOf({source,anchor,title:null,status:'absent'}):null;
+// credits: the ordered provider credits of a readable section (a present, empty list is a valid empty set).
+export const creditsVersion=(source,anchor,credits)=>credits?.status==='ok'&&Array.isArray(credits.items)?digestOf({source,anchor,part:'credits',items:credits.items.map(item=>[item.role,item.key??null,item.key==null?(item.name??null):null])}):null;
+
 // ---- priority and fairness (decision 5) ----
 // facts: {cohorts:Set of 'live'|'history', personal:true|false|null, available:true|false|null}; null is UNKNOWN. A positive live fact makes the Film live whatever its cohort; a history-only Film is background (unknown
 // facts do not promote it); a member of a live cohort is live unless BOTH facts are known false.
@@ -242,4 +254,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});

@@ -7,6 +7,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
+import * as EnrichmentDiscovery from '../src/catalog-enrichment-discovery.js';
 import {revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT} from '../src/domain/slot-evidence.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
@@ -47,9 +48,16 @@ const RUN='run-reval',MIN=60000,START=Date.now()+3600000;
 const clock={offset:0},advance={ms:0},slowAll={ms:0};
 class SteppedDate extends Date{static now(){return super.now()+clock.offset;}}
 
-async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90,observed={title:'Film R',normalized:'film r'},catalog=null,movieTitles={translations:[],alternatives:[]},authority=Authority,extras=[],watchlist=false,movies={}}){
+async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90,observed={title:'Film R',normalized:'film r'},catalog=null,movieTitles={translations:[],alternatives:[]},authority=Authority,extras=[],watchlist=false,movies={},enrichment=false}){
  clock.offset=0;advance.ms=0;slowAll.ms=0;
  const file=migrated();
+ if(enrichment){// AIR-684: the rest of the real chain (0012 onward), so the Catalog Enrichment inbox, the scope tables and the Discovery triggers exist
+  const rest=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&!chain.includes(name.slice(0,-4))).sort();
+  const applied=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+rest.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+  if(applied.status!==0)throw new Error(applied.stderr||'migration failed');
+  // These tests are not about the EPG-priority pause (ADR 0135): the table of a schema that predates it is the one the lease code already supports.
+  sql(file,'DROP TABLE discovery_epg_priority');
+ }
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  const setup={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null};
  const taken=await Authority.acquireLease(setup,{programmeRunId:null});
@@ -78,7 +86,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
  const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]},translations:{translations:movieTitles.translations},alternative_titles:{titles:movieTitles.alternatives}};
  const context=vm.createContext({console,Date:SteppedDate,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
   fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);clock.offset+=slowAll.ms;if(parsed.pathname.includes('/movie/'))clock.offset+=advance.ms;if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));const wanted=Number((parsed.pathname.match(/\/movie\/(\d+)/)||[])[1]);return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?(movies[wanted]||movie):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
-  DiscoveryAuthority:authority,pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
+  DiscoveryAuthority:authority,...(enrichment?{CatalogEnrichmentDiscovery:EnrichmentDiscovery,CatalogEnrichmentRunner:enrichment.runner}:{}),pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const name of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(name,'utf8'),context);
@@ -506,4 +514,60 @@ const hopsUntilStop=async(context,env,limit)=>{
  assert.equal(statusOf(file).legacyRevalidation.lapComplete,true);
 }
 
+
+// AIR-684 (ADR 0219 decision 2): the REAL revalidation path writes the Discovery `source_changed` signals, wakes an idle producer without any other admission or cron, keeps a failed enqueue retryable and never loses the change.
+{
+ const T0='2026-11-27T10:00:00.000Z';
+ const seedFilm=file=>sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:101',2,NULL,'Film R','${T0}');INSERT INTO film_external_id VALUES ('film:tmdb:101','tmdb','101',1,0,NULL);INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('film:tmdb:101','discovery','${T0}','k')`);
+ const signals=file=>sql(file,"SELECT part,state,version FROM enrichment_signal WHERE kind='source_changed' AND subject='film:tmdb:101' ORDER BY part").map(r=>r.part+'='+r.state+'@v'+r.version);
+ const calls=[];
+ const runner={hasRunnable:async()=>{calls.push('has');return true;},kick:async()=>{calls.push('kick');}};
+ globalThis.CatalogEnrichmentRunner=runner;// the module is a real ES module in this realm: it reads the runner global exactly as the bundled Worker does
+ {
+  // a Film that holds a retained Discovery membership: the verified response becomes durable signals, the producer is woken, and the outcome of the revalidation is written
+  const {file,chunk}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  seedFilm(file);calls.length=0;
+  const first=await chunk();
+  assert.equal(first.revalidation.revalidated,1);
+  assert.deepEqual(decisionOf(file).anchor,[90,96],'the revalidation outcome is durable');
+  assert.deepEqual(signals(file),['core=pending@v1','credits=pending@v1','localization=pending@v1'],'one signal per VERIFIED part of the detail');
+  assert.deepEqual(calls,['has','kick'],'the producer is woken from the revalidation itself: no admission, no cron');
+  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE kind='admitted'")[0].n,0,'Discovery admission behaviour is unchanged: no admitted signal, no second queue');
+ }
+ {
+  // a Film with no retained membership: nothing is written and nothing wakes
+  const {file,chunk}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  calls.length=0;
+  await chunk();
+  assert.deepEqual(signals(file),[]);assert.deepEqual(calls,[]);
+  assert.deepEqual(decisionOf(file).anchor,[90,96],'the revalidation is not delayed by an unobserved Film');
+ }
+ {
+  // an enqueue failure: the verified outcome is NOT made durable, the key stays eligible, the producer is still woken (the write may have landed), and the next chunk observes again and succeeds
+  const {file,env,chunk,fetched}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  seedFilm(file);calls.length=0;
+  const real=env.DB;
+  env.DB={...real,prepare:text=>{if(/INSERT INTO enrichment_signal/.test(text))throw new Error('D1 unavailable');return real.prepare(text);},batch:real.batch.bind(real)};
+  const failedChunk=await chunk();
+  assert.equal(failedChunk.revalidation.revalidated,0);assert.ok(failedChunk.revalidation.deferred>=1,'the revalidation is deferred, not completed');
+  assert.deepEqual(decisionOf(file).anchor,[90],'no decision was written without the verified change being enqueued');
+  assert.deepEqual(signals(file),[]);assert.deepEqual(calls,['has','kick'],'woken after the uncertain outcome');
+  env.DB=real;calls.length=0;
+  const recovered=await chunk({keep:false});
+  assert.equal(recovered.revalidation.revalidated,1,'recovered on the next chunk');
+  assert.deepEqual(decisionOf(file).anchor,[90,96]);
+  assert.deepEqual(signals(file),['core=pending@v1','credits=pending@v1','localization=pending@v1']);
+  assert.equal(movieCalls(fetched),2,'the observation was made again, not guessed');
+  // and the change that landed is not duplicated by a repeated observation
+  assert.deepEqual(calls,['has','kick']);
+ }
+ {
+  // a lost Discovery lease at the causal write applies nothing: a held lease is part of the statement
+  const lost=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  seedFilm(lost.file);
+  const out=await EnrichmentDiscovery.emitSourceChanged(lost.env,{tmdbId:'101',movie:{id:101,release_date:'2001-05-01',runtime:96,credits:{cast:[],crew:[]},translations:{translations:[]}},lease:{id:'not-held',expiresAt:1}});
+  assert.equal(out.state,'unchanged');assert.deepEqual(signals(lost.file),[]);
+ }
+}
+delete globalThis.CatalogEnrichmentRunner;
 console.log('discovery revalidation ok');

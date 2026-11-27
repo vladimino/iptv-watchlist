@@ -254,12 +254,18 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source));
    for(const row of next){
     const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
-    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await sha({source:row.source,anchor:row.anchor,fields:answers[row.source]?.fields||null}),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
+    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.fields||{}),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
    }
    if(core.fallbackFill.length||core.unconfirmedAgreement.length||core.storedDiffers.length){
     const refreshed=(await readRows(env,filmId)).find(row=>row.part==='film');
     await putRow(env,ctx,{...refreshed,film:{...(refreshed.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement,storedDiffers:core.storedDiffers,writtenFields:[...new Set([...(refreshed.film?.writtenFields||[]),...writeFields])]}},{expectEpoch:refreshed.planEpoch});
    }
+  }
+ }else if(metadataEligible&&core.complete){
+  // A refresh whose verified answer has nothing left to fill (every core field already holds a value, fill-only) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
+  // (a verified source change) would stay due for ever and a later equal observation could never be told from a change.
+  for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&answers[item.source]?.status==='ok'&&['due','deferred_repair'].includes(item.status))){
+   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].fields),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
   }
  }
  // ---- localization: each applicable source writes its OWN row, needing only its own anchor ----
@@ -273,8 +279,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   if(title.status==='ambiguous'){await putRow(env,ctx,{...row,status:'needs_attention',reason:'ambiguous_translation',failureClass:'owner_required'},{expectEpoch:row.refreshEpoch});continue;}
   // unsupported coverage (the Letterboxd page has no typed title): the source cannot supply this part, which is neither a failure nor a verified absence
   if(title.status==='unsupported'){await putRow(env,ctx,{...row,status:'not_applicable',reason:'no_typed_title_in_source',failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
-  if(title.status==='absent'){await putRow(env,ctx,{...row,status:'complete_with_gaps',reason:'no_russian_title',gaps:['no_russian_title'],failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
-  const sourceVersion=await sha({source,anchor:row.anchor,title:title.value});
+  if(title.status==='absent'){await putRow(env,ctx,{...row,status:'complete_with_gaps',reason:'no_russian_title',gaps:['no_russian_title'],sourceVersion:await Plan.localizationVersion(source,row.anchor,title),failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
+  const sourceVersion=await Plan.localizationVersion(source,row.anchor,title);
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},localization:{sources:[{source,value:title.value,sourceVersion,observedAt:now,provenance:{anchor:row.anchor}}]},requireExisting:true,
    guards:[Plan.anchorSetGuard(filmId,context.anchors),Plan.epochGuard(filmId,{part:'localization',source,refreshEpoch:row.refreshEpoch,planEpoch:filmRow.planEpoch}),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)]};
   {const stop=await mayWrite();if(stop)return partial(report,stop);}
@@ -296,11 +302,12 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   // The expected set comes from a FRESH complete response, or - when persisted chunk rows already hold it - from D1 alone (a resume makes no upstream request).
   const fresh=answers[choice.source]?.status==='ok'&&answers[choice.source].credits.status==='ok'?answers[choice.source].credits.items:null;
   const persisted=plans[choice.source]?resumeRows.filter(row=>row.source===choice.source).sort((a,b)=>a.slot-b.slot):[];
-  let expected=null,chunks=null,digestOfSet=null;
+  let expected=null,chunks=null,digestOfSet=null,creditsVersion=null;
   if(fresh){
    expected=Plan.expectedCredits(choice.source,fresh);
    chunks=Plan.chunkCredits(expected.items);
    digestOfSet=await Plan.expectedDigest(expected.items);
+   creditsVersion=await Plan.creditsVersion(choice.source,rowOf('credits',choice.source)?.anchor??null,answers[choice.source].credits);
   }else if(persisted.length){
    const planRows=plans[choice.source].rows;
    chunks=planRows.map(row=>({slot:row.slot,items:row.expected.items.map(([personId,role])=>({personId,role,roleId:personId.slice('person:'.length)}))}));
@@ -319,13 +326,13 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
     const stale=chunks.some(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return !(stored&&stored.status==='complete'&&stored.expected?.digest===digestOfSet&&stored.expected?.total===chunks.length);});
     if(stale){
      const guard=guardSql(ctx);
-     const rowsOut=chunks.map(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return {...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null};});
+     const rowsOut=chunks.map(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return {...base,slot:chunk.slot,status:'due',sourceVersion:creditsVersion??base.sourceVersion??null,expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null};});
      await putRowsAtomic(env,ctx,rowsOut,[[`UPDATE catalog_enrichment_state SET status='not_applicable',reason='superseded_plan',expected_json=NULL,updated_at=? WHERE film_id=? AND part='credits' AND source=? AND slot>=? AND ${guard.sql}`,[now,filmId,choice.source,chunks.length,...guard.params]]]);
     }
    }
    let allDone=true;
    for(const chunk of chunks){
-    const slotRow={...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
+    const slotRow={...base,slot:chunk.slot,status:'due',sourceVersion:creditsVersion??rowOf('credits',choice.source,chunk.slot)?.sourceVersion??base.sourceVersion??null,expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
     const missing=Plan.missingForChunk(chunk,{have,people});
     if(!missing.credits.length){await putRow(env,ctx,{...slotRow,status:'complete',failures:0,retryAt:null,pendingSince:null});continue;}
     // the chunk row (with the persisted expected set and its epoch) is durable BEFORE its first unit: an interrupted Film resumes from it
