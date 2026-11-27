@@ -91,12 +91,14 @@ function sourceIdsOf(document,members){
 }
 function idsOf(document,members,resolved){return sourceIdsOf(document,members).map(id=>canonicalFilmId(id,resolved)).filter(Boolean);}
 
-// AIR-572. Identity resolution of the source film ids BEFORE any target is formed. An id with a `film:`/`tmdb_`/`tmdb:` prefix names its
-// Film directly (a one-hop redirect is followed to the survivor). A bare Letterboxd lid is NEVER turned into `film:<lid>` by spelling: it is
+// AIR-572. Identity resolution of the source film ids BEFORE any target is formed. An id with a `film:` prefix is an explicit canonical Film key and names its
+// Film directly (a one-hop redirect is followed to the survivor). A typed movie reference (`tmdb_<n>`, `tmdb:<n>`, AIR-671) is resolved from the claims of the movie id (see below).
+// A bare Letterboxd lid is NEVER turned into `film:<lid>` by spelling: it is
 // resolved through the one trusted, non-conflicting `film_external_id` (scheme `letterboxd`) claim, else through an EXISTING Film `film:<lid>`.
 // A lid with a competing/untrusted claim, a redirect chain longer than one hop, or neither a claim nor an existing Film is refused by name:
 // the Producer never creates a second Film from a spelling and never guesses from title or year (a legitimate new Film is admitted by the
-// admission paths, not here). Reads are bounded: at most IDENTITY_LOOKUP_CAP distinct lids in IDENTITY_CHUNK-sized, read-only statements.
+// admission paths, not here). Reads are bounded: at most IDENTITY_LOOKUP_CAP distinct lids (the cap is on lids only: the supported Watchlist is larger and its typed movie references are read in the same IDENTITY_CHUNK-sized
+// read-only statements without a cap of their own), one statement per chunk.
 export const IDENTITY_LOOKUP_CAP=1000;
 export const IDENTITY_CHUNK=200;
 const DIRECT=/^(film:|tmdb_|tmdb:)/;
@@ -104,7 +106,7 @@ const DIRECT=/^(film:|tmdb_|tmdb:)/;
 // canonical Film id (`film:...`) is a permanent entity key and is never reinterpreted, whatever its spelling.
 const MOVIE_REF=/^(?:tmdb_|tmdb:)([1-9]\d{0,11})$/;
 export const movieOf=raw=>MOVIE_REF.exec(String(raw??''))?.[1]??null;
-export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map()}={}){
+export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map(),trustedMovies=new Map()}={}){
  // `via` is the provenance of the decision; `guardsOf` turns it into write-time proofs.
  const follow=(id,via)=>{
   if(!redirects.has(id))return {target:id,via,owner:id};
@@ -118,8 +120,12 @@ export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map
   const rows=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
   const found=[...new Set(rows.map(row=>row.film_id))];
   if(found.length>1||(found.length===1&&claims.length>rows.length)||(found.length===0&&claims.length>0))return {refused:'producer_identity_ambiguous'};
-  const decided=found.length===1?follow(found[0],'movie_claim'):follow('film:tmdb:'+movie,'movie_unclaimed');
-  return decided.refused?decided:{...decided,movie};
+  if(found.length===1){const decided=follow(found[0],'movie_claim');return decided.refused?decided:{...decided,movie};}
+  // Unclaimed: the minting spelling is only the target of a genuinely unclaimed, eligible Film. The spelling is not current identity (ADR 0217 I1): a redirect, or a Film that already holds a DIFFERENT trusted movie id,
+  // is refused, as the Discovery admission refuses both (`planAdmissionFilm`). It is never followed.
+  const candidate='film:tmdb:'+movie;
+  if(redirects.has(candidate)||(trustedMovies.get(candidate)||[]).some(value=>String(value)!==movie))return {refused:'producer_identity_ambiguous'};
+  return {target:candidate,via:'movie_unclaimed',owner:candidate,movie};
  }
  if(DIRECT.test(raw))return follow(canonicalFilmId(raw),'direct');
  const clean=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
@@ -141,12 +147,16 @@ export function guardsOf(raw,decision){
  const out=[];
  if(!decision||!decision.target)return out;
  // A typed movie reference (ADR 0217 decision 8d): the exact owner proof, asserted INSIDE the fenced batch of every write to the target (replay included). `movie_claim`: the owner still holds the movie id as its one trusted,
- // non-conflicting claim and no other row of the movie id exists on any Film. `movie_unclaimed`: no Film other than the target (or the redirect owner it was followed from) holds any row of the movie id.
+ // non-conflicting claim and no other row of the movie id exists on any Film. `movie_unclaimed`: see below.
  if(decision.movie!==undefined){
   if(decision.via==='movie_claim'){
    out.push({sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0)",params:[decision.owner,decision.movie]});
    out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))",params:[decision.movie,decision.owner]});
-  }else out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND film_id<>? AND film_id<>?)",params:[decision.movie,decision.owner,decision.target]});
+  }else{
+   // Unclaimed: no row of the movie id exists on any Film, except the target's own trusted, non-conflicting one (a benign concurrent Discovery admission of the same movie on the same target), and the target holds no different trusted movie.
+   out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))",params:[decision.movie,decision.target]});
+   out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value<>? AND trusted=1 AND conflicting=0)",params:[decision.target,decision.movie]});
+  }
   if(decision.redirected)out.push({sql:'EXISTS (SELECT 1 FROM film_redirect WHERE from_id=? AND to_film_id=?)',params:[decision.owner,decision.target]});
   return out;
  }
@@ -171,8 +181,8 @@ export async function resolveSourceIdentitiesEach(env,rawIds){
  const unique=[...new Set(rawIds.filter(Boolean))];
  const lids=unique.filter(id=>!DIRECT.test(id));
  const movies=unique.filter(id=>movieOf(id)!==null);
- if(lids.length+movies.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
- const claims=new Map(),films=new Set(),redirects=new Map();
+ if(lids.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
+ const claims=new Map(),films=new Set(),redirects=new Map(),trustedMovies=new Map();
  const db=database(env);
  try{
   // The typed movie references: ALL rows of each movie id, of any trust (the resolution must see an untrusted or conflicting claim, not ignore it). One statement per chunk.
@@ -184,6 +194,14 @@ export async function resolveSourceIdentitiesEach(env,rawIds){
     byMovie.get(row.value).push(row);
    }
    for(const id of movies.slice(i,i+IDENTITY_CHUNK))claims.set(id,byMovie.get(movieOf(id))||[]);
+  }
+  // The unclaimed candidates: the trusted movie ids their minting spelling already holds (a Film holding a DIFFERENT trusted movie is another identity). One statement per chunk.
+  const candidates=[...new Set(movies.filter(id=>!claims.get(id).length).map(id=>'film:tmdb:'+movieOf(id)))];
+  for(let i=0;i<candidates.length;i+=IDENTITY_CHUNK){
+   for(const row of await many(db,"SELECT film_id,value FROM film_external_id WHERE scheme='tmdb' AND trusted=1 AND conflicting=0 AND film_id IN (SELECT value FROM json_each(?))",[JSON.stringify(candidates.slice(i,i+IDENTITY_CHUNK))])){
+    if(!trustedMovies.has(row.film_id))trustedMovies.set(row.film_id,[]);
+    trustedMovies.get(row.film_id).push(row.value);
+   }
   }
   for(let i=0;i<lids.length;i+=IDENTITY_CHUNK){
    const chunk=JSON.stringify(lids.slice(i,i+IDENTITY_CHUNK));
@@ -208,7 +226,7 @@ export async function resolveSourceIdentitiesEach(env,rawIds){
  }catch{return {ok:false,code:'producer_identity_unreadable'};}
  const resolved=new Map(),refused=[],guards=new Map(),byId=new Map();
  for(const id of unique){
-  const out=resolveIdentity(id,{claims:claims.get(id)||[],films,redirects});
+  const out=resolveIdentity(id,{claims:claims.get(id)||[],films,redirects,trustedMovies});
   if(out.target){resolved.set(id,out.target);const g=guardsOf(id,out);byId.set(id,{target:out.target,guards:g});if(g.length){if(!guards.has(out.target))guards.set(out.target,[]);guards.get(out.target).push(...g);}}
   else{refused.push({id,code:out.refused});byId.set(id,{refused:out.refused});}
  }

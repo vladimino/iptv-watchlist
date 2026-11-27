@@ -82,8 +82,14 @@ async function workflow(file,env,nonce){
  assert.equal(proofs.length,2);assert.match(proofs[0].sql,/^EXISTS .*scheme='tmdb'.*trusted=1 AND conflicting=0/);assert.match(proofs[1].sql,/^NOT EXISTS .*NOT \(film_id=\? AND trusted=1 AND conflicting=0\)/);
  assert.deepEqual(proofs[0].params,[SURVIVOR,'603']);assert.deepEqual(proofs[1].params,['603',SURVIVOR]);
  const open=guardsOf('tmdb_603',unclaimed);
- assert.equal(open.length,1);assert.match(open[0].sql,/^NOT EXISTS .*film_id<>\? AND film_id<>\?/);assert.deepEqual(open[0].params,['603','film:tmdb:603','film:tmdb:603']);
+ assert.equal(open.length,2);
+ assert.match(open[0].sql,/^NOT EXISTS .*scheme='tmdb' AND value=\? AND NOT \(film_id=\? AND trusted=1 AND conflicting=0\)/);assert.deepEqual(open[0].params,['603','film:tmdb:603']);
+ assert.match(open[1].sql,/^NOT EXISTS .*film_id=\? AND scheme='tmdb' AND value<>\? AND trusted=1 AND conflicting=0/);assert.deepEqual(open[1].params,['film:tmdb:603','603']);
  assert.equal(guardsOf('tmdb_603',redirected).length,3,'owner proof plus the redirect proof');
+ // The spelling is not current identity (ADR 0217 I1): an unclaimed movie id is a mint target only for a Film that is not redirected and holds no DIFFERENT trusted movie. Never followed, never accepted.
+ assert.deepEqual(resolveIdentity('tmdb_603',{redirects:new Map([['film:tmdb:603','film:lbx2']])}),{refused:'producer_identity_ambiguous'},'a redirected spelling is refused, not followed');
+ assert.deepEqual(resolveIdentity('tmdb_603',{trustedMovies:new Map([['film:tmdb:603',['700']]])}),{refused:'producer_identity_ambiguous'},'a Film that holds a different trusted movie is refused');
+ assert.equal(resolveIdentity('tmdb_603',{trustedMovies:new Map([['film:tmdb:604',['700']]])}).target,'film:tmdb:603','the trusted movie of another Film is irrelevant');
 }
 
 // 2. The read of the claims: one statement per chunk, any trust, resolved on the real schema; explicit Film ids and Letterboxd ids are unaffected.
@@ -100,7 +106,8 @@ async function workflow(file,env,nonce){
  assert.equal(held.ok,false);assert.equal(held.code,'producer_identity_ambiguous');
  const seen=[];
  await resolveSourceIdentities({DB:d1Standin(file,{onQuery:async text=>{seen.push(text);}})},['tmdb_603','tmdb_604']);
- assert.equal(seen.filter(text=>/scheme='tmdb'/.test(text)).length,1,'one claims statement for the movie references of a chunk');
+ assert.equal(seen.filter(text=>/scheme='tmdb' AND value IN/.test(text)).length,1,'one claims statement for the movie references of a chunk');
+ assert.equal(seen.filter(text=>/film_id IN \(SELECT value FROM json_each/.test(text)&&/scheme='tmdb'/.test(text)).length,1,'one statement for the trusted movies of the unclaimed candidates of a chunk');
 }
 
 // 3. The whole Workflow. Order 1: the Film already holds the movie id (fixture of the attached state): facts and membership land on the survivor, no `film:tmdb:603` is minted, the chain completes.
@@ -211,6 +218,80 @@ async function workflow(file,env,nonce){
   const {file,result}=await race(['tmdb_603'],survivorFixture,()=>{});
   assert.equal(result.state,'complete');assert.equal(one(file,'SELECT film_id FROM watchlist_film'),SURVIVOR);assert.deepEqual(films(file),[SURVIVOR]);
  }
+}
+
+// 4b. The unclaimed path accepts only a genuinely unclaimed, eligible target. Real writer, real receipt; planning and the batch both refuse.
+{
+ const sealed=async(setup,sources=['tmdb_603'])=>{const file=database();setup(file);publish(file,sources);return {file,snap:await acquireSealedSnapshot(envOf(file),P,{previousIds:[]})};};
+ const applied=(file,id)=>Number(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE target_id='"+id+"' AND state='applied'"));
+ const planOf=snap=>planEpgUnits({runId:'run-u',at:AT,films:snap.films.map(film=>({id:film.id,facts:film.facts}))});
+ // (a) facts-first Film `film:tmdb:603`, unclaimed at source resolution: an untrusted row of the movie lands ON THAT FILM before the write (before prePlan reads its revision): the typed reference is now held, nothing is written
+ for(const [trusted,conflicting] of [[0,0],[0,1]]){
+  const {file,snap}=await sealed(f=>addFilm(f,'film:tmdb:603'));
+  assert.equal(snap.ok,true);assert.deepEqual(snap.films.map(film=>film.id),['film:tmdb:603']);
+  addMovie(file,'film:tmdb:603','603',trusted,conflicting);
+  const out=await applyEpgUnits(envOf(file),{plan:planOf(snap),now:()=>AT});
+  assert.equal(out.counts.applied,0,'trusted='+trusted+' conflicting='+conflicting);assert.equal(out.counts.failed,1);assert.equal(out.failures.length,1);assert.equal(out.failures[0].code,'film_person_precondition');
+  assert.equal(applied(file,'film:tmdb:603'),0);assert.equal(Number(one(file,'SELECT COUNT(*) FROM watchlist_film')),0);assert.equal(Number(one(file,'SELECT COUNT(*) FROM film_metadata')),0);
+  assert.equal(one(file,"SELECT state FROM canonical_write_receipt WHERE target_id='film:tmdb:603'"),'failed');
+ }
+ // (b) the same inside the batch, with no revision movement (the row lands between the pre-plan and the writer's batch)
+ {
+  const {file,snap}=await sealed(f=>addFilm(f,'film:tmdb:603'));
+  let raced=false;
+  const env=envOf(file,{onBatch:async statements=>{if(!raced&&statements.some(item=>/INSERT INTO film /.test(item.text))){raced=true;addMovie(file,'film:tmdb:603','603',0,1);}}});
+  const out=await applyEpgUnits(env,{plan:planOf(snap),now:()=>AT});
+  assert.equal(raced,true);assert.equal(out.counts.applied,0);assert.equal(applied(file,'film:tmdb:603'),0);assert.equal(Number(one(file,'SELECT COUNT(*) FROM film_metadata')),0);
+ }
+ // (c) the candidate already holds a DIFFERENT trusted movie (700) and no row of 603: refused at planning, by name, nothing written
+ {
+  const file=database();addFilm(file,'film:tmdb:603');addMovie(file,'film:tmdb:603','700');publish(file,['tmdb_603']);
+  const out=await resolveSourceIdentities(envOf(file),['tmdb_603']);
+  assert.equal(out.ok,false);assert.equal(out.code,'producer_identity_ambiguous');
+  const result=await workflow(file,envOf(file),'51515151-5151-5151-5151-515151515151');
+  assert.equal(result.state,'stopped');assert.equal(result.code,'producer_identity_ambiguous');assert.equal(Number(one(file,'SELECT COUNT(*) FROM film_metadata')),0);
+ }
+ // (d) ... and when the different trusted movie lands on the candidate after the plan
+ {
+  const {file,snap}=await sealed(f=>addFilm(f,'film:tmdb:603'));
+  addMovie(file,'film:tmdb:603','700');
+  const out=await applyEpgUnits(envOf(file),{plan:planOf(snap),now:()=>AT});
+  assert.equal(out.counts.applied,0);assert.equal(applied(file,'film:tmdb:603'),0);assert.equal(Number(one(file,'SELECT COUNT(*) FROM film_metadata')),0);
+ }
+ // (e) a redirected spelling is refused, never followed
+ {
+  const file=database();addFilm(file,'film:tmdb:603');addFilm(file,'film:lbx2');sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:603','film:lbx2','"+AT+"')");publish(file,['tmdb_603']);
+  const out=await resolveSourceIdentities(envOf(file),['tmdb_603']);
+  assert.equal(out.ok,false);assert.equal(out.code,'producer_identity_ambiguous');
+  assert.equal(Number(one(file,'SELECT COUNT(*) FROM film_metadata')),0);
+ }
+ // (f) the intended cases still hold: a facts-first Film with its OWN trusted claim of the same movie (a benign concurrent Discovery admission) is the owner and receives the facts
+ {
+  const {file,snap}=await sealed(f=>addFilm(f,'film:tmdb:603'));
+  addMovie(file,'film:tmdb:603','603');
+  const out=await applyEpgUnits(envOf(file),{plan:planOf(snap),now:()=>AT});
+  assert.equal(out.counts.applied,1);assert.equal(applied(file,'film:tmdb:603'),1);assert.deepEqual(films(file),['film:tmdb:603']);
+ }
+}
+
+// 4c. Capacity: the cap of the identity lookup counts Letterboxd ids only. A sealed Watchlist of more than IDENTITY_LOOKUP_CAP typed movie references (the Watchlist contract allows 5000), mixed with lids, resolves at the
+// actual snapshot boundary through the existing 200-id statements; nothing stops the chain, and no cap of this change applies.
+{
+ const file=database();
+ const lids=Array.from({length:30},(_v,i)=>'mix'+i);
+ lids.forEach(lid=>addFilm(file,'film:'+lid));
+ const refs=Array.from({length:1500},(_v,i)=>'tmdb_'+(1000+i));
+ addFilm(file,SURVIVOR);addMovie(file,SURVIVOR,'1000');
+ publish(file,[...refs,...lids,'film:explicit1']);
+ const seen=[];
+ const env={DB:d1Standin(file,{onQuery:async text=>{seen.push(text);}})};
+ const snap=await acquireSealedSnapshot(env,P,{previousIds:[]});
+ assert.equal(snap.ok,true,JSON.stringify(snap.code||''));
+ assert.equal(snap.films.length,1531,'1500 movie references + 30 lids + 1 explicit id: every listed Film is a unit');
+ assert.ok(snap.films.some(film=>film.id===SURVIVOR)&&!snap.films.some(film=>film.id==='film:tmdb:1000'),'the claimed reference resolved to its owner');
+ assert.equal(seen.filter(text=>/FROM film_external_id WHERE scheme='tmdb' AND value IN/.test(text)).length,Math.ceil(1500/200),'one claims statement per 200 references');
+ const lidCap=await resolveSourceIdentities(envOf(file),Array.from({length:1001},(_v,i)=>'l'+i));
+ assert.equal(lidCap.code,'producer_identity_bounded','the cap of Letterboxd ids is unchanged');
 }
 
 // 5. A REAL Discovery admission interleaves with the facts write (the current writer, not a model of it). The facts plan was made while the movie id was unclaimed; Discovery admits `tmdb_603` first: it creates `film:tmdb:603`

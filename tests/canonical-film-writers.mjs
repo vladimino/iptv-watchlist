@@ -443,6 +443,14 @@ if(section('13')){
   assert.deepEqual(filmIds(file),[LID]);assert.deepEqual(owners(file),[LID]);
   for(const table of ['film_metadata','film_sync_state','watchlist_film','film_dimension'])assert.equal(rows(file,'SELECT COUNT(*) c FROM '+table)[0].c,0,table+' rolled back');
  }
+ // (b2) The Film is created by ANOTHER batch between the writer's read and its batch, carrying an untrusted row of the movie on itself: the existence of the Film does not lift the requirement; the whole batch fails.
+ {
+  const state={file:null,fired:0};
+  const {file,env}=fresh('open',{onBatch:async()=>{if(!state.fired++)assert.equal(sqlite(state.file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:603',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:603','tmdb','603',0,0);").status,0);}});
+  state.file=file;
+  await assert.rejects(writeFilmFacts(env,facts({expectedRevision:0,requestId:'race-own'})),code('film_person_precondition'));
+  assert.equal(state.fired,1);assert.equal(rows(file,'SELECT COUNT(*) c FROM film_metadata')[0].c,0,'rolled back');
+ }
  // (c) With a REAL receipt (applyFilmFacts, atomic): the same race leaves no applied receipt and no row; the receipt of the target is `failed` with the typed class.
  {
   const state={file:null,fired:0};

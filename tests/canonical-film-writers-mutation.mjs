@@ -36,7 +36,8 @@ const MUTANTS=[
  ['an older observation is written',"if(row&&!(observedAt>row.observed_at)){","if(false){",'8'],
  ['a reserved source is accepted',"||RESERVED.has(item.source)||seen.has(item.source)","||seen.has(item.source)",'8'],
  ['the effective localization is not materialised',"if(effective.tier==='automatic'){","if(false){",'8'],
- ['a mint is not asserted absent inside the batch',"if(mint!==null)statements.push([fenced.assertSql(\"EXISTS (SELECT 1 FROM film WHERE id=?) OR NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=?)\"),[id,mint]]);","",'13'],
+ ['a mint is not asserted absent inside the batch',"if(mint!==null)statements.push([fenced.assertSql(\"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))\"),[mint,id]]);","",'13'],
+ ['a mint tolerates any row of its own Film',"AND NOT (film_id=? AND trusted=1 AND conflicting=0))\"),[mint,id]]);","AND film_id<>?)\"),[mint,id]]);",'13'],
 ];
 for(const [name,from] of MUTANTS)assert.equal(source.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+SOURCE);
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'film-writers-mutants-'));

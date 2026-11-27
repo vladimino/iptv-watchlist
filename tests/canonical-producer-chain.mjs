@@ -509,7 +509,8 @@ assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0},{film_id:'film:tmdb:8',trusted:0,conflicting:1}]}),{refused:'producer_identity_ambiguous'});
 assert.equal(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9']])}).target,'film:tmdb:9');
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9'],['film:tmdb:9','film:tmdb:10']])}),{refused:'producer_identity_redirect_chain'});
-assert.equal(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}).target,'film:tmdb:6');
+assert.deepEqual(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}),{refused:'producer_identity_ambiguous'},'AIR-671: the minting spelling of an unclaimed movie id is not followed through a redirect');
+assert.equal(resolveIdentity('film:tmdb:5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}).target,'film:tmdb:6','an explicit Film id still follows its redirect');
 
 // Historical mixed fixture (21.11): 386 canonical film:<lid> + 9 existing film:tmdb:<n> with trusted Letterboxd claims -> 395 unique existing owners, 0 shadow Films.
 {

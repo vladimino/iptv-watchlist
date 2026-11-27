@@ -282,7 +282,8 @@ export async function writeFilmFacts(env,input){
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
  // ADR 0217 decision 8d (AIR-671): a write that would CREATE `film:tmdb:<n>` asserts, INSIDE the fenced batch below, that no row of the movie id exists (any trust, any Film), so a plan made before an attach (or a Discovery admission)
- // fails the whole batch closed (`film_person_precondition`) and never mints a duplicate. The writer takes an EXPLICIT Film target and never resolves a movie reference: that is done at the source boundary
+ // fails the whole batch closed (`film_person_precondition`) and never mints a duplicate. The only row of the movie id a creating write tolerates is the target's own trusted, non-conflicting one (a concurrent admission of the same movie);
+ // a Film created by another batch in the meantime does not lift the requirement (the revision CAS refuses it as well). The writer takes an EXPLICIT Film target and never resolves a movie reference: that is done at the source boundary
  // (`resolveSourceIdentities`, which also puts the exact owner proof into `guards`, asserted in this same batch).
  const mint=snapshot.film?null:SPELLED_TMDB.exec(id)?.[1]??null;
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
@@ -292,7 +293,7 @@ export async function writeFilmFacts(env,input){
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
- if(mint!==null)statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM film WHERE id=?) OR NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=?)"),[id,mint]]);
+ if(mint!==null)statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))"),[mint,id]]);
  if(input.requireExisting===true)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
  if(membership.present)statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM watchlist_membership_authority WHERE id=1 AND mode='producer')"),[]]);
  // AIR-572: caller-supplied proof conditions (the Producer's Letterboxd claim / owner / redirect proof of this Film target), asserted INSIDE the same
