@@ -5,6 +5,8 @@
 // entry: the ledger COPIES the entry's `attempts` and next retry time from the outcome (idempotent, so a restart between the check and the settle charges nothing twice). A row ends only when it is
 // resolved, superseded (the id left the Watchlist) or at the attempt cap (`terminal`, visible, it waits for the owner). Age no longer ends a row: a row pending longer than AGE_REPORT_MS is REPORTED
 // (`overdue`), not terminated. The membership is never rolled back by an admission failure. Collaborators are injected: the ledger repository and the identity bridge.
+// AIR-673 / ADR 0217 decision 9: the typed `resolvedBy` of a Watchlist id admitted as a lid-only Film.
+export const LID_ONLY_RESOLVED_BY = 'identity:lid_only';
 export const STEP_LIMIT = 3;
 // AIR-599: the age at which a pending row is reported (run record, Monitor). It is not a terminal rule any more.
 export const AGE_REPORT_MS = 14 * 24 * 3600000;
@@ -67,7 +69,10 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       if (outcome?.checked) counts.checked++;
       if (out?.labels?.has(row.lid) || tmdb || (outcome?.class === 'settled' && outcome.reason !== 'owner_dismissed')) {
         // Verified now, or already linked by another writer's receipt: resolved without a second write.
-        const by = ('identity:' + (tmdb || 'verified')).slice(0, 200);
+        // AIR-673 / ADR 0217 decision 9: a lid-only Film (a label with `lidOnly` and no TMDB movie, no linked alias) is a typed success of its own. Settlement accepts it in addition to "label or TMDB link"; it
+        // never invents a TMDB alias and never writes a receipt of its own (the coordinator's `present_lid_only` settles only).
+        const label = out?.labels?.get?.(row.lid);
+        const by = (label?.lidOnly === true && !tmdb ? LID_ONLY_RESOLVED_BY : 'identity:' + (tmdb || 'verified')).slice(0, 200);
         const done = await settle(row, {state: 'resolved', attempts: row.attempts, resolvedBy: by});
         if (done.ok) { resolved++; counts.resolved++; } else if (done.reason === 'conflict') counts.rowChanged++;
         continue;

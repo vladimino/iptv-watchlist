@@ -1230,4 +1230,39 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  assert.deepEqual([idOut.http,...sig(idOut)],[503,'G1','G1','G1']);
 }
 
+// AIR-673 / ADR 0217 decision 9 (M1), test 15: a lid-only Film is read by `film:lb:<lid>` and by the bare lid; `tmdb_<n>` answers `absent`; `predictions.eligibility` is a separate field that never alters the read values or the coverage, and it
+// disappears once a trusted tmdb claim exists on the same Film (an attach). The claim rows decide, never the id spelling.
+{
+ const file=blank();
+ film(file,'film:lb:lo1',[['letterboxd','lo1']]);
+ sqlite(file,`INSERT INTO film_lid_admission (lid,film_id,route,admitted_at,receipt_key,proof_version,final_url,slug,canonical_path,shortlink,type_marker,id_block_outcome,completeness_outcome,title,year,proof_digest,checked_at,redirect_status,page_status) VALUES ('lo1','film:lb:lo1','watchlist_admission',${q(AT)},'admission:lid:lo1',1,'https://letterboxd.com/film/s/','s','/film/s/','lo1','film','absent','complete','T',1999,${q('a'.repeat(64))},${q(AT)},301,200)`);
+ const byFilm=await read(file,'film:lb:lo1'),byLid=await read(file,'lo1'),byMovie=await read(file,'tmdb_603');
+ for(const out of [byFilm,byLid]){
+  assert.equal(out.http,200);
+  assert.equal(out.body.identity.filmId,'film:lb:lo1');
+  assert.equal(out.body.identity.permalink,'/film/lo1','the permalink goes through the lid\'s trusted claim');
+  assert.deepEqual(out.body.predictions.eligibility,{status:'not_eligible',reason:'lid_only_deferred'});
+  assert.notEqual(out.body.predictions.status,undefined,'the read value status is still stated by the read itself');
+ }
+ assert.equal(byMovie.http,404,'tmdb_<n> answers absent until an attach');
+ // The eligibility is separate: the values and the coverage are exactly what the read gives without it.
+ const {eligibility:_e,...without}=byLid.body.predictions;
+ assert.ok(!('eligibility' in without));
+ assert.ok(['absent','partial','present','conflict','unknown'].includes(without.status));
+ // An attach: a trusted tmdb claim on the same Film. The same Film id; the exclusion ends; the ordinary gates decide.
+ claim(file,'film:lb:lo1','tmdb','603');
+ const attached=await read(file,'film:lb:lo1');
+ assert.equal(attached.http,200);
+ assert.equal(attached.body.identity.filmId,'film:lb:lo1','the minted id never changes');
+ assert.equal(attached.body.identity.permalink,'/film/tmdb_603');
+ assert.ok(!('eligibility' in attached.body.predictions),'no eligibility statement after the attach');
+ assert.equal((await read(file,'tmdb_603')).body.identity.filmId,'film:lb:lo1','found by the movie as well');
+}
+// An ordinary movie Film costs no extra statement and carries no eligibility field.
+{
+ const file=world();
+ const out=await read(file,'tmdb_5');
+ assert.ok(!('eligibility' in out.body.predictions));
+}
+
 console.log('film-aggregate: FilmAggregateV1 sections (display, watchlist, availability, personal, predictions, history) over the AIR-646 resolver; G1 candidate discovery and coverage with its bounds; per-section before/after tokens (generation_moved), identity_moved with no section, the 40-statement budget with the reserved fence, C2 dedup and conflicts, the Watchlist negative proof, history limited/unavailable; dormant and read-only');

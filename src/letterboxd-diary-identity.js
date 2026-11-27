@@ -27,7 +27,7 @@ const LetterboxdDiaryIdentity=(()=>{
  const TRANSPORT_REASONS=new Set(['forbidden','challenge','rate_limited','timeout','network_error','upstream_5xx','tmdb_unavailable','upstream_cooldown']);
  const NOT_NOW_REASONS=new Set(['deferred','unavailable','admission_closed','admission_unavailable','in_flight','admission_skipped','admission_held','diary_cap','epoch_fenced','persist_failed','owner_requeued','entry_changed','checking']);
  const GONE_REASONS=new Set(['not_found']);
- const SETTLED_REASONS=new Set(['verified','linked','owner_dismissed']);
+ const SETTLED_REASONS=new Set(['verified','linked','lid_only','owner_dismissed']);
  function classify(reason){
   const r=String(reason||'');
   if(TRANSPORT_REASONS.has(r))return 'transport';
@@ -340,6 +340,11 @@ const LetterboxdDiaryIdentity=(()=>{
      if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,tmdb,verdict?checkedDigest:null);labels.set(lid,verdict?label(verdict):{title:null,year:null,tmdb});return;}
      record(item,linked.state==='conflict'?'link_conflict':'link_failed',linked.state==='conflict'?{}:{tmdb});
      return;
+    }
+    // AIR-673 / ADR 0217 decision 9: the lid is a lid-only Film (admitted by the coordinator's `lid_only` kind, or found already admitted). The entry stays on the existing `lb-<lid>` fact key with NO invented `tmdb:` alias:
+    // nothing is bridged or linked, the `linking` intent is cleared with the outcome `lid_only`, and the caller's label carries `lidOnly` with no TMDB movie. The coordinator's `present_lid_only` settles only; no receipt is written here.
+    case 'admitted_lid_only':case 'present_lid_only':{
+     counts.verified++;settled.set(lid,'lid_only');clear.push(lid);labels.set(lid,{title:null,year:null,tmdb:null,lidOnly:true});return;
     }
     case 'other_code':case 'conflict':case 'source_changed':return;
     case 'wait':defer(item,prior);outcomes.set(lid,{checked:false,class:'not_now',reason:'in_flight',retryAt:out.dueAt??null,attempts:Number(stored.films[lid]?.attempts)||0,streak:Number(stored.films[lid]?.streak)||0,terminal:false});return;

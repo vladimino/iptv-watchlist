@@ -65,6 +65,17 @@ Every section has a `status` (`present`, `absent`, `unknown`, `unavailable`, `pa
 - **Statements.** At most 40 D1 statements per request, counted on the binding. The identity fence is reserved first; each section reserves its after-statement before its first read; the ratings coverage reads run first. A section that cannot get its statements is `unavailable`, `budget_exceeded`. A typical request uses about 20.
 - **Index use.** Every statement is served by a primary key or an existing index, checked by `EXPLAIN QUERY PLAN` in `tests/film-aggregate.mjs` on a database built from the real chain, which allows no scan of a base table or of an index (only the bound key lists, a constant row, derived tables, the recursive queue and the measuring CTE of the bounded document read). The retirement reads use `tmdb_retirement_decision_movie` (migration 0040) and the ancestry step `film_redirect_by_target` (migration 0043); both migrations are delivered offline and applied in the pre-activation window above.
 
+## Lid-only Film: `predictions.eligibility` (ADR 0217 decision 9, choice M1, AIR-673, dormant)
+
+A Film minted `film:lb:<lid>` is read by `film:lb:<lid>` and by the bare lid; `tmdb_<n>` answers `absent` (404) until an attach, and the permalink is `/film/<lid>` until a trusted movie claim exists. The `predictions` section keeps ADR 0216 sections 5 and 6b unchanged: known historical values and conflicts under authorized aliases are reported as read, `none` only under full negative proof, coverage as it is.
+
+Eligibility is a **separate** field of that section, `predictions.eligibility`:
+- `{status: "not_eligible", reason: "lid_only_deferred"}` when the survivor has a trusted `letterboxd` claim, no trusted `tmdb` claim and a `film_lid_admission` row (itself or one of its redirect sources). It never turns a present or conflicting value into `partial` and never invents incompleteness.
+- Absent after a successful attach (a trusted `tmdb` claim): the ordinary ADR 0154 gates decide, and the id of the Film does not change.
+- `{status: "unknown", reason: "budget_exceeded" | "eligibility_unavailable"}` when the one extra statement cannot be spent or read; never an eligible answer. An ordinary movie Film carries no `eligibility` key and spends no extra statement. A table not yet applied means no lid-only Film exists.
+
+The claim rows decide, never the spelling of the id.
+
 ## Derived readiness (ADR 0218 decision 4, AIR-665, dormant)
 
 `src/film-readiness.js` derives `displayReady`, `catalogReady` and `predictionReady` from the response body above, and `src/film-readiness-composition.js` (`readFilmReadiness`) composes the real `readFilmAggregate` read with it. Both read nothing themselves and add no statement to the 40-statement budget (asserted in `tests/film-aggregate.mjs`: identical D1 query count, byte-identical database). The rules, the checked prediction-domain handoff (observation versus independently supplied context) and the placement of the D1 reader switch (aggregate activation, AIR-648) are in the [Film/Person reference](../domain/film-person.md#readiness-is-derived-not-a-new-entity-status). They add no field to the `film-aggregate/v1` response.
