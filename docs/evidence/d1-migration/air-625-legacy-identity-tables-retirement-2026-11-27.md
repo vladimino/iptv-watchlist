@@ -32,6 +32,8 @@ This is **executor evidence, not an independent production query**. Two `SELECT`
 
 Retained evidence: **two observed zero counts**, the dated figure in ADR 0215 ("0, 0, 0") and the live read above. That supports "nothing is retained now"; it does **not** prove that no row ever existed (rows deleted earlier, or in a restored copy, were not examined). The apply preflight re-checks emptiness immediately before the drop and refuses on any row.
 
+**Correction (AIR-603, 27 Nov 2026).** The repository chain on `main` bd621cc ends at 54: `0051`-`0053` are the neighbouring changes and `0054` is this file, so "ends at 52" below was the state before PR #1052 and is superseded. `0054` is the last file of checkpoint B of the single migration window ([runbook](../../runbooks/d1-migration-window-v38-v54.md)).
+
 **Consequence for the apply order.** Production is at schema 38 while the repository chain ends at 52 (0051 and 0052 on `main`, 0053 taken by a neighbouring change). `0054` follows a complete version 53 and refuses anything else, so it cannot be applied until `0039`-`0053` are applied by their own owner operations. The retirement therefore waits for that chain; it does not accelerate it.
 
 ## Offline migration

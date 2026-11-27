@@ -215,6 +215,9 @@ export const FILES={
  "canonical-film-external-ids-producer.mjs": {
   "suite": "core"
  },
+ "d1-migration-window-production.mjs": {
+  "suite": "core"
+ },
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
@@ -291,6 +294,9 @@ export const FILES={
   "suite": "core"
  },
  "canonical-letterboxd-claim.mjs": {
+  "suite": "core"
+ },
+ "migration-window-v47-runtime-compat.mjs": {
   "suite": "core"
  },
  "prediction-alias-bridge-cohort.mjs": {
