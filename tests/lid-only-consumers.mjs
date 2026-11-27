@@ -14,7 +14,7 @@ async function settleWith({label=null,link=null,outcome=null}={}){
  const repository={
   dueAdmissions:async()=>({ok:true,rows:[{lid:'lo1',attempts:0,updatedAt:'u',firstSeenSnapshotId:'s1',firstSeenAt:null,lastReason:null}],pending:1,overdue:0,overdueUnknown:0}),
   readSnapshot:async()=>({ok:true,snapshot:{films:[{lid:'lo1',url:'https://letterboxd.com/film/some-short/'}]}}),
-  settleAdmission:async(env,fields)=>{settled.push(fields);return {ok:true};},
+  settleAdmission:async(env,fields,options)=>{settled.push({...fields,guards:options?.guards||[]});return {ok:true};},
  };
  const identity={
   MAX_ATTEMPTS:5,
@@ -26,11 +26,16 @@ async function settleWith({label=null,link=null,outcome=null}={}){
  const out=await step(ctx,{now:NOW});
  return {out,settled};
 }
+const OWNER=['INSERT INTO film_person_cas (id,ok) VALUES (1,1)',['lo1']];
 {
- const lidOnly=await settleWith({label:{title:null,year:null,tmdb:null,lidOnly:true}});
+ const lidOnly=await settleWith({label:{title:null,year:null,tmdb:null,lidOnly:true},outcome:{checked:true,class:'settled',reason:'lid_only',attempts:0,ownerGuard:OWNER}});
  assert.equal(lidOnly.out.resolved,1);
  assert.equal(lidOnly.settled.length,1);
  assert.deepEqual([lidOnly.settled[0].state,lidOnly.settled[0].resolvedBy],['resolved','identity:lid_only'],'a lid-only label settles as a typed success');
+ assert.ok(lidOnly.settled[0].guards.some(guard=>guard===OWNER),'the ledger batch carries the current-ownership assertion of the Diary result');
+ // a lid-only label WITHOUT that assertion is never trusted: the row stays due and nothing is settled
+ const unguarded=await settleWith({label:{title:null,year:null,tmdb:null,lidOnly:true},outcome:{checked:true,class:'settled',reason:'lid_only',attempts:0}});
+ assert.equal(unguarded.settled.length,0);assert.equal(unguarded.out.resolved,0);
  // A linked TMDB movie always wins: a label never overrides an alias.
  const linked=await settleWith({label:{title:null,year:null,tmdb:null,lidOnly:true},link:{tmdb:'603'}});
  assert.equal(linked.settled[0].resolvedBy,'identity:603');

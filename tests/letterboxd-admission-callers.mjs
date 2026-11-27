@@ -1085,4 +1085,162 @@ const file=fresh('d1'),env=world(file);
  assert.equal(rowOf('lo3').state,'admitting','the row stays in its durable intent for another attempt');
 }
 
+// ===== AIR-673 review: races that actually interrupt the rated lid-only settlement, an already-present Film of another route, and the survivor Film after a merge =====
+{
+ const SHA='f'.repeat(64),KEY='letterboxd/imports/'+SHA+'/rated-candidates.json';
+ const RULES={eligibleTypes:['video.movie'],idBlockMarker:'<section class="film-ids">'};
+ const page=(lid,slug,title,year)=>'<html><head><link rel="canonical" href="https://letterboxd.com/film/'+slug+'/"><link rel="shortlink" href="https://boxd.it/'+lid+'"><meta property="og:type" content="video.movie"><meta property="og:title" content="'+title+' ('+year+')"><script type="application/ld+json">'+JSON.stringify({name:title,releasedEvent:[{startDate:String(year)}]})+'</script></head><body class="film"><section class="film-ids"></section></body></html>';
+ const addPage=(lid,slug,title='Lid Only',year=1999)=>site.set(lid,{slug,html:page(lid,slug,title,year)});
+ const doc=(code,over={})=>({schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[code]:{code,state:'pending',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name:'Lid Only',year:1999,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:null,...over}},checkpoint:{cursor:null,stopped:null}});
+ const rowOf=code=>getDocD1(file,KEY).candidates[code];
+ const lidRows=lid=>rows(file,"SELECT film_id,route,proof_digest FROM film_lid_admission WHERE lid='"+lid+"'");
+ const linksDoc=()=>getDocD1(file,'letterboxd/facts/links.json')||{};
+ const fresh2=()=>{reset();};
+ // A world whose database runs a side effect at a chosen moment, as a competing writer would.
+ const hooked=({onBatch=null,onQuery=null}={})=>({DB:d1Standin(file,{onBatch:onBatch?statements=>onBatch(statements.map(item=>item.text)):null,onQuery:onQuery||null}),BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'fixture-token'});
+ const stepWith=(e,extra)=>Candidates.identityStep(e,{sha:SHA,fetchImpl,lidOnlyRules:RULES,...extra});
+ const proofFor=(lid,slug,title,year)=>vm.runInContext('(async()=>{const html='+JSON.stringify(page(lid,slug,title,year))+';const landing=new URL("https://letterboxd.com/film/'+slug+'/");const evidence=LetterboxdIdentity.pageEvidence(html,landing,letterboxdPageTools());return LetterboxdLidOnlyProof.lidOnlyPageProof({lid:'+JSON.stringify(lid)+',redirect:{status:301},fetched:{html,landing},evidence,rules:'+JSON.stringify(RULES)+',checkedAt:"2026-11-27T10:00:00.000Z"});})()',ctx);
+ const admitElsewhere=async(lid,slug,title)=>{
+  const proof=await proofFor(lid,slug,title,1999);assert.equal(proof.admits,true);
+  const out=await D1.admitVerifiedLidOnly(env,{lid,route:'watchlist_admission',reacquire:async()=>({ok:true,proof:proof.proof,links:await Facts.linksObservation(env,lid)}),now:()=>new Date(NOW).toISOString()});
+  assert.equal(out.outcome,'admitted_lid_only',JSON.stringify(out));return {proof,out};
+ };
+
+ // R1. The candidate row is REMOVED between the admission and the settlement's own read: the settlement refuses BEFORE any fact is written; the row stays removed and no terminal write lands.
+ fresh2();setDocD1(file,KEY,doc('lq1'));addPage('lq1','lid-only-1999');
+ let armed=false;
+ const r1=await stepWith(hooked({onBatch:texts=>{if(!armed&&texts.some(t=>/INSERT INTO film_lid_admission/.test(t))){armed=true;const d=getDocD1(file,KEY);d.candidates.lq1.state='removed';setDocD1(file,KEY,d);}}}));
+ assert.notEqual(r1.verified,true,JSON.stringify(r1));
+ assert.equal(rowOf('lq1').state,'removed','a row removed meanwhile is never settled');
+ assert.equal(Object.keys(linksDoc()).includes('letterboxd:lq1'),false,'no fact link was written for a candidate that no longer exists');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM film_rated_admission WHERE source_code='lq1'")[0].n,0);
+
+ // R2. A COMPETING CLAIM of the lid arrives after the coordinator returned and before the settlement batch: the batch's ownership assertion fails and nothing is reported verified.
+ fresh2();setDocD1(file,KEY,doc('lq2'));addPage('lq2','lid-only-1999');
+ sqlite(file,"INSERT OR IGNORE INTO film (id,contract_version,updated_at) VALUES ('film:other-owner-lq',1,'"+STAMP+"');INSERT OR IGNORE INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:other-owner-lq',1,'"+STAMP+"')");
+ let armed2=false,fired2=false;
+ const r2=await stepWith(hooked({onBatch:texts=>{if(texts.some(t=>/INSERT INTO film_lid_admission/.test(t)))armed2=true;else if(armed2&&!fired2&&texts.some(t=>/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t)&&t.includes('films/lb-lq2'))){fired2=true;sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:other-owner-lq','letterboxd','lq2',0,0)");}}}));
+ assert.equal(fired2,true,'the competing claim was injected after the admission');
+ assert.notEqual(r2.verified,true,JSON.stringify(r2));
+ assert.equal(rowOf('lq2').state,'admitting','the row keeps its durable intent: ownership changed, not verified');
+ assert.equal(r2.reason,'ownership_changed',JSON.stringify(r2));
+
+ // R3. A Ratings alias to a MOVIE appears after the admission and before the facts link: reviewed (`ratings_tmdb_link`), never a TMDB-linked record reported as the lid's own.
+ fresh2();setDocD1(file,KEY,doc('lq3'));addPage('lq3','lid-only-1999');
+ let armed3=false,fired3=false;
+ const r3=await stepWith(hooked({onBatch:texts=>{if(texts.some(t=>/INSERT INTO film_lid_admission/.test(t)))armed3=true;else if(armed3&&!fired3&&texts.some(t=>/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t)&&t.includes('letterboxd/facts/links.json'))){fired3=true;setDocD1(file,'letterboxd/facts/links.json',{...linksDoc(),'letterboxd:lq3':'tmdb-900300','tmdb:900300':'tmdb-900300'});}}}));
+ assert.equal(fired3,true);
+ assert.notEqual(r3.verified,true,JSON.stringify(r3));
+ assert.notEqual(rowOf('lq3').state,'verified','a TMDB-linked record is never reported as the lid\'s own');
+ // the next ordinary step (no competing writer) reconciles the applied receipt, meets the same alias and reviews the row
+ const r3b=await stepWith(world(file));
+ assert.notEqual(r3b.verified,true,JSON.stringify(r3b));
+ assert.equal(rowOf('lq3').state,'needs_review',JSON.stringify([r3,r3b]));assert.equal(rowOf('lq3').reason,'ratings_tmdb_link');
+ assert.equal(linksDoc()['letterboxd:lq3'],'tmdb-900300','our write did not touch the alias that appeared');
+ assert.equal(Object.values(linksDoc()).includes('lb-lq3'),false);
+ // and the guard itself: a lid whose record is a movie's is refused by the lid-only link writer
+ await assert.rejects(()=>Facts.linkLidOnly(env,'lq3'),error=>error.code==='alias_conflict');
+
+ // R4. An ALREADY-PRESENT Film admitted by ANOTHER route (a different proof digest): settled as present, with no receipt of its own and no TMDB alias; the resolved Film id is the proof row's.
+ fresh2();
+ const other=await admitElsewhere('lq4','lid-only-1999','Other Title');
+ const receiptsBefore=receipts(file,'admission:lid:lq4').length;
+ setDocD1(file,KEY,doc('lq4'));addPage('lq4','lid-only-1999','Lid Only');
+ const r4=await stepWith(world(file));
+ assert.equal(r4.verified,true,JSON.stringify(r4));
+ assert.equal(r4.filmId,'film:lb:lq4');
+ assert.equal(receipts(file,'admission:lid:lq4').length,receiptsBefore,'no receipt of its own for a present Film');
+ assert.equal(lidRows('lq4')[0].proof_digest,other.proof.proof.proofDigest,'the proof row stays the first route\'s');
+ assert.notEqual(rowOf('lq4').proofDigest,other.proof.proof.proofDigest,'the candidate carries its own page digest');
+ assert.deepEqual([rowOf('lq4').state,rowOf('lq4').tmdb,rowOf('lq4').filmId],['verified',null,'film:lb:lq4']);
+
+ // R5. After a MERGE the proof row and the claim name an arbitrary survivor: the settlement uses the coordinator's resolved Film id, not `film:lb:<lid>`.
+ fresh2();
+ await admitElsewhere('lq5','lid-only-1999','Other Title');
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:survivor-lq5',1,'"+STAMP+"');INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:survivor-lq5',1,'"+STAMP+"');DELETE FROM film_external_id WHERE film_id='film:lb:lq5' AND scheme='letterboxd';INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:survivor-lq5','letterboxd','lq5',1,0);UPDATE film_lid_admission SET film_id='film:survivor-lq5' WHERE lid='lq5';INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:lq5','film:survivor-lq5','"+STAMP+"')");
+ setDocD1(file,KEY,doc('lq5'));addPage('lq5','lid-only-1999','Lid Only');
+ const r5=await stepWith(world(file));
+ assert.equal(r5.verified,true,JSON.stringify(r5));
+ assert.equal(r5.filmId,'film:survivor-lq5');assert.equal(rowOf('lq5').filmId,'film:survivor-lq5');
+
+ // R6. A REAL mismatched intent: the row holds a lid-only intent for ANOTHER page digest; the page now proves a different digest: `source_changed`, nothing admitted.
+ fresh2();
+ setDocD1(file,KEY,doc('lq6',{state:'admitting',kind:'lid_only',intendedTmdb:null,filmPath:'/film/lid-only-1999/',proofDigest:'0'.repeat(64),enrichment:'pending'}));addPage('lq6','lid-only-1999');
+ const r6=await stepWith(world(file));
+ assert.equal(rowOf('lq6').state,'needs_review',JSON.stringify(r6));assert.equal(rowOf('lq6').reason,'source_changed');
+ assert.equal(lidRows('lq6').length,0);
+}
+
+// ===== AIR-673 review: the Diary and the Watchlist ledger on a FRESH H1 lid-only admission (injected synthetic rules; the shipped rules stay empty), its recovery, and the current-ownership fence of both settlements =====
+{
+ const RULES={eligibleTypes:['video.movie'],idBlockMarker:'<section class="film-ids">'};
+ const page=(lid,slug,title,year)=>'<html><head><link rel="canonical" href="https://letterboxd.com/film/'+slug+'/"><link rel="shortlink" href="https://boxd.it/'+lid+'"><meta property="og:type" content="video.movie"><meta property="og:title" content="'+title+' ('+year+')"><script type="application/ld+json">'+JSON.stringify({name:title,releasedEvent:[{startDate:String(year)}]})+'</script></head><body class="film"><section class="film-ids"></section></body></html>';
+ const addPage=(lid,slug,title='Lid Only',year=1999)=>site.set(lid,{slug,html:page(lid,slug,title,year)});
+ const linksDoc=()=>getDocD1(file,'letterboxd/facts/links.json')||{};
+ const entry=async lid=>(await Facts.readDiaryIdentity(env)).films[lid]||null;
+ const lidRows=lid=>rows(file,"SELECT film_id FROM film_lid_admission WHERE lid='"+lid+"'");
+ const diary=(e,lid,slug,extra={})=>Identity.resolve(e,[{lid,slug}],opts({route:'ratings_diary',lidOnlyRules:RULES,...extra}));
+ const hooked=({onBatch})=>({DB:d1Standin(file,{onBatch:statements=>onBatch(statements.map(item=>item.text))}),BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'fixture-token'});
+
+ // D1. A fresh H1 page through the Diary: admitted by the `lid_only` kind under the common key, ONE applied receipt, the entry cleared, the label `lidOnly`, no alias, the ownership assertion handed on.
+ reset();
+ await seed(env,'dq1');addPage('dq1','diary-lid-only-1999');
+ const first=await diary(env,'dq1','diary-lid-only-1999');
+ const o1=first.outcomes.get('dq1');
+ assert.deepEqual([o1.class,o1.reason],['settled','lid_only'],JSON.stringify([...first.outcomes]));
+ assert.equal(JSON.stringify(first.labels.get('dq1')),JSON.stringify({title:null,year:null,tmdb:null,lidOnly:true}));
+ assert.ok(Array.isArray(o1.ownerGuard),'the Watchlist ledger receives the current-ownership assertion');
+ assert.deepEqual(lidRows('dq1').map(r=>r.film_id),['film:lb:dq1']);
+ assert.deepEqual(receipts(file,'admission:lid:dq1').map(r=>r.state),['applied'],'one applied receipt of its own');
+ assert.equal((await Facts.diaryLinks(env,['dq1'])).get('dq1').tmdb,null);
+ assert.equal(Object.keys(linksDoc()).some(alias=>alias==='tmdb:900150'),false);
+ assert.equal(await entry('dq1'),null,'the intent is cleared with the outcome lid_only');
+
+ // D2. Recovery: the admission applied, the entry (the durable intent) survived a crash. The next step settles it from the applied receipt, with the same single receipt and no second Film.
+ const before=JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),receipts(file,'admission:lid:dq1'),lidRows('dq1')]);
+ await Facts.updateDiaryIdentity(env,{set:{dq1:{reason:'lid_only_intent',class:'intent',kind:'lid_only',tmdb:null,proofDigest:rows(file,"SELECT proof_digest FROM film_lid_admission WHERE lid='dq1'")[0].proof_digest,slug:'diary-lid-only-1999',attempts:0,streak:0,queuedAt:new Date(NOW).toISOString(),lastAttemptAt:new Date(NOW).toISOString(),nextAttemptAt:new Date(NOW).toISOString(),route:'ratings_diary'}},expect:{dq1:null}});
+ assert.equal((await entry('dq1')).reason,'lid_only_intent');
+ const again=await diary(env,'dq1','diary-lid-only-1999');
+ assert.deepEqual([again.outcomes.get('dq1').class,again.outcomes.get('dq1').reason],['settled','lid_only'],JSON.stringify([...again.outcomes]));
+ assert.equal(await entry('dq1'),null,'the recovered intent is cleared');
+ assert.equal(JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),receipts(file,'admission:lid:dq1'),lidRows('dq1')]),before,'idempotent: nothing written twice');
+
+ // D3. A COMPETING CLAIM of the lid arrives after the coordinator admitted and before the Diary write: the write's ownership assertion refuses it, the entry (intent) stays and NO settled outcome or label is returned.
+ reset();
+ await seed(env,'dq3');addPage('dq3','diary-lid-only-1999');
+ sqlite(file,"INSERT OR IGNORE INTO film (id,contract_version,updated_at) VALUES ('film:other-owner-dq',1,'"+STAMP+"');INSERT OR IGNORE INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:other-owner-dq',1,'"+STAMP+"')");
+ let admitted3=false,fired3=false;
+ const raced=await diary(hooked({onBatch:texts=>{if(texts.some(t=>/INSERT INTO film_lid_admission/.test(t)))admitted3=true;else if(admitted3&&!fired3&&texts.some(t=>/diary-identity\.json/.test(t)&&/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t))){fired3=true;sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:other-owner-dq','letterboxd','dq3',0,0)");}}}),'dq3','diary-lid-only-1999');
+ assert.equal(fired3,true,'the competing claim landed after the admission and before the Diary write');
+ const o3=raced.outcomes.get('dq3');
+ assert.notEqual(o3.class,'settled',JSON.stringify([...raced.outcomes]));
+ assert.equal(raced.labels.has('dq3'),false,'no successful label for another consumer to trust');
+ assert.equal(o3.ownerGuard,undefined);
+ assert.ok(await entry('dq3'),'the intent entry is kept');
+
+ // D4. The Watchlist ledger over the REAL repository: a fresh H1 lid-only admission settles the row `identity:lid_only` (ownership assertion in the ledger batch); a competing claim between the Diary result and the
+ // ledger settlement leaves the row due, never resolved.
+ reset();
+ sqlite(file,"DELETE FROM ratings_document WHERE key='letterboxd/facts/scans/diary-identity.json'");
+ const GUARD='INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
+ const ledger=()=>Object.fromEntries(rows(file,'SELECT lid,state,attempts,last_reason,resolved_by FROM watchlist_admission_pending').map(r=>[r.lid,r]));
+ const bridge=(rules,e=env)=>({MAX_ATTEMPTS:Identity.MAX_ATTEMPTS,resolve:(env2,items,o)=>Identity.resolve(e,items,{...o,fetchImpl,lidOnlyRules:rules}),diaryLinks:(e2,lids)=>Facts.diaryLinks(e2,lids)});
+ const wnow=Date.now();
+ await seed(env,'dq4');await seed(env,'dq5');addPage('dq4','wl-lid-only-1999');addPage('dq5','wl-lid-only-2000','Lid Only Five',2000);
+ const wfilm=(id,slug,year)=>({id,title:'T'+id,year,url:'https://letterboxd.com/film/'+slug+'/'});
+ const pub=await WatchlistD1.publishSnapshot(env,[wfilm('dq4','wl-lid-only-1999',1999),wfilm('dq5','wl-lid-only-2000',2000)],{scanId:'sdq',observedAt:'2026-11-27T11:00:00.000Z',runId:'r-sdq',slotKey:'k'},{now:Date.parse('2026-11-27T11:00:00.000Z')});
+ assert.equal(pub.ok,true,JSON.stringify(pub));
+ const ctxOf=e=>({env:e,epoch:1,now:()=>wnow,deadline:wnow+600000});
+ const out=await admissionStep({repository:WatchlistD1,identity:bridge(RULES),epochGuard:()=>[GUARD,[]]})(ctxOf(env),{limit:3,now:wnow});
+ assert.equal(out.resolved,2,JSON.stringify(out)+JSON.stringify(ledger()));
+ assert.deepEqual([ledger().dq4.state,ledger().dq4.resolved_by],['resolved','identity:lid_only']);
+ assert.deepEqual(lidRows('dq4').map(r=>r.film_id),['film:lb:dq4']);
+ // a stale ledger: the ledger batch is refused when the ownership no longer holds
+ sqlite(file,"UPDATE watchlist_admission_pending SET state='pending',resolved_by=NULL WHERE lid='dq5'");
+ sqlite(file,"INSERT OR IGNORE INTO film (id,contract_version,updated_at) VALUES ('film:other-owner-dq',1,'"+STAMP+"');INSERT OR IGNORE INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:other-owner-dq',1,'"+STAMP+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:other-owner-dq','letterboxd','dq5',0,0)");
+ const stale=await admissionStep({repository:WatchlistD1,identity:bridge(RULES),epochGuard:()=>[GUARD,[]]})(ctxOf(env),{limit:3,now:wnow});
+ assert.equal(ledger().dq5.state,'pending',JSON.stringify([stale,ledger()]));
+ assert.notEqual(ledger().dq5.resolved_by,'identity:lid_only','a competing claim never lets the ledger resolve the row');
+}
+
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {LID_ONLY_DEFERRED,lidCandidate,predictionEligibility,readLidOnlyDeferred} from '../src/prediction-lid-only-exclusion.js';
+import {LID_ONLY_DEFERRED,cohortFilms,lidCandidate,predictionEligibility,readLidOnlyDeferred} from '../src/prediction-lid-only-exclusion.js';
 
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lid-only-m1-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -57,15 +57,33 @@ assert.equal(lidCandidate(7),null);
  assert.equal((await readLidOnlyDeferred(envOf(other),['q1'])).size,1);
 }
 
-// 3. A merge: the admission row's Film is a redirect source; the survivor's trusted tmdb claim ends the exclusion, the survivor's absence keeps it.
+// 3. A merge (AIR-674 moves the proof row to the survivor, and a redirect may also leave it on the source): the cohort is decided on the RESOLVED Film, for every id that nominates it.
 {
+ // 3a. the proof row moved to an arbitrary survivor with no trusted movie claim: the survivor's own id, the lid, the fact key and the redirect SOURCE are all excluded.
  const file=fresh();
- film(file,'film:lb:m1');claim(file,'film:lb:m1','letterboxd','m1');admission(file,'m1','film:lb:m1');
- film(file,'film:tmdb:700');
- sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:m1','film:tmdb:700',"+STAMP+")");
- assert.equal((await readLidOnlyDeferred(envOf(file),['m1'])).size,1,'survivor without a trusted movie claim: still excluded');
- claim(file,'film:tmdb:700','tmdb','700');
- assert.equal((await readLidOnlyDeferred(envOf(file),['m1'])).size,0,'survivor with a trusted movie claim: not excluded');
+ film(file,'film:lb:m1');film(file,'film:survivor');
+ claim(file,'film:survivor','letterboxd','m1');
+ admission(file,'m1','film:survivor');
+ sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:m1','film:survivor',"+STAMP+")");
+ const out=await readLidOnlyDeferred(envOf(file),['film:survivor','film:lb:m1','m1','lb-m1','film:unrelated']);
+ assert.deepEqual([...out].sort(),['film:lb:m1','film:survivor','lb-m1','m1'],'every id that names the resolved Film is excluded, an unrelated Film is not');
+ // 3b. the proof row left on the redirect source: the same answer.
+ const left=fresh();
+ film(left,'film:lb:m2');film(left,'film:survivor2');
+ claim(left,'film:survivor2','letterboxd','m2');
+ admission(left,'m2','film:lb:m2');
+ sqlite(left,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:m2','film:survivor2',"+STAMP+")");
+ assert.deepEqual([...await readLidOnlyDeferred(envOf(left),['film:survivor2','m2'])].sort(),['film:survivor2','m2']);
+ // 3c. a survivor with a current trusted movie claim is outside the cohort (the attach happened on the survivor); a RETIRED movie claim is historical evidence and does not lift the exclusion.
+ claim(file,'film:survivor','tmdb','700');
+ assert.equal((await readLidOnlyDeferred(envOf(file),['film:survivor','m1'])).size,0,'a trusted movie claim on the survivor ends the exclusion');
+ const retired=fresh();
+ film(retired,'film:lb:r1');claim(retired,'film:lb:r1','letterboxd','r1');admission(retired,'r1','film:lb:r1');claim(retired,'film:lb:r1','tmdb','701');
+ assert.equal((await readLidOnlyDeferred(envOf(retired),['r1'])).size,0);
+ sqlite(retired,"INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,payload_json,recorded_at) VALUES ('rq1','film:lb:r1','retire','r1','701','999','{}','{\"by\":\"owner\",\"at\":\"2026-11-27T10:00:00.000Z\",\"source\":\"synthetic\"}','owner_request','{}',"+STAMP+")");
+ assert.equal((await readLidOnlyDeferred(envOf(retired),['r1'])).size,1,'a movie retired by a non-superseded owner decision is not a current claim');
+ // 3d. the cohort statement answers per Film id for the aggregate: the same rule.
+ assert.deepEqual([...await cohortFilms(envOf(left).DB,['film:survivor2','film:lb:m2','film:unrelated'])].sort(),['film:lb:m2','film:survivor2']);
 }
 
 // 4. Dormant paths: the table not applied (nothing lid-only can exist), no D1 binding (R2-only world), no candidate (no read at all).
@@ -74,8 +92,8 @@ assert.equal(lidCandidate(7),null);
  assert.equal((await readLidOnlyDeferred({},['abc12'])).size,0);
  let queried=0;
  const spy={DB:{prepare(){queried++;throw new Error('must not query');}}};
- assert.equal((await readLidOnlyDeferred(spy,['tmdb_603','film:tmdb:603'])).size,0);
- assert.equal(queried,0,'ids that cannot be lids cost no statement');
+ assert.equal((await readLidOnlyDeferred(spy,['tmdb_603'])).size,0);
+ assert.equal(queried,0,'a movie id nominates nothing and costs no statement');
 }
 
 // 5. Fail closed: any read failure other than the missing table is thrown, never turned into "not excluded".
@@ -93,15 +111,9 @@ assert.equal(lidCandidate(7),null);
  assert.equal(out.size,130);
 }
 
-// 7. The separate `predictions.eligibility` field: a statement about eligibility only; it never invents anything about values.
-{
- const trusted={scheme:'tmdb',value:'603',trusted:true,conflicting:false};
- assert.deepEqual(predictionEligibility({claims:[{scheme:'letterboxd',value:'abc12',trusted:true,conflicting:false}],lidAdmitted:true}),LID_ONLY_DEFERRED);
- assert.deepEqual(LID_ONLY_DEFERRED,{status:'not_eligible',reason:'lid_only_deferred'});
- assert.equal(predictionEligibility({claims:[trusted],lidAdmitted:true}),null,'after an attach the ordinary gates apply');
- assert.equal(predictionEligibility({claims:[{...trusted,retired:true}],lidAdmitted:true})?.reason,'lid_only_deferred','a retired movie claim is not a current claim');
- assert.equal(predictionEligibility({claims:[],lidAdmitted:false}),null,'no admission row: no statement');
- assert.equal(predictionEligibility({claims:null,lidAdmitted:true}),null);
- assert.notEqual(predictionEligibility({claims:[],lidAdmitted:true}),LID_ONLY_DEFERRED,'a fresh object each time');
-}
+// 7. The separate `predictions.eligibility` field is a verdict about eligibility only, from the SAME cohort statement.
+assert.deepEqual(predictionEligibility({inCohort:true}),LID_ONLY_DEFERRED);
+assert.deepEqual(LID_ONLY_DEFERRED,{status:'not_eligible',reason:'lid_only_deferred'});
+assert.equal(predictionEligibility({inCohort:false}),null,'outside the cohort the ordinary gates decide');
+assert.notEqual(predictionEligibility({inCohort:true}),LID_ONLY_DEFERRED,'a fresh object each time');
 console.log('prediction-lid-only-exclusion: ok');

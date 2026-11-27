@@ -24,7 +24,7 @@ import {createHash} from 'node:crypto';
 import {CREDIT_SELECTION_SQL,database} from './film-person-authority.js';
 import {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT} from './film-aggregate-resolver.js';
-import {predictionEligibility} from './prediction-lid-only-exclusion.js';
+import {COHORT_SQL,predictionEligibility} from './prediction-lid-only-exclusion.js';
 
 export {FILM_AGGREGATE_CONTRACT};
 // ADR 0216 decision 6b, the work bounds of candidate discovery.
@@ -430,23 +430,21 @@ async function predictionsSection(db,fence,set,coverage){
 
 
 // ---- predictions.eligibility (AIR-673, ADR 0217 decision 9, choice M1): a SEPARATE field. It is a verdict about eligibility only; it never turns a present or conflicting value into `partial` and never invents incompleteness. ----
-// A lid-only Film is a Film whose `film_lid_admission` row names it and that holds NO trusted `tmdb` claim. The claim rows of the resolution decide, never the spelling of the id (`film:lb:<lid>` is a minting id). The statement is spent only
-// for a survivor that has a trusted `letterboxd` claim and no trusted `tmdb` claim, so an ordinary movie costs none. Not readable (no budget, a failed read) is `unknown`, never an eligible answer. A table not yet applied means no lid-only Film exists.
-const LID_ADMISSION_SQL="SELECT EXISTS (SELECT 1 FROM film_lid_admission WHERE film_id IN (SELECT value FROM json_each(?)) OR lid IN (SELECT value FROM json_each(?))) AS admitted";
-async function eligibilitySection(db,resolution,set){
+// ONE cohort rule with the prediction queue, the manifest and `submit` (`COHORT_SQL`, src/prediction-lid-only-exclusion.js, the SAME statement) on the resolved survivor Film: the survivor is the Film of a `film_lid_admission` row
+// (its own or a redirect source's: a merge moves the proof) and holds no current trusted `tmdb` claim (a retired movie is historical evidence, not a current claim). The claim rows decide, never the spelling of an id. The statement is
+// spent only for a survivor WITHOUT a current trusted movie claim (an ordinary movie Film is outside the cohort by the rule itself and costs none). Not readable (no budget, a failed read) is `unknown`, never an eligible answer.
+// A table not yet applied means no lid-only Film exists.
+async function eligibilitySection(db,resolution){
  const claims=Array.isArray(resolution.claims)?resolution.claims:[];
- const own=c=>c.trusted===true&&c.conflicting!==true&&c.retired!==true;
- if(claims.some(c=>c.scheme==='tmdb'&&own(c)))return null;
- if(!claims.some(c=>c.scheme==='letterboxd'&&own(c)))return null;
- const ids=[resolution.filmId,...(Array.isArray(resolution.redirectedFrom)?resolution.redirectedFrom:[])];
- let admitted;
- try{admitted=Number((await row(db,LID_ADMISSION_SQL,[JSON.stringify(ids),JSON.stringify(set.lids)])).admitted)===1;}
+ if(claims.some(c=>c.scheme==='tmdb'&&c.trusted===true&&c.conflicting!==true&&c.retired!==true))return null;
+ let inCohort;
+ try{inCohort=(await db.prepare(COHORT_SQL).bind(JSON.stringify([resolution.filmId])).all()).results?.length>0;}
  catch(error){
   if(error instanceof BudgetExceeded)return {status:'unknown',reason:'budget_exceeded'};
   if(/no such table/i.test(String(error?.message||error?.cause?.message||'')))return null;
   return {status:'unknown',reason:'eligibility_unavailable'};
  }
- return predictionEligibility({claims,lidAdmitted:admitted});
+ return predictionEligibility({inCohort});
 }
 
 // ---- Watchlist (decision 5: source authority ADR 0186 vs projection ADR 0203, and the negative proof) ----
@@ -642,7 +640,7 @@ export async function readSections(env,resolution,budget){
  }
  if(!ratingsHeld)coverage={status:'incomplete',reason:'ratings_evidence_unavailable',token:null,tokenStatus:'unavailable'};
  // AIR-673: attached after the after-reads, so a section that moved stays `unavailable` and carries nothing.
- if(out.predictions&&out.predictions.status!=='unavailable'){const eligibility=await eligibilitySection(db,resolution,set);if(eligibility)out.predictions={...out.predictions,eligibility};}
+ if(out.predictions&&out.predictions.status!=='unavailable'){const eligibility=await eligibilitySection(db,resolution);if(eligibility)out.predictions={...out.predictions,eligibility};}
  out.history=historySection(resolution,set,coverage);
  return {display:out.display,watchlist:out.watchlist,availability:out.availability,personal:out.personal,predictions:out.predictions,history:out.history};
 }

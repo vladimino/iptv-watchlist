@@ -446,3 +446,29 @@ export async function admitVerifiedLidOnly(env,input={}){
  }
  return {...out,...base};
 }
+
+// AIR-673 / ADR 0217 decisions 5b and 5c: the CURRENT-STATE assertion every successful lid-only settlement carries INSIDE its own settlement batch (a domain document write, a Diary or Watchlist write): complete,
+// non-conflicting ownership of the lid by `filmId` (exactly one `letterboxd` row of the lid on any Film, trusted and non-conflicting, on that Film; the proof row names that Film; the Film exists; no redirect leaves it)
+// and, when the proof row is the one THIS caller's page proof produced (`proofDigest`), that its own applied receipt of the common lid key (target, content digest and, for a newly applied attempt, request id) is still
+// there. A proof row of another route (another digest) is settled as present, without a receipt of its own. Never a fabricated receipt. -> one assertion statement `[sql, params]` for the caller's batch `extra`.
+async function lidOnlyOwnershipCondition({lid,filmId,proofDigest=null,requestId=null}){
+ if(typeof lid!=='string'||!LID.test(lid)||typeof filmId!=='string'||!filmId.startsWith('film:'))throw failed('film_person_invalid');
+ let sql="(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd' AND value=?)=1"
+  +" AND EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=? AND film_id=? AND trusted=1 AND conflicting=0)"
+  +' AND EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND film_id=?)'
+  +' AND EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)';
+ const params=[lid,lid,filmId,lid,filmId,filmId,filmId];
+ if(proofDigest){
+  const digest=await lidOnlyReceiptDigest({lid,proofDigest});
+  sql+=' AND (NOT EXISTS (SELECT 1 FROM film_lid_admission WHERE lid=? AND proof_digest=?) OR EXISTS (SELECT 1 FROM canonical_write_receipt WHERE operation_key=? AND state=\'applied\' AND target_id=? AND content_digest=?'+(requestId?' AND request_id=?':'')+'))';
+  params.push(lid,proofDigest,admissionOperationKey({lid}),filmId,digest,...(requestId?[requestId]:[]));
+ }
+ return {sql,params};
+}
+export async function lidOnlySettlementGuard(input){const {sql,params}=await lidOnlyOwnershipCondition(input);return [fenced.assertSql(sql),params];}
+// The same condition evaluated NOW (a settlement whose write has no D1 batch to carry the statement checks it immediately before it reports success; the window after is that writer's documented limit).
+export async function lidOnlyOwnershipHolds(env,input){
+ const {sql,params}=await lidOnlyOwnershipCondition(input);
+ const row=await one(database(env),'SELECT CASE WHEN ('+sql+') THEN 1 ELSE 0 END AS ok',params);
+ return Number(row?.ok)===1;
+}

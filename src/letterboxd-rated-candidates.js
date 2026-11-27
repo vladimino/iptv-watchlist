@@ -505,26 +505,27 @@ const LetterboxdRatedCandidates = (() => {
     const outcomes = Object.fromEntries(result.outcomes.map(entry => [entry.fact, entry.outcome]));
     return {factKey, outcomes};
   }
-  const sameLidIntent = (row, filmPath) => !!(row && row.state === 'admitting' && row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath);
+  // The durable intent is exact: kind, no movie, the page path AND the proof digest of the page this attempt proved. A row whose page changed (another digest) is a CHANGED source, never the same intent.
+  const sameLidIntent = (row, filmPath, proofDigest) => !!(row && row.state === 'admitting' && row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath && row.proofDigest === proofDigest);
   async function commitLidOnly(env, sha, code, item, proof, generatedAt, recover = {}) {
     const key = CANDIDATES(sha);
-    const filmPath = proof.proof.canonicalPath;
+    const filmPath = proof.proof.canonicalPath, proofDigest = proof.proof.proofDigest;
     let outcome = 'missing';
     await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
       const row = current.candidates[code];
       if (!row) {outcome = 'missing'; return null;}
       if (row.state === 'removed' || row.state === 'needs_review') {outcome = row.state; return null;}
-      if (row.state === 'verified') {outcome = row.kind === 'lid_only' && row.tmdb == null && row.filmPath === filmPath ? 'already' : 'verified_conflict'; return null;}
-      if (row.state === 'admitting') {outcome = sameLidIntent(row, filmPath) ? 'held' : 'intent_conflict'; return null;}
+      if (row.state === 'verified') {outcome = row.kind === 'lid_only' && row.tmdb == null && row.filmPath === filmPath && row.proofDigest === proofDigest ? 'already' : 'verified_conflict'; return null;}
+      if (row.state === 'admitting') {outcome = sameLidIntent(row, filmPath, proofDigest) ? 'held' : 'intent_conflict'; return null;}
       if (row.state !== 'pending') {outcome = 'claim_changed'; return null;}
-      current.candidates[code] = {...row, state: 'admitting', kind: 'lid_only', intendedTmdb: null, filmPath, enrichment: 'pending', reason: null};
+      current.candidates[code] = {...row, state: 'admitting', kind: 'lid_only', intendedTmdb: null, filmPath, proofDigest, enrichment: 'pending', reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       outcome = 'claimed';
       return current;
     });
     if (outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
     if (outcome !== 'claimed' && outcome !== 'held' && outcome !== 'already') return refusedClaim(code, outcome);
-    const heldNow = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (outcome === 'already' ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath ? {ok: true} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath) ? {ok: true} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : 'claim_changed'});};
+    const heldNow = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (outcome === 'already' ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest ? {ok: true} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest) ? {ok: true} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
     const held = await heldNow();
     if (!held.ok) return refusedClaim(code, held.reason);
     // The coordinator: the page proof is the one this step just made; the links observation is read FRESH here and fenced inside the canonical batch, so a link written in between fails the batch whole.
@@ -556,41 +557,48 @@ const LetterboxdRatedCandidates = (() => {
     if (admitted.outcome !== 'admitted_lid_only' && admitted.outcome !== 'present_lid_only') {
       return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: admitted.reason || (admitted.outcome === 'wait' ? 'in_flight' : 'deferred'), phase: 'identity'};
     }
-    const beforeRating = await heldNow();
-    if (!beforeRating.ok) return refusedClaim(code, beforeRating.reason);
-    const rating = await writeLidRating(env, code, item, generatedAt, sha);
-    await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
+    const filmId = admitted.id;
+    if (typeof filmId !== 'string' || !filmId.startsWith('film:')) return {pending: true, fetched: true, verified: false, code, state: 'admitting', reason: 'deferred', phase: 'identity'};
+    return settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId: admitted.outcome === 'admitted_lid_only' ? admitted.requestId || null : null, already: outcome === 'already', fetched: true, generatedAt, guard: recover.guard || null});
+  }
+  // The ONE settlement of a lid-only candidate (a newly applied attempt, an already-present Film and the recovery from an applied receipt). The current candidate row is read before any fact is written; the facts go to the lid's own
+  // fact key (a movie alias that appeared meanwhile is `alias_conflict`: reviewed, never reported verified); and the terminal `verified` write is a document compare-and-swap that carries, in the same D1 batch, the complete current
+  // ownership of the lid by the resolved Film and, for this attempt's own proof row, its own applied receipt. A refused batch writes nothing and leaves the row `admitting`.
+  async function settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId, already, fetched, generatedAt, guard}) {
+    const key = CANDIDATES(sha);
+    const current = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (already ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest ? {ok: true, row} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest) ? {ok: true, row} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
+    const before = await current();
+    if (!before.ok) return refusedClaim(code, before.reason);
+    let rating;
+    try {
+      rating = await writeLidRating(env, code, item, generatedAt, sha);
+    } catch (error) {
+      if (error && error.code === 'alias_conflict') {
+        const review = await markReview(env, key, code, 'ratings_tmdb_link', null, undefined, {guard});
+        return {pending: true, fetched, verified: false, code, state: review.refused ? 'admitting' : 'needs_review', reason: review.refused ? 'in_flight' : review.reason, phase: 'identity', writes: review.changed === true};
+      }
+      throw error;
+    }
+    const owned = await LetterboxdAdmissionD1.lidOnlySettlementGuard({lid: code, filmId, proofDigest, requestId});
+    const saved = await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
       const row = current.candidates[code];
-      const ok = outcome === 'already' ? !!row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath : sameLidIntent(row, filmPath);
-      if (!ok) return null;
+      if (!(already ? row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest : sameLidIntent(row, filmPath, proofDigest))) return null;
       if (row.state === 'verified') return null;
       // Enrichment is retired at `d1` and a lid-only Film is outside its scope (ADR 0211, ADR 0217 decision 9): nothing is left to enrich.
-      current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, enrichment: 'done', intendedTmdb: null, reason: null};
+      current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, proofDigest, filmId, enrichment: 'done', intendedTmdb: null, reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
-    });
+    }, {extra: [owned]});
+    if (saved.refused === true) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'ownership_changed', phase: 'identity'};
     const after = await readDoc(env, key);
     const row = after.value && after.value.candidates && after.value.candidates[code];
-    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath) return refusedClaim(code, 'claim_changed');
-    return {pending: true, fetched: true, verified: true, code, tmdb: null, lidOnly: true, rating: rating.outcomes, filmId: 'film:lb:' + code, phase: 'identity'};
+    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath || row.proofDigest !== proofDigest) return refusedClaim(code, 'claim_changed');
+    return {pending: true, fetched, verified: true, code, tmdb: null, lidOnly: true, rating: rating.outcomes, filmId, phase: 'identity'};
   }
-
-  // The recovery of an applied lid-only attempt: no page, no proof and no coordinator call. The intent (`filmPath`) is the row's own; the rating and the verified row are the same idempotent writes as in `commitLidOnly`.
-  async function finishLidOnlyFromReceipt(env, sha, code, item, generatedAt) {
-    const key = CANDIDATES(sha), filmPath = item.filmPath;
-    if (!sameLidIntent(item, filmPath)) return refusedClaim(code, 'intent_conflict');
-    const rating = await writeLidRating(env, code, item, generatedAt, sha);
-    await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
-      const row = current.candidates[code];
-      if (!sameLidIntent(row, filmPath)) return null;
-      current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, enrichment: 'done', intendedTmdb: null, reason: null};
-      current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
-      return current;
-    });
-    const after = await readDoc(env, key);
-    const row = after.value && after.value.candidates && after.value.candidates[code];
-    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath) return refusedClaim(code, 'claim_changed');
-    return {pending: true, fetched: false, verified: true, code, tmdb: null, lidOnly: true, rating: rating.outcomes, filmId: 'film:lb:' + code, phase: 'identity'};
+  // The recovery of an applied lid-only attempt: no page, no proof and no coordinator call. The coordinator's reconcile (`present_lid_only`, `fromReceipt`) named the resolved Film; the row's own exact intent (path and proof digest)
+  // is checked, the settlement fence asserts the same applied receipt and the complete current ownership, and every write is the same idempotent one as in `commitLidOnly`.
+  async function finishLidOnlyFromReceipt(env, sha, code, item, generatedAt, settled) {
+    return settleLidOnly(env, sha, code, item, {filmPath: item.filmPath, proofDigest: item.proofDigest, filmId: settled && settled.id, requestId: null, already: false, fetched: false, generatedAt, guard: null});
   }
 
   function peopleOf(list) {
@@ -881,7 +889,7 @@ const LetterboxdRatedCandidates = (() => {
       }
       // AIR-673: an applied lid-only attempt of this row finishes it WITHOUT a fetch: the Film is admitted already; only the lid-keyed facts and the verified row remain (both idempotent).
       if (lidOnlyRow && settled.outcome === 'present_lid_only' && settled.fromReceipt) {
-        const committed = await finishLidOnlyFromReceipt(env, sha, code, item, doc.generatedAt);
+        const committed = await finishLidOnlyFromReceipt(env, sha, code, item, doc.generatedAt, settled);
         return withWrites(committed, committed.verified === true || committed.state === 'needs_review', committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
       }
       if (settled.outcome !== 'needs_check') return withWrites({pending: true, fetched: false, verified: false, code, state: item.state, reason: settled.reason === 'evidence_unrecorded' ? 'evidence_unrecorded' : 'in_flight', phase: 'identity'}, false, 'none');

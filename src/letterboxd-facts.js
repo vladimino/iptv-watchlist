@@ -222,7 +222,8 @@ function recordRatingChange(record,incoming,effective){
  // The lid's own fact record `lb-<lid>`, linked by `letterboxd:<lid>` ONLY: no TMDB alias is written or invented (ADR 0217 decision 9, rated and Diary entry points).
  async function linkLidOnly(env,lid){
   if(!LID.test(String(lid||'')))throw new FactsError('invalid_identity','Invalid Letterboxd id');
-  return linkFilm(env,{letterboxd:String(lid)});
+  // `expectKey`: the record MUST be the lid's own `lb-<lid>`. A Ratings link that appeared since the admission (a movie alias on another record) is an `alias_conflict`, never a TMDB-linked record returned as the lid's.
+  return linkFilm(env,{letterboxd:String(lid)},{expectKey:'lb-'+String(lid)});
  }
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
  // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.

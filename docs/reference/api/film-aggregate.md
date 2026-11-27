@@ -69,10 +69,10 @@ Every section has a `status` (`present`, `absent`, `unknown`, `unavailable`, `pa
 
 A Film minted `film:lb:<lid>` is read by `film:lb:<lid>` and by the bare lid; `tmdb_<n>` answers `absent` (404) until an attach, and the permalink is `/film/<lid>` until a trusted movie claim exists. The `predictions` section keeps ADR 0216 sections 5 and 6b unchanged: known historical values and conflicts under authorized aliases are reported as read, `none` only under full negative proof, coverage as it is.
 
-Eligibility is a **separate** field of that section, `predictions.eligibility`:
-- `{status: "not_eligible", reason: "lid_only_deferred"}` when the survivor has a trusted `letterboxd` claim, no trusted `tmdb` claim and a `film_lid_admission` row (itself or one of its redirect sources). It never turns a present or conflicting value into `partial` and never invents incompleteness.
-- Absent after a successful attach (a trusted `tmdb` claim): the ordinary ADR 0154 gates decide, and the id of the Film does not change.
-- `{status: "unknown", reason: "budget_exceeded" | "eligibility_unavailable"}` when the one extra statement cannot be spent or read; never an eligible answer. An ordinary movie Film carries no `eligibility` key and spends no extra statement. A table not yet applied means no lid-only Film exists.
+Eligibility is a **separate** field of that section, `predictions.eligibility`, from the **same cohort statement** as the prediction queue, the manifest and `submit` ([prediction runner](prediction-runner.md#lid-only-films-are-excluded-while-they-have-no-tmdb-movie-adr-0217-decision-9-choice-m1-air-673-dormant)) on the resolved survivor Film:
+- `{status: "not_eligible", reason: "lid_only_deferred"}` when the survivor is the Film of a `film_lid_admission` row (its own, or a redirect source's: a merge moves the proof) and holds no current trusted `tmdb` claim. It never turns a present or conflicting value into `partial` and never invents incompleteness.
+- Absent after a successful attach (a current trusted `tmdb` claim): the ordinary ADR 0154 gates decide, and the id of the Film does not change.
+- `{status: "unknown", reason: "budget_exceeded" | "eligibility_unavailable"}` when the one extra statement cannot be spent or read; never an eligible answer. A Film that holds a current trusted movie claim carries no `eligibility` key and spends no extra statement (it is outside the cohort by the rule itself). A table not yet applied means no lid-only Film exists.
 
 The claim rows decide, never the spelling of the id.
 

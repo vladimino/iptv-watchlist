@@ -73,7 +73,10 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
         // never invents a TMDB alias and never writes a receipt of its own (the coordinator's `present_lid_only` settles only).
         const label = out?.labels?.get?.(row.lid);
         const by = (label?.lidOnly === true && !tmdb ? LID_ONLY_RESOLVED_BY : 'identity:' + (tmdb || 'verified')).slice(0, 200);
-        const done = await settle(row, {state: 'resolved', attempts: row.attempts, resolvedBy: by});
+        // AIR-673: a lid-only success settles the row with the SAME current-ownership assertion in the ledger batch; a failed settlement leaves the row due (the row, not the label, is what the ledger trusts).
+        const ownerGuard = label?.lidOnly === true && !tmdb && Array.isArray(outcome?.ownerGuard) ? outcome.ownerGuard : null;
+        if (label?.lidOnly === true && !tmdb && !ownerGuard) { counts.notNow++; continue; }
+        const done = await settle(row, {state: 'resolved', attempts: row.attempts, resolvedBy: by}, ownerGuard);
         if (done.ok) { resolved++; counts.resolved++; } else if (done.reason === 'conflict') counts.rowChanged++;
         continue;
       }

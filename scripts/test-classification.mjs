@@ -451,6 +451,9 @@ export const FILES={
  "lid-only-consumers.mjs": {
   "suite": "core"
  },
+ "prediction-lid-only-real-path.mjs": {
+  "suite": "core"
+ },
  "film-readiness.mjs": {
   "suite": "core"
  },

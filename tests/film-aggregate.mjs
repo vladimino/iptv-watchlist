@@ -1249,6 +1249,25 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  const {eligibility:_e,...without}=byLid.body.predictions;
  assert.ok(!('eligibility' in without));
  assert.ok(['absent','partial','present','conflict','unknown'].includes(without.status));
+ // Historical values, conflicts and coverage are reported as read, under the authorized lid alias, and `eligibility` is separate: it never turns a present value into partial, never invents incompleteness.
+ pointer(file,'lo1',4);
+ const withValue=await read(file,'lo1');
+ const {eligibility:eligValue,...valueOnly}=withValue.body.predictions;
+ assert.deepEqual(eligValue,{status:'not_eligible',reason:'lid_only_deferred'});
+ assert.equal(valueOnly.current.length,1,'the stored historical value is read');
+ assert.equal(valueOnly.current[0].storageId,'lo1');assert.equal(valueOnly.current[0].predictedRating,4);
+ // The status is the ADR 0216 rule on the coverage alone (a known value with incomplete ratings coverage is `partial`); the eligibility field is not one of its inputs.
+ assert.notEqual(valueOnly.coverage.status,'complete');assert.equal(valueOnly.status,'partial');
+ assert.equal(valueOnly.current.length,1,'and the known value is still reported');
+ // A merge to an arbitrary survivor: the same unified read, the same eligibility (the proof row's Film is a redirect source).
+ const merged=blank();
+ film(merged,'film:survivor-lo9',[['letterboxd','lo9']]);film(merged,'film:lb:lo9',[]);
+ sqlite(merged,`INSERT INTO film_lid_admission (lid,film_id,route,admitted_at,receipt_key,proof_version,final_url,slug,canonical_path,shortlink,type_marker,id_block_outcome,completeness_outcome,title,year,proof_digest,checked_at,redirect_status,page_status) VALUES ('lo9','film:lb:lo9','watchlist_admission',${q(AT)},'admission:lid:lo9',1,'https://letterboxd.com/film/s/','s','/film/s/','lo9','film','absent','complete','T',1999,${q('b'.repeat(64))},${q(AT)},301,200);INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:lo9','film:survivor-lo9',${q(AT)})`);
+ for(const id of ['film:lb:lo9','film:survivor-lo9','lo9']){
+  const out=await read(merged,id);
+  assert.equal(out.http,200,id);assert.equal(out.body.identity.filmId,'film:survivor-lo9',id);
+  assert.deepEqual(out.body.predictions.eligibility,{status:'not_eligible',reason:'lid_only_deferred'},id+' (the same cohort rule as the queue)');
+ }
  // An attach: a trusted tmdb claim on the same Film. The same Film id; the exclusion ends; the ordinary gates decide.
  claim(file,'film:lb:lo1','tmdb','603');
  const attached=await read(file,'film:lb:lo1');
