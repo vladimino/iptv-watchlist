@@ -34,7 +34,12 @@ const template=path.join(root,'template.sqlite');
 assert.equal(sqlite(template,chain).status,0);
 for(const text of [VERIFY,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1","UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1",BASELINE])assert.equal(sqlite(template,text).status,0);
 let worlds=0;
-function world(){const file=path.join(root,'w-'+(worlds++)+'.sqlite');fs.copyFileSync(template,file);return {file,env:{DB:d1Standin(file)}};}
+// AIR-688: `--profile` (or HARNESS_PROFILE=1) classifies every statement by a literal-free fingerprint of its text, so the share of each REPEATED read is measured, not assumed.
+const profiling=process.argv.includes('--profile')||process.env.HARNESS_PROFILE==='1';
+const profile=new Map();
+const fingerprint=text=>String(text).replace(/'(?:[^']|'')*'/g,"'?'").replace(/\b\d+\b/g,'#').replace(/\s+/g,' ').trim().slice(0,150);
+const record=text=>{const key=fingerprint(text);profile.set(key,(profile.get(key)||0)+1);};
+function world(){const file=path.join(root,'w-'+(worlds++)+'.sqlite');fs.copyFileSync(template,file);return {file,env:{DB:d1Standin(file,profiling?{onQuery:async text=>record(text),onBatch:async list=>{for(const item of list)record(item.text);}}:{})}};}
 const filmSql=id=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',2,NULL,'K${id}','${T}');INSERT INTO film_external_id VALUES ('film:tmdb:${id}','tmdb','${id}',1,0,NULL);`;
 const activate=(scopes)=>`INSERT INTO catalog_enrichment_control VALUES (1,'inactive',0,1,'${T}','harness');UPDATE catalog_enrichment_control SET state='active',generation=1,revision=2;`+scopes.map(scope=>`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('${scope}',1,1,1,'${T}');`).join('');
 const signal=id=>`INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:${id}','rated','',1,'pending','${T}');`;
@@ -56,7 +61,7 @@ const clock=()=>new Date(Date.parse(T)+(tick++)*1000).toISOString();
 const runUntilIdle=async(w,fetchImpl,{limit=400,drainOptions={},between=null}={})=>{
  const runs=[];
  for(let i=0;i<limit;i++){
-  const result=await D.drain(w.env,{runId:'harness-'+(tick)+'-'+i,clock,tools:{},fetchImpl,...drainOptions});
+  const result=await D.drain(w.env,{runId:'harness-'+(tick)+'-'+i,clock,tools:{},fetchImpl,gateReuse:!process.argv.includes('--no-reuse'),...drainOptions});
   runs.push({stop:result.stop,films:result.counts.films,units:result.counts.units,signals:result.counts.signals,statements:result.counts.statements,requests:result.counts.requests,yields:result.counts.yields,steps:result.counts.steps});
   if(between)await between(i,result);
   if(!['handover','yield'].includes(result.stop))break;
@@ -187,4 +192,13 @@ const reports={
 };
 const runner=reports[scenario];
 if(!runner){console.error('unknown scenario '+scenario+'; use base, mixed, epg or populated');process.exit(2);}
-console.log(JSON.stringify({scenario,...(await runner())},null,1));
+const report=await runner();
+// The repeated gate reads this card is about, by kind, so a before/after comparison says WHICH reads went away: the four authority/schema-contract reads of the fenced writers, the schema probes of the receipt writer, and the receipt lookup of the reconcile step (never reused).
+const KINDS=[['authorityMarkerInventory',/^SELECT name FROM sqlite_master WHERE type='\?' AND name IN/],['schemaContractVersion',/^SELECT version FROM schema_contract WHERE id=#$/],['markerFenceBaselineRead',/^SELECT \(SELECT COUNT\(\*\) FROM film_person_authority WHERE id=#\) AS marker_rows/],['receiptSchemaProbes',/^SELECT \(SELECT version FROM schema_contract WHERE id=#\) AS version,\(SELECT COUNT\(\*\) FROM sqlite_master/],['receiptLookupReconcile',/^SELECT request_id,operation,origin,target_kind,target_id,content_digest/]];
+const kindOf=sql=>KINDS.find(([,re])=>re.test(sql))?.[0]||null;
+const statementProfile=()=>{
+ const byKind={};for(const [sql,n] of profile)byKind[kindOf(sql)||'other']=(byKind[kindOf(sql)||'other']||0)+n;
+ return {...statementProfileTop(),byKind};
+};
+const statementProfileTop=()=>{const all=[...profile.entries()].sort((a,b)=>b[1]-a[1]);const total=all.reduce((n,[,c])=>n+c,0);return {total,top:all.slice(0,14).map(([sql,n])=>({n,share:Math.round(n/total*1000)/10,sql}))};};
+console.log(JSON.stringify({scenario,...report,...(profiling?{statementProfile:statementProfile()}:{})},null,1));

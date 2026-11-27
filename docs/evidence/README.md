@@ -287,6 +287,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-132 revoke one saved identity correction (offline tests and local browser check, no production operation) | [discovery/air-132-identity-revoke-offline-2026-11-19.md](discovery/air-132-identity-revoke-offline-2026-11-19.md) |
 | Catalog Enrichment Producer offline cost harness (synthetic catalog, scratch database, no production operation) | [catalog-enrichment/air-605-offline-harness-2026-11-26.md](catalog-enrichment/air-605-offline-harness-2026-11-26.md) |
 | Catalog Enrichment Producer ADR 0219 acceptance matrix for AIR-605 (scenario to test map, explicit gaps) | [catalog-enrichment/air-605-acceptance-matrix-2026-11-27.md](catalog-enrichment/air-605-acceptance-matrix-2026-11-27.md) |
+| Catalog Enrichment writers: before/after statement profile of the time-bounded writer gate reuse (AIR-688; synthetic catalog, scratch database, no production operation) | [catalog-enrichment/air-688-gate-reuse-2026-11-27.md](catalog-enrichment/air-688-gate-reuse-2026-11-27.md) |
 | Catalog Enrichment Producer Discovery scope acceptance for AIR-684 (scenario to test map, offline measurements of the Discovery path) | [catalog-enrichment/air-684-discovery-scope-acceptance-2026-11-27.md](catalog-enrichment/air-684-discovery-scope-acceptance-2026-11-27.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

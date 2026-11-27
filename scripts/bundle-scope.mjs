@@ -75,8 +75,8 @@ export function loadDiscoveryAuthority(run){
  // AIR-631: the merge reads the provenance control row, so the provenance module (and the pure planner whose anchor digest it shares) is scoped in front of the mutations, as build.mjs does.
  if(run('typeof CatalogEnrichmentPlan')==='undefined')run(scoped('src/catalog-enrichment-plan.js','CatalogEnrichmentPlan'));
  run(scopedImports('src/film-metadata-provenance.js','FilmMetadataProvenance','const {failed,many,one}=FilmPersonAuthority;\nconst {computeAnchors,anchorSetGuard,canonicalJson}=CatalogEnrichmentPlan;'));
- run(scopedImports('src/canonical-mutations.js','CanonicalMutations','const {assertWritable,database,failed,many,one,readAuthority}=FilmPersonAuthority;\nconst {bindProducerFence,fenceStatements}=ProducerFence;\nconst {readControl,reconcileMetadata}=FilmMetadataProvenance;'));
- run(scopedImports('src/canonical-receipts.js','CanonicalReceipts','const {assertWritable,database,failed,many,one,readAuthority}=FilmPersonAuthority;\nconst {fenced}=CanonicalMutations;'));
+ run(scopedImports('src/canonical-mutations.js','CanonicalMutations','const {assertWritable,database,dropGateReuse,failed,many,one,readAuthority,readWriterGate}=FilmPersonAuthority;\nconst {bindProducerFence,fenceStatements}=ProducerFence;\nconst {readControl,reconcileMetadata}=FilmMetadataProvenance;'));
+ run(scopedImports('src/canonical-receipts.js','CanonicalReceipts','const {assertWritable,database,dropGateReuse,failed,many,one,readAuthority,readWriterGate,reuseSchemaFact}=FilmPersonAuthority;\nconst {fenced}=CanonicalMutations;'));
  run(scopedIdentityEvidence());
  run(scopedDiscoveryAuthority());
 }

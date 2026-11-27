@@ -421,6 +421,9 @@ export const FILES={
  "catalog-enrichment-store.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-units-scoped.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-units.mjs": {
   "suite": "core"
  },
@@ -1092,6 +1095,9 @@ export const FILES={
   "suite": "core"
  },
  "film-localization-reconciler.mjs": {
+  "suite": "core"
+ },
+ "film-person-gate-reuse.mjs": {
   "suite": "core"
  },
  "film-person-backfill.mjs": {
