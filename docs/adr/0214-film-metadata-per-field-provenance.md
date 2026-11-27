@@ -25,6 +25,8 @@
 
 **Superseded by:** None
 
+**Amended by ADR 0224:** Amended in part by [ADR 0224](0224-russian-first-catalog-metadata.md) (Accepted 2026-11-27, decisions 2–5, 7–9 and 11 only: language/evidence basis in value-bound provenance and comparator, history/merge/revert and dormant compatibility; [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7221071584)); original status and approval retained. All other clauses remain binding.
+
 ## Context
 
 ### What exists (main `cb1fb88`, 24 Nov 2026)

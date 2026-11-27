@@ -12,6 +12,8 @@
 **Supersedes:** In part [ADR 0087](0087-rated-archive-film-admission.md) decision 4: metadata written onto the R2 admission entry.  
 **Superseded by:** In part by [ADR 0214](0214-film-metadata-per-field-provenance.md) (Accepted 2026-11-25), only while its provenance mode is `enforce`: decision 1 (fill-only), the decision 2 rule that a later answer of an earlier source never overwrites, and the decision 3b rule that values under a superseded anchor are never overwritten.
 
+**Amended by ADR 0224:** Amended in part by [ADR 0224](0224-russian-first-catalog-metadata.md) (Accepted 2026-11-27, decision 2 only: language-aware field precedence and acquisition for synopsis, poster and genres; [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7221071584)); original status and approval retained. All other clauses remain binding.
+
 ## Context
 
 ### What exists (main `c5ecc1bd`, 24 Nov 2026)
