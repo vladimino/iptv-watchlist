@@ -565,6 +565,23 @@ const hopsUntilStop=async(context,env,limit)=>{
   assert.deepEqual(calls,['has','kick']);
  }
  {
+  // a FAILED eligibility read for a retained member: nothing is committed and no upstream request is made (the drift event is not consumed without its verified change), and the retry emits once
+  const {file,env,chunk,queries}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  seedFilm(file);calls.length=0;
+  const real=env.DB;
+  env.DB={...real,prepare:text=>{if(/catalog_enrichment_member/.test(text))throw new Error('D1 unavailable');return real.prepare(text);},batch:real.batch.bind(real)};
+  const failedChunk=await chunk();
+  assert.equal(failedChunk.revalidation.revalidated,0);assert.ok(failedChunk.revalidation.deferred>=1,'deferred, not completed');
+  assert.deepEqual(decisionOf(file).anchor,[90],'no decision was committed');
+  assert.deepEqual(queries,[],'and no upstream request was made');
+  assert.deepEqual(signals(file),[]);
+  env.DB=real;
+  const retried=await chunk({keep:false});
+  assert.equal(retried.revalidation.revalidated,1);assert.deepEqual(decisionOf(file).anchor,[90,96]);
+  assert.deepEqual(signals(file),['core=pending@v1','credits=pending@v1','localization=pending@v1'],'the retry emits the verified change');
+  assert.equal(queries.length,1,'one upstream request in total: the failed read cost none');
+ }
+ {
   // a lost Discovery lease at the causal write applies nothing: a held lease is part of the statement
   const lost=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
   seedFilm(lost.file);

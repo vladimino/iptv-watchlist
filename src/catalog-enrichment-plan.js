@@ -107,6 +107,9 @@ export function afterOutcome(row,outcome,now){
 export const fallbackElapsed=(pendingSince,now)=>!!pendingSince&&Date.parse(now)-Date.parse(pendingSince)>=FALLBACK_MS;
 
 // ---- the core decision (decision 2) ----
+// the fields whose language quality ranks before the provider (ADR 0224); the language of a source's value comes from its typed observation (`answer.language[field]`: `ru`, `en` or null)
+const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
+const languageRank=(answer,field)=>({ru:2,en:1})[answer?.language?.[field]]||0;
 const equalYear=(a,b)=>Number(a)===Number(b);
 const equalRuntime=(a,b)=>Math.abs(Number(a)-Number(b))<=RUNTIME_TOLERANCE_MIN;
 const COMPARE={year:equalYear,runtime:equalRuntime};
@@ -142,10 +145,14 @@ export function decideCore(input){
    const state=fieldState(source,field,input);
    if(state==='not_applicable'||state==='absent')continue;
    if(state==='value'){
+    // ADR 0224: for the synopsis and the poster ONLY, verified language quality ranks before provider preference at equal confirmed confidence (Russian above English above unknown). Among the sources that have a VALUE for this
+    // blank field now, the best language wins and the fixed source order breaks a tie; nothing here waits for another source, widens a refresh or replaces a stored value (the field is blank).
+    let chosen=source;
+    if(LANGUAGE_FIELDS.includes(field))for(const later of CORE_ORDER.slice(CORE_ORDER.indexOf(source)+1))if(fieldState(later,field,input)==='value'&&languageRank(answers[later],field)>languageRank(answers[chosen],field))chosen=later;
     // Letterboxd's own value needs a recorded agreement whenever the Film holds a Letterboxd anchor; a value of the other source needs it too, unless every earlier source is only transport-unavailable for 72 h.
-    if(hasLetterboxdAnchor&&!agreed&&!fallbackOver){out.waiting[field]={reason:'waiting_for_agreement',source};decided=true;break;}
-    out.writes[field]={source,value:answers[source].fields[field]};
-    if(fallbackOver){out.fallbackFill.push({field,source,waitedFor:fallbackOver});if(hasLetterboxdAnchor&&!agreed)out.unconfirmedAgreement.push(field);}
+    if(hasLetterboxdAnchor&&!agreed&&!fallbackOver){out.waiting[field]={reason:'waiting_for_agreement',source:chosen};decided=true;break;}
+    out.writes[field]={source:chosen,value:answers[chosen].fields[field]};
+    if(fallbackOver){out.fallbackFill.push({field,source:chosen,waitedFor:fallbackOver});if(hasLetterboxdAnchor&&!agreed)out.unconfirmedAgreement.push(field);}
     decided=true;break;
    }
    if(state==='failed'){out.waiting[field]={reason:'failed_source',source,retryable:false};decided=true;break;}

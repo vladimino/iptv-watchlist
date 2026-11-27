@@ -271,6 +271,19 @@ function CORE_ALL(waiting,reason){return P.CORE_FIELDS.every(field=>waiting[fiel
  const decision=P.decideCore({applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,disagreement:false,stored:{},
   answers:{letterboxd:{status:'ok',fields:{year:null,runtime:null,synopsis:null,poster:null,url:'u',genres:[]},coverage:{}},tmdb:{status:'ok',fields:{year:1999,runtime:136,synopsis:null,poster:'p',url:'t',genres:['Боевик']},coverage:{synopsis:'unreadable',year:'verified'}}},now:'2026-11-27T10:00:00.000Z'});
  assert.equal(decision.writes.year.value,1999,'a valid independent field fills');assert.equal(decision.waiting.synopsis.reason,'unverified_coverage');assert.equal(decision.complete,false,'the part cannot settle on an unverified field');
+ // ADR 0224: for the synopsis and the poster ONLY, verified language quality ranks before the provider at equal confirmed confidence; the fixed source order breaks a tie; nothing else changes
+ const both=(lbLang,tmLang,over={})=>P.decideCore({applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,disagreement:false,stored:{},now:'2026-11-27T10:00:00.000Z',
+  answers:{letterboxd:{status:'ok',fields:{year:1999,runtime:100,synopsis:'English text',poster:'lb.jpg',url:'lb',genres:['Drama']},coverage:{},language:{synopsis:lbLang,poster:null}},tmdb:{status:'ok',fields:{year:2000,runtime:140,synopsis:'Русский текст',poster:'tm.jpg',url:'tm',genres:['Боевик']},coverage:{},language:{synopsis:tmLang,poster:tmLang}}},...over});
+ assert.equal(both('en','ru').writes.synopsis.source,'tmdb','a verified Russian synopsis outranks the assumed English of Letterboxd on a blank field');
+ assert.equal(both('en','ru').writes.poster.source,'tmdb','and a verified Russian poster outranks an unknown-language one');
+ assert.equal(both('en','en').writes.synopsis.source,'letterboxd','equal language: the existing source order decides');
+ assert.equal(both('en',null).writes.synopsis.source,'letterboxd','English outranks an unknown language');
+ assert.equal(both('ru','en').writes.synopsis.source,'letterboxd','a Russian Letterboxd value (none today) is never displaced by English');
+ for(const field of ['year','runtime','url','genres'])assert.equal(both('en','ru').writes[field].source,'letterboxd',field+': the fixed provider order is unchanged for every other field');
+ assert.equal(both('en','ru',{agreed:false}).waiting.synopsis.reason,'waiting_for_agreement','the agreement requirement still applies to the chosen source');
+ assert.deepEqual(both('en','ru',{stored:{synopsis:'stored'}}).writes.synopsis,undefined,'a stored value is never replaced: fill-only');
+ const pendingLb=both('en','ru',{answers:{letterboxd:{status:'transport'},tmdb:{status:'ok',fields:{synopsis:'Русский текст',year:1,runtime:1,poster:'p',url:'u',genres:['x']},coverage:{},language:{synopsis:'ru'}}},pendingSince:{letterboxd:'2026-11-27T09:00:00.000Z'}});
+ assert.equal(pendingLb.waiting.synopsis.reason,'waiting_for_precedence','a pending earlier source is not skipped: the transport-only fallback still needs its 72 h');
  const items=[{role:'director',key:'12',name:'D'},{role:'actor',key:'11',name:'A'}];
  const credits=await P.creditsVersion('tmdb','603',{status:'ok',items});
  assert.match(credits,/^[0-9a-f]{64}$/);

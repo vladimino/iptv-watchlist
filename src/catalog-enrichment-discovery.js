@@ -49,17 +49,18 @@ export function sourceChangedStatements({tmdbId,versions,at,lease=null}){
  }
  return out;
 }
-// Is this Film's revalidation an OBSERVER of the shared Russian-first projection? Only when the Catalog Enrichment schema of this change is applied AND the Film holds a retained `discovery` membership (a trusted tmdb claim, not
-// redirected). One bounded, indexed read. Anything else (no schema, no scope, a Film outside it, a failed read) answers false, so a deployment alone, or a Film no scope holds, leaves the live revalidation request exactly as it was.
+const absent=error=>/no such (table|column)/i.test(String(error?.cause?.message||error?.message||error));
+// Is this Film's revalidation an OBSERVER of the shared Russian-first projection? -> 'yes' | 'no' | 'unknown'. 'yes': the Catalog Enrichment schema of this change is applied AND the Film holds a retained `discovery` membership of a
+// trusted, non-redirected claim. 'no': the schema is absent, or no such membership exists (a known, final answer: the live request stays the former one). 'unknown': the read itself failed for any other reason. An unknown answer is
+// NEVER read as "no": the caller must leave the revalidation undone (before any upstream request) so a retained member's drift event is observed on the retry instead of being committed without its verified change. One bounded, indexed read.
 export async function observerEligible(env,tmdbId){
  const handle=database(env);
- if(!handle||!TMDB_ID.test(String(tmdbId)))return false;
+ if(!handle||!TMDB_ID.test(String(tmdbId)))return 'no';
  try{
   const row=await one(handle,"SELECT 1 AS ok FROM film_external_id e JOIN catalog_enrichment_member m ON m.film_id=e.film_id AND m.scope='discovery' WHERE e.scheme='tmdb' AND e.value=? AND e.trusted=1 AND e.conflicting=0 AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) LIMIT 1",[String(tmdbId)]);
-  return !!row;
- }catch{return false;}
+  return row?'yes':'no';
+ }catch(error){return absent(error)?'no':'unknown';}
 }
-const absent=error=>/no such (table|column)/i.test(String(error?.cause?.message||error?.message||error));
 // The causal wake, AFTER the write (never inside the batch): only when work is runnable; no runner (an old version, the producer dormant) is a no-op, and a lost wake is recovered by the reconcile cron.
 async function wake(env){
  if(typeof CatalogEnrichmentRunner==='undefined')return;

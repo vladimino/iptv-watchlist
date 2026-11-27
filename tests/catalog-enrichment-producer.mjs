@@ -76,7 +76,7 @@ const filmJson=file=>JSON.parse(rows(file,`SELECT film_json AS j FROM catalog_en
  const second=await step(w,up,at(11));
  assert.equal(second.state,'done');
  assert.equal(up.calls.length,4,'boxd.it + the film page, TMDB, Wikidata: at most four requests for the acquisition');
- assert.deepEqual(meta(w.file),{year:1999,runtime:136,synopsis:'lb synopsis',poster:'https://img/lb.jpg',url:'https://letterboxd.com/film/the-matrix/',genres_json:'["Sci-Fi"]'},'Letterboxd fills every blank core field first (precedence)');
+ assert.deepEqual(meta(w.file),{year:1999,runtime:136,synopsis:'tm synopsis',poster:'https://image.tmdb.org/t/p/w500/ru.jpg',url:'https://letterboxd.com/film/the-matrix/',genres_json:'["Sci-Fi"]'},'Letterboxd fills every blank core field first (the fixed provider order), EXCEPT the synopsis and the poster: a verified Russian TMDB value outranks the assumed-English synopsis and the unlabelled poster of Letterboxd on a blank field (ADR 0224)');
  assert.deepEqual(loc(w.file),[{source:'tmdb',value:'Матрица'}],'the tmdb source writes its own row from its own response; wikidata has none, letterboxd has no Russian title');
  assert.deepEqual(credits(w.file).map(c=>c.person_id),['person:actor/neo','person:actor/trinity','person:director/lana'],'credits come from ONE namespace, the Letterboxd one; no TMDB persons are added');
  assert.equal(rows(file0(w),"SELECT COUNT(*) AS n FROM person WHERE id LIKE 'person:tmdb_%'")[0].n,0);
@@ -595,12 +595,27 @@ function file0(w){return w.file;}
  await step(gap,upstream({lb:'404'}));
  await step(gap,upstream({lb:'404',tm:movie({genres:[{id:28,name:'x'},{id:424242,name:'new'}]})}),at(11));
  assert.equal(core(gap.file).status,'complete_with_gaps');assert.ok(core(gap.file).sourceVersion);
- // the typed declarations of what was written: each value bound to the language its observation carried
+ // the declarations the producer hands to the writer BEFORE it runs (`metadata.declared`, the shape the AIR-631 writer reads), each bound to the language and basis its observation carried
  const decl=await world({lid:null});
  await step(decl,upstream({lb:'404'}));
  const written=await step(decl,upstream({lb:'404'}),at(11));
- const bySynopsis=(written.report.declarations||[]).find(item=>item.field==='synopsis');
- assert.deepEqual([bySynopsis?.language,bySynopsis?.languageBasis,bySynopsis?.value,bySynopsis?.source],['ru','explicit','tm synopsis','tmdb'],'the synopsis is declared with its verified Russian tag');
- assert.deepEqual((written.report.declarations||[]).find(item=>item.field==='poster')?.language,'ru');
+ const declared=Object.fromEntries((written.report.declarations||[]).map(item=>[item.field,item]));
+ assert.deepEqual([declared.synopsis?.language,declared.synopsis?.languageBasis,declared.synopsis?.source],['ru','explicit','tmdb'],'the synopsis is declared with its verified Russian tag');
+ assert.deepEqual([declared.poster?.language,declared.poster?.languageBasis],['ru','explicit'],'the poster carries the tag of the selected image');
+ for(const field of ['year','runtime','url','genres'])if(declared[field])assert.equal('language' in declared[field],false,field+': no language is declared for a field that carries none');
+ assert.deepEqual([declared.year?.source,declared.year?.anchor,declared.year?.observedAt],['tmdb',{scheme:'tmdb',value:'603'},at(11)],'source, anchor and observation time are declared');
+ // a Letterboxd synopsis is declared as ASSUMED English (the owner-approved default); a field with an unknown poster language declares none
+ const lbOnly=await world();// TMDB is unavailable (transport): only the Letterboxd observation can fill
+ await step(lbOnly,upstream({tm:'transport'}));
+ const lbWrote=await step(lbOnly,upstream({tm:'transport'}),at(11));
+ const lbDeclared=Object.fromEntries((lbWrote.report.declarations||[]).map(item=>[item.field,item]));
+ assert.deepEqual([lbDeclared.synopsis?.source,lbDeclared.synopsis?.language,lbDeclared.synopsis?.languageBasis],['letterboxd','en','assumed'],'Letterboxd synopsis: assumed English, never an explicit tag');
+ assert.equal('language' in (lbDeclared.poster||{}),false,'a Letterboxd poster carries no language');
+ // the mixed-source blank-field case on the real producer: Russian TMDB wins the synopsis and the poster, Letterboxd keeps the other fields, and the agreement requirement still holds
+ const mixed=await world();
+ await step(mixed,upstream({}));const mixedWrote=await step(mixed,upstream({}),at(11));
+ const md=Object.fromEntries((mixedWrote.report.declarations||[]).map(item=>[item.field,item.source]));
+ assert.deepEqual([md.synopsis,md.poster,md.year,md.url],['tmdb','tmdb','letterboxd','letterboxd'],'the selected value and its declaration implement the language rule only for synopsis and poster');
+ assert.equal(rows(mixed.file,`SELECT synopsis FROM film_metadata WHERE film_id='${FILM}'`)[0].synopsis,'tm synopsis');
 }
 console.log('catalog enrichment producer: ok');

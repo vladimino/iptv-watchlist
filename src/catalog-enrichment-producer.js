@@ -228,7 +228,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const asAnswer=source=>{
   if(!applicable.includes(source))return undefined;
   const answer=answers[source];
-  if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields,coverage:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.coverage]))}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
+  if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields,coverage:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.coverage])),language:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.language??null]))}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
   const row=rowOf('core',source);
   if(row&&['complete','complete_with_gaps'].includes(row.status))return {status:'ok',fields:{}};
   return row?.pendingSince?{status:'transport'}:{status:'stopped'};
@@ -249,7 +249,15 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const sync=CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
   const anchorGuard=Plan.anchorSetGuard(filmId,context.anchors);
   const guards=[...writeFields.map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
-  const metadata={updatedAt:now,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
+  // ADR 0214 decision 4 and ADR 0224: every core write DECLARES, per field, the source, the anchor it relied on, its observation time, the agreement digest it holds and, from the typed observation, the language and basis that the written
+  // value carries (the single conversion `Plan.declarationOf`; a field that carries no language declares none). The provenance writer of AIR-631 reads `metadata.declared`; a writer or a mode that does not know it ignores it and
+  // the statements are unchanged.
+  const declared=Object.fromEntries(writeFields.map(field=>{
+   const source=core.writes[field].source,anchor=context.anchors[source];
+   const typed=Plan.declarationOf(field,source,anchor,answers[source]?.observation?.[field]);
+   return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null,...(typed&&typed.language?{language:typed.language,languageBasis:typed.languageBasis}:{})}];
+  }));
+  const metadata={updatedAt:now,declared,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},metadata,...(sync?{sync:{metadataAt:now}}:{}),requireExisting:true,guards};
   {const stop=await mayWrite();if(stop)return partial(report,stop);}
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.core(filmId),input,now:()=>now});
@@ -257,7 +265,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   if(['applied','noop','settled'].includes(unit.state)){
    report.written.push(...writeFields);
    // the typed declarations of what was written: the one explicit boundary to a provenance writer (AIR-631); each value is bound to the language and basis its observation carried
-   report.declarations=writeFields.map(name=>Plan.declarationOf(name,core.writes[name].source,context.anchors[core.writes[name].source],answers[core.writes[name].source]?.observation?.[name])).filter(Boolean);
+   report.declarations=writeFields.map(name=>({field:name,...declared[name]}));
    const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source)&&settles(row.source));
    for(const row of next){
     const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);

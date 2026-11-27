@@ -205,23 +205,33 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
   env.DB=real;
  }finally{delete globalThis.CatalogEnrichmentRunner;}
  // the live revalidation request is widened only for an approved observer: the schema applied AND a retained discovery membership of a trusted, non-redirected claim
- assert.equal(await D.observerEligible(env,'603'),false,'a Film no scope holds');
+ assert.equal(await D.observerEligible(env,'603'),'no','a Film no scope holds');
  sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:o',2,NULL,'O','${T}');INSERT INTO film_external_id VALUES ('film:o','tmdb','777',1,0,NULL)`);
- assert.equal(await D.observerEligible(env,'777'),false,'a Film with a claim but no membership');
+ assert.equal(await D.observerEligible(env,'777'),'no','a Film with a claim but no membership');
  sql(file,`INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('film:o','rated','${T}','k')`);
- assert.equal(await D.observerEligible(env,'777'),false,'a membership of another scope');
+ assert.equal(await D.observerEligible(env,'777'),'no','a membership of another scope');
  sql(file,`INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('film:o','discovery','${T}','k')`);
- assert.equal(await D.observerEligible(env,'777'),true,'a retained discovery membership');
- assert.equal(await D.observerEligible(env,'abc'),false);
+ assert.equal(await D.observerEligible(env,'777'),'yes','a retained discovery membership');
+ assert.equal(await D.observerEligible(env,'abc'),'no');
  sql(file,"UPDATE film_external_id SET conflicting=1 WHERE film_id='film:o'");
- assert.equal(await D.observerEligible(env,'777'),false,'a conflicting claim');
+ assert.equal(await D.observerEligible(env,'777'),'no','a conflicting claim');
  sql(file,"UPDATE film_external_id SET conflicting=0 WHERE film_id='film:o'");
  sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:p',2,NULL,'P','${T}');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:o','film:p','${T}')`);
- assert.equal(await D.observerEligible(env,'777'),false,'a redirected Film');
+ assert.equal(await D.observerEligible(env,'777'),'no','a redirected Film');
+ // a FAILED eligibility read is never "no": it is 'unknown', and the caller defers (the unknown answer is not a schema-absent answer)
+ sql(file,"UPDATE film_external_id SET conflicting=0 WHERE film_id='film:o'");
+ sql(file,"DELETE FROM film_redirect WHERE from_id='film:o'");
+ assert.equal(await D.observerEligible(env,'777'),'yes');
+ const real=env.DB;
+ env.DB={...real,prepare:text=>{if(/catalog_enrichment_member/.test(text))throw new Error('D1 unavailable');return real.prepare(text);},batch:real.batch.bind(real)};
+ assert.equal(await D.observerEligible(env,'777'),'unknown','a transient read failure');
+ env.DB={...real,prepare:text=>{if(/catalog_enrichment_member/.test(text))throw new Error('no such table: catalog_enrichment_member');return real.prepare(text);},batch:real.batch.bind(real)};
+ assert.equal(await D.observerEligible(env,'777'),'no','a missing table is the known schema-absent answer');
+ env.DB=real;
  // before the apply of the producer schema the emitter ends quietly
  const old=await setup({schema:46});
  assert.deepEqual(await D.emitSourceChanged(old.env,{tmdbId:'603',movie:movie(),at:T}),{state:'absent',parts:[]});
- assert.equal(await D.observerEligible(old.env,'603'),false,'before the schema exists: never an observer, never a failure');
+ assert.equal(await D.observerEligible(old.env,'603'),'no','before the schema exists: never an observer, never a failure');
 }
 
 // ---- D. the activation preflight ----

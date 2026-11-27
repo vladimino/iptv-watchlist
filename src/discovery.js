@@ -1093,7 +1093,10 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    try{
     // AIR-684 (ADR 0224): the live revalidation request stays EXACTLY as it was until this Film is an approved observer (the enrichment schema applied and a retained Discovery membership). Only then does the same call also carry the tagged
     // image lists, the request shape of the producer's own fetch (`TMDB_DETAIL_QUERY`): never a second request, and a deployment alone changes nothing.
-    const observer=typeof CatalogEnrichmentDiscovery!=='undefined'&&await CatalogEnrichmentDiscovery.observerEligible(env,previous.tmdbId);
+    // 'unknown' (the eligibility read itself failed) is never "no": the revalidation stays undone BEFORE any upstream request, so a retained member's drift event is not committed without its verified change.
+    const eligibility=typeof CatalogEnrichmentDiscovery==='undefined'?'no':await CatalogEnrichmentDiscovery.observerEligible(env,previous.tmdbId);
+    if(eligibility==='unknown'){revalidation.deferred++;return 'break';}
+    const observer=eligibility==='yes';
     const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles'+(observer?',images&include_image_language=ru,en,null':''));
     if(observer&&await noteCatalogSourceChange(env,previous.tmdbId,movie,lease)==='failed'){revalidation.deferred++;return 'break';}
     const known=knownScorerCandidates(aliasIndex,candidate);
