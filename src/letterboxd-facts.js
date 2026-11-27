@@ -637,8 +637,8 @@ function recordRatingChange(record,incoming,effective){
 
  // AIR-602 / ADR 0207 decision 3, at the marker mode `d1`: the admission of ONE inferred item through the D1 coordinator. The evidence row is the `restricts` row of the title and year search (ADR 0213:
  // never proof). -> 'admitted' | 'present' | 'present_other_code' | 'refused_after_link'; a non-terminal answer stops the chunk before its receipt (the same chunk is re-sent).
- async function admitInferredAtD1(env,item,origin,chunk,terminalGuards=[],owned=null){
-  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,...(owned&&owned.beforeCanonical?{beforeCanonical:owned.beforeCanonical}:{}),finalize:async(result,guard)=>{terminalGuards.push(guard);return {wrote:true};},receipt:{tmdb:String(item.tmdb),archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year},
+ async function admitInferredAtD1(env,item,origin,chunk,terminalGuards=[]){
+  const out=await LetterboxdAdmissionD1.admitVerifiedFilm(env,{kind:'inferred_import',lid:item.lid,finalize:async(result,guard)=>{terminalGuards.push(guard);return {wrote:true};},receipt:{tmdb:String(item.tmdb),archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year},
    evidence:{subject:{kind:'letterboxd_lid',value:item.lid},relation:'same_work',object:{kind:'tmdb_movie',value:String(item.tmdb)},polarity:'restricts',route:'letterboxd_export_import',method:'title_year_search',sourceRoot:origin.archiveSha256,sourceRef:'chunk:'+chunk,observedAt:new Date().toISOString()},
    now:()=>new Date().toISOString()});
   if(out.outcome==='admitted'||out.outcome==='present')return out.outcome;
@@ -906,7 +906,7 @@ function recordRatingChange(record,incoming,effective){
   const counts={},films=[],records=[],terminalGuards=[];let conflicts=0;
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb};
-   let admitted=null,d1Admission=null,reconciledGuard=null;
+   let admitted=null,d1Admission=null;
    // PR #1018 review: at `d1` every irreversible effect of an `admit` item that runs before the item's own admission (the inferred mark, the link and, for another code on the Film, the facts) asserts the operation
    // history the verdict was computed against IN ITS OWN BATCH. A moved history refuses that batch whole and the chunk stops before its receipt (re-send replans); nothing is linked or published on a superseded verdict.
    let itemEnv=env;
@@ -925,12 +925,10 @@ function recordRatingChange(record,incoming,effective){
      if(reconciled.outcome!=='needs_check')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+reconciled.outcome+'): the chunk stops before its receipt');
      const plan=await LetterboxdAdmissionD1.planAdmissionD1(env,{tmdb:String(item.tmdb),sourceCode:item.lid});
      itemEnv={...env,admissionGuards:[reconciled.guard.statement]};
-     if(plan.outcome==='conflict'||plan.outcome==='other_code'||plan.outcome==='lid_only')terminalGuards.push(reconciled.guard);
-     // AIR-672 / ADR 0217 decision 5b: a lid-only Film already holds this lid: the inferred import is a conflict, with no link and no fact.
-     if(plan.outcome==='conflict'||plan.outcome==='lid_only'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'conflict'});continue;}
+     if(plan.outcome==='conflict'||plan.outcome==='other_code')terminalGuards.push(reconciled.guard);
+     if(plan.outcome==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'conflict'});continue;}
      if(plan.outcome==='held'||plan.outcome==='redirect')throw new FactsError('admission_not_settled','The admission of '+item.lid+' is not settled ('+plan.outcome+'): the chunk stops before its receipt');
      d1Admission=plan.outcome==='other_code'?'present_other_code':'planned';
-     reconciledGuard=reconciled.guard;
     }else{
     admitted=await admitInferredFilm(env,item,origin);
     if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
@@ -938,52 +936,33 @@ function recordRatingChange(record,incoming,effective){
    }
    // AIR-559: an inferred pair is marked on its record first, and linked only to that same record.
    const inferredIdentity=item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null;
-   // The effects of the item's own identity before its admission: the inferred mark, then the link. `guardEnv` carries the assertions every one of these Ratings batches adds to its own; `wrap` maps a refused
-   // fence onto a stopped chunk. -> the fact key, or null when the code is linked elsewhere (the conflict is noted).
-   const linkEffects=async(guardEnv,wrap)=>{
-    let markedKey=null;
-    if(inferredIdentity){
-     const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
-     markedKey=plannedKey(linkIndex||{},links);
-     if(markedKey&&!(await wrap(()=>markInferredPair(guardEnv,markedKey,links,inferredIdentity))))markedKey=null;
-    }
-    return inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await wrap(()=>linkOrNote(guardEnv,links,inferredIdentity?{expectKey:markedKey}:undefined));
-   };
-   let factKey=null,ownedLink;
-   // AIR-672 / ADR 0217 decision 5b: a NEW admission (`planned`) RESERVES the common key `admission:lid:<lid>` BEFORE its first effect. The inferred mark and the link then run inside the owned writer execution, and each of their
-   // Ratings batches asserts the exact pending attempt (request id, attempt number, inside its window) beside its document, epoch and authority fences, so an expired or abandoned attempt can never land a late link. The
-   // canonical batch follows and settles that same receipt. Every other verdict (present, another code on the Film, a conflict) reserves nothing and links as before, under the verdict's own history guard.
-   if(d1Admission!=='planned'){
-    factKey=await linkEffects(itemEnv,fenced);
-   }else{
-    const beforeCanonical=async attempt=>{
-     const guardEnv={...env,admissionGuards:[attempt.statement]};
-     const wrap=async effect=>{try{return await effect();}catch(error){if(error&&error.code==='ratings_domain_fence')throw new FactsError('admission_not_settled','The attempt of '+item.lid+' no longer owns its lid key: the chunk stops before its receipt');throw error;}};
-     ownedLink=await linkEffects(guardEnv,wrap);
-     if(!ownedLink)throw new FactsError('admission_not_settled','The code of '+item.lid+' was linked elsewhere after the reservation: the chunk stops before its receipt');
-    };
-    itemEnv=env;
-    const out=await admitInferredAtD1(env,item,origin,chunk,terminalGuards,{beforeCanonical});
-    if(out==='refused_after_link'){
-     // The batch refused after the link (a concurrent writer admitted the code for another Film): terminal. No fact and no claim; the inferred-marked link stays (it is never a claim proof, ADR 0184); the entry
-     // is an admission conflict for owner repair. When the owned attempt never ran its link (the verdict was settled before any reservation) nothing was linked: a plain conflict.
-     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:ownedLink?'refused_after_link':'conflict'});continue;
-    }
-    d1Admission=out;
-    if(out==='present_other_code'){
-     // A settled `present_other_code` verdict (the pair is not admitted again) links and publishes facts only under the terminal history guard of THAT verdict (PR #1018 review).
-     const verdictGuard=terminalGuards[terminalGuards.length-1];
-     if(!verdictGuard)throw new FactsError('admission_not_settled','The verdict of '+item.lid+' has no history guard: the chunk stops before its receipt');
-     itemEnv={...env,admissionGuards:[verdictGuard.statement]};
-    }else itemEnv=ownedLink?env:{...env,admissionGuards:[reconciledGuard.statement]};
-    if(ownedLink)factKey=ownedLink;
-    else factKey=await linkEffects(itemEnv,fenced);
-    if(factKey&&out!=='present_other_code')itemEnv=env;
+   let markedKey=null;
+   if(inferredIdentity){
+    const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
+    markedKey=plannedKey(linkIndex||{},links);
+    if(markedKey&&!(await fenced(()=>markInferredPair(itemEnv,markedKey,links,inferredIdentity))))markedKey=null;
    }
+   const factKey=inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await fenced(()=>linkOrNote(itemEnv,links,inferredIdentity?{expectKey:markedKey}:undefined));
    if(!factKey){
     // A writer linked the code between the check and the link: the entry this commit just created is withdrawn, never one it found.
     if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;
+   }
+   if(d1Admission==='planned'){
+    const out=await admitInferredAtD1(env,item,origin,chunk,terminalGuards);
+    if(out==='refused_after_link'){
+     // The batch refused after the link (a concurrent writer admitted the code for another Film): terminal. No fact and no claim; the inferred-marked link stays (it is never a claim proof, ADR 0184); the entry
+     // is an admission conflict for owner repair.
+     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true,admission:'refused_after_link'});continue;
+    }
+    d1Admission=out;
+    // The item's own admission settled the history it observed (its receipt moved the fingerprint): the facts that follow depend on that admission, not on the pre-link verdict. A settled `present_other_code`
+    // verdict (the pair is not admitted again) publishes facts only under the terminal history guard of THAT verdict (PR #1018 review): a conflicting admission that settles before the fact write refuses the batch.
+    if(out==='present_other_code'){
+     const verdictGuard=terminalGuards[terminalGuards.length-1];
+     if(!verdictGuard)throw new FactsError('admission_not_settled','The verdict of '+item.lid+' has no history guard: the chunk stops before its receipt');
+     itemEnv={...env,admissionGuards:[verdictGuard.statement]};
+    }else itemEnv=env;
    }
    if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
     const key='tmdb_'+item.tmdb;

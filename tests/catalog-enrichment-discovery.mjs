@@ -110,11 +110,11 @@ const catalog=(...ids)=>Object.fromEntries(ids.map(id=>['tmdb_'+id,film(id)]));
 }
 {
  // B2. before schema 48 the code is the former code: no origin column, the same writes, no signal
- const {file,env}=await setup({schema:48,activate:true});
+ const {file,env}=await setup({schema:47,activate:true});
  await Authority.replaceCatalog(env,catalog(50),{admission:{origin:'resolver',programmeRunId:RUN}});
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission WHERE tmdb_id='50'")[0].n,1);
- assert.deepEqual(sig(file),[],'schema 48: deploying the code before the migration changes nothing');
- assert.equal(sql(file,'SELECT version FROM schema_contract')[0].version,48);
+ assert.deepEqual(sig(file),[],'schema 47: deploying the code before the migration changes nothing');
+ assert.equal(sql(file,'SELECT version FROM schema_contract')[0].version,47);
 }
 
 // ---- C. the source_changed emitter ----
@@ -157,17 +157,17 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
  assert.deepEqual(await D.emitSourceChanged(env,{tmdbId:'603',movie:movie({id:999}),at:T}),{emitted:false,reason:'not_this_movie'});
  // a pending credits signal is runnable (the member exists) and the producer's consume reopens the part
  assert.deepEqual((await S.runnableSignals(env,{now:'2026-11-27T11:00:00.000Z'})).filter(s=>s.kind==='source_changed').map(s=>s.part),['credits','localization']);
- // before the apply (schema 46) the emitter ends quietly
+ // before the apply (schema 47) the emitter ends quietly
  const old=await setup({schema:46});
  assert.deepEqual(await D.emitSourceChanged(old.env,{tmdbId:'603',movie:movie(),at:T}),{emitted:false,reason:'schema_absent'});
 }
 
 // ---- D. the activation preflight ----
 {
- const {file,env}=await setup({schema:48});
+ const {file,env}=await setup({schema:47});
  const before=sql(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n;
  const old=await D.activationPreflight(env);
- assert.deepEqual([old.ok,old.problems],[false,['schema_not_applied']],'schema 48: the settlement is not deployed');
+ assert.deepEqual([old.ok,old.problems],[false,['schema_not_applied']],'schema 47: the settlement is not deployed');
  const clean=await setup();
  const ok=await D.activationPreflight(clean.env);
  assert.deepEqual([ok.ok,ok.problems],[true,[]]);

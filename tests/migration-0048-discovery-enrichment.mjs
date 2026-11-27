@@ -1,5 +1,5 @@
-// AIR-684: migration 0049, the Discovery scope of the Catalog Enrichment Producer (ADR 0219 decision 3), on scratch sqlite databases built from the real migrations. Offline; synthetic ids only.
-//  - the chain 48 -> 49 and the refusals (wrong predecessor, a second apply); additive: no existing row changes;
+// AIR-684: migration 0048, the Discovery scope of the Catalog Enrichment Producer (ADR 0219 decision 3), on scratch sqlite databases built from the real migrations. Offline; synthetic ids only.
+//  - the chain 47 -> 48 and the refusals (wrong predecessor, a second apply); additive: no existing row changes;
 //  - nothing is emitted before the scope is first activated on the steady path; a movie insert after it writes one `pending` admitted signal, a TV row never does, a repeat is one row with a raised version;
 //  - a movie insert while a transfer is loading is `staged` whether or not the scope is activated (never consumable), a TV row is never staged;
 //  - the commit of a RESOLVER transfer with the scope activated promotes the staged signals whose row is current and deletes the rest; before activation it deletes them (history);
@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import {migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
-const M49=fs.readFileSync('migrations/0049_discovery_enrichment_scope.sql','utf8');
+const M48=fs.readFileSync('migrations/0048_discovery_enrichment_scope.sql','utf8');
 const run=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<28});
 const exec=(file,text)=>{const r=run(file,text);if(r.status!==0)throw new Error(r.stderr);};
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);const o=String(r.stdout).trim();return o?JSON.parse(o):[];};
@@ -24,21 +24,21 @@ const ACTIVATE=`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cu
 // a transfer as replaceCatalog drives it: the loading statement (stamped when the writer is the new version), rows, the commit
 const LOADING=(origin,run,batches)=>origin?`UPDATE discovery_transfer SET state='loading', programme_run_id='${run}', origin='${origin}', origin_batches=${batches}, batches=${batches} WHERE id=1`:`UPDATE discovery_transfer SET state='loading', batches=${batches} WHERE id=1`;
 const COMMIT=`UPDATE discovery_admission SET state='superseded' WHERE state='pending'; UPDATE discovery_transfer SET state='committed', batches=batches+1 WHERE id=1`;
-const fresh=()=>{const f=migrated(48);exec(f,'UPDATE discovery_authority SET mode=\'d1\', cutover=\'open\' WHERE id=1');return f;};
-const apply=f=>exec(f,M49);
+const fresh=()=>{const f=migrated(47);exec(f,'UPDATE discovery_authority SET mode=\'d1\', cutover=\'open\' WHERE id=1');return f;};
+const apply=f=>exec(f,M48);
 
 // ---- 1. the chain, the refusals, additive ----
 {
- const f=fresh();assert.equal(version(f),48);
+ const f=fresh();assert.equal(version(f),47);
  const before=rows(f,'SELECT * FROM discovery_transfer');
- apply(f);assert.equal(version(f),49);
+ apply(f);assert.equal(version(f),48);
  assert.deepEqual(rows(f,'SELECT id,state,programme_run_id,batches FROM discovery_transfer'),before.map(r=>({id:r.id,state:r.state,programme_run_id:r.programme_run_id,batches:r.batches})),'the transfer row is unchanged');
  assert.deepEqual(rows(f,'SELECT origin,origin_batches FROM discovery_transfer'),[{origin:null,origin_batches:null}]);
- assert.notEqual(run(f,M49).status,0,'a second apply is refused');
- assert.equal(version(f),49);
- const v46=migrated(47),b=dump(v46);assert.notEqual(run(v46,M49).status,0,'on version 47 the file aborts');assert.deepEqual(dump(v46),b,'and nothing changed');
+ assert.notEqual(run(f,M48).status,0,'a second apply is refused');
+ assert.equal(version(f),48);
+ const v46=migrated(46),b=dump(v46);assert.notEqual(run(v46,M48).status,0,'on version 46 the file aborts');assert.deepEqual(dump(v46),b,'and nothing changed');
  assert.notEqual(run(f,"UPDATE discovery_transfer SET origin='import' WHERE id=1").status,0,'only `resolver` is a stored origin');
- assert.equal(version(migrated()),49,'the full chain ends at 49');
+ assert.equal(version(migrated()),48,'the full chain ends at 48');
 }
 
 // ---- 2. the steady path: nothing before the activation, one signal after, TV never ----
@@ -151,4 +151,4 @@ const apply=f=>exec(f,M49);
  exec(f,LOADING('resolver','run-A',1));exec(f,ADM(80));
  assert.deepEqual(states(f),['tmdb:80=consumed@v1'],'staging never overwrites a signal that is already consumed or pending');
 }
-console.log('migration 0049 discovery enrichment scope ok');
+console.log('migration 0048 discovery enrichment scope ok');

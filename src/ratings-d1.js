@@ -214,8 +214,7 @@ function effectGuardStatements(env){
 // ADR 0222 / PR #1018 review: an env may carry `admissionGuards`, the operation-history assertions (`guard.statement` of the Letterboxd admission coordinator) of the identity the caller observed. Every Ratings commit made through it
 // asserts them in its own batch, so an irreversible effect (a link, a fact, a claim) planned against a history that has since moved is refused whole, never half done. Internal code only, never request input; only that
 // exact assertion shape is accepted.
-// AIR-672 / ADR 0217 decision 5b: the same carrier also accepts, and only in its exact shape, the OWNED-ATTEMPT assertion of `ownedAttemptCondition` (the receipt of the key is `pending` with this request id and attempt, inside its window).
-const ADMISSION_GUARD=/^INSERT INTO film_person_cas \(id,ok\) VALUES \(1,\(SELECT CASE WHEN EXISTS \(SELECT 1 FROM film_person_cas WHERE id=1\) AND (?:\(\(SELECT COUNT\(\*\) FROM canonical_write_receipt WHERE origin=\? AND operation_key=\?\)=\? AND |\(EXISTS \(SELECT 1 FROM canonical_write_receipt WHERE origin=\? AND operation_key=\? AND request_id=\? AND state='pending' AND attempts=\? AND next_attempt_at>\?\)\) THEN 1 ELSE 0 END\)\) ON CONFLICT\(id\) DO UPDATE SET ok=excluded\.ok$)/;
+const ADMISSION_GUARD=/^INSERT INTO film_person_cas \(id,ok\) VALUES \(1,\(SELECT CASE WHEN EXISTS \(SELECT 1 FROM film_person_cas WHERE id=1\) AND \(\(SELECT COUNT\(\*\) FROM canonical_write_receipt WHERE origin=\? AND operation_key=\?\)=\? AND /;
 function admissionGuardStatements(env){
  const list=env?.admissionGuards;
  if(list===undefined||list===null)return [];

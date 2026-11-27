@@ -16,7 +16,6 @@ import * as WatchlistD1 from '../src/watchlist-d1.js';
 import {admissionStep} from '../src/letterboxd-sync-admission.js';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {lidOnlyProofDigest} from '../src/domain/letterboxd-lid-only-digest.js';
 
 execFileSync(process.execPath,['build.mjs'],{stdio:'ignore'});
 const bundle=fs.readFileSync('dist/server/index.js','utf8');
@@ -453,10 +452,9 @@ const file=fresh('d1'),env=world(file);
   const json=await response.json();
   assert.equal(injected,true,'the rival landed between the plan and the admission');
   assert.equal(response.status,200,JSON.stringify(json));
-  // AIR-672 / ADR 0217 decision 5b: the rival is seen by the PLANNER, before the reservation: a plain conflict, and nothing was linked (the link runs only inside an owned attempt, which was never reserved).
-  assert.deepEqual([json.conflicts,json.entries[0].conflict,json.entries[0].admission],[1,true,'conflict']);
-  assert.equal(await Facts.resolveAlias(env,'letterboxd:Bz5'),null,'no link: the reservation precedes the mark and the link, and a settled conflict reserves nothing');
-  assert.equal((await Facts.diaryLinks(env,['Bz5'])).get('Bz5').tmdb,null,'and no fact record was written for it');
+  assert.deepEqual([json.conflicts,json.entries[0].conflict,json.entries[0].admission],[1,true,'refused_after_link']);
+  assert.ok(await Facts.resolveAlias(env,'letterboxd:Bz5'),'the inferred-marked alias link stays (it was made before the admission, and is never a claim proof)');
+  assert.equal((await Facts.diaryLinks(env,['Bz5'])).get('Bz5').tmdb,null,'but no fact record was written for it');
   assert.equal(admissionRows(file).filter(item=>item.source_code==='Bz5').length,1,'only the rival admission exists');
   assert.equal(evidence(file).filter(item=>item.subject_value==='Bz5').length,0,'no evidence row for the refused item');
  }
@@ -469,15 +467,12 @@ const file=fresh('d1'),env=world(file);
   const factRecords=()=>rows(file,"SELECT key FROM ratings_document WHERE key LIKE 'letterboxd/facts/films/%' AND part=0").length;
   const receiptDoc=(chunk)=>getDocD1(file,'letterboxd/imports/'+SHA+'/chunks/'+chunk+'.receipt.json');
   for(const [lid,tmdb,other,chunk] of [['Fz1','700041',true,41],['Fz2','700042',false,42]]){
-   // `other`: the movie already belongs to another code (the verdict is present_other_code and the link and the facts proceed); otherwise the pair is planned (reserved, then linked inside the owned attempt, then admitted)
+   // `other`: the movie already belongs to another code (the verdict is present_other_code and the link and the facts proceed); otherwise the pair is planned (admission after the link)
    if(other)assert.equal((await ADD('Fo'+lid,tmdb)).outcome,'admitted');
    let moved=0;
    const watching={...env,DB:d1Standin(file,{onBatch:async list=>{
     // the FIRST batch that writes the link or a fact record of this lid (the inferred mark, or the link): the competitor lands just before it
-    // `other` (no reservation: the verdict is settled before any): a competitor reserves the key just before the link or fact batch. Otherwise (a NEW admission) the item's OWN attempt already holds the key (ADR 0217
-    // decision 5b: the reservation precedes the mark and the link), so the competing event is the attempt being ABANDONED (expired and superseded) just before its mark or link batch: the assertion of the exact owned
-    // attempt refuses that batch whole.
-    if(!moved&&list.some(item=>/ratings_document/.test(item.text)&&/letterboxd\/facts\/(links\.json|films\/)/.test(item.text))&&(!other||list.some(item=>new RegExp('admission:lid:'+lid).test(item.text)))){moved++;sqlite(file,other?competitor(lid,'film:tmdb:'+tmdb):"UPDATE canonical_write_receipt SET state='abandoned',error_class='superseded_by_retry',next_attempt_at=NULL,updated_at='"+STAMP+"',settled_at='"+STAMP+"' WHERE operation_key='admission:lid:"+lid+"' AND state='pending'");}
+    if(!moved&&list.some(item=>/ratings_document/.test(item.text)&&/letterboxd\/facts\/(links\.json|films\/)/.test(item.text))&&list.some(item=>new RegExp('admission:lid:'+lid).test(item.text))){moved++;sqlite(file,competitor(lid,'film:tmdb:'+tmdb));}
    }})};
    const before={links:(await Facts.diaryLinks(env,[lid])).get(lid)?.tmdb??null,records:factRecords(),admissions:admissionRows(file).length};
    const response=await Facts.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body([item(lid,tmdb)],chunk))}),watching,'/api/letterboxd/baseline/commit');
@@ -571,92 +566,6 @@ const file=fresh('d1'),env=world(file);
  sqlite(file,"DELETE FROM film_external_id WHERE film_id='film:held'");
  const resumed=await post(body([item('Bz4','700004')],3));
  assert.equal(resumed.status,200,JSON.stringify(resumed.json));assert.equal(resumed.json.entries[0].admission,'admitted');
-}
-
-// ===== F2. AIR-672 / ADR 0217 decision 5b and test 5c: the inferred import RESERVES the common lid key BEFORE its mark and link; both run inside the owned attempt; the canonical batch settles it =====
-{
- reset();
- const SHA='d'.repeat(64);
- const body=(items,chunk=0,sha=SHA)=>({origin:{archiveSha256:sha,generatedAt:'2026-11-20T10:00:00.000Z',generatedAtSource:'archive_name'},chunk,items});
- const commit=async(e,b)=>{const response=await Facts.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}),e,'/api/letterboxd/baseline/commit');return {status:response.status,json:await response.json()};};
- const item=(lid,tmdb,title='Baseline',year=1999)=>({lid,facts:{watched:true},tmdb,identity:'inferred',admit:{title,year}});
- const watch=(onBatch)=>({...env,DB:d1Standin(file,{onBatch})});
- const kindOf=list=>list.some(entry=>/INSERT INTO film_rated_admission/.test(entry.text))?'canonical':list.some(entry=>/INSERT INTO canonical_write_receipt/.test(entry.text)&&/operation_key/.test(entry.text))?'reserve':list.some(entry=>/ratings_document/.test(entry.text)&&/letterboxd\/facts\/(links\.json|films\/)/.test(entry.text))?'effect':null;
- const lidReceipts=lid=>receipts(file).filter(entry=>entry.operation_key==='admission:lid:'+lid);
- const films=lid=>rows(file,"SELECT id FROM film WHERE id IN (SELECT film_id FROM film_rated_admission WHERE source_code='"+lid+"') OR id='film:lb:"+lid+"'");
- const proofOf=async lid=>{const proof={proofVersion:1,lid,finalUrl:'https://letterboxd.com/film/short-1999/',slug:'short-1999',canonicalPath:'/film/short-1999/',shortlink:lid,typeMarker:'video.movie',idBlockOutcome:'absent',completenessOutcome:'complete',title:'Short',year:1999,redirectStatus:301,pageStatus:200,checkedAt:'2026-11-20T10:00:00.000Z'};proof.proofDigest=await lidOnlyProofDigest(proof);return proof;};
-
- // (1) the reservation precedes the first mark or link batch, which precedes the canonical admission; the receipt of the key is applied by the canonical batch
- {
-  const order=[];
-  const out=await commit(watch(async list=>{const kind=kindOf(list);if(kind)order.push(kind);}),body([item('Oz1','710001')],1));
-  assert.equal(out.status,200,JSON.stringify(out.json));assert.equal(out.json.entries[0].admission,'admitted');
-  assert.ok(order.indexOf('reserve')>=0&&order.indexOf('effect')>order.indexOf('reserve'),'reservation first, then the effects: '+order.join(','));
-  assert.ok(order.indexOf('canonical')>order.indexOf('effect'),'then the canonical admission: '+order.join(','));
-  assert.deepEqual(lidReceipts('Oz1').map(entry=>entry.state),['applied'],'one receipt, settled by the canonical batch');
-  assert.ok((await Facts.diaryLinks(env,['Oz1'])).get('Oz1').tmdb==='710001','linked');
- }
-
- // (2) the pending attempt is ABANDONED (expired and superseded) before the link batch: the owned-attempt assertion refuses it, nothing is linked or admitted, the chunk stops without a receipt
- {
-  let moved=0;
-  const out=await commit(watch(async list=>{if(!moved&&kindOf(list)==='effect'){moved++;sqlite(file,"UPDATE canonical_write_receipt SET state='abandoned',error_class='superseded_by_retry',next_attempt_at=NULL,updated_at='"+STAMP+"',settled_at='"+STAMP+"' WHERE operation_key='admission:lid:Oz2' AND state='pending'");}}),body([item('Oz2','710002')],2));
-  assert.equal(moved,1);assert.deepEqual([out.status,out.json.code],[409,'admission_not_settled']);
-  assert.equal(await Facts.resolveAlias(env,'letterboxd:Oz2'),null,'a late link of an abandoned owner never lands');
-  assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz2').length,0);
-  assert.equal(lidReceipts('Oz2').some(entry=>entry.state==='applied'),false);
-  // the re-sent chunk replans from durable state and succeeds under a NEW attempt
-  const again=await commit(env,body([item('Oz2','710002')],2));
-  assert.equal(again.status,200,JSON.stringify(again.json));assert.equal(again.json.entries[0].admission,'admitted');
-  assert.deepEqual(lidReceipts('Oz2').map(entry=>entry.state).sort(),['abandoned','applied']);
-  assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz2').length,1);
- }
-
- // (3) the code is linked elsewhere AFTER the reservation: the link finds the conflict, the attempt is not settled, nothing is admitted, no chunk receipt
- {
-  let moved=0;
-  const out=await commit(watch(async list=>{if(!moved&&kindOf(list)==='effect'){moved++;await Facts.linkFilm(env,{letterboxd:'Oz3',tmdb:'710099'});}}),body([item('Oz3','710003')],3));
-  assert.equal(moved,1);assert.deepEqual([out.status,out.json.code],[409,'admission_not_settled'],JSON.stringify(out.json));
-  assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz3').length,0,'no admission on the linked-elsewhere code');
-  assert.equal(lidReceipts('Oz3').some(entry=>entry.state==='applied'),false,'the reserved attempt was never applied');
- }
-
- // (4) a failure BETWEEN the link and the canonical commit: the retry recovers from durable state, the link is idempotent, ONE admission, ONE applied receipt
- {
-  let failedOnce=0;
-  const first=await commit(watch(async list=>{if(!failedOnce&&kindOf(list)==='canonical'){failedOnce++;throw new Error('crash before the canonical commit');}}),body([item('Oz4','710004')],4)).catch(error=>({status:500,error}));
-  assert.equal(failedOnce,1);assert.notEqual(first.status,200,'the chunk did not settle');
-  assert.ok((await Facts.diaryLinks(env,['Oz4'])).get('Oz4').tmdb==='710004'||await Facts.resolveAlias(env,'letterboxd:Oz4'),'the link landed inside the owned attempt');
-  assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz4').length,0,'but nothing was admitted');
-  const retry=await commit(env,body([item('Oz4','710004')],4));
-  assert.equal(retry.status,200,JSON.stringify(retry.json));assert.equal(retry.json.entries[0].admission,'admitted');
-  assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz4').length,1);
-  assert.equal(lidReceipts('Oz4').filter(entry=>entry.state==='applied').length,1,'exactly one applied receipt');
-  assert.equal(films('Oz4').length,1,'one Film');
-  // idempotent replay of the settled chunk
-  const before=JSON.stringify([admissionRows(file),lidReceipts('Oz4'),evidence(file)]);
-  const replay=await commit(env,body([item('Oz4','710004')],4));
-  assert.deepEqual([replay.status,replay.json.replay],[200,true]);assert.equal(JSON.stringify([admissionRows(file),lidReceipts('Oz4'),evidence(file)]),before);
- }
-
- // (5) competing lid-only and inferred attempts, both orders: never two Films for one lid, never an automatic attach
- {
-  const lidOnly=(lid)=>D1.admitVerifiedLidOnly(env,{lid,route:'ratings_diary',reacquire:async()=>({ok:true,proof:await proofOf(lid)}),now:()=>new Date(NOW).toISOString()});
-  // lid-only first: the inferred import is a conflict with no link and no fact
-  assert.equal((await lidOnly('Oz5')).outcome,'admitted_lid_only');
-  const blocked=await commit(env,body([item('Oz5','710005')],5));
-  assert.equal(blocked.status,200,JSON.stringify(blocked.json));
-  assert.deepEqual([blocked.json.conflicts,blocked.json.entries[0].conflict,blocked.json.entries[0].admission],[1,true,'conflict']);
-  assert.equal(await Facts.resolveAlias(env,'letterboxd:Oz5'),null,'no link');
-  assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz5').length,0,'no TMDB admission for the lid');
-  assert.deepEqual(films('Oz5').map(entry=>entry.id),['film:lb:Oz5'],'one Film, the lid-only one');
-  // inferred first: the lid-only attempt sees the durable admission and stops
-  const admitted=await commit(env,body([item('Oz6','710006')],6));
-  assert.equal(admitted.json.entries[0].admission,'admitted');
-  const stop=await lidOnly('Oz6');
-  assert.equal(stop.outcome,'present',JSON.stringify(stop));
-  assert.deepEqual(films('Oz6').map(entry=>entry.id),['film:tmdb:710006'],'one Film, the TMDB one');
- }
 }
 
 // ===== G. the source changed between two attempts: the `linking` intent names A, the page now names B: `source_changed`, no admission, no link =====

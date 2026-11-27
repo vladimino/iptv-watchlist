@@ -392,13 +392,6 @@ async function publishedGenerationMatches(env,seenRunId){
  const generation=await publishedPointer(env);
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
 }
-// AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part digests of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that already
-// holds a retained Discovery membership only. Best effort and silent: the module is in the Worker scope only (offline imports of this file have none), a Film outside the scope or an absent schema writes nothing, and a failure never
-// fails or delays the chunk (the producer's own events and the reconcile recover a missed signal). It fetches nothing and writes no canonical table.
-async function noteCatalogSourceChange(env,tmdbId,movie){
- if(typeof CatalogEnrichmentDiscovery==='undefined')return;
- try{await CatalogEnrichmentDiscovery.emitSourceChanged(env,{tmdbId:String(tmdbId),movie});}catch{/* never a Discovery failure */}
-}
 // AIR-687: positive proof that a thrown discovery_fence was only a CAS collision on discovery_authority.generation. The refusal must come from a D1 batch carrying the generation fence (a CHECK failure with a cause and the
 // generation that fence expected; the direct evidence/invariant throws and any other CHECK carry none) and the authority counter must have moved past that generation, the published pointer must positively name this run as `published` (a missing or non-published pointer is NOT a match), the authority must be ready, not held, not loading and
 // bound to this run, and the hop's own lease must still renew (the batch fence also checks the lease id/expiry). Anything else stays the fail-closed error.
@@ -413,6 +406,13 @@ async function retryableFenceCollision(env,error,programmeRunId,lease){
  // The batch's own fence statement expected `fenceGeneration`; only a counter that has moved past it is a competing writer. An unchanged counter means the CHECK failed for another reason of the same fence.
  if(!(Number(gate.generation)>error.fenceGeneration))return false;
  return await renewDiscoveryLease(env,lease)===true;
+}
+// AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part digests of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that already
+// holds a retained Discovery membership only. Best effort and silent: the module is in the Worker scope only (offline imports of this file have none), a Film outside the scope or an absent schema writes nothing, and a failure never
+// fails or delays the chunk (the producer's own events and the reconcile recover a missed signal). It fetches nothing and writes no canonical table.
+async function noteCatalogSourceChange(env,tmdbId,movie){
+ if(typeof CatalogEnrichmentDiscovery==='undefined')return;
+ try{await CatalogEnrichmentDiscovery.emitSourceChanged(env,{tmdbId:String(tmdbId),movie});}catch{/* never a Discovery failure */}
 }
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}

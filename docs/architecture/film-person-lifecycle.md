@@ -274,23 +274,7 @@ The `step.do.bind(step)` call that failed every Producer Workflow instance at it
 
 After a complete Watchlist scan commits a new snapshot version, each new Letterboxd id is resolved by the bounded same-run check of the Diary bridge (the Letterboxd film page and the TMDB movie must agree, at most three ids per step). The only outcomes are an admitted Film with a verified TMDB identity, written through the existing admission and retention writers (and the proof-gated claim where it applies), or an id kept in a durable pending-admission ledger with its provenance, backoff and a terminal state (every run retries the due rows, including after no-op scans). Since AIR-599 the Diary phase and this step share one retry contract and one attempt count (transport failures are never charged, a 404 is; age never ends a row; terminal only at the cap or by the owner), and the admission batch asserts the Letterboxd Sync epoch ([contract](../reference/integrations/letterboxd-ratings.md#one-retry-contract-for-both-callers-air-599-adr-0207-decision-4b)). A title or year match never admits a Film. A membership commit is not rolled back by a failed admission, and the admission work list lives with the Letterboxd run rather than the EPG checkpoint. A watched or rated mark may explain a removal but is never read as its proven cause.
 
-### Lid-only admission: the dormant coordinator kind ([ADR 0217](../adr/0217-source-independent-film-admission.md) step 3, AIR-672; **dormant, not live behavior**)
-
-Accepted ADR 0217 lets a verified Letterboxd film with no TMDB movie be admitted as the Film `film:lb:<lid>` through the ADR 0207 coordinator. Step 3 delivers the dormant core: the H1 page proof, the `lid_only` kind under the one key `admission:lid:<lid>`, the symmetric predicates and the immutable proof row `film_lid_admission` (migration `0048`, **not applied**). Nothing calls it from a live path: it runs only at the admission marker `d1` with the table present, H1's rules ship empty (fail closed until the real markup is shown on permitted captures), and the TMDB-proved path is unchanged. Contract: [Letterboxd ratings](../reference/integrations/letterboxd-ratings.md#the-lid-only-page-proof-and-the-lid_only-coordinator-kind-air-672-adr-0217-decisions-2-to-7-delivery-step-3-dormant).
-
-```mermaid
-flowchart TD
-  paths["Paths that know a lid:<br/>Diary, Watchlist, rated step, inferred import"] -->|"reserve admission:lid:LID"| key[("Receipt key<br/>one unresolved attempt per lid")]
-  older["Older keys of the code:<br/>short_code and inferred_import"] -->|"reconcile first, never reserved again"| key
-  page["H1 page check:<br/>complete page, positively absent TMDB relation"] -->|"tmdb_none"| batch
-  key --> batch["lid_only canonical batch<br/>marker d1, revision, absences, links.json etag"]
-  batch -->|"one fenced batch writes"| film["Film film:lb:LID<br/>trusted letterboxd claim<br/>film_lid_admission proof row<br/>applied receipt"]
-  inferred["Inferred import, new admission:<br/>reserve first, then mark and link<br/>inside the owned attempt (each batch asserts it)"] -->|"canonical batch settles the same receipt"| key
-  tmdb["TMDB-proved or inferred path<br/>meets film_lid_admission"] -->|"never attaches or duplicates"| refused["present_lid_only, needs_review or conflict"]
-  film -.->|"later steps, not delivered here"| later["Domain settlement of the entry points<br/>owner re-check and attach"]
-```
-
-The solid arrows are what this step delivers (dormant). The dashed arrow is later work of ADR 0217 (settlement of the three entry points, readers, merge, the owner re-check and attach). A minting id records only how a Film was created; it is not a current claim.
+Accepted [ADR 0217](../adr/0217-source-independent-film-admission.md) (AIR-643, architecture only, **not live behavior**) lets a verified Letterboxd film with no TMDB movie be admitted as `film:lb:<lid>` through the ADR 0207 coordinator once its cards are delivered and activated. Nothing above describes it until then, and its diagram comes with the implementation delivery.
 
 ### Claim bridge evidence: the canonical path ([ADR 0215](../adr/0215-identity-evidence-full-model.md) decision 5, choice 0215-8b = C; card E2b [AIR-618](https://trello.com/c/4RqJUcyf); dormant)
 
