@@ -127,17 +127,28 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
  assert.equal(open.status,200);assert.equal(open.body.control.state,'inactive');assert.equal(open.body.attention.length,0);
  activate(file);
  sql(file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,1,1,'${T}');
-  INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,film_json) VALUES ('film:a','film','*',0,'identity_disagreement',NULL,'${T}','${T}','{"disagreement":{"reasons":["tmdb_differs"]},"fallbackFill":[{"field":"year"}],"unconfirmedAgreement":["year"]}');
+  INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,film_json) VALUES ('film:a','film','*',0,'identity_disagreement',NULL,'${T}','${T}','{"disagreement":{"reasons":["tmdb_differs"]},"fallbackFill":[{"field":"year"}],"supersededKept":["runtime"],"unconfirmedAgreement":["year"]}');
   INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,failure_class,failure_signature,failures,due_since,updated_at) VALUES ('film:a','credits','tmdb',0,'deferred_repair','unreadable_credits','repairable','unreadable',6,'${T}','${T}');
   INSERT INTO catalog_enrichment_tick (tick_id,started_at,state,counts_json) VALUES ('run-1','${T}','started','{"films":2}');
   INSERT INTO enrichment_signal (kind,subject,state,version,armed_at) VALUES ('anchor_changed','film:a','pending',1,'${T}');
   INSERT INTO upstream_cooldown (scope,until_at,reason,retry_after_s,set_by,updated_at) VALUES ('tmdb',4102444800000,'rate_limited',120,'x',0);`);
  const active=await call(env,'/api/admin/settings',{method:'GET',payload:undefined,type:null,action:null,token:null,origin:null});
  assert.deepEqual([active.body.control.state,active.body.scopes[0].scope,active.body.lastRun.counts.films,active.body.signals.pending,active.body.draining,active.body.cooldowns[0].scope],['active','rated',2,1,null,'tmdb']);
+ // AIR-633 (ADR 0214 decision 13): the provenance mode, revision, history, waiting upgrades and the per-field outcome totals, with honest coverage; counts only
+ sql(file,`INSERT INTO catalog_enrichment_tick (tick_id,started_at,finished_at,state,counts_json) VALUES ('run-2','2026-11-26T08:00:00.000Z','2026-11-26T08:01:00.000Z','finished','{"films":1,"provenance":{"offered":4,"fills":3,"replacements":2,"history":2,"superseded_kept":1,"refusals":{"language_kept":1,"stored_differs":2}}}'),('run-3','2026-11-26T08:30:00.000Z','2026-11-26T08:31:00.000Z','finished','{"films":1,"provenance":{"replacements":1,"history":1,"refusals":{"language_kept":4}}}'),('run-4','2026-11-26T08:40:00.000Z','2026-11-26T08:41:00.000Z','finished','{"films":0}');
+  INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) VALUES ('source_changed','film:a','','core',1,0,'pending','${'a'.repeat(64)}','language_upgrade','${T}',0);`);
+ const prov=(await call(env,'/api/admin/settings',{method:'GET',payload:undefined,type:null,action:null,token:null,origin:null})).body.provenance;
+ assert.deepEqual([prov.configured,prov.mode,prov.revision,prov.languageUpgradesWaiting,prov.outcomes.fills,prov.outcomes.replacements,prov.outcomes.history,prov.outcomes.offered,prov.outcomes.superseded_kept,prov.outcomes.refusals.language_kept,prov.outcomes.refusals.stored_differs],[true,'off',1,1,3,3,3,4,1,5,2],'the totals are sums of the outbox counts, the mode and revision are read, the waiting upgrades are the pending language signals');
+ assert.deepEqual([prov.outcomes.coverage.finishedRunsSummed,prov.outcomes.coverage.runsWithCounts,prov.outcomes.coverage.olderRunsNotSummed],[3,2,false],'the aggregation says how many finished runs it summed, how many carried counts and whether older runs were left out');
+ assert.deepEqual([prov.history.capped,prov.history.total],[false,0],'the history read is bounded and says whether it was capped');
+ assert.ok(!JSON.stringify(prov).match(/film:|synopsis/),'counts only: no Film id and no field text');
+ // a failed read is reported as unavailable, never as zero
+ const broken=await call(baseEnv({DB:d1Standin(file,{rewrite:text=>/FROM catalog_enrichment_tick WHERE state IN/.test(text)?'SELECT * FROM no_such_table_x':text})}),'/api/admin/settings',{method:'GET',payload:undefined,type:null,action:null,token:null,origin:null});
+ assert.equal(broken.body.provenance?.outcomes?.unavailable,true,'an unreadable outbox is "unavailable", not zeros');
  const list=active.body.attention;
  assert.deepEqual(list.map(item=>item.part+':'+item.status),['film:identity_disagreement','credits:deferred_repair'].sort((a,b)=>list.findIndex(x=>x.part+':'+x.status===a)-list.findIndex(x=>x.part+':'+x.status===b)));
  const film=list.find(item=>item.part==='film');
- assert.deepEqual([film.lists.fallbackFill.length,film.lists.unconfirmedAgreement,film.lists.disagreement.reasons],[1,['year'],['tmdb_differs']],'the lists kept for owner review, each with a retry action');
+ assert.deepEqual([film.lists.fallbackFill.length,film.lists.unconfirmedAgreement,film.lists.disagreement.reasons,film.lists.supersededKept],[1,['year'],['tmdb_differs'],['runtime']],'the lists kept for owner review, each with a retry action');
  assert.deepEqual(film.retry,{action:'retry',filmId:'film:a',part:undefined,source:undefined}.part===undefined?{action:'retry',filmId:'film:a'}:film.retry);
  // a pause with a run that has not been written as stopped: the drain is displayed
  sql(file,"UPDATE catalog_enrichment_control SET state='paused',generation=generation+1,revision=revision+1");

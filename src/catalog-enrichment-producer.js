@@ -4,9 +4,10 @@
 // Every state write asserts the lease and the control generation; the units additionally assert the anchor set, the plan epoch and the metadata lock. A stale plan therefore writes nothing and is replanned.
 import {database,failed,many,one} from './film-person-authority.js';
 import {Plan} from './catalog-enrichment-plan.js';
-import {readControl} from './catalog-enrichment-store.js';
+import {readControl,emitUpgradeStatement} from './catalog-enrichment-store.js';
 import {runUnit as runUnitRaw,unitKeys} from './catalog-enrichment-units.js';
 import {fetchLetterboxd,fetchTmdb,fetchWikidata} from './catalog-enrichment-sources.js';
+import {readProvenance,confidenceOf,storedValue,valueDigest,addCounts as addProvenance,emptyCounts as emptyProvenanceCounts} from './film-metadata-provenance.js';
 
 export const CODE_VERSION='c1-2';
 export const REPAIR_WAKE_LIMIT=20;
@@ -25,6 +26,9 @@ const guardSql=ctx=>{
  // not publish its rows as current even while that event is still pending
  if(ctx.anchorGuard){sql+=` AND ${ctx.anchorGuard.sql}`;params.push(...ctx.anchorGuard.params);}
  if(ctx.filmId&&Number.isInteger(ctx.planEpoch)){sql+=" AND EXISTS (SELECT 1 FROM catalog_enrichment_state pf WHERE pf.film_id=? AND pf.part='film' AND pf.source='*' AND pf.slot=0 AND pf.plan_epoch=?)";params.push(ctx.filmId,ctx.planEpoch);}
+ // ADR 0214 decisions 11 and 12 (AIR-633): the provenance mode and revision the core plan was read under. A core completion carries it, so a plan made under one policy never settles after the control moved (a stale policy keeps the part due and
+ // replanned); schema absent has no control row and is unchanged.
+ if(ctx.provenanceGuard){sql+=` AND ${ctx.provenanceGuard.sql}`;params.push(...ctx.provenanceGuard.params);}
  return {sql,params};
 };
 const sha=value=>Plan.digestOf(value);
@@ -62,7 +66,29 @@ async function putRowsAtomic(env,ctx,rows,extra=[]){
  await handle.batch([...rows.map(row=>rowStatement(ctx,row)),...extra].map(([statement,params])=>handle.prepare(statement).bind(...params)));
 }
 
+// ATOMIC publication of core completions together with the Film outcome projection (AIR-633): one D1 batch is one transaction, every statement carries the SAME guard (lease, control generation, identity, anchor set, plan epoch and the
+// provenance mode and revision), and each is matched on its own expected epoch. The core parts and the owner-review lists therefore either all persist or none does, and a moved fence publishes nothing.
+async function putAtomicGuarded(env,ctx,entries){
+ if(!entries.length)return;
+ const handle=db(env);
+ await handle.batch(entries.map(({row,expectEpoch})=>{const [statement,params]=rowStatement(ctx,row,{expectEpoch});return handle.prepare(statement).bind(...params);}));
+}
+
 // ---- reading what a plan needs ----
+// ADR 0214 decision 5 / AIR-633: the provenance MODE and, from `hold`/`enforce`, the standing, attributing source and bound language of every stored field, read with the SAME helpers the writer uses (one comparator, no second reading of
+// the rules). Schema absent or mode `off` -> {mode:'off'} (today's planning). An unreadable control row fails the step closed, like the writer.
+async function readStanding(handle,filmId,metadata,locked){
+ const prov=await readProvenance(handle,filmId);
+ if(!prov||prov.mode==='off')return {mode:'off',revision:prov?.revision??null,fields:{}};
+ const fields={};
+ for(const field of CORE_FIELDS){
+  const value=storedValue(metadata,field),raw=prov.fields[field]||null;
+  const stand=confidenceOf(raw,value,prov.anchors.digest,locked);
+  const bound=!!raw&&value!==null&&raw.value_digest===valueDigest(value);
+  fields[field]={name:stand.name,source:bound?raw.source:null,language:bound?raw.language??null:null};
+ }
+ return {mode:prov.mode,revision:prov.revision,fields};
+}
 async function readContext(env,filmId){
  const handle=db(env);
  const film=await one(handle,'SELECT id,contract_version FROM film WHERE id=?',[filmId]);
@@ -74,7 +100,7 @@ async function readContext(env,filmId){
  const stored={year:metadata?.year??null,runtime:metadata?.runtime??null,synopsis:metadata?.synopsis??null,poster:metadata?.poster??null,url:metadata?.url??null,genres:parse(metadata?.genres_json)||[]};
  const locked=!!await one(handle,"SELECT 1 AS x FROM film_dimension WHERE film_id=? AND dimension='metadata' AND (status='reviewed' OR COALESCE(authority,'')='owner')",[filmId]);
  const credits=await many(handle,'SELECT person_id,role FROM film_person_credit WHERE film_id=?',[filmId]);
- return {film:{id:film.id,contractVersion:Number(film.contract_version)},anchors,stored,locked,credits,rows:await readRows(env,filmId)};
+ return {film:{id:film.id,contractVersion:Number(film.contract_version)},anchors,stored,locked,credits,provenance:await readStanding(handle,filmId,metadata,locked),rows:await readRows(env,filmId)};
 }
 const lockGuard=filmId=>({sql:"NOT EXISTS (SELECT 1 FROM film_dimension WHERE film_id=? AND dimension='metadata' AND (status='reviewed' OR COALESCE(authority,'')='owner'))",params:[filmId]});
 
@@ -82,7 +108,9 @@ const lockGuard=filmId=>({sql:"NOT EXISTS (SELECT 1 FROM film_dimension WHERE fi
 // Processes ONE Film. ctx: {leaseId, generation, now, tools, fetchImpl, coordinator, env}. -> {state:'not_active'|'absent'|'blocked'|'done', ...}
 // `budget` (optional): {canStart:()=>boolean}, the resource-bounded drainer's own answer to "does the remaining statement budget cover one more unit group plus the finalize-and-successor reserve". It is asked before EVERY unit
 // group of a Film (core, a localization row, each Person, each credits chunk): a Film spans as many steps and instances as it needs, progress is durable per unit, and nothing here caps credits or Films.
-export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetchImpl=fetch,coordinator=null,budget=null}){
+// `sources` (optional): the three fetchers, defaulting to the real ones (a test seam; the shared Russian-first observation of ADR 0224 is produced by `fetchTmdb` and `fetchLetterboxd`).
+const REAL_SOURCES=Object.freeze({fetchLetterboxd,fetchTmdb,fetchWikidata});
+export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetchImpl=fetch,coordinator=null,budget=null,sources=REAL_SOURCES}){
  const canStart=()=>!budget||budget.canStart();
  const partial=(report,reason='budget')=>({state:'partial',report:{...report,partial:reason}});
  // The WRITE BOUNDARY: before every group of canonical writes the drainer is asked (1) whether the remaining statement budget covers it and (2) whether a progressing EPG publication holds the writes. Fetching, anchor checks and the planning rows above
@@ -107,7 +135,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const context=await readContext(env,filmId);
  if(!context)return {state:'absent'};
  if(context.redirected)return {state:'redirected'};
- const report={written:[],units:[],transport:[],failed:[],disagreement:null,gaps:[],conflicts:[],hints:[]};
+ const report={written:[],units:[],transport:[],failed:[],disagreement:null,gaps:[],conflicts:[],hints:[],provenance:emptyProvenanceCounts()};
  const applicable=Plan.applicableSources(context.anchors);
  const digest=await Plan.anchorDigest(context.anchors);
  const byKey=new Map(context.rows.map(row=>[key(row),row]));
@@ -121,6 +149,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const nowAnchors={letterboxd:context.anchors.letterboxd?.value??null,tmdb:context.anchors.tmdb?.value??null};
   const corrected=['letterboxd','tmdb'].some(scheme=>previous[scheme]&&nowAnchors[scheme]&&previous[scheme]!==nowAnchors[scheme]);
   const next={...known,anchorDigest:digest,anchors:nowAnchors,anchorCheckedAt:now,applicable};
+  delete next.supersededKept; // the finding belongs to the OLD anchor set: invalidated here, re-derived by the next settled evaluation under the new one
   if(corrected){
    next.agreedAnchorDigest=null;next.disagreement=null;
    const superseded=context.rows.filter(row=>row.part==='credits'&&row.status!=='not_applicable'&&row.film?.wroteCredits);
@@ -130,6 +159,11 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
     await putRow(env,ctx,{...row,status:held?'needs_attention':'due',reason:held?'superseded_credits':null,failures:0,transportStreak:0,pendingSince:null,retryAt:null,expected:null,refreshEpoch:row.refreshEpoch+1},{expectEpoch:row.refreshEpoch});
    }
    void superseded;
+  }
+  // ADR 0214 decisions 7, 10 and 12 (AIR-633): in enforce a SOURCE-SET change (a source added or removed, with no same-scheme value correction) makes every automatic field's whole-set digest superseded, so the surviving core parts are
+  // re-confirmed under the new anchors: ONLY the core rows reopen (due, one more refresh epoch). Settled credits and localization are untouched. A first admission has no earlier digest and reopens nothing.
+  if(!corrected&&known.anchorDigest&&context.provenance.mode==='enforce'){
+   for(const row of context.rows.filter(item=>item.part==='core'&&item.status!=='not_applicable'))await putRow(env,ctx,{...row,status:'due',reason:null,failures:0,transportStreak:0,pendingSince:null,retryAt:null,refreshEpoch:row.refreshEpoch+1},{expectEpoch:row.refreshEpoch});
   }
   // the marker stays until the second pass has created or reopened the rows: a Film whose rows do not exist yet must stay in the queue
   filmRow={...filmRow,status:corrected?'active':filmRow.status,reason:'check_anchors',retryAt:null,planEpoch:filmRow.planEpoch+1,film:next};
@@ -184,9 +218,9 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const lbAnchor=context.anchors.letterboxd,tmdbAnchor=context.anchors.tmdb;
  const answers={};
  await Promise.all(toFetch.map(async source=>{
-  if(source==='letterboxd')answers.letterboxd=await fetchLetterboxd(env,{lid:lbAnchor.value,tmdbAnchor:tmdbAnchor?.value??null,coordinator,fetchImpl,tools});
-  else if(source==='tmdb')answers.tmdb=await fetchTmdb(env,{id:tmdbAnchor.value,coordinator,fetchImpl});
-  else answers.wikidata=await fetchWikidata(env,{tmdbId:tmdbAnchor.value,coordinator,fetchImpl});
+  if(source==='letterboxd')answers.letterboxd=await sources.fetchLetterboxd(env,{lid:lbAnchor.value,tmdbAnchor:tmdbAnchor?.value??null,coordinator,fetchImpl,tools});
+  else if(source==='tmdb')answers.tmdb=await sources.fetchTmdb(env,{id:tmdbAnchor.value,coordinator,fetchImpl});
+  else answers.wikidata=await sources.fetchWikidata(env,{tmdbId:tmdbAnchor.value,coordinator,fetchImpl});
  }));
  // outcomes onto every row of the source
  for(const [source,answer] of Object.entries(answers)){
@@ -230,7 +264,11 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const answer=answers[source];
   if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields,coverage:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.coverage])),language:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.language??null]))}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
   const row=rowOf('core',source);
-  if(row&&['complete','complete_with_gaps'].includes(row.status))return {status:'ok',fields:{}};
+  if(row&&['complete','complete_with_gaps'].includes(row.status)){
+   // a settled source that is NOT asked now is not an absence; what it verified when it settled, under THIS anchor set, is retained in its core row and composes across independent retries (a changed anchor set or a reopen invalidates it)
+   const note=row.film?.coverage;
+   return {status:'ok',fields:{},...(note&&note.anchorDigest===digest&&Array.isArray(note.absent)?{coverage:Object.fromEntries(note.absent.map(name=>[name,'absent'])),retained:true}:{})};
+  }
   return row?.pendingSince?{status:'transport'}:{status:'stopped'};
  };
  const coreAnswers={letterboxd:asAnswer('letterboxd'),tmdb:asAnswer('tmdb')};
@@ -243,12 +281,57 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  // A source settles its core row only when it was FETCHED this tick and its observation is complete coverage. An unfetched or failed source keeps its row, version and counters exactly as they were; an OK answer with an unreadable
  // or ambiguous field is repairable (below), never a settlement and never a version.
  const settles=source=>answers[source]?.status==='ok'&&Plan.unresolvedFields(answers[source].observation).length===0;
+ // ADR 0214 decisions 5 and 10, ADR 0224 (AIR-633): what this fetch offers the one writer for a nonblank field. Only a DUE core part plans it (the fetch was made for it); the writer's comparator and language guards decide and count each one.
+ const replacements=metadataEligible?Plan.planReplacements({provenance:context.provenance,applicable,hasLetterboxdAnchor:hasLb,agreed,stored,answers:coreAnswers,locked:context.locked,fills:core.writes}):{offers:{},pending:[],fillOverrides:{},supersededKept:[]};
+ for(const [field,override] of Object.entries(replacements.fillOverrides))core.writes[field]={source:override.source,value:override.value};
+ for(const [field,offer] of Object.entries(replacements.offers))core.writes[field]={source:offer.source,value:offer.value,offer:offer.mode};
  const writeFields=Object.keys(core.writes);
+ report.provenance.offered=(report.provenance.offered||0)+Object.keys(replacements.offers).length;
+ report.provenance.superseded_kept=(report.provenance.superseded_kept||0)+replacements.supersededKept.length;
+ // A Russian upgrade that off or hold cannot make is recorded as ONE inbox signal (source_changed for the whole core part, held by the signal reader until the mode is enforce and by the membership/scope fences like every signal).
+ // It is published INSIDE this plan's fence (lease, control generation, identity, anchor set, plan epoch, and the provenance mode and revision the plan read), so a stale fetch, a lost lease or a mode change publishes nothing; the signal
+ // is read back, and when the publication does not hold the part is NOT settled (it stays due and is replanned). The digest binds the waiting values and the provenance revision: an identical observation re-arms nothing, a new Russian
+ // value or a new mode era does. Schema absent: nothing can be held, nothing is published (fail closed).
+ const emitUpgrade=async()=>{
+  const waiting=replacements.pending.filter(item=>item.reason==='language_upgrade');
+  if(!waiting.length||context.provenance.mode==='enforce'||context.provenance.revision===null)return true;
+  const digestOfWaiting=await sha({upgrade:waiting.map(item=>[item.field,item.source,item.value]),mode:context.provenance.mode,revision:context.provenance.revision});
+  const [statement,params]=emitUpgradeStatement({subject:filmId,digest:digestOfWaiting,at:now,guard:guardSql(ctx),mode:context.provenance.mode,revision:context.provenance.revision});
+  await db(env).prepare(statement).bind(...params).run();
+  const held=await one(db(env),"SELECT cause_digest FROM enrichment_signal WHERE kind='source_changed' AND subject=? AND source='' AND part='core'",[filmId]);
+  if(held?.cause_digest!==digestOfWaiting)return false;
+  report.provenance.upgrades_waiting=(report.provenance.upgrades_waiting||0)+waiting.length;
+  return true;
+ };
+ // The owner-review lists of the Film row. In enforce `storedDiffers` is derived from what the writer ACTUALLY refused (`stored_differs`), never from a pre-comparator comparison (a successful replacement is not a refusal); off and hold keep
+ // the planner's list. `supersededKept` is recomputed on every settled evaluation and CLEARED when the value was reconfirmed or replaced, or the source no longer settles it as absent.
+ const provenanceGuard=context.provenance.revision===null?null:{sql:'EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id=1 AND mode=? AND revision=?)',params:[context.provenance.mode,context.provenance.revision]};
+ const coreCtx=provenanceGuard?{...ctx,provenanceGuard}:ctx;
+ const coverageNote=source=>({anchorDigest:digest,absent:Object.entries(answers[source]?.observation||{}).filter(([,item])=>item?.coverage==='absent').map(([name])=>name)});
+ // The Film outcome projection (owner-review lists). In enforce `storedDiffers` is derived from what the writer ACTUALLY refused (`stored_differs`), never from a pre-comparator comparison. `supersededKept` is PRESERVED until it is genuinely
+ // resolved: the writer actually replaced or adopted a value for the field in THIS write (its own `changes`), or the stored value no longer reads `superseded`. A planned offer that the writer refused, a stale no-op or a refused downgrade
+ // resolves nothing. An anchor change invalidates the old-anchor finding at the anchor check. -> the Film row to publish, or null when there is nothing to record.
+ const filmProjection=async(refused=[],changes=[])=>{
+  const enforcing=context.provenance.mode==='enforce';
+  const storedDiffers=enforcing?core.storedDiffers.filter(item=>refused.some(skip=>skip.field===item.field&&skip.reason==='stored_differs')):core.storedDiffers;
+  const refreshed=(await readRows(env,filmId)).find(row=>row.part==='film');
+  const prior=refreshed.film?.supersededKept||[];
+  let supersededKept=prior;
+  if(enforcing){
+   const actually=field=>['replace:','adopt:'].some(prefix=>changes.includes(prefix+field));
+   const resolved=field=>actually(field)||(context.provenance.fields[field]?.name??'unknown')!=='superseded';
+   supersededKept=[...new Set([...prior.filter(field=>!resolved(field)),...replacements.supersededKept])];
+  }
+  if(!(core.fallbackFill.length||core.unconfirmedAgreement.length||storedDiffers.length||supersededKept.length||prior.length||(refreshed.film?.storedDiffers||[]).length))return null;
+  const {supersededKept:_old,...rest}=refreshed.film||{};
+  return {...refreshed,film:{...rest,fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement,storedDiffers,...(supersededKept.length?{supersededKept}:{}),writtenFields:[...new Set([...(refreshed.film?.writtenFields||[]),...report.written])]}};
+ };
  if(metadataEligible&&writeFields.length){
   const sourceRow=rowOf('core',core.writes[writeFields[0]].source);
   const sync=CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
   const anchorGuard=Plan.anchorSetGuard(filmId,context.anchors);
-  const guards=[...writeFields.map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
+  // a blank fill keeps its blank guard; an offered replacement, adoption or absence is fenced by the Film revision of the writer instead (ADR 0214 decision 12)
+  const guards=[...writeFields.filter(field=>!core.writes[field].offer).map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation),...(provenanceGuard?[provenanceGuard]:[])];
   // ADR 0214 decision 4 and ADR 0224: every core write DECLARES, per field, the source, the anchor it relied on, its observation time, the agreement digest it holds and, from the typed observation, the language and basis that the written
   // value carries (the single conversion `Plan.declarationOf`; a field that carries no language declares none). The provenance writer of AIR-631 reads `metadata.declared`; a writer or a mode that does not know it ignores it and
   // the statements are unchanged.
@@ -264,26 +347,38 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   {const stop=await mayWrite();if(stop)return partial(report,stop);}
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.core(filmId),input,now:()=>now});
   report.units.push({part:'core',state:unit.state});
+  // ATTEMPTED (offered) is counted above; COMMITTED effects come from the writer's own counts of an applied batch, and a refusal-only or no-op plan reports the refusals its pre-plan computed. A settled replay counts nothing (no double counting).
+  if(unit.state==='applied')addProvenance(report.provenance,unit.result?.provenance??unit.provenance);
+  else if(unit.state==='noop')addProvenance(report.provenance,{refusals:unit.provenance?.refusals,source_absent:unit.provenance?.source_absent,provenance_mismatch:unit.provenance?.provenance_mismatch});
   if(['applied','noop','settled'].includes(unit.state)){
-   report.written.push(...writeFields);
-   // the typed declarations of what was written: the one explicit boundary to a provenance writer (AIR-631); each value is bound to the language and basis its observation carried
+   // `written` names the VALUES that actually changed (a fill or a replacement; an adoption or an `agreed` audit moves provenance only); before provenance (off) a fill is its field
+   const changed=unit.result?.changes;
+   report.written.push(...(Array.isArray(changed)&&context.provenance.mode!=='off'?writeFields.filter(field=>changed.some(item=>['provenance:','replace:'].some(prefix=>String(item)===prefix+field))):unit.state==='applied'?writeFields.filter(field=>!core.writes[field].offer):[]));
+   // the typed declarations of what was offered: the one explicit boundary to a provenance writer (AIR-631); each value is bound to the language and basis its observation carried
    report.declarations=writeFields.map(name=>({field:name,...declared[name]}));
+   if(!await emitUpgrade())return {state:'done',report:{...report,upgradeNotPublished:true}};
    const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source)&&settles(row.source));
+   const entries=[];
    for(const row of next){
     const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
-    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
+    entries.push({row:{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement,coverage:coverageNote(row.source)}},expectEpoch:row.refreshEpoch});
    }
-   if(core.fallbackFill.length||core.unconfirmedAgreement.length||core.storedDiffers.length){
-    const refreshed=(await readRows(env,filmId)).find(row=>row.part==='film');
-    await putRow(env,ctx,{...refreshed,film:{...(refreshed.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement,storedDiffers:core.storedDiffers,writtenFields:[...new Set([...(refreshed.film?.writtenFields||[]),...writeFields])]}},{expectEpoch:refreshed.planEpoch});
-   }
+   // the core completions and the Film outcome projection are ONE guarded transaction: both persist, or the part stays due and replans (a moved provenance mode or revision, a lost lease or a failed batch publishes neither)
+   const projection=await filmProjection(unit.result?.skipped||unit.skipped||[],Array.isArray(unit.result?.changes)?unit.result.changes:[]);
+   if(projection)entries.push({row:projection,expectEpoch:projection.planEpoch});
+   await putAtomicGuarded(env,coreCtx,entries);
   }
  }else if(metadataEligible&&core.complete){
-  // A refresh whose verified answer has nothing left to fill (every core field already holds a value, fill-only) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
+  // A refresh whose verified answer has nothing left to offer (every field settled, kept or pinned) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
   // (a verified source change) would stay due for ever and a later equal observation could never be told from a change.
+  if(!await emitUpgrade())return {state:'done',report:{...report,upgradeNotPublished:true}};
+  const entries=[];
   for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&settles(item.source)&&['due','deferred_repair'].includes(item.status))){
-   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
+   entries.push({row:{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),coverage:coverageNote(row.source)}},expectEpoch:row.refreshEpoch});
   }
+  const projection=await filmProjection([],[]);
+  if(projection)entries.push({row:projection,expectEpoch:projection.planEpoch});
+  await putAtomicGuarded(env,coreCtx,entries);
  }
  // An OK answer whose observation has an unreadable or ambiguous field: the sections that ARE valid may fill (above), but the source's core part is REPAIRABLE (it backs off and counts like any malformed section, with the existing
  // quarantine and recovery), never settled, never given a version and never a reason to clear its counters.

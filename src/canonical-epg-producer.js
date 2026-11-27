@@ -65,6 +65,11 @@ export function epgReplan(plan,env){
 
 // The units one call may visit: the injected limit raised to at least 1 and never above the hard ceiling.
 export const epgUnitCap=limit=>Math.min(Math.max(Number(limit)||1,1),EPG_UNIT_HARD_CAP);
+// the writer's per-field outcome counts of the units of one pass, summed (a local helper: this module imports only the adapters and the authority)
+const sumProvenance=(total,add)=>{
+ for(const [key,value] of Object.entries(add))if(key==='refusals'){for(const [reason,n] of Object.entries(value||{}))total.refusals[reason]=(total.refusals[reason]||0)+(Number(n)||0);}else if(Number.isFinite(Number(value)))total[key]=(total[key]||0)+Number(value);
+ return total;
+};
 const emptyCounts=()=>({applied:0,noop:0,already:0,unknown:0,failed:0,absent:0,pending:0});
 
 // cursor: index of the next unit (resumable; persist it in the run state). limit: units per call. Returns
@@ -87,6 +92,8 @@ export async function applyEpgUnits(env,{plan,cursor=0,limit=EPG_UNIT_LIMIT_DEFA
     if(!input){counts.absent++;continue;}
    }
    const outcome=await applyFilmFacts(env,{origin:EPG_ORIGIN,event:plan.event,input,...(now?{now}:{}),...(policy?{policy}:{})});
+   // ADR 0214 decision 13 (AIR-633): the writer's per-field outcome counts of an EPG unit (these callers are undeclared, so refusals such as attributed_kept or hold are the evidence); the key exists only when the writer reported any
+   {const measured=outcome.state==='noop'?outcome.provenance:outcome.already===true?null:outcome.result?.provenance;if(measured)counts.provenance=sumProvenance(counts.provenance||{refusals:{}},measured);} // a refusal-only no-op reports its pre-plan refusals; an already-applied replay counts nothing
    if(outcome.state==='noop')counts.noop++;
    else if(outcome.already===true)counts.already++;
    else if(outcome.state==='applied')counts.applied++;

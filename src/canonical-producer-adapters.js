@@ -74,7 +74,7 @@ export async function prePlanFilmFacts(env,{input,requestId}){
  const plan=planFilmFacts(snapshot,{...input,requestId});
  // A producer that never creates a Film (`requireExisting:true`, ADR 0127) refuses a missing one before any receipt exists; the writer asserts it again inside its batch.
  if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');
- return {noop:plan.noop,expectedRevision:snapshot.revision,changes:plan.changes,skipped:plan.skipped,redirect:snapshot.redirect};
+ return {noop:plan.noop,expectedRevision:snapshot.revision,changes:plan.changes,skipped:plan.skipped,redirect:snapshot.redirect,...(plan.counts?{counts:plan.counts}:{})};
 }
 
 // The digest binds the target id (and the content), so equality with the receipt's digest is the whole check.
@@ -150,7 +150,7 @@ export async function applyFilmFacts(env,{origin,event,input,replan,now,policy=R
  const requestId=await producerRequestId({origin,event,target,digest});
  const clock=typeof now==='function'?now:()=>now||new Date().toISOString();
  const plan=await prePlanFilmFacts(env,{input,requestId});
- if(plan.noop)return {state:'noop',receipt:false,requestId,skipped:plan.skipped};
+ if(plan.noop)return {state:'noop',receipt:false,requestId,skipped:plan.skipped,...(plan.counts?{provenance:plan.counts}:{})}; // the pre-plan's per-field outcome counts (ADR 0214 decision 13): a refusal-only plan commits nothing and keeps no receipt, but its refusals are measured
  const spec=filmFactsOperation({replan:replan||(async()=>input),now:clock});
  const outcome=await receiptedWrite(env,{requestId,operation:FILM_FACTS_OPERATION,origin,target,expectedRevision:plan.expectedRevision,digest,now:clock,policy},{
   atomic:true,

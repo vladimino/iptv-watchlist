@@ -345,6 +345,74 @@ export const localizationVersion=(source,anchor,title)=>title?.status==='value'?
 // credits: the ordered provider credits of a readable section (a present, empty list is a valid empty set).
 export const creditsVersion=(source,anchor,credits)=>credits?.status==='ok'&&Array.isArray(credits.items)?digestOf({source,anchor,part:'credits',items:credits.items.map(item=>[item.role,item.key??null,item.key==null?(item.name??null):null])}):null;
 
+// ---- replacement planning (ADR 0214 decisions 5, 10 and 12; ADR 0224; AIR-633 PV2) ----
+// The planner only DECIDES WHAT TO OFFER the one canonical writer on a due fetch; the writer's comparator (confidence, then language quality for synopsis and poster, then source precedence, freshness, digest) and its language guards
+// (P3-A, no downgrade) remain the single authority that replaces, adopts or refuses, and every outcome is counted there. The planner therefore adds NO second rank policy: any observed value of an applicable source is offered for a
+// nonblank field (an equal value too, so adoption and the `agreed` audit are reachable), except where the observation is unconfirmed (an unconfirmed observation never replaces a different nonblank value).
+// `provenance` (optional): {mode:'off'|'hold'|'enforce', fields:{field->{name, source, language}}}; absent or mode `off` reads every stored value as unknown-language.
+const same=(a,b)=>canonical(a??null)===canonical(b??null);
+// The language of one observed field comes from the typed observation of the shared Russian-first projection (ADR 0224, AIR-684): `answer.language[field]` is `ru`, `en` (an explicit tag, or the owner-approved assumption for a Letterboxd synopsis) or null.
+const languageOf=(answer,field)=>answer?.language?.[field]??null;
+// -> {offers:{field->{source,value,mode:'replace'|'adopt'|'absent',language}}, pending:[{field,source,reason}], fillOverrides:{field->{source,value}}, supersededKept:[field]}
+// enforce: every observation of a nonblank field is offered (an answered source with a verified absence is offered as a null declaration, so `source_absent` is counted by the writer; a superseded value with no observation is listed as
+// `supersededKept`). hold: only an equal value (an adoption) is offered, a different one is `pending`. off or schema absent: nothing is offered; a Russian upgrade of a different nonblank synopsis or poster is `pending`, which is the
+// durable evidence that makes the Film's core part runnable again once enforce permits it.
+export function planReplacements(input){
+ const out={offers:{},pending:[],fillOverrides:{},supersededKept:[]};
+ const {provenance,applicable,hasLetterboxdAnchor,agreed,stored,answers,locked,fills={}}=input;
+ if(locked)return out;
+ const mode=provenance?.mode||'off';
+ const confirmed=!hasLetterboxdAnchor||!!agreed; // an unconfirmed observation never replaces a different nonblank value (ADR 0214 decision 5)
+ if(!confirmed)return out;
+ // the explicit state of a source for a field, from its own typed observation: value | absent (verified) | unresolved | unobserved (settled, not asked now) | pending | not_applicable
+ const observedState=(source,field)=>{
+  if(!applicable.includes(source))return 'not_applicable';
+  const answer=answers[source];
+  if(!answer||answer.status!=='ok')return 'pending';
+  const coverage=answer.coverage?.[field];
+  if(coverage===undefined)return 'unobserved';
+  if(coverage==='absent')return 'absent';
+  if(coverage==='verified')return blank(answer.fields?.[field])?'absent':'value';
+  return 'unresolved';
+ };
+ const valuesOf=field=>CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],language:languageOf(answers[source],field)}));
+ for(const field of CORE_FIELDS){
+  const isLanguage=LANGUAGE_FIELDS.includes(field);
+  if(blank(stored[field])){
+   // a blank is filled by decideCore in source order. For synopsis and poster a Russian observation of ANOTHER source is better than that fill (ADR 0224): enforce fills the Russian value directly; off and hold fill as before and leave the
+   // durable evidence that makes the Russian value an upgrade once enforce permits it.
+   const fill=fills[field];
+   if(!fill||!isLanguage)continue;
+   const russian=valuesOf(field).find(item=>item.language==='ru');
+   if(!russian||same(fill.value,russian.value)||languageOf(answers[fill.source],field)==='ru')continue;
+   if(mode==='enforce')out.fillOverrides[field]={source:russian.source,value:russian.value};
+   else out.pending.push({field,source:russian.source,reason:'language_upgrade',value:russian.value});
+   continue;
+  }
+  const standing=provenance?.fields?.[field]||{name:'unknown',language:null,source:null};
+  const seen=valuesOf(field);
+  if(!seen.length){
+   if(mode!=='enforce')continue;
+   // An ABSENCE is only what a source's own typed observation says (`answer.coverage[field] === 'absent'`): a source that was not asked this tick (the scheduling placeholder of a settled part), is pending or transport-unavailable,
+   // failed, or has unreadable or ambiguous coverage is neither a value nor an absence. A superseded value is listed as kept only after EVERY applicable source's current coverage settled as a verified absence under the new anchors.
+   const states=CORE_ORDER.filter(source=>applicable.includes(source)).map(source=>observedState(source,field));
+   if(standing.name==='superseded'&&states.length&&states.every(state=>state==='absent'))out.supersededKept.push(field);
+   // the very source that attributed the stored value verifiably has none now: the writer counts it as `source_absent` and keeps the value (a blank never clears)
+   // a RETAINED absence (what a settled source verified earlier, not asked now) is evidence for composing the finding, not a new upstream observation: it is never declared to the writer as a fresh absence
+   if(standing.source&&observedState(standing.source,field)==='absent'&&!answers[standing.source]?.retained)out.offers[field]={source:standing.source,value:null,mode:'absent',language:null};
+   continue;
+  }
+  // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order
+  const pick=isLanguage?[...seen].sort((a,b)=>({ru:2,en:1}[b.language]||0)-({ru:2,en:1}[a.language]||0))[0]:seen[0];
+  const equal=same(stored[field],pick.value);
+  const upgrade=isLanguage&&pick.language==='ru'&&standing.language!=='ru'; // P3-A: a confirmed Russian value may replace an eligible unknown or English one
+  if(mode==='enforce'){out.offers[field]={source:pick.source,value:pick.value,mode:equal?'adopt':'replace',language:pick.language};continue;}
+  if(equal){if(mode==='hold')out.offers[field]={source:pick.source,value:pick.value,mode:'adopt',language:pick.language};continue;}
+  if(upgrade)out.pending.push({field,source:pick.source,reason:'language_upgrade',value:pick.value});
+ }
+ return out;
+}
+
 // ---- priority and fairness (decision 5) ----
 // facts: {cohorts:Set of 'live'|'history', personal:true|false|null, available:true|false|null}; null is UNKNOWN. A positive live fact makes the Film live whatever its cohort; a history-only Film is background (unknown
 // facts do not promote it); a member of a live cohort is live unless BOTH facts are known false.
@@ -366,4 +434,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({planReplacements,declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});

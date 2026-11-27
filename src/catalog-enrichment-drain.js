@@ -9,6 +9,7 @@ import {createGateReuse,database,many,one} from './film-person-authority.js';
 import {acquireLease,consumeSignal,readControl,releaseLease,renewLease,runnableSignals} from './catalog-enrichment-store.js';
 import {nextClass,priorityClass} from './catalog-enrichment-plan.js';
 import {processFilm,CODE_VERSION} from './catalog-enrichment-producer.js';
+import {addCounts as addProvenance,emptyCounts as emptyProvenanceCounts} from './film-metadata-provenance.js';
 
 // Engineering-owned defaults (ADR 0219 decision 6), one module, reported in each run's outbox entry. The statement budget is the ADR 0094 guard, not a provider limit; a handover happens at HANDOVER_AT, half the documented
 // 10,000; a step starts only when the remaining budget covers its own work plus the finalize-and-successor reserve.
@@ -198,7 +199,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  let baseLive=0,baseBackground=0;
  let holdSuspected=false,newest=true;
  try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);if(newest){holdSuspected=c.stop==='yield';newest=false;}baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
- const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,bySource:{}};
+ const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,provenance:emptyProvenanceCounts(),bySource:{}};
  const holdCache={at:null,value:null},cursors=new Map();
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed,requests:sent.n}});
  const control=await readControl(env);
@@ -288,6 +289,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     const committed=step.report.units.filter(unit=>['applied'].includes(unit.state)).length;
     counts.units+=committed;
     if(klass==='live')counts.committedLive+=committed;else counts.committedBackground+=committed;
+    addProvenance(counts.provenance,step.report.provenance);
     counts.transport+=step.report.transport.length;counts.failed+=step.report.failed.length;if(step.report.disagreement)counts.disagreements++;
     // per SOURCE: requests actually asked (a cooldown skip sends none), transport outcomes, definite failures and cooldown skips
     for(const source of step.report.fetched||[]){const entry=(counts.bySource[source]||={requests:0,transport:0,failed:0,cooldownSkips:0});const skipped=step.report.transport.some(item=>item.source===source&&item.cooldown);if(skipped)entry.cooldownSkips++;else entry.requests++;}

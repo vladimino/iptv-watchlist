@@ -361,4 +361,30 @@ if(section('7')){
  const epg=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epg.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
 }
+// AIR-633 (ADR 0214 decision 13): the EPG producer outcome counts the writer's per-field provenance outcomes (undeclared callers: an unknown value is replaced with history, an attributed one is kept)
+if(section('3')){
+ const file=database('open'),env=envOf(file);
+ const run=(runId,at,runtime)=>applyEpgUnits(env,{plan:planEpgUnits({runId,at:iso(at),films:[{id:ID(40),facts:{...facts('A'),metadata:META({runtime})}}]}),now:()=>iso(at)});
+ const first=await run('prov-1',0,100);
+ assert.equal(first.counts.provenance,undefined,'mode off: the writer reports no per-field counts and the count object keeps its shape');
+ assert.equal(sqlite(file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'").status,0);
+ const second=await run('prov-2',60000,101);
+ assert.deepEqual([second.counts.applied,second.counts.provenance.replacements,second.counts.provenance.history],[1,1,1],'an unknown value is replaced by the undeclared EPG write, with a history row, and the pass counts it');
+}
+// AIR-633 second review: a refusal-only (no-op) EPG pass reports its refusals, and an already-applied replay counts nothing twice
+if(section('3')){
+ const file=database('open'),env=envOf(file);
+ const run=(runId,at,runtime)=>applyEpgUnits(env,{plan:planEpgUnits({runId,at:iso(at),films:[{id:ID(41),facts:{...facts('A'),metadata:META({runtime})}}]}),now:()=>iso(at)});
+ await run('refuse-1',0,100);
+ assert.equal(sqlite(file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'").status,0);
+ // a DECLARED (C1-style) write attributes the runtime; the undeclared EPG value that differs is then refused in a no-op pre-plan: no receipt, no mutation, but the refusal is measured
+ const {writeFilmFacts,readFilmSnapshot}=await import('../src/canonical-film-writers.js');
+ sqlite(file,"INSERT INTO film_external_id VALUES ('"+ID(41)+"','tmdb','41',1,0,NULL)");
+ await writeFilmFacts(env,{id:ID(41),at:iso(70000),requestId:'declared-1',expectedRevision:(await readFilmSnapshot(env,ID(41))).revision,film:{contractVersion:1},metadata:{updatedAt:iso(70000),runtime:99,declared:{runtime:{source:'tmdb',anchor:{scheme:'tmdb',value:'41'},observedAt:iso(70000),agreedAnchorDigest:null}}},requireExisting:true});
+ const refused=await run('refuse-2',80000,123);
+ assert.deepEqual([refused.counts.noop,refused.counts.applied],[1,0],'a refusal-only plan is a no-op: no receipt, no mutation');
+ assert.ok(refused.counts.provenance.refusals.attributed_kept>=1,'and its refusal is measured: '+JSON.stringify(refused.counts.provenance));
+ const replay=await run('refuse-2',80000,123);
+ assert.ok(!replay.counts.provenance||replay.counts.provenance.replacements===undefined||replay.counts.provenance.replacements===0,'repeating the same pass counts no committed change');
+}
 console.log('canonical-epg-producer: ok');
