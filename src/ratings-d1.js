@@ -367,13 +367,11 @@ async function overlayViewRows(db){
   after=page[page.length-1].alias_id;
  }
 }
-// AIR-675: whether the ratings view holds a row for EVERY one of these alias ids (read only; the caller proves a completed projection from the actual rows, never from the record alone).
-export async function viewHasAliases(env,ids){
+// AIR-675: whether the ratings view ALREADY equals what projecting these records would write: the very comparison `viewWrites` makes against the stored rows (key, watched, watchlist, rating, with its absent-fact semantics), so a row that exists
+// with another `fact_key` or a stale value is NOT complete. Read only; the repair, when needed, is the existing projection (`projectView`) under the caller's guards.
+export async function viewComplete(env,records){
  const db=database(env);
- const list=[...new Set(ids||[])];
- if(!list.length||list.length>20)throw failed('ratings_domain_unavailable');
- const rows=await many(db,'SELECT alias_id FROM ratings_view WHERE alias_id IN ('+list.map(()=>'?').join(',')+')',list);
- return rows.length===list.length;
+ return (await viewWrites(db,records)).length===0;
 }
 
 export async function overlayView(env,index){

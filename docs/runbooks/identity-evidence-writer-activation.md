@@ -4,7 +4,7 @@
 
 ## What the control is
 
-One durable row per writer in `identity_evidence_writer` (`discovery_decision`, `discovery_owner`, `claim_alias_bridge`, `tmdb_retirement_decision`, `tmdb_retirement_application`, and from schema 52 `lid_tmdb_attach`: [AIR-675](https://trello.com/c/8k4DjDpv), migration `0052`, see the [attach runbook](lid-recheck-intent-0052-0052-apply.md)), plus the append-only `identity_evidence_writer_change`. **No row means `off`**, and so does a schema without the table. A writer inserts evidence only while its row is `pending` or `on`. Fields and triggers: [D1 schema](../reference/data/d1-schema.md#identity-evidence-writer-control-schema-v42-adr-0215-accepted-not-applied).
+One durable row per writer in `identity_evidence_writer` (`discovery_decision`, `discovery_owner`, `claim_alias_bridge`, `tmdb_retirement_decision`, `tmdb_retirement_application`, and from schema 52 `lid_tmdb_attach`: [AIR-675](https://trello.com/c/8k4DjDpv), migration `0052`, see the [attach runbook](lid-recheck-intent-0051-0052-apply.md)), plus the append-only `identity_evidence_writer_change`. **No row means `off`**, and so does a schema without the table. A writer inserts evidence only while its row is `pending` or `on`. Fields and triggers: [D1 schema](../reference/data/d1-schema.md#identity-evidence-writer-control-schema-v42-adr-0215-accepted-not-applied).
 
 A row alone is not coverage: a version that predates the writer commits the same domain step with no insert, whatever the row says. Coverage is claimed only for a **drained, unbroken** `on` interval, and only as ADR 0215 decision 4 states it (per key: "no qualifying evidence recorded", never "not checked").
 

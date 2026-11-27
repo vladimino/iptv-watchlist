@@ -672,6 +672,15 @@ const NOLINK=()=>({link:async()=>{const e=new Error('write_contention');e.code='
   const repaired=await replay(env,real);
   assert.equal(repaired.projection,undefined,JSON.stringify(repaired));
   assert.deepEqual(rows(file,'SELECT alias_id,actual_rating FROM ratings_view ORDER BY alias_id'),[{alias_id:'Ab1',actual_rating:4},{alias_id:'tmdb_603',actual_rating:4}],'the missing movie view row is back, with the rating');
+  // (g) the view row EXISTS but is WRONG (another fact key, a stale rating): presence is not completeness; the replay compares with what projecting the record would write and repairs it under the same guards
+  sqlite(file,"UPDATE ratings_view SET fact_key='lb-Other',actual_rating=1 WHERE alias_id='tmdb_603'");
+  assert.deepEqual(rows(file,"SELECT fact_key,actual_rating FROM ratings_view WHERE alias_id='tmdb_603'"),[{fact_key:'lb-Other',actual_rating:1}]);
+  const wrong=await replay(env,real);
+  assert.equal(wrong.projection,undefined,JSON.stringify(wrong));
+  assert.deepEqual(rows(file,"SELECT fact_key,actual_rating FROM ratings_view WHERE alias_id='tmdb_603'"),[{fact_key:'lb-Ab1',actual_rating:4}],'the wrong key and the stale rating are repaired from the current record');
+  sqlite(file,"UPDATE ratings_view SET actual_rating=2 WHERE alias_id='Ab1'");
+  await replay(env,real);
+  assert.deepEqual(rows(file,"SELECT actual_rating FROM ratings_view WHERE alias_id='Ab1'"),[{actual_rating:4}],'the lid view row is compared too');
   // and a fully complete pair writes nothing on a further replay
   const snap=JSON.stringify([recordDoc(file),rows(file,'SELECT * FROM ratings_view ORDER BY alias_id')]);
   await replay(env,real);assert.equal(JSON.stringify([recordDoc(file),rows(file,'SELECT * FROM ratings_view ORDER BY alias_id')]),snap);

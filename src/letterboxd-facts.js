@@ -243,7 +243,7 @@ function recordRatingChange(record,incoming,effective){
  //  - `guardsFor(fence)` (the caller's) returns the statements that ride in the SAME Ratings batch as the record write and as the projection: the markers, the complete ownership predicates, the exact settled intent and the document fence of THAT
  //    observation. A moved document, a moved marker, a proved correction or a closed or not-authoritative Ratings domain refuses the batch whole (the legacy store is never written: without `extra` the R2 stand-in refuses too);
  //  - the record is the lid's OWN key and is never followed: a moved record, another movie id or another Letterboxd id on it is a conflict, nothing is relabelled;
- //  - the record write projects both view rows in its own batch (`viewWrites`); a record that already carries the movie is NOT trusted as complete: the actual view rows of both aliases are checked, and a missing one is repaired by the existing idempotent
+ //  - the record write projects both view rows in its own batch (`viewWrites`); a record that already carries the movie is NOT trusted as complete: the actual view rows are compared with what projecting the record would write, and a missing or different one is repaired by the existing idempotent
  //    projection under the SAME guards (an interrupted record-to-view boundary).
  // It writes no alias, no fact value and no key. `pendingOnly: true` writes only when the record or the view is not complete. -> {state:'projected'|'complete'|'absent'|'conflict'}.
  async function completeAttachedLink(env,{lid,tmdb,guardsFor,pendingOnly=false}){
@@ -257,12 +257,11 @@ function recordRatingChange(record,incoming,effective){
   if(!Array.isArray(guards)||!guards.length)throw new FactsError('atomic_unavailable','The attached pair completion needs its guards');
   const {value:current}=await readJSON(env,recordKey(factKey));
   if(current&&(current.redirectTo||current.migrating))return {state:'conflict'};
-  const ids=[lid,'tmdb_'+tmdb];
-  if(pendingOnly&&current&&String(current.links?.tmdb)===String(tmdb)&&current.links?.letterboxd===lid&&await RatingsD1.viewHasAliases(env,ids))return {state:'complete',factKey};
+  if(pendingOnly&&current&&String(current.links?.tmdb)===String(tmdb)&&current.links?.letterboxd===lid&&await RatingsD1.viewComplete(env,[current]))return {state:'complete',factKey};
   try{
    const {record}=await recordObservations(env,factKey,{letterboxd:lid,tmdb:String(tmdb)},[],{extra:guards,attach:{lid,tmdb:String(tmdb)}});
    if(String(record?.links?.tmdb)!==String(tmdb)||record?.links?.letterboxd!==lid)return {state:'conflict'};
-   if(!await RatingsD1.viewHasAliases(env,ids))await projectRecords(env,[record],{extra:guards});
+   if(!await RatingsD1.viewComplete(env,[record]))await projectRecords(env,[record],{extra:guards});
    return {state:'projected',factKey};
   }catch(error){if(error.code==='alias_conflict')return {state:'conflict'};throw error;}
  }
