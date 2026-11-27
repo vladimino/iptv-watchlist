@@ -457,6 +457,18 @@ export const FILES={
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
+ "prediction-lid-only-exclusion.mjs": {
+  "suite": "core"
+ },
+ "lid-only-consumers.mjs": {
+  "suite": "core"
+ },
+ "prediction-lid-only-real-path.mjs": {
+  "suite": "core"
+ },
+ "prediction-lid-only-merge.mjs": {
+  "suite": "core"
+ },
  "film-readiness.mjs": {
   "suite": "core"
  },

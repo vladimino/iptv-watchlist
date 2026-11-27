@@ -24,6 +24,7 @@ import {createHash} from 'node:crypto';
 import {CREDIT_SELECTION_SQL,database} from './film-person-authority.js';
 import {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT} from './film-aggregate-resolver.js';
+import {COHORT_SQL,MISSING_LID_ADMISSION,predictionEligibility} from './prediction-lid-only-exclusion.js';
 
 export {FILM_AGGREGATE_CONTRACT};
 // ADR 0216 decision 6b, the work bounds of candidate discovery.
@@ -427,6 +428,25 @@ async function predictionsSection(db,fence,set,coverage){
  return {section,after};
 }
 
+
+// ---- predictions.eligibility (AIR-673, ADR 0217 decision 9, choice M1): a SEPARATE field. It is a verdict about eligibility only; it never turns a present or conflicting value into `partial` and never invents incompleteness. ----
+// ONE cohort rule with the prediction queue, the manifest and `submit` (`COHORT_SQL`, src/prediction-lid-only-exclusion.js, the SAME statement) on the resolved survivor Film: the survivor is the Film of a `film_lid_admission` row
+// (its own or a redirect source's: a merge moves the proof) and holds no current trusted `tmdb` claim (a retired movie is historical evidence, not a current claim). The claim rows decide, never the spelling of an id. The statement is
+// spent only for a survivor WITHOUT a current trusted movie claim (an ordinary movie Film is outside the cohort by the rule itself and costs none). Not readable (no budget, a failed read) is `unknown`, never an eligible answer.
+// A table not yet applied means no lid-only Film exists.
+async function eligibilitySection(db,resolution){
+ const claims=Array.isArray(resolution.claims)?resolution.claims:[];
+ if(claims.some(c=>c.scheme==='tmdb'&&c.trusted===true&&c.conflicting!==true&&c.retired!==true))return null;
+ let inCohort;
+ try{inCohort=(await db.prepare(COHORT_SQL).bind(JSON.stringify([resolution.filmId])).all()).results?.length>0;}
+ catch(error){
+  if(error instanceof BudgetExceeded)return {status:'unknown',reason:'budget_exceeded'};
+  if(MISSING_LID_ADMISSION.test(String(error?.message||error?.cause?.message||'')))return null;
+  return {status:'unknown',reason:'eligibility_unavailable'};
+ }
+ return predictionEligibility({inCohort});
+}
+
 // ---- Watchlist (decision 5: source authority ADR 0186 vs projection ADR 0203, and the negative proof) ----
 const CURRENT_SNAPSHOT='(SELECT snapshot_id FROM watchlist_current WHERE id=1)';
 const WATCHLIST_SQL="SELECT (SELECT json_object('rows',COUNT(*),'mode',MAX(mode),'generation',MAX(generation),'writes',MAX(writes)) FROM watchlist_authority WHERE id=1) AS source,"
@@ -619,6 +639,8 @@ export async function readSections(env,resolution,budget){
   else out[name]=moved;
  }
  if(!ratingsHeld)coverage={status:'incomplete',reason:'ratings_evidence_unavailable',token:null,tokenStatus:'unavailable'};
+ // AIR-673: attached after the after-reads, so a section that moved stays `unavailable` and carries nothing.
+ if(out.predictions&&out.predictions.status!=='unavailable'){const eligibility=await eligibilitySection(db,resolution);if(eligibility)out.predictions={...out.predictions,eligibility};}
  out.history=historySection(resolution,set,coverage);
  return {display:out.display,watchlist:out.watchlist,availability:out.availability,personal:out.personal,predictions:out.predictions,history:out.history};
 }
