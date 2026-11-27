@@ -192,10 +192,10 @@ fails(copyOf(db,'down'),'UPDATE schema_contract SET version=46 WHERE id=1');
  exec(file,"INSERT INTO catalog_enrichment_tick (tick_id,started_at,state,counts_json) VALUES ('run-1','"+T+"','started','{}');UPDATE catalog_enrichment_tick SET state='finished',finished_at='"+T+"',counts_json='{\"requests\":2}' WHERE tick_id='run-1';");
  fails(file,"INSERT INTO catalog_enrichment_tick (tick_id,started_at,state,counts_json) VALUES ('run-2','"+T+"','started','not json')");
  // the due selection pages through the partial indexes in order, with no sort and no full scan
- const runnable=String(run(file,"EXPLAIN QUERY PLAN SELECT film_id FROM catalog_enrichment_state s WHERE s.cohort='live' AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND COALESCE(s.retry_at,'')<='"+T+"' AND (COALESCE(s.retry_at,''),s.due_since,s.film_id,s.part,s.source,s.slot)>('','','','','',0) ORDER BY COALESCE(s.retry_at,''),s.due_since,s.film_id,s.part,s.source,s.slot LIMIT 50;").stdout);
+ const runnable=String(run(file,"EXPLAIN QUERY PLAN SELECT film_id FROM catalog_enrichment_state s WHERE s.cohort='live' AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND s.held=0 AND COALESCE(s.retry_at,'')<='"+T+"' AND (COALESCE(s.retry_at,''),s.due_since,s.film_id,s.part,s.source,s.slot)>('','','','','',0) ORDER BY COALESCE(s.retry_at,''),s.due_since,s.film_id,s.part,s.source,s.slot LIMIT 50;").stdout);
  assert.match(runnable,/catalog_enrichment_state_runnable/,'the runnable selection reads its partial index');
  assert.doesNotMatch(runnable,/USE TEMP B-TREE FOR ORDER BY/,'in index order: no sort of the whole queue');
- const anchor=String(run(file,"EXPLAIN QUERY PLAN SELECT film_id FROM catalog_enrichment_state s WHERE s.cohort='live' AND s.part='film' AND s.status='active' AND s.reason='check_anchors' AND COALESCE(s.retry_at,'')<='"+T+"' AND (COALESCE(s.retry_at,''),s.due_since,s.film_id)>('','','') ORDER BY COALESCE(s.retry_at,''),s.due_since,s.film_id LIMIT 50;").stdout);
+ const anchor=String(run(file,"EXPLAIN QUERY PLAN SELECT film_id FROM catalog_enrichment_state s WHERE s.cohort='live' AND s.part='film' AND s.status='active' AND s.reason='check_anchors' AND s.held=0 AND COALESCE(s.retry_at,'')<='"+T+"' AND (COALESCE(s.retry_at,''),s.due_since,s.film_id)>('','','') ORDER BY COALESCE(s.retry_at,''),s.due_since,s.film_id LIMIT 50;").stdout);
  assert.match(anchor,/catalog_enrichment_state_anchor/,'the anchor check selection reads its partial index');
  assert.doesNotMatch(anchor,/USE TEMP B-TREE FOR ORDER BY/);
 }

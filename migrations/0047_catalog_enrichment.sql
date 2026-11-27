@@ -74,6 +74,8 @@ CREATE TABLE catalog_enrichment_state (
  status TEXT NOT NULL CHECK (status IN ('active', 'due', 'complete', 'complete_with_gaps', 'not_applicable', 'needs_attention', 'deferred_repair', 'identity_disagreement')),
  reason TEXT,
  cohort TEXT NOT NULL DEFAULT 'live' CHECK (cohort IN ('live', 'history')),
+ -- `held` = 1 while the Film has NO enabled membership: its rows stay out of the due indexes (a disabled scope costs the due selection nothing). Maintained only by the scope and membership triggers below, never by the producer.
+ held INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1)),
  anchor TEXT,
  source_version TEXT,
  refresh_epoch INTEGER NOT NULL DEFAULT 0 CHECK (refresh_epoch >= 0),
@@ -100,8 +102,8 @@ CREATE TABLE catalog_enrichment_state (
 ) STRICT;
 -- The indexed due selection (ADR 0219 decision 5): two PARTIAL indexes, one per kind of runnable row, ordered by the run-after time (`COALESCE(retry_at, '')`: a row with no retry is due now and sorts first) and then by how long
 -- it has been due. A pick pages through ONE of them per cohort with a keyset cursor, so the rows it examines are exactly the rows it reads (bounded per page) and a blocked or repeated head never hides what is behind it.
-CREATE INDEX catalog_enrichment_state_runnable ON catalog_enrichment_state (cohort, COALESCE(retry_at, ''), due_since, film_id, part, source, slot) WHERE part <> 'film' AND status IN ('due', 'deferred_repair');
-CREATE INDEX catalog_enrichment_state_anchor ON catalog_enrichment_state (cohort, COALESCE(retry_at, ''), due_since, film_id) WHERE part = 'film' AND status = 'active' AND reason = 'check_anchors';
+CREATE INDEX catalog_enrichment_state_runnable ON catalog_enrichment_state (cohort, COALESCE(retry_at, ''), due_since, film_id, part, source, slot) WHERE part <> 'film' AND status IN ('due', 'deferred_repair') AND held = 0;
+CREATE INDEX catalog_enrichment_state_anchor ON catalog_enrichment_state (cohort, COALESCE(retry_at, ''), due_since, film_id) WHERE part = 'film' AND status = 'active' AND reason = 'check_anchors' AND held = 0;
 
 -- 5. The receipt-key generation of one logical unit (a part of a Film, or a Person unit shared by several Films). Advanced only by a compare-and-swap on generation and history fingerprint; never deleted.
 CREATE TABLE catalog_enrichment_unit_generation (
@@ -168,6 +170,31 @@ CREATE TRIGGER catalog_enrichment_scope_fence_update AFTER UPDATE ON catalog_enr
 WHEN OLD.enabled IS NOT NEW.enabled OR OLD.activated IS NOT NEW.activated OR OLD.cutoff_at IS NOT NEW.cutoff_at OR OLD.revision IS NOT NEW.revision
 BEGIN
  UPDATE catalog_enrichment_control SET generation = generation + 1, revision = revision + 1, updated_at = NEW.updated_at WHERE id = 1 AND state <> 'inactive';
+END;
+
+-- Eligibility lives in the index, not in a scan: a scope toggle (rare, owner-driven) moves the `held` flag of the affected Films' rows, so a disabled scope's members are not in the due indexes at all. A Film with at least one enabled
+-- membership is never held. The producer never writes the flag; a membership of an enabled scope releases the Film's rows.
+CREATE TRIGGER catalog_enrichment_scope_disabled AFTER UPDATE OF enabled ON catalog_enrichment_scope
+WHEN OLD.enabled = 1 AND NEW.enabled = 0
+BEGIN
+ UPDATE catalog_enrichment_state SET held = 1
+ WHERE held = 0 AND film_id IN (SELECT film_id FROM catalog_enrichment_member WHERE scope = NEW.scope)
+ AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope = m.scope AND c.enabled = 1 WHERE m.film_id = catalog_enrichment_state.film_id);
+END;
+CREATE TRIGGER catalog_enrichment_scope_enabled AFTER UPDATE OF enabled ON catalog_enrichment_scope
+WHEN OLD.enabled = 0 AND NEW.enabled = 1
+BEGIN
+ UPDATE catalog_enrichment_state SET held = 0 WHERE held = 1 AND film_id IN (SELECT film_id FROM catalog_enrichment_member WHERE scope = NEW.scope);
+END;
+CREATE TRIGGER catalog_enrichment_scope_inserted_enabled AFTER INSERT ON catalog_enrichment_scope
+WHEN NEW.enabled = 1
+BEGIN
+ UPDATE catalog_enrichment_state SET held = 0 WHERE held = 1 AND film_id IN (SELECT film_id FROM catalog_enrichment_member WHERE scope = NEW.scope);
+END;
+CREATE TRIGGER catalog_enrichment_member_released AFTER INSERT ON catalog_enrichment_member
+WHEN EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope = NEW.scope AND enabled = 1)
+BEGIN
+ UPDATE catalog_enrichment_state SET held = 0 WHERE held = 1 AND film_id = NEW.film_id;
 END;
 
 -- The emitters. Each statement upserts one inbox row: a new row has version 1, an existing row has its version raised and becomes pending again (a semantic re-arm). They write ONLY enrichment_signal,

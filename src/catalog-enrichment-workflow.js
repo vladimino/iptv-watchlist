@@ -65,8 +65,9 @@ async function sendKick(env,id,now){
 export async function hasRunnable(env,{now}){
  if((await runnableSignals(env,{now,limit:1})).length)return true;
  if(await repairPending(env))return true; // a new code version has deferred items waiting for their wake
- const due=await dueFilms(env,{now,window:1});
- return due.live.length+due.background.length>0;
+ const due=await dueFilms(env,{now});
+ // a stream that stopped at its page budget without finding anything may still hide runnable work: that is "maybe runnable", and the run it starts laps the range
+ return due.live.length+due.background.length>0||due.incomplete;
 }
 
 export const OWNER_GRACE_MS=120000;

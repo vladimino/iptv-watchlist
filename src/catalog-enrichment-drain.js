@@ -87,16 +87,19 @@ export async function relevanceFacts(env,filmIds){
 export const MAX_PAGES=4;
 const LOCKED_CORE="(s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))";
 const STREAMS=Object.freeze({
- runnable:{where:"s.part<>'film' AND s.status IN ('due','deferred_repair')",key:'COALESCE(s.retry_at,\'\'),s.due_since,s.film_id,s.part,s.source,s.slot',cursor:['','','','','',0],extra:`, ${LOCKED_CORE} AS locked, EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement') AS disagree`},
- anchor:{where:"s.part='film' AND s.status='active' AND s.reason='check_anchors'",key:'COALESCE(s.retry_at,\'\'),s.due_since,s.film_id',cursor:['','',''],extra:', 0 AS locked, 0 AS disagree'},
+ runnable:{where:"s.part<>'film' AND s.status IN ('due','deferred_repair') AND s.held=0",key:'COALESCE(s.retry_at,\'\'),s.due_since,s.film_id,s.part,s.source,s.slot',cursor:['','','','','',0],extra:`, ${LOCKED_CORE} AS locked, EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement') AS disagree`},
+ anchor:{where:"s.part='film' AND s.status='active' AND s.reason='check_anchors' AND s.held=0",key:'COALESCE(s.retry_at,\'\'),s.due_since,s.film_id',cursor:['','',''],extra:', 0 AS locked, 0 AS disagree'},
 });
-export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set(),maxPages=MAX_PAGES}){
+// RANGE EXHAUSTED is distinguished from PAGE BUDGET EXHAUSTED: `incomplete` is true when a stream stopped at its page budget with more of its range unread and found nothing, so "nothing found" is not "nothing there". The caller keeps a
+// `cursors` map for the run: an incomplete stream continues from its cursor at the next pick (real forward progress past a head of rows that are not runnable), and a stream that found work or exhausted its range starts again at its head.
+export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set(),maxPages=MAX_PAGES,cursors=null}){
  const handle=database(env);
  const examined={live:0,history:0},picked=new Map(),blocked=[];
- let pages=0;
+ let pages=0,incomplete=false;
  for(const cohort of ['live','history']){
   for(const stream of Object.values(STREAMS)){
-   let cursor=stream.cursor,found=0;
+   const cursorKey=cohort+':'+(stream===STREAMS.runnable?'runnable':'anchor');
+   let cursor=cursors?.get(cursorKey)||stream.cursor,found=0,exhausted=false;
    for(let page=0;page<maxPages&&found<window;page++){
     const tuple=cursor.map(()=>'?').join(',');
     const rows=await many(handle,`SELECT r.*, EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=r.film_id) AS enabled FROM (SELECT s.film_id AS film_id,s.part AS part,s.source AS source,s.slot AS slot,s.due_since AS due_since,s.retry_at AS retry_at,COALESCE(s.retry_at,'') AS ra${stream.extra} FROM catalog_enrichment_state s WHERE s.cohort=? AND ${stream.where} AND COALESCE(s.retry_at,'')<=? AND (${stream.key})>(${tuple}) ORDER BY ${stream.key} LIMIT ?) AS r ORDER BY r.ra,r.due_since,r.film_id,r.part,r.source,r.slot`,[cohort,now,...cursor,window]);
@@ -108,14 +111,15 @@ export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set(),maxP
      if(!known)found++; // DISTINCT Films: the repeated slots of one Film are one Film
      if(!known||row.due_since<known.dueSince)picked.set(row.film_id,{filmId:row.film_id,dueSince:row.due_since});
     }
-    if(rows.length<window)break; // the index range is exhausted
+    if(rows.length<window){exhausted=true;break;} // the index range is exhausted
     const last=rows[rows.length-1];
     cursor=stream===STREAMS.runnable?[last.ra,last.due_since,last.film_id,last.part,last.source,Number(last.slot)]:[last.ra,last.due_since,last.film_id];
    }
+   if(!exhausted&&found===0){incomplete=true;cursors?.set(cursorKey,cursor);}else cursors?.delete(cursorKey);
   }
  }
  const facts=await relevanceFacts(handle,[...picked.keys()]);
- const out={live:[],background:[],blocked,examined,pages};
+ const out={live:[],background:[],blocked,examined,pages,incomplete};
  for(const entry of [...picked.values()].sort((a,b)=>a.dueSince<b.dueSince?-1:a.dueSince>b.dueSince?1:a.filmId<b.filmId?-1:1)){
   const fact=facts.get(entry.filmId);
   out[priorityClass({cohorts:fact.cohorts,personal:fact.personal,available:fact.available})].push({...entry,personal:fact.personal,available:fact.available});
@@ -193,7 +197,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  let baseLive=0,baseBackground=0;
  try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
  const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,bySource:{}};
- const holdCache={at:null,value:null};
+ const holdCache={at:null,value:null},cursors=new Map();
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed,requests:sent.n}});
  const control=await readControl(env);
  if(control.state!=='active')return finish(control.state==='paused'?'paused':'not_active');
@@ -238,11 +242,14 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     const outcome=await consumeSignal(env,{signal,generation,leaseId,now:clock()});
     if(outcome.consumed){consumed++;counts.signals++;}
    }
-   const due=await dueFilms(env,{now:clock(),skip});
-   if(due.blocked.length){try{counts.deferred+=await deferBlocked(env,{blocked:due.blocked,leaseId,generation,now:clock()});}catch{/* the in-run pass still excludes them: they are not picked */}}
+   const due=await dueFilms(env,{now:clock(),skip,cursors});
+   let cleared=0;
+   if(due.blocked.length){try{cleared=await deferBlocked(env,{blocked:due.blocked,leaseId,generation,now:clock()});counts.deferred+=cleared;}catch{/* the in-run pass still excludes them: they are not picked */}}
    const klass=nextClass({hasLive:due.live.length>0,hasBackground:due.background.length>0,committedLive:baseLive+counts.committedLive,committedBackground:baseBackground+counts.committedBackground});
    if(!klass){
     if(consumed)continue; // new work may have become due by the signals just consumed
+    // progress without a pick is still progress: rows were deferred out of the head, or a stream stopped at its page budget and continues from its cursor; both are bounded by the statement budget, which hands over
+    if(cleared>0||due.incomplete)continue;
     const wakeAt=await earliestWake(env,{now:clock()});
     return wakeAt?finish('parked',{wakeAt}):finish('idle');
    }

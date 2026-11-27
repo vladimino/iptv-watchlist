@@ -399,4 +399,73 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,'the successors consumed the rest of the inbox, each within its own budget');
  assert.equal((await run(w,upstream())).stop,'idle');assert.equal(metaCount(w.file),8,'and a normal budget then drains the Films');
 }
+
+// ---- forward progress past a head larger than the whole per-pick page budget ----
+{
+ const T0=T;
+ const film=id=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',2,NULL,'K','${T0}');INSERT INTO film_external_id VALUES ('film:tmdb:${id}','tmdb','${id}',1,0,NULL);`;
+ const member=(id,scope)=>`INSERT INTO catalog_enrichment_member VALUES ('film:tmdb:${id}','${scope}','${T0}','k${id}');`;
+ const state=(film,part,source,slot,due)=>`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,cohort,retry_at,due_since,updated_at) VALUES ('film:tmdb:${film}','${part}','${source}',${slot},'due','live',NULL,'${due}','${T0}');`;
+ const early=i=>`2026-11-01T0${Math.floor(i/3600)}:${String(Math.floor(i/60)%60).padStart(2,'0')}:${String(i%60).padStart(2,'0')}.000Z`;
+ const late='2026-11-20T00:00:00.000Z';
+ const BUDGET_ROWS=D.MAX_PAGES*50;
+ const heldOf=file=>rows(file,'SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE held=1')[0].n;
+
+ // 1. DISABLED scope: 3x the page budget of disabled members ahead of 10 enabled ones. The scope is disabled AFTER its rows exist (the owner action), which moves them out of the due indexes; the enabled Films complete through the real drain
+ {
+  const w=world(0);
+  sqlite(w.file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',1,1,1,'"+T0+"');");
+  sqlite(w.file,'BEGIN;'+Array.from({length:BUDGET_ROWS*3},(_,i)=>film(20000+i)+member(20000+i,'discovery')+state(20000+i,'core','tmdb',0,early(i))).join('')+'COMMIT;');
+  sqlite(w.file,'BEGIN;'+Array.from({length:10},(_,i)=>film(30000+i)+member(30000+i,'rated')+`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,cohort,due_since,updated_at) VALUES ('film:tmdb:${30000+i}','film','*',0,'active','live','${late}','${T0}');`.replace("'active','live'","'active','live'")).join('')+'COMMIT;');
+  sqlite(w.file,"UPDATE catalog_enrichment_state SET reason='check_anchors' WHERE part='film';UPDATE catalog_enrichment_scope SET enabled=0,revision=revision+1 WHERE scope='discovery';");
+  assert.equal(heldOf(w.file),BUDGET_ROWS*3,'the disabled scope\'s rows left the due indexes');
+  const d=await D.dueFilms(w.env,{now:'2026-11-26T10:00:00.000Z'});
+  assert.ok(d.examined.live<=20,'the disabled head costs the selection nothing: '+d.examined.live);
+  const result=await run(w,upstream());
+  assert.equal(result.stop,'idle');assert.equal(metaCount(w.file),10,'the enabled Films completed without an unrelated event');
+  // re-enabling releases the rows
+  sqlite(w.file,"UPDATE catalog_enrichment_scope SET enabled=1,revision=revision+1 WHERE scope='discovery'");
+  assert.equal(heldOf(w.file),0,'enabling the scope puts its Films back in the indexes');
+ }
+ // 2. an ALL-DISABLED queue is quiescent: no run spins, no maybe-runnable answer, no scan cost
+ {
+  const w=world(0);
+  sqlite(w.file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',1,1,1,'"+T0+"');");
+  sqlite(w.file,'BEGIN;'+Array.from({length:BUDGET_ROWS*2},(_,i)=>film(40000+i)+member(40000+i,'discovery')+state(40000+i,'core','tmdb',0,early(i))).join('')+'COMMIT;UPDATE catalog_enrichment_scope SET enabled=0,revision=revision+1 WHERE scope=\'discovery\';');
+  const up=upstream();
+  const result=await run(w,up);
+  assert.equal(result.stop,'idle','nothing is eligible: the run is idle, not parked and not spinning');
+  assert.equal(up.calls.length,0);assert.ok(result.counts.statements<60,'and it cost a handful of statements: '+result.counts.statements);
+  const due=await D.dueFilms(w.env,{now:'2026-11-26T10:00:00.000Z'});
+  assert.deepEqual([due.live.length,due.background.length,due.incomplete],[0,0,false],'quiescent: no runnable work and no unread range');
+ }
+ // 3. OWNER-LOCKED rows, more than the whole page budget, ahead of one ordinary Film: the drain defers them progressively (a bounded number per pass) and keeps going until the Film completes
+ {
+  const w=world(0);
+  sqlite(w.file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,1,1,'"+T0+"');");
+  sqlite(w.file,'BEGIN;'+Array.from({length:BUDGET_ROWS+60},(_,i)=>film(50000+i)+member(50000+i,'rated')+state(50000+i,'core','tmdb',0,early(i))+`INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES ('film:tmdb:${50000+i}','metadata','reviewed','owner',NULL,NULL,NULL,'owner',NULL,NULL,NULL,0,'none','${T0}');`).join('')+film(59999)+member(59999,'rated')+`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,cohort,due_since,updated_at) VALUES ('film:tmdb:59999','film','*',0,'active','check_anchors','live','${late}','${T0}');COMMIT;`);
+  const result=await run(w,upstream());
+  assert.ok(['idle','parked'].includes(result.stop),'the run ends by itself: '+result.stop);
+  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM film_metadata WHERE film_id='film:tmdb:59999'")[0].n,1,'the ordinary Film behind the locked head completed without an unrelated event');
+  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE reason='owner_blocked'")[0].n,BUDGET_ROWS+60,'every locked row was deferred out of the head (bounded per pass, repeated by the loop)');
+ }
+ // 4. a head of Films SKIPPED in this run, larger than the page budget: the stream is `incomplete` and continues from its cursor over successive picks
+ {
+  const w=world(0);
+  sqlite(w.file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,1,1,'"+T0+"');");
+  sqlite(w.file,'BEGIN;'+Array.from({length:BUDGET_ROWS*2+30},(_,i)=>film(60000+i)+member(60000+i,'rated')+state(60000+i,'core','tmdb',0,early(i))).join('')+film(69999)+member(69999,'rated')+state(69999,'core','tmdb',0,late)+'COMMIT;');
+  const skip=new Set(Array.from({length:BUDGET_ROWS*2+30},(_,i)=>'film:tmdb:'+(60000+i)));
+  const cursors=new Map();
+  const now='2026-11-26T10:00:00.000Z';
+  let found=null,picks=0;
+  for(;picks<6&&!found;picks++){
+   const d=await D.dueFilms(w.env,{now,skip,cursors});
+   if(d.live.length+d.background.length)found=[...d.live,...d.background][0].filmId;
+   else assert.equal(d.incomplete,true,'nothing found while rows remain unread is reported as incomplete, never as "nothing there"');
+  }
+  assert.equal(found,'film:tmdb:69999','the eligible Film behind a head of 2x the page budget is reached by continuing from the cursor');
+  assert.ok(picks>=2&&picks<=4,'in a bounded number of picks: '+picks);
+  assert.equal((await D.dueFilms(w.env,{now,skip,cursors})).examined.live<=D.MAX_PAGES*50,true,'each pick stays within its page budget');
+ }
+}
 console.log('catalog enrichment drain: ok');
