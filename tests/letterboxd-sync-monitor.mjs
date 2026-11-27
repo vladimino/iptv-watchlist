@@ -57,6 +57,16 @@ for(const bad of [null,undefined,{error:true}]){const r=Policy.evaluateLetterbox
  plan=Policy.planAlerts(late,plan.state,NOW+60000);assert.equal(plan.sends[0].kind,'alert');
  const recovered=Policy.planAlerts([],plan.state,NOW+120000);assert.equal(recovered.sends[0].kind,'recovery');assert.equal(recovered.sends[0].stream,'letterboxd');
 }
+// 6b. AIR-691: the already open `letterboxd_identity_cap_refused` incident recovers through the shared planner once the corrected policy no longer reports it, with the backlog still non-empty.
+{
+ const H=3600000,at=hours=>new Date(NOW-hours*H).toISOString();
+ const check=extra=>model({identityCheck:{lastCheckAt:at(2),work:14,oldestWorkAt:at(2),atCap:0,backlog:14,capHeld:3,capacity:200,capFull:false,backlogFull:false,ledgerUnreadable:false,overdue:0,overdueUnknown:0,...extra}});
+ const open=Policy.evaluateLetterboxd(check({capHeld:200,capFull:true}),NOW);assert.deepEqual(keys(open),['letterboxd_identity_cap_refused']);
+ let plan=Policy.planAlerts(open.issues,null,NOW);plan=Policy.planAlerts(open.issues,plan.state,NOW+60000);assert.deepEqual(plan.sends.map(s=>[s.kind,s.key]),[['alert','letterboxd_identity_cap_refused']],'the incident is open and sent');
+ const healthy=Policy.evaluateLetterboxd(check(),NOW+H);assert.deepEqual(keys(healthy),[],'the backlog is still non-empty but there is room');
+ const recovered=Policy.planAlerts(healthy.issues,plan.state,NOW+H);assert.deepEqual(recovered.sends.map(s=>[s.kind,s.key]),[['recovery','letterboxd_identity_cap_refused']],'one recovery, no new alert');
+ const again=Policy.planAlerts(healthy.issues,recovered.state,NOW+2*H);assert.equal(again.sends.length,0,'no repeated recovery');
+}
 // 7. The monitor wiring supplies the model only for an active executor and never without a database.
 {
  const text=fs.readFileSync('src/monitor.js','utf8');
@@ -78,7 +88,10 @@ for(const bad of [null,undefined,{error:true}]){const r=Policy.evaluateLetterbox
  assert.deepEqual(keys(Policy.evaluateLetterboxd(check({lastCheckAt:at(1),work:3,oldestWorkAt:at(90)}),NOW)),[],'progress was made an hour ago');
  assert.deepEqual(keys(Policy.evaluateLetterboxd(check({overdue:3}),NOW)),['letterboxd_admission_overdue']);
  const unknown=Policy.evaluateLetterboxd(check({overdueUnknown:2}),NOW);assert.deepEqual(keys(unknown),['letterboxd_admission_overdue']);assert.match(unknown.issues[0].message,/unknown age/);
- assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:4}),NOW)),['letterboxd_identity_cap_refused']);
+ // AIR-691: a backlog alone (free capacity) is the ordinary queue; the refusal needs a document with no free place (`capFull`).
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:14,capHeld:3,capacity:200,capFull:false}),NOW)),[],'owner requeue into free room is not a cap refusal');
+ assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:4,capHeld:200,capacity:200,capFull:true}),NOW)),['letterboxd_identity_cap_refused']);
+ assert.equal(Policy.evaluateLetterboxd(check({backlog:4,capHeld:200,capacity:200,capFull:true}),NOW).issues[0].metrics.capHeld,200);
  assert.deepEqual(keys(Policy.evaluateLetterboxd(check({backlog:2000,backlogFull:true}),NOW)),['letterboxd_identity_backlog_full']);
  assert.deepEqual(keys(Policy.evaluateLetterboxd(model({identityCheck:{error:'unreadable'}}),NOW)),['letterboxd_identity_check_unreadable']);
  const ledger=Policy.evaluateLetterboxd(check({ledgerUnreadable:true,overdue:null,overdueUnknown:null}),NOW);assert.deepEqual(keys(ledger),['letterboxd_identity_check_unreadable'],'an unreadable ledger is reported, never read as nothing waiting');assert.match(ledger.issues[0].message,/ledger/);
