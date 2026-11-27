@@ -854,4 +854,111 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
   assert.equal(JSON.parse([...seen][0]).value,'Русский');
  }
 }
+// ---- 13. review of bf891d2b: assumed means English only, identical-value adoption keeps verified Russian, owner history is faithful ----
+{
+ const world=async()=>{const w=fresh();await seed(w.env);setMode(w.file,'enforce');return w;};
+ const lang=row=>row&&[row.language,row.language_basis];
+ const FIELDS_VALUES={synopsis:['Русский текст','Different English'],poster:['/ru.jpg','/en.jpg']};
+ // P4-B is exactly an English Letterboxd synopsis: assumed Russian is refused by the writer, by the revert validation and by the DDL on both sides
+ {
+  const w=await world();
+  await assert.rejects(declare(w.env,{synopsis:'x'},{languages:{synopsis:{language:'ru',languageBasis:'assumed'}}}),error=>error.code==='film_person_invalid','assumed Russian is not a declaration');
+  await assert.rejects(declare(w.env,{synopsis:'x'},{source:'tmdb',languages:{synopsis:{language:'en',languageBasis:'assumed'}}}),error=>error.code==='film_person_invalid');
+  await declare(w.env,{synopsis:'x'},{languages:{synopsis:ASSUMED_EN}});
+  const stored=rows(w.file,"SELECT * FROM film_metadata_field WHERE field='synopsis'")[0];
+  const base=`INSERT INTO film_metadata_field (film_id,field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,language,language_basis,observed_at,checked_at,value_digest,write_key,written_revision,updated_at) VALUES`;
+  const row=(film,field,source,language,basis)=>`${base} ('${film}','${field}','automatic','${source}','catalog_enrichment','${source}','a','${'a'.repeat(64)}','confirmed',${language?`'${language}'`:'NULL'},${basis?`'${basis}'`:'NULL'},'${T}','${T}','${'b'.repeat(64)}','k',1,'${T}')`;
+  fails(w.file,row('film:z','synopsis','letterboxd','ru','assumed'),/CHECK/i);
+  fails(w.file,row('film:z','poster','letterboxd','en','assumed'),/CHECK/i);
+  fails(w.file,row('film:z','synopsis','tmdb','en','assumed'),/CHECK/i);
+  exec(w.file,row('film:z','synopsis','letterboxd','en','assumed'));
+  const hist=(cols,vals)=>`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,${cols}) VALUES ('film:z','synopsis','replaced','h${Math.random()}','${T}',${vals})`;
+  fails(w.file,hist('old_language,old_language_basis,old_source',"'ru','assumed','letterboxd'"),/CHECK/i);
+  fails(w.file,hist('new_language,new_language_basis,new_source',"'ru','assumed','letterboxd'"),/CHECK/i);
+  fails(w.file,hist('old_language,old_language_basis,old_source',"'en','assumed','tmdb'"),/CHECK/i);
+  fails(w.file,hist('new_language',"'ru'"),/CHECK/i);
+  fails(w.file,`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,old_language,old_language_basis) VALUES ('film:z','year','replaced','hy','${T}','ru','explicit')`,/CHECK/i);
+  exec(w.file,hist('old_language,old_language_basis,old_source,new_language,new_language_basis,new_source',"'en','assumed','letterboxd','ru','explicit','tmdb'"));
+  // a revert from a history row that claims assumed Russian is refused before any statement
+  void stored;
+  const forged={id:1,field:'synopsis',oldValueText:JSON.stringify('x'),oldSource:'letterboxd',oldAnchorDigest:await digestOfFilm(w.env),oldLanguage:'ru',oldLanguageBasis:'assumed'};
+  await assert.rejects(owner(w.env,[{action:'revert',field:'synopsis',history:forged}]),error=>error.code==='film_person_invalid');
+ }
+ // identical-value adoption never erases verified Russian: fallback Russian -> equal English or untagged -> different English, for both fields, and for a released pin
+ for(const [name,[ruValue,otherValue]] of Object.entries(FIELDS_VALUES)){
+  for(const variant of ['fallback','released pin']){
+   const w=await world();
+   if(variant==='fallback')await declare(w.env,{[name]:ruValue},{source:'tmdb',agree:false,languages:{[name]:RU}});
+   else{
+    await declare(w.env,{[name]:ruValue},{source:'tmdb',languages:{[name]:RU}});
+    await owner(w.env,[{action:'lock',field:name}]);await owner(w.env,[{action:'release',field:name}],{at:T1});
+    assert.deepEqual(lang(field(w.file,name)),['ru','explicit'],name+': release changes confidence, not the language');
+   }
+   const before=JSON.stringify(field(w.file,name));
+   for(const tag of [name==='synopsis'?ASSUMED_EN:EN,EN,{}]){
+    const equal=await declare(w.env,{[name]:ruValue},{at:T2,observedAt:T2,languages:{[name]:tag}});
+    assert.equal(equal.written,false,name+' '+variant+': an identical English or untagged observation is not an adoption');
+    assert.equal(JSON.stringify(field(w.file,name)),before,name+' '+variant+': the row, its Russian tag included, is untouched');
+   }
+   const diff=await declare(w.env,{[name]:otherValue},{at:T3,observedAt:T3,languages:{[name]:name==='synopsis'?ASSUMED_EN:EN}});
+   assert.deepEqual(diff.skipped.map(item=>item.reason),['language_kept'],name+' '+variant+': a different English observation cannot follow');
+   assert.equal(meta(w.file)[name],ruValue);assert.equal(history(w.file).filter(item=>item.reason==='replaced').length,0);
+  }
+ }
+ // the same source, value and time with a changed evidence basis: explicit outranks assumed deterministically, in either order, without touching confidence
+ {
+  const results=new Set();
+  for(const order of [['assumed','explicit'],['explicit','assumed']]){
+   const w=await world();
+   for(const basis of order)await declare(w.env,{synopsis:'Same text'},{at:T1,observedAt:T1,languages:{synopsis:{language:'en',languageBasis:basis}}});
+   const row=field(w.file,'synopsis');results.add(JSON.stringify([row.language,row.language_basis,row.agreement,row.source]));
+  }
+  assert.deepEqual([...results],['["en","explicit","confirmed","letterboxd"]'],'explicit wins the tie in both orders, the agreement stays what the writer derived');
+ }
+ // owner history says what was committed: lock, release and revert of explicit Russian and assumed English, a dimension-locked attributed value included
+ for(const [label,tag,source] of [['explicit Russian',RU,'tmdb'],['assumed English',ASSUMED_EN,'letterboxd']]){
+  for(const dimensionLocked of [false,true]){
+   const w=await world();
+   await declare(w.env,{synopsis:'Tagged text'},{source,languages:{synopsis:tag}});
+   const attributed=field(w.file,'synopsis');
+   if(dimensionLocked)exec(w.file,`INSERT INTO film_dimension (film_id,dimension,status,source,provenance_json,authority,attempts,next_action,updated_at) VALUES ('${ID}','metadata','reviewed','owner','{}','owner',0,'none','${T}')`);
+   await owner(w.env,[{action:'lock',field:'synopsis'}],{at:T1});
+   const pinned=field(w.file,'synopsis');
+   const tagName=label+(dimensionLocked?' under the dimension lock':'');
+   assert.deepEqual([pinned.tier,pinned.source,pinned.anchor_value,pinned.anchor_digest,pinned.agreement,...lang(pinned)],['owner',attributed.source,attributed.anchor_value,attributed.anchor_digest,null,tag.language,tag.languageBasis],tagName+': the pin keeps the attributed lineage and language');
+   const lock=history(w.file).find(item=>item.reason==='owner_lock');
+   assert.deepEqual([lock.old_language,lock.old_language_basis,lock.new_language,lock.new_language_basis,lock.new_source],[tag.language,tag.languageBasis,tag.language,tag.languageBasis,attributed.source],tagName+': the lock history shows the committed language on both sides');
+   await owner(w.env,[{action:'release',field:'synopsis'}],{at:T2});
+   const released=history(w.file).find(item=>item.reason==='owner_release');
+   assert.deepEqual([released.old_language,released.new_language,released.new_language_basis,released.new_tier],[tag.language,tag.language,tag.languageBasis,'released'],tagName+': the release history keeps the language');
+   assert.deepEqual(lang(field(w.file,'synopsis')),[tag.language,tag.languageBasis]);
+   if(!dimensionLocked){
+    // revert of an attributed tagged value (a released value is `unknown`, so its history carries no identity to revert to)
+    const r=await world();
+    await declare(r.env,{synopsis:'Tagged text'},{source,languages:{synopsis:tag}});
+    await owner(r.env,[{action:'set',field:'synopsis',value:'Owner value'}],{at:T3});
+    const set=history(r.file).find(item=>item.reason==='owner_set');
+    assert.deepEqual([set.old_language,set.old_language_basis],[tag.language,tag.languageBasis]);
+    await owner(r.env,[{action:'revert',field:'synopsis',history:{...historyAction(set,'synopsis'),oldLanguage:set.old_language,oldLanguageBasis:set.old_language_basis}}],{at:T3});
+    const revert=history(r.file).find(item=>item.reason==='owner_revert');
+    assert.deepEqual([revert.new_language,revert.new_language_basis],[tag.language,tag.languageBasis],tagName+': the revert history shows the restored language');
+    assert.deepEqual(lang(field(r.file,'synopsis')),[tag.language,tag.languageBasis]);
+   }
+  }
+ }
+ // locking a released (unbound lineage) Russian value keeps only the verified language; an assumed one is dropped with its Letterboxd lineage
+ {
+  const w=await world();
+  await declare(w.env,{synopsis:'Assumed'},{languages:{synopsis:ASSUMED_EN}});
+  await owner(w.env,[{action:'lock',field:'synopsis'}]);await owner(w.env,[{action:'release',field:'synopsis'}],{at:T1});
+  await owner(w.env,[{action:'lock',field:'synopsis'}],{at:T2});
+  const row=field(w.file,'synopsis');
+  assert.deepEqual([row.source,row.tier,...lang(row)],['unattributed','owner',null,null],'an assumed English is not evidence beyond Letterboxd lineage');
+  const x=await world();
+  await declare(x.env,{synopsis:'Русский'},{source:'tmdb',languages:{synopsis:RU}});
+  await owner(x.env,[{action:'lock',field:'synopsis'}]);await owner(x.env,[{action:'release',field:'synopsis'}],{at:T1});
+  await owner(x.env,[{action:'lock',field:'synopsis'}],{at:T2});
+  assert.deepEqual([field(x.file,'synopsis').source,...lang(field(x.file,'synopsis'))],['unattributed','ru','explicit'],'a verified language stays bound to the value');
+ }
+}
 console.log('film metadata provenance (AIR-631): the sync SHA-256 and the writer digest, schema absent and off byte-identical, binding, invalidation and declaration, anchor and mode races, the comparator with convergence over every permutation, locks, triggers and owner actions, modes, clear rules and the field-wise merge, and the statement bounds: ok');

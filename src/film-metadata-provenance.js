@@ -108,8 +108,10 @@ function standing(row,value,digest,dimLocked){
 // ADR 0224: for synopsis and poster ONLY, language quality is compared before provider precedence at equal confidence (Russian 2, English 1, unknown 0; an assumed English counts as English). Every other field has no language, so its order is unchanged.
 const LANGUAGE_RANK=Object.freeze({ru:2,en:1});
 export const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
-const rankOf=(rank,source,observedAt,digest,language=null)=>[rank,LANGUAGE_RANK[language]||0,PRECEDENCE[source]||0,observedAt||'',digest||''];
-const compare=(left,right)=>{for(let i=0;i<5;i++){if(left[i]<right[i])return -1;if(left[i]>right[i])return 1;}return 0;};
+// The evidence basis is only the LAST tie-break (explicit over assumed, for the very same source, value and time), so it never changes which source, freshness or confidence wins and never raises identity confidence.
+const BASIS_RANK=Object.freeze({explicit:1,assumed:0});
+const rankOf=(rank,source,observedAt,digest,language=null,basis=null)=>[rank,LANGUAGE_RANK[language]||0,PRECEDENCE[source]||0,observedAt||'',digest||'',BASIS_RANK[basis]??-1];
+const compare=(left,right)=>{for(let i=0;i<6;i++){if(left[i]<right[i])return -1;if(left[i]>right[i])return 1;}return 0;};
 export const confidenceOf=standing;
 
 // ADR 0224: the language a declaration carries for the value it declares (null/undefined = unknown or not applicable). Only synopsis and poster have one; `assumed` is the P4-B default of a freshly observed Letterboxd synopsis.
@@ -117,7 +119,7 @@ export function languageOf(field,item){
  const language=item?.language??null,basis=item?.languageBasis??null;
  if(language===null&&basis===null)return {language:null,languageBasis:null};
  if(!['ru','en'].includes(language)||!['explicit','assumed'].includes(basis)||!LANGUAGE_FIELDS.includes(field))throw failed('film_person_invalid');
- if(basis==='assumed'&&!(field==='synopsis'&&item.source==='letterboxd'))throw failed('film_person_invalid');
+ if(basis==='assumed'&&!(field==='synopsis'&&item.source==='letterboxd'&&language==='en'))throw failed('film_person_invalid');
  return {language,languageBasis:basis};
 }
 const HISTORY_SQL='INSERT INTO film_metadata_history (film_id,field,reason,old_value_text,old_tier,old_source,old_anchor_scheme,old_anchor_value,old_anchor_digest,old_agreement,old_language,old_language_basis,old_observed_at,new_value_digest,new_tier,new_source,new_language,new_language_basis,new_anchor_digest,write_key,at,merged_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,field,write_key) DO NOTHING';
@@ -171,6 +173,9 @@ export function planMetadataProvenance(snapshot,input,at){
   const stored=storedValue(row,field),stand=standing(prov.fields[field],stored,digest,dimLocked);
   if(stand.mismatch){out.counts.provenance_mismatch++;}
   const old=oldOf(stored,stand);
+  // the language bound to the stored value: any row that still describes it (a released one included: release changes confidence, not the language)
+  const boundRaw=prov.fields[field]&&stored!==null&&prov.fields[field].value_digest===valueDigest(stored)?prov.fields[field]:null;
+  const sLang=boundRaw?.language??null,sBasis=boundRaw?.language_basis??null;
   // ---- owner actions: owner authority is the only way past a lock ----
   if(actions.has(field)){
    const action=actions.get(field),current=prov.fields[field];
@@ -187,15 +192,17 @@ export function planMetadataProvenance(snapshot,input,at){
    }else if(action.action==='lock'){
     if(stored===null){reject(field,'blank_field');continue;}
     if(current?.tier==='owner'&&stand.bound)continue;
-    const keep=stand.name==='confirmed'||stand.name==='superseded'||stand.name==='unconfirmed'?stand.row:null;
-    history(field,'owner_lock',old,{valueDigest:valueDigest(stored),tier:'owner',source:keep?keep.source:'unattributed',anchorDigest:keep?keep.anchor_digest:null});
+    // an attributed (bound automatic) row keeps its whole lineage, even when the metadata dimension lock makes it read as `owner`; an unbound row is never trusted. A released or unknown value is pinned as `unattributed`, keeping only a verified (explicit) language: an assumed one exists only under Letterboxd lineage.
+    const keep=boundRaw&&boundRaw.tier==='automatic'?boundRaw:null;
+    const carried=keep?{language:keep.language,languageBasis:keep.language_basis}:sBasis==='explicit'?{language:sLang,languageBasis:sBasis}:{language:null,languageBasis:null};
+    history(field,'owner_lock',old,{valueDigest:valueDigest(stored),tier:'owner',source:keep?keep.source:'unattributed',language:carried.language,languageBasis:carried.languageBasis,anchorDigest:keep?keep.anchor_digest:null});
     out.post.push(keep
      ?ownerRow('owner',keep.source,keep.origin,{anchorScheme:keep.anchor_scheme,anchorValue:keep.anchor_value,anchorDigest:keep.anchor_digest,language:keep.language,languageBasis:keep.language_basis,observedAt:keep.observed_at},stored)
-     :ownerRow('owner','unattributed','owner_route',{anchorScheme:null,anchorValue:null,anchorDigest:null,observedAt:atIso},stored));
+     :ownerRow('owner','unattributed','owner_route',{anchorScheme:null,anchorValue:null,anchorDigest:null,language:carried.language,languageBasis:carried.languageBasis,observedAt:atIso},stored));
     out.changes.push('owner_lock:'+field);
    }else if(action.action==='release'){
     if(!current||current.tier!=='owner'){continue;}
-    history(field,'owner_release',old,{valueDigest:current.value_digest,tier:'released',source:current.source,anchorDigest:current.anchor_digest});
+    history(field,'owner_release',old,{valueDigest:current.value_digest,tier:'released',source:current.source,language:current.language,languageBasis:current.language_basis,anchorDigest:current.anchor_digest});
     out.post.push([ 'UPDATE film_metadata_field SET tier=?,agreement=NULL,checked_at=?,write_key=?,written_revision=?,updated_at=? WHERE film_id=? AND field=? AND tier=?',['released',atIso,writeKey,revision,atIso,id,field,'owner']]);
     out.changes.push('owner_release:'+field);
    }else{
@@ -210,7 +217,7 @@ export function planMetadataProvenance(snapshot,input,at){
     anchorGuard=true;
     const source=hist.oldSource||'owner',lineageOwned=source==='owner'||source==='unattributed';
     out.effective[field]=value;
-    history(field,'owner_revert',old,{valueDigest:valueDigest(value),tier:'owner',source,anchorDigest:digest});
+    history(field,'owner_revert',old,{valueDigest:valueDigest(value),tier:'owner',source,language:histLanguage.language,languageBasis:histLanguage.languageBasis,anchorDigest:digest});
     out.post.push(ownerRow('owner',source,lineageOwned?'owner_route':'catalog_enrichment',{anchorScheme:hist.oldAnchorScheme??null,anchorValue:hist.oldAnchorValue??null,anchorDigest:digest,language:histLanguage.language,languageBasis:histLanguage.languageBasis,observedAt:hist.oldObservedAt||atIso},value));
     out.changes.push('owner_revert:'+field);
    }
@@ -246,13 +253,15 @@ export function planMetadataProvenance(snapshot,input,at){
   if(agreement==='unconfirmed')out.counts.agreement_stale++;
   const observedAt=instant(decl.observedAt),vDigest=valueDigest(incoming);
   const lang=languageOf(field,decl);
-  const vRank=rankOf(agreement==='unconfirmed'?2:4,decl.source,observedAt,vDigest,lang.language);
-  const sRank=rankOf(stand.rank,stand.row?.source,stand.row?.observed_at,stand.row?.value_digest,stand.row?.language);
+  const vRank=rankOf(agreement==='unconfirmed'?2:4,decl.source,observedAt,vDigest,lang.language,lang.languageBasis);
+  const sRank=rankOf(stand.rank,stand.row?.source,stand.row?.observed_at,stand.row?.value_digest,sLang,sBasis);
   const next={tier:'automatic',source:decl.source,origin:'catalog_enrichment',anchorScheme:decl.anchor.scheme,anchorValue:decl.anchor.value,anchorDigest:digest,agreement,language:lang.language,languageBasis:lang.languageBasis,observedAt,checkedAt:atIso};
   const upsert=()=>out.post.push(fieldRow(id,field,next,incoming,writeKey,revision,atIso));
   anchorGuard=true;
   if(stored===null){fill();upsert();out.changes.push('provenance:'+field);continue;}
   if(same(stored,incoming)){
+   // ADR 0224: an identical English or untagged observation never erases the verified Russian evidence bound to this very value (a released row included)
+   if(LANGUAGE_FIELDS.includes(field)&&sLang==='ru'&&lang.language!=='ru')continue;
    if(compare(vRank,sRank)>0){upsert();out.counts.adoptions++;out.changes.push('adopt:'+field);}
    // the very same observation seen again by a later write: only the audit column moves (ADR 0214 decision 5, `agreed`); a different tuple that outranks adopts, which keeps the semantic projection order-independent
    else if(compare(vRank,sRank)===0&&stand.row&&stand.name!=='unknown'&&atIso>stand.row.checked_at){
@@ -263,7 +272,7 @@ export function planMetadataProvenance(snapshot,input,at){
   }
   if(mode==='hold'){out.skipped.push({field,reason:'hold_fill_only'});out.counts.refusals.hold++;continue;}
   // ADR 0224 (P3-A): for synopsis and poster, a verified Russian value is never downgraded to an English or unknown-language one, and a genuinely unknown-language nonblank value is replaced only by a confirmed Russian observation (a missing lineage alone never lets English or unknown replace it)
-  if(LANGUAGE_FIELDS.includes(field)&&lang.language!=='ru'&&(stand.row?.language==='ru'||!stand.row?.language)){out.skipped.push({field,reason:'language_kept'});out.counts.refusals.language_kept++;continue;}
+  if(LANGUAGE_FIELDS.includes(field)&&lang.language!=='ru'&&(sLang==='ru'||!sLang)){out.skipped.push({field,reason:'language_kept'});out.counts.refusals.language_kept++;continue;}
   if(vRank[0]===4&&compare(vRank,sRank)>0){
    if(vRank[0]===sRank[0]&&vRank[1]===sRank[1]&&vRank[2]===sRank[2]&&vRank[3]===sRank[3])out.counts.same_rank_conflict++;
    history(field,'replaced',old,{valueDigest:vDigest,tier:'automatic',source:decl.source,language:lang.language,languageBasis:lang.languageBasis,anchorDigest:digest});
@@ -372,7 +381,7 @@ export async function reconcileMetadata(db,from,to,resolve,at){
   if(toValue===null){takeRetired();continue;}
   if(same(fromValue,toValue)){
    // equal values: the pin is preserved by default; with two pins the survivor's is kept
-   const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest,fromStand.row?.language),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest,toStand.row?.language);
+   const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest,fromStand.row?.language,fromStand.row?.language_basis),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest,toStand.row?.language,toStand.row?.language_basis);
    const rowsEqual=semantic(retiredRow())===semantic(effective(toProv?.fields[field],toStand));
    if(rowsEqual)continue;
    const retiredWins=toPinned?false:fromPinned?true:compare(fromRank,toRank)>0;

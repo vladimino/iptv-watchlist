@@ -84,10 +84,10 @@ CREATE TABLE film_metadata_field (
  CHECK (source NOT IN ('owner', 'unattributed') OR (origin = 'owner_route' AND tier IN ('owner', 'released') AND anchor_scheme IS NULL)),
  CHECK (source <> 'owner' OR anchor_digest IS NOT NULL),
  -- ADR 0224 (language-bound provenance): the language of the selected value and the evidence for it, bound to the value like every other semantic column. Only synopsis and poster carry one; NULL is unknown or not applicable.
- -- `assumed` is the owner-approved P4-B default for a freshly observed Letterboxd synopsis (not a verified tag) and exists for no other field or source.
+ -- `assumed` is the owner-approved P4-B default for a freshly observed Letterboxd synopsis (not a verified tag): it means ENGLISH, and exists for no other field, source or language.
  CHECK ((language IS NULL) = (language_basis IS NULL)),
  CHECK (language IS NULL OR field IN ('synopsis', 'poster')),
- CHECK (language_basis IS NULL OR language_basis <> 'assumed' OR (field = 'synopsis' AND source = 'letterboxd'))
+ CHECK (language_basis IS NULL OR language_basis <> 'assumed' OR (field = 'synopsis' AND source = 'letterboxd' AND language = 'en'))
 ) STRICT, WITHOUT ROWID;
 
 -- 3. The history. Append-only; nothing cascades into it, so it outlives a deleted row or Film. `old_value_text` is the canonical JSON text of one scalar or array (a value, not a provenance store).
@@ -116,6 +116,12 @@ CREATE TABLE film_metadata_history (
  at TEXT NOT NULL CHECK (length(at) = 24),
  merged_from TEXT,
  CHECK (reason <> 'merge_discarded' OR merged_from IS NOT NULL),
+ -- the language columns obey the field-row invariants on both sides: paired NULLs, only synopsis and poster, and `assumed` only as English of a Letterboxd synopsis
+ CHECK ((old_language IS NULL) = (old_language_basis IS NULL)),
+ CHECK ((new_language IS NULL) = (new_language_basis IS NULL)),
+ CHECK ((old_language IS NULL AND new_language IS NULL) OR field IN ('synopsis', 'poster')),
+ CHECK (old_language_basis IS NULL OR old_language_basis <> 'assumed' OR (field = 'synopsis' AND old_source = 'letterboxd' AND old_language = 'en')),
+ CHECK (new_language_basis IS NULL OR new_language_basis <> 'assumed' OR (field = 'synopsis' AND new_source = 'letterboxd' AND new_language = 'en')),
  UNIQUE (film_id, field, write_key)
 ) STRICT;
 CREATE TRIGGER film_metadata_history_no_update BEFORE UPDATE ON film_metadata_history
