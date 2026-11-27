@@ -31,7 +31,7 @@ A copy's stored status is never compared as truth. The difference with the deriv
 - **Metadata:** presence and usability are separate axes. A stored non-null value is `present` whatever its type, with `usable` and a diagnostic (`malformed`, `wrong_type`, `empty`, `not_positive`) under the ADR 0218 decision 4 rules; a null is `unknown` (`null_unproved`). `film_metadata_field` (ADR 0214 PV1) is not live, so no field is ever proved `absent`. Confidence is `unattributed`; no provenance record is trusted to raise it. Freshness is `unknown`.
 - **Localization:** the existing `resolveLocalization` over `owner_review_entry` (the Film and its redirect ancestors), the applied reviewed row and the source rows; the stored provisional row is a legacy candidate of its own source, exactly as at runtime.
 - **Fingerprint and prediction:** read under authorized storage ids only. The reader does **not** read the ratings link index, so candidate coverage is `incomplete` (`ratings_evidence_not_read`) and nothing is ever proved absent or `none`. A known conflict between storage ids stays `conflict`. Compatibility is `incompatible` only for a pointer bound to another fingerprint hash or an invalidated fingerprint; otherwise `unknown` (the ADR-0035 registry and the profile rule are not read).
-- The marker generations of Film/Person, prediction and owner review are read before and after each page; a move refuses the page.
+- The marker generations of Film/Person, prediction and owner review are read before and after each page; a move refuses the page. The result also returns them as `pins` (numbers, not labels), the tokens a later writer must assert inside its own batch to keep a classification from outliving the state it judged.
 
 ## Running it on an offline copy
 

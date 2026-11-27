@@ -335,7 +335,7 @@ const DIAGNOSE_END_RESERVE=10,DIAGNOSE_FIRST_FILM_ESTIMATE=16;
 const bump=(map,key)=>{map[key]=(map[key]||0)+1;};
 const STATEMENT=Symbol('statement');
 // Counts every D1 execution of a call. A prepared statement counts when it is executed (first, all, run, raw); a batch counts once, as D1 does. Statements prepared here are unwrapped for batch.
-function countedEnv(env){
+export function countedEnv(env){
  const db=database(env),counter={n:0};
  if(!db)throw failed('film_person_unavailable');
  const wrap=statement=>({[STATEMENT]:statement,bind:(...args)=>wrap(statement.bind(...args)),first:(...args)=>{counter.n++;return statement.first(...args);},all:(...args)=>{counter.n++;return statement.all(...args);},run:(...args)=>{counter.n++;return statement.run(...args);},raw:(...args)=>{counter.n++;return statement.raw(...args);}});

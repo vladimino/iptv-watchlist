@@ -181,6 +181,8 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  }
  return {
   writes:0,
+  // The generations the classification was read under (tokens, not labels): a writer that must not outlive this proof asserts them inside its own batch.
+  pins:{filmPerson:Number.isInteger(before.film.generation)?before.film.generation:null,prediction:Number.isInteger(prediction.generation)?prediction.generation:null,ownerReview:Number.isInteger(before.owner.generation)?before.owner.generation:null},
   markers:{filmPerson:before.film.state,prediction:prediction.available?'open':prediction.reason,ownerReview:before.owner.available?'open':before.owner.reason},
   films:page.length,next:ids===null&&page.length===size?page[page.length-1]:null,
   classified,facts,summary:summarize(classified),
