@@ -202,4 +202,30 @@ const deps=(fetchImpl,extra={})=>({tools:{},fetchImpl,clock,...extra});
  assert.ok(['idle','not_active'].includes(out2.stop));
  assert.equal(record(o.file).instance,'ce-00000001','another instance\'s record is not overwritten');
 }
+
+// ---- a step is a bounded slice of the instance budget, not a whole drain ----
+{
+ const w=world({films:12});
+ const log=[];
+ const step=mockStep({after:async(name,out)=>{log.push([name,out.stop,out.counts.statements]);}});
+ const slice={statements:2200,handoverAt:1500};
+ const out=await W.run(w.env,{instance:'ce-00000001'},step,deps(upstream(),{stepBudget:slice}));
+ assert.equal(out.stop,'idle');assert.equal(metaCount(w.file),12);
+ const drains=log.filter(([name])=>name.startsWith('drain-'));
+ assert.ok(drains.length>=3,'one instance ran several steps: '+drains.length);
+ assert.ok(drains.every(([,,statements])=>statements<=slice.statements),'no step exceeded its slice: '+JSON.stringify(drains.map(entry=>entry[2])));
+ assert.deepEqual(w.created,[],'a step that ends at its slice is not an instance handover: no successor was created');
+ assert.equal(record(w.file).instance,'ce-00000001');
+}
+// ---- a failed step attempt is charged to the instance (pessimistically) and backs off; it does not replay the slice for free ----
+{
+ const w=world({films:4});
+ let attempts=0;
+ const failing=()=>{attempts++;throw new Error('callback failed');};
+ const step=mockStep({wait:async()=>{throw new Error('timeout');}});
+ const out=await W.run(w.env,{instance:'ce-00000001'},step,deps(upstream(),{coordinator:failing}));
+ assert.equal(out.stop,'handover','failed attempts exhaust the instance budget and hand it over');
+ assert.ok(attempts>=1&&attempts<=4,'the instance stopped attempting once its accounting was spent: '+attempts);
+ assert.deepEqual(w.created.length,1);
+}
 console.log('catalog enrichment workflow: ok');

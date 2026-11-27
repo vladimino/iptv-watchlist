@@ -8,7 +8,7 @@
 //     and a send that throws (the instance is not running) is read as "no live owner" and creates one. A lost kick is recovered by the reconcile.
 //   - A `waitForEvent` that times out THROWS and would fail the instance, so it is wrapped and the timeout is the due-time wake.
 //   - HANDOVER: at the statement budget the predecessor records the successor by compare-and-swap, creates it (idempotent by id) and stops; the successor writes only after it acquires its own lease.
-import {drain,dueFilms,BUDGET,repairPending,DEFER_MINUTES} from './catalog-enrichment-drain.js';
+import {drain,dueFilms,BUDGET,repairPending,DEFER_MINUTES,countingEnv} from './catalog-enrichment-drain.js';
 import {readControl,runnableSignals,deliverTicks} from './catalog-enrichment-store.js';
 
 export const RUN_PROJECTION='catalog_enrichment_run';
@@ -16,6 +16,9 @@ export const RUN_PROJECTION='catalog_enrichment_run';
 export const CRON='11-59/15 * * * *';
 const WAIT_EVENT='kick';
 const MAX_ROUNDS=64;
+// One Workflow STEP is a bounded slice of the instance budget, not a whole drain: a step whose callback fails is retried by the platform from its start, so the work a failure can waste is one slice, and a slice ends at the platform's
+// own checkpoint. The instance still hands over at its own budget (BUDGET); a step that ends at its slice only continues in the next step of the same instance.
+export const STEP_BUDGET=Object.freeze({statements:2500,handoverAt:1500});
 const MAX_WAIT_MS=24*3600000;
 const ID=/^ce-[a-z0-9-]{1,60}$/;
 
@@ -110,7 +113,9 @@ export async function reconcile(env,{clock}={}){
 
 // ---- the instance body ----
 // payload: {instance}. deps: {tools, fetchImpl, coordinator?:()=>coordinator, clock?, budget?}. step: the Workflow step (without one, an offline run executes the callbacks inline).
-export async function run(env,payload,step,deps={}){
+export async function run(rawEnv,payload,step,deps={}){
+ // Every orchestration call of the instance (control and run-record reads, compare-and-swaps, runnable checks, outbox delivery) is counted into the instance's statement accounting with the steps' own statements.
+ const {env,counter:orchestration}=countingEnv(rawEnv);
  const id=typeof payload?.instance==='string'&&ID.test(payload.instance)?payload.instance:null;
  if(!id)return {stop:'invalid_instance'};
  const clock=deps.clock||(()=>new Date().toISOString());
@@ -124,19 +129,29 @@ export async function run(env,payload,step,deps={}){
  let last='none';
  // INSTANCE-level accounting: the statements every executed step issued (failed calls included) accumulate across the steps of this instance, so the instance hands over at its own budget instead of every step starting
  // from zero; a replayed (cached) step issues nothing and adds nothing.
- let spent=0,errorRounds=0;
+ let stepSpent=0,errorRounds=0;
+ const spentNow=()=>stepSpent+orchestration.statements;
+ const stepBase=deps.stepBudget||STEP_BUDGET;
  const base=deps.budget||BUDGET;
  for(let round=0;round<MAX_ROUNDS;round++){
   const control=await readControl(env);
   if(control.state!=='active'){await settle(env,id,'retired');return {stop:control.state==='paused'?'paused':'not_active',rounds:round};}
   // the remaining instance budget bounds this step; with less left than one step needs, the instance hands over without starting it
+  const spent=spentNow();
   const remaining={...base,statements:base.statements-spent,handoverAt:base.handoverAt-spent};
-  const exhausted=remaining.handoverAt<=0||remaining.statements-remaining.reserve<(base.stepEstimate||150);
-  const result=exhausted?{stop:'handover',wakeAt:null,counts:{statements:0}}:await doStep('drain-'+round,async()=>{
-   const out=await drain(env,{runId:id+'-'+round,clock,tools:deps.tools,fetchImpl:deps.fetchImpl,coordinator:deps.coordinator?deps.coordinator():null,budget:remaining,...(deps.shouldYield?{shouldYield:deps.shouldYield}:{})});
-   return {stop:out.stop,wakeAt:out.wakeAt||null,counts:out.counts};
+  const slice={...remaining,statements:Math.min(remaining.statements,stepBase.statements),handoverAt:Math.min(remaining.handoverAt,stepBase.handoverAt)};
+  // the round cap is a handover too: an instance that used all its rounds with work left hands it to a successor instead of retiring
+  const exhausted=remaining.handoverAt<=0||remaining.statements-remaining.reserve<(base.stepEstimate||150)||round===MAX_ROUNDS-1;
+  const result=exhausted?{stop:'handover',wakeAt:null,counts:{statements:0},instance:true}:await doStep('drain-'+round,async()=>{
+   // a callback that throws is a failed ATTEMPT: its statements are unknown, so the whole slice is charged (pessimistic) and the instance backs off instead of replaying the slice
+   try{
+    const out=await drain(rawEnv,{runId:id+'-'+round,clock,tools:deps.tools,fetchImpl:deps.fetchImpl,coordinator:deps.coordinator?deps.coordinator():null,budget:slice,...(deps.shouldYield?{shouldYield:deps.shouldYield}:{})});
+    return {stop:out.stop,wakeAt:out.wakeAt||null,counts:out.counts};
+   }catch{return {stop:'error_backoff',wakeAt:null,counts:{statements:slice.statements},failedAttempt:true};}
   });
-  spent+=Number(result.counts?.statements)||0;
+  stepSpent+=Number(result.counts?.statements)||0;
+  // a step that ended only at its own slice is NOT a handover of the instance: the next step continues here while the instance budget lasts
+  if(result.stop==='handover'&&!result.instance&&spentNow()<base.handoverAt&&base.statements-spentNow()-base.reserve>=(base.stepEstimate||150)){last='step';continue;}
   // the terminal outbox entry of the run reaches the Events Log best effort: delivery never blocks a run and a failure is retried by the next run or the reconcile
   try{await deliverTicks(env,{nowMs:Date.parse(nowIso(clock))});}catch{/* delivery is retried */}
   last=result.stop;
