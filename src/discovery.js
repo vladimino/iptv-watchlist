@@ -381,7 +381,7 @@ async function publishedPointer(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null};
 }
-const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000,DISCOVERY_FENCE_COLLISION_SERIES_LIMIT=6;
+const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000;
 // The authority gate still names this run and is ready: a fence refusal then was a generation-counter collision, not a switch of the published run.
 async function authorityStillOwnsRun(env,runId){
  if(typeof DiscoveryAuthority==='undefined')return true;
@@ -394,38 +394,46 @@ async function publishedGenerationMatches(env,seenRunId){
 }
 // AIR-687 (second delivery): what a thrown `discovery_fence` means is decided from the authoritative state read back AFTER the refusal, never from how complete the error's own classification is. The first delivery retried
 // only a proven batch CHECK collision, so a refusal with no cause (a read-side generation compare, a direct throw, a partial diagnostic) fell through to `stage: error` and an hour gate (20:00 Madrid, 27 Nov 2026).
-// `safe` only says that scheduling a re-evaluation is safe: nothing is written here, the retry is a fresh chunk whose every read and write is fenced again, and decisions are idempotent per key. It is false only when the state
-// positively contradicts continuing (the published pointer does not name this run as `published`, the authority is not ready, held, loading or bound to another run, or the hop's lease is gone); those keep the fail-closed
-// `error` record. State that cannot be read right now is `safe` too (a re-evaluation later reads again), with its own basis. `cause` is diagnostic only.
+// Two decisions are kept apart. WRITE safety is unchanged and is not decided here: the refused hop writes nothing more (its candidate data is never written by a hop that lost the fence), and every read and write of the next
+// chunk is fenced again. WAKE is decided here: whether the series needs another chunk. It does, whenever the refusal can still clear: a lost or expired hop lease (the next chunk takes a fresh one), a pointer or authority that is
+// temporarily unreadable, missing or not ready, a hold or a loading transfer (their own busy times apply in the next chunk). Only a state that positively shows the series is superseded (the pointer names another run as
+// `published`, or the authority is bound to another run) needs no further chunk of this series; that keeps the fail-closed `error` record (the Workflow plan then stops it as `stale_generation`).
+// The assessment is read-only: it reads the pointer, the authority gate and the stored lease and compares the lease id and expiry; it never renews or writes.
 const FENCE_CAUSES=['generation_moved','batch_fence','batch_check','read_or_direct'];
-const FENCE_BASES=['state_confirmed','state_unreadable','pointer_not_published','authority_not_ready','authority_held','authority_loading','other_programme','lease_lost'];
+const FENCE_BASES=['state_confirmed','state_unreadable','pointer_unconfirmed','authority_not_ready','authority_held','authority_loading','lease_lost','other_programme','run_superseded'];
 async function assessFenceRefusal(env,error,programmeRunId,lease){
  const checked=/CHECK constraint failed/i.test(String(error?.cause?.message||''));
  let cause=checked?(Number.isInteger(error?.fenceGeneration)?'batch_fence':'batch_check'):'read_or_direct';
- let pointer,gate=null;
+ let pointer,gate=null,held=null;
  try{
   pointer=await publishedPointer(env);
   if(typeof DiscoveryAuthority!=='undefined')gate=await DiscoveryAuthority.readAuthority(env);
- }catch{return {safe:true,cause,basis:'state_unreadable'};}
+  held=lease?await readDiscoveryLeaseValue(env):null;
+ }catch{return {revalidate:true,cause,basis:'state_unreadable'};}
  if(gate&&cause==='batch_fence'&&Number(gate.generation)>error.fenceGeneration)cause='generation_moved';
- if(pointer?.phase!=='published'||pointer.programmeRunId!==programmeRunId)return {safe:false,cause,basis:'pointer_not_published'};
+ if(pointer?.phase==='published'&&pointer.programmeRunId&&pointer.programmeRunId!==programmeRunId)return {revalidate:false,cause,basis:'run_superseded'};
+ if(gate?.ready&&gate.programmeRunId&&gate.programmeRunId!==programmeRunId)return {revalidate:false,cause,basis:'other_programme'};
+ if(pointer?.phase!=='published'||pointer.programmeRunId!==programmeRunId)return {revalidate:true,cause,basis:'pointer_unconfirmed'};
  if(gate){
-  if(!gate.ready)return {safe:false,cause,basis:'authority_not_ready'};
-  if(gate.held)return {safe:false,cause,basis:'authority_held'};
-  if(gate.transfer==='loading')return {safe:false,cause,basis:'authority_loading'};
-  if((gate.programmeRunId??null)!==programmeRunId||(gate.publishedProgrammeRunId??programmeRunId)!==programmeRunId)return {safe:false,cause,basis:'other_programme'};
+  if(!gate.ready)return {revalidate:true,cause,basis:'authority_not_ready'};
+  if(gate.held)return {revalidate:true,cause,basis:'authority_held'};
+  if(gate.transfer==='loading')return {revalidate:true,cause,basis:'authority_loading'};
  }
- try{if(lease&&!await renewDiscoveryLease(env,lease))return {safe:false,cause,basis:'lease_lost'};}
- catch{return {safe:true,cause,basis:'state_unreadable'};}
- return {safe:true,cause,basis:'state_confirmed'};
+ if(lease&&!(held&&held.id===lease.id&&Number(held.expiresAt)>Date.now()))return {revalidate:true,cause,basis:'lease_lost'};
+ return {revalidate:true,cause,basis:'state_confirmed'};
 }
-// The wait before the next re-evaluation of a refusal that is safe to re-evaluate. The first DISCOVERY_FENCE_COLLISION_SERIES_LIMIT consecutive attempts are short (a competing writer holds the counter for seconds); after that the wait
-// steps up the same 1 min / 5 min / 15 min / 1 h ladder the Workflow's own recovery uses, so a persistent refusal stops costing a chunk every 30 s without ever turning one transient conflict into an hour of idleness.
-const DISCOVERY_FENCE_REVALIDATION_LADDER_MS=[60000,300000,900000,3600000];
-function fenceRevalidationDelayMs(count){
- if(count<=DISCOVERY_FENCE_COLLISION_SERIES_LIMIT)return DISCOVERY_FENCE_COLLISION_DEFER_MS;
- return DISCOVERY_FENCE_REVALIDATION_LADDER_MS[Math.min(count-DISCOVERY_FENCE_COLLISION_SERIES_LIMIT-1,DISCOVERY_FENCE_REVALIDATION_LADDER_MS.length-1)];
+// The wait before the next re-evaluation: it doubles from the short collision interval (a competing writer holds the counter for seconds) and is capped by the existing five-minute backoff of a chunk that made no progress
+// (PAGED_BUDGET_BACKOFF_MS). There is no count-based hour tier: whatever blocks is re-read every re-evaluation, so the work resumes within the cap after the obstruction ends, a persistent refusal costs at most twelve
+// light chunks an hour (a lease attempt and a few reads), and it stays visible through `fenceCollisions` and the monitor's zero-work loop rule.
+// What the refused chunk really did before its final write was refused (its decisions, assignments and cheap-pass work are already durable and idempotent): carried into the re-evaluation checkpoint so the report counts it exactly
+// once and the monitor sees real progress; without it (a refusal earlier in the chunk) the checkpoint carries none.
+function fenceWork(summary){
+ const count=value=>Number.isFinite(value)&&value>0?value:0;
+ if(!summary||typeof summary!=='object')return {checked:0,remaining:null};
+ return {checked:count(summary.checked),screenedOut:count(summary.screenedOut),reused:count(summary.reused),touched:count(summary.touched),added:count(summary.added),tmdbCalls:count(summary.tmdbCalls),deferred:count(summary.deferred),
+  remaining:Number.isInteger(summary.remaining)?summary.remaining:null,cheapRemaining:Number.isInteger(summary.cheapRemaining)?summary.cheapRemaining:null,waitingRetry:count(summary.waitingRetry),assignment:summary.assignment&&typeof summary.assignment==='object'?summary.assignment:undefined,revalidation:summary.revalidation&&typeof summary.revalidation==='object'?summary.revalidation:undefined};
 }
+function fenceRevalidationDelayMs(count){return Math.min(DISCOVERY_FENCE_COLLISION_DEFER_MS*2**Math.max(0,Math.min(count,20)-1),PAGED_BUDGET_BACKOFF_MS);}
 // AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part versions of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that
 // already holds a retained Discovery membership only, under the revalidation's own Discovery lease. It fetches nothing and writes no canonical table. -> 'written' | 'unchanged' | 'absent' | 'failed'. The module exists in the Worker
 // scope only (offline imports of this file have none): without it, or before the schema is applied, the answer is 'absent' and the revalidation proceeds as before. A 'failed' answer is NOT swallowed: the caller must leave the
@@ -1359,11 +1367,17 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  timings.preCommitMs=Date.now()-t0;
  const statusStarted=Date.now();
  await inPhase('final_checkpoint',async()=>{
-  await saveJSON(env,'epg/discovery-status.json',summary);
-  timings.statusMs=Date.now()-statusStarted;
-  const checkpointStarted=Date.now();
-  if(checkpoint)await checkpoint(summary);
-  timings.checkpointMs=Date.now()-checkpointStarted;
+  try{
+   await saveJSON(env,'epg/discovery-status.json',summary);
+   timings.statusMs=Date.now()-statusStarted;
+   const checkpointStarted=Date.now();
+   if(checkpoint)await checkpoint(summary);
+   timings.checkpointMs=Date.now()-checkpointStarted;
+  }catch(e){
+   // AIR-687: a fence refusal of the final write comes after the chunk's durable decisions and assignments; its real counts travel with the error so the re-evaluation checkpoint reports them once (not enumerable: never serialised).
+   if(e&&typeof e==='object'&&e.code==='discovery_fence'&&!e.chunkSummary){try{Object.defineProperty(e,'chunkSummary',{value:summary,enumerable:false,writable:true,configurable:true});}catch{}}
+   throw e;
+  }
  });
  timings.totalMs=Date.now()-t0;
  return summary;
@@ -2051,17 +2065,17 @@ async function advanceDiscovery(env,body={}){
   else{
    const failure=discoveryFailureFields(e,e?.timings);
    const typed=TYPED_DISCOVERY_CODES.has(failure.error);
-   // AIR-687: any `discovery_fence` thrown outside `guarded` (a status, checkpoint or assignment write, a read-side generation compare, a direct refusal) is re-evaluated from the authoritative state (`assessFenceRefusal`):
-   // while the state confirms this run, the series waits a short, backed-off interval instead of the hour boundary where the hourly writers collide again. A contradicting state keeps the fail-closed `error` record
-   // below, with the contradicting fact recorded as `fenceBasis`.
+   // AIR-687: any `discovery_fence` thrown outside `guarded` (a status, checkpoint or assignment write, a read-side generation compare, a direct refusal) is re-evaluated: `assessFenceRefusal` decides only whether the series
+   // needs another chunk. While it can (everything but a positively superseded run) the series waits a short, backed-off interval instead of the hour boundary where the hourly writers collide again. A superseded run keeps the
+   // fail-closed `error` record below, with the fact recorded as `fenceBasis`.
    let revalidation=null,fenceBasis=null;
    if(typed&&failure.error==='discovery_fence'&&programmeRunId){
     let assessment;
-    try{assessment=await assessFenceRefusal(env,e,programmeRunId,acquired);}catch{assessment={safe:true,cause:'read_or_direct',basis:'state_unreadable'};}
-    if(assessment.safe){const count=(Number(current?.fenceCollisions)||0)+1;revalidation={count,delayMs:fenceRevalidationDelayMs(count),assessment,failedAt:failure.failedAt};}
+    try{assessment=await assessFenceRefusal(env,e,programmeRunId,acquired);}catch{assessment={revalidate:true,cause:'read_or_direct',basis:'state_unreadable'};}
+    if(assessment.revalidate){const count=(Number(current?.fenceCollisions)||0)+1;revalidation={count,delayMs:fenceRevalidationDelayMs(count),assessment,failedAt:failure.failedAt,work:e?.chunkSummary&&typeof e.chunkSummary==='object'?e.chunkSummary:null};}
     else fenceBasis=assessment.basis;
    }
-   result=revalidation?{stage:'partial',fenceRevalidation:true,generationCollision:revalidation.assessment.cause==='generation_moved',fenceCollisions:revalidation.count,fenceCause:revalidation.assessment.cause,fenceBasis:revalidation.assessment.basis,failedAt:revalidation.failedAt??null,failureKind:'fence',checked:0,remaining:null,error:null,retryAt:new Date(Date.now()+revalidation.delayMs).toISOString(),programmeRunId}:{stage:'error',...(fenceBasis?{fenceBasis}:{}),error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
+   result=revalidation?{...fenceWork(revalidation.work),stage:'partial',fenceRevalidation:true,generationCollision:revalidation.assessment.cause==='generation_moved',fenceCollisions:revalidation.count,fenceCause:revalidation.assessment.cause,fenceBasis:revalidation.assessment.basis,failedAt:revalidation.failedAt??null,failureKind:'fence',error:null,retryAt:new Date(Date.now()+revalidation.delayMs).toISOString(),programmeRunId}:{stage:'error',...(fenceBasis?{fenceBasis}:{}),error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
   }
  }
  trace.chunk=chunkSummary(result);

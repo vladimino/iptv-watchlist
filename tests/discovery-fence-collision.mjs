@@ -27,7 +27,8 @@ const RUN='run-reval',MIN=60000,START=Date.now()+3600000;
 // A controllable clock for the chunk's own code: the stub below can move it forward when TMDB answers, to cross the persist limit between the read and the writes.
 const published={run:'run-reval'};
 const clock={offset:0},advance={ms:0};
-class SteppedDate extends Date{static now(){return super.now()+clock.offset;}}
+const realNow=Date.now.bind(Date);
+class SteppedDate extends Date{constructor(...args){if(args.length===0)super(realNow()+clock.offset);else super(...args);}static now(){return realNow()+clock.offset;}}
 
 async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90,observed={title:'Film R',normalized:'film r'},catalog=null,movieTitles={translations:[],alternatives:[]},authority=Authority}){
  clock.offset=0;advance.ms=0;
@@ -222,41 +223,114 @@ const P=await import('../src/domain/monitor-policy.js');
  assert.deepEqual(recovered.issues.map(item=>item.key),[]);assert.equal(recovered.facts.recovery,'queue_empty','the candidate was really settled and the queue is proven empty (the within_policy disposition is covered in tests/monitor-policy.mjs)');
  clock.offset=0;
 }
-// G. Consecutive refusals back off: six short waits, then the Workflow recovery ladder (1 min, 5 min, 15 min, 1 h), never an immediate hour, never a hot loop; the safe re-evaluation continues while the state confirms the run.
+// G. Consecutive refusals back off from 30 s, doubling, capped at the existing five-minute no-progress backoff; there is no count-based hour tier. The obstruction ends right after the twelfth assessment and the real Workflow
+// chunk resumes durable work within the cap, with the counter cleared; a repeated hourly collision sequence never waits for an hour boundary.
+const readFence=(w,state)=>({...Authority,selectActionableObservations:async(...args)=>{if(state.left>0){state.left--;sql(w.file(),"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");throw fenceError();}return Authority.selectActionableObservations(...args);}});
+const hostNow=Date.now;
+const withHostClock=async fn=>{Date.now=()=>realNow()+clock.offset;try{return await fn();}finally{Date.now=hostNow;clock.offset=0;}};
+await withHostClock(async()=>{
+ published.run=RUN;
+ const state={left:0},holder={};
+ const wrapped={...Authority,selectActionableObservations:async(...args)=>{if(state.left>0){state.left--;sql(holder.file,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");throw fenceError();}return Authority.selectActionableObservations(...args);}};
+ const w=await world({durations:[90,96],decision:null,fillers:400,authority:wrapped});holder.file=w.file;
+ const wf=loadWorkflow(w);const meter={statements:0,batches:0};
+ const decisions=()=>count(w.file,'discovery_decision');
+ assert.equal((await wf.runWorkflowChunk(w.env,meter)).usefulProgress,true);
+ const before=decisions();
+ state.left=1e9;
+ const waits=[];
+ for(let attempt=1;attempt<=12;attempt++){
+  const out=await wf.runWorkflowChunk(w.env,meter);
+  assert.equal(out.summary.fenceRevalidation,true,'attempt '+attempt+': '+JSON.stringify(out.summary).slice(0,200));
+  const record=await recordOf(w);
+  assert.equal(record.fenceCollisions,attempt);assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');
+  const delay=Date.parse(record.retryAt)-Date.now();
+  waits.push(Math.round(delay/1000));
+  const plan=wf.workflowPlan({published:RUN,pinned:RUN,record,lease:null,now:Date.now(),chunks:attempt,last:null,uncertainWrites:0,used:0});
+  assert.equal(plan.action,'wait');assert.ok(plan.until-Date.now()<=301000,'the Workflow wakes at the backoff, never at an hour boundary: attempt '+attempt+' '+JSON.stringify({until:plan.until-Date.now(),delay,reason:plan.reason,retryAt:record.retryAt,next:record.nextCatchUpAt}));
+  clock.offset+=delay+1000;
+ }
+ const expected=[30,60,120,240,300,300,300,300,300,300,300,300];
+ waits.forEach((seconds,index)=>assert.ok(Math.abs(seconds-expected[index])<=2,'wait '+(index+1)+' is '+seconds+' s, expected '+expected[index]+' s: '+waits.join(',')));
+ assert.equal(decisions(),before,'nothing persisted by the refused chunks');
+ // The obstruction ends just after the last assessment: the next re-evaluation resumes durable work.
+ state.left=0;
+ const resumed=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(resumed.usefulProgress,true,JSON.stringify(resumed.summary));
+ assert.ok(decisions()>before,'durable decisions after budget exhaustion: '+before+' -> '+decisions());
+ assert.equal((await recordOf(w)).fenceCollisions,undefined,'cleared by the first useful chunk');
+});
+// G2. A repeated hourly collision sequence (the night of 26 to 27 Nov): at every hour boundary one refusal, and each time the work resumes within seconds, never at the next boundary.
+await withHostClock(async()=>{
+ published.run=RUN;
+ const state={left:0},holder={};
+ const wrapped={...Authority,selectActionableObservations:async(...args)=>{if(state.left>0){state.left--;sql(holder.file,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");throw fenceError();}return Authority.selectActionableObservations(...args);}};
+ const w=await world({durations:[90,96],decision:null,fillers:400,authority:wrapped});holder.file=w.file;
+ const wf=loadWorkflow(w);const meter={statements:0,batches:0};
+ let last=count(w.file,'discovery_decision');
+ for(let hour=1;hour<=3;hour++){
+  state.left=1;
+  const refused=await wf.runWorkflowChunk(w.env,meter);
+  assert.equal(refused.summary.fenceRevalidation,true,'hour '+hour);
+  const record=await recordOf(w),delay=Date.parse(record.retryAt)-Date.now();
+  assert.ok(delay>0&&delay<=31000,'hour '+hour+': a short wait, not the next boundary: '+delay);
+  clock.offset+=delay+1000;
+  const resumed=await wf.runWorkflowChunk(w.env,meter);
+  assert.equal(resumed.usefulProgress,true,'hour '+hour);
+  const now=count(w.file,'discovery_decision');assert.ok(now>last,'hour '+hour+': durable progress '+last+' -> '+now);last=now;
+  clock.offset+=3600000-delay;
+ }
+});
+// H. WRITE safety is not wake: a refusal whose blocking fact can still clear (a replaced or expired hop lease, a pointer that is not confirmed as published, a loading transfer) is re-evaluated after a short wait, and once the obstruction
+// is gone the real chunk of a fresh hop persists its work before the hour; the refused hop wrote nothing. A positively superseded run keeps the fail-closed error; a held authority refuses the checkpoint itself.
+async function setPointerRun(env,phase,run){if(phase===null)await env.BUCKET.delete('epg/published-generation.json');else await env.BUCKET.put('epg/published-generation.json',JSON.stringify({phase,programmeRunId:run}));}
+for(const [label,basis,obstruct,repair] of [
+ ['lease replaced','lease_lost',file=>sql(file,"UPDATE discovery_lease SET lease_id='other-hop', expires_at="+(Date.now()+30000)+" WHERE id=1"),w=>sql(w.file,"UPDATE discovery_lease SET lease_id=NULL, expires_at=0 WHERE id=1")],
+ ['lease expired','lease_lost',file=>sql(file,"UPDATE discovery_lease SET expires_at=1 WHERE id=1"),()=>{}],
+ ['pointer not published','pointer_unconfirmed',(file,w)=>setPointer(w.env,'candidate'),w=>setPointer(w.env,'published')],
+ ['pointer missing','pointer_unconfirmed',(file,w)=>setPointer(w.env,null),w=>setPointer(w.env,'published')],
+ ['loading transfer','authority_loading',file=>sql(file,"UPDATE discovery_transfer SET state='loading'"),w=>sql(w.file,"UPDATE discovery_transfer SET state='idle'")],
+]){
+ published.run=RUN;
+ const w=await world({durations:[90,96],decision:null});
+ const wf=loadWorkflow(w);const meter={statements:0,batches:0};
+ bumpOnStatus(w,1,file=>obstruct(file,w));
+ const refused=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(refused.summary.fenceRevalidation,true,label);assert.equal(refused.summary.fenceBasis,basis,label);assert.equal(refused.usefulProgress,false,label);
+ assert.deepEqual([count(w.file,'discovery_decision'),count(w.file,'published_epg_show')],[0,0],label+': the refused hop wrote nothing');
+ const record=await recordOf(w);
+ assert.equal(record.stage,'paused',label);assert.equal(record.reason,'backoff',label);assert.equal(record.fenceBasis,basis,label);
+ const wait=Date.parse(record.retryAt)-Date.now();
+ assert.ok(wait>0&&wait<=31000,label+': a short wait, not the hour boundary: '+wait);
+ // The obstruction clears: a fresh hop resumes and persists its work before the hour, once, with no duplicate.
+ await repair(w);
+ clock.offset+=31000;
+ const resumed=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(resumed.usefulProgress,true,label+': '+JSON.stringify(resumed.summary).slice(0,300));
+ assert.deepEqual([count(w.file,'discovery_decision'),count(w.file,'published_epg_show')],[1,2],label+': durable work after the restoration');
+ assert.equal((await recordOf(w)).fenceCollisions,undefined,label);
+ clock.offset=0;
+}
+// A held authority refuses the checkpoint write itself: the genuine fence is kept (the chunk is not recorded as done), nothing is retried behind it.
 {
  published.run=RUN;
  const w=await world({durations:[90,96],decision:verified({anchor:[90]})});
- bumpOnStatus(w,1000);
- const waits=[];
- for(let attempt=1;attempt<=11;attempt++){
-  const out=await w.advance();
-  assert.equal(out.fenceRevalidation,true,'attempt '+attempt+': '+JSON.stringify(out).slice(0,200));
-  const record=await recordOf(w);
-  assert.equal(record.fenceCollisions,attempt);assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');
-  const delay=Date.parse(record.retryAt)-Date.now()-clock.offset;
-  waits.push(Math.round(delay/1000));
-  clock.offset+=delay+1000;
- }
- const expected=[30,30,30,30,30,30,60,300,900,3600,3600];
- waits.forEach((seconds,index)=>assert.ok(Math.abs(seconds-expected[index])<=2,'wait '+(index+1)+' is '+seconds+' s, expected '+expected[index]+' s: '+waits.join(',')));
- clock.offset=0;
+ bumpOnStatus(w,1,file=>sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1"));
+ await assert.rejects(()=>w.advance(),error=>error.code==='discovery_unavailable','a held authority refuses the checkpoint');
+ assert.notEqual((await recordOf(w).catch(()=>null))?.reason,'backoff');
 }
-// H. Genuine refusals are not retried: a replaced/expired lease, a non-published pointer, a held authority and a refusal that is not the batch CHECK (no cause: unknown outcome / evidence).
-for(const [label,arrange] of [
- ['lease replaced',w=>bumpOnStatus(w,1,file=>sql(file,"UPDATE discovery_lease SET lease_id='other-hop' WHERE id=1"))],
- ['lease expired',w=>bumpOnStatus(w,1,file=>sql(file,"UPDATE discovery_lease SET expires_at=1 WHERE id=1"))],
- ['authority held',w=>bumpOnStatus(w,1,file=>sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1"))],
- ['pointer not published',w=>bumpOnStatus(w,1,()=>setPointer(w.env,'candidate'))],
- ['pointer missing',w=>bumpOnStatus(w,1,()=>setPointer(w.env,null))],
+// A positively superseded run (the pointer names another run as published, or the authority is bound to another run) keeps the fail-closed error with the fact recorded: another chunk of this series would be wrong.
+for(const [label,basis,obstruct] of [
+ ['pointer names another run','run_superseded',(file,w)=>setPointerRun(w.env,'published','run-other')],
+ ['authority bound to another run','other_programme',(file)=>sql(file,"UPDATE discovery_authority SET programme_run_id='run-other' WHERE id=1")],
 ]){
  published.run=RUN;
  const w=await world({durations:[90,96],decision:verified({anchor:[90]})});
- arrange(w);
+ bumpOnStatus(w,1,file=>obstruct(file,w));
  let out=null,thrown=null;try{out=await w.advance();}catch(e){thrown=e;}
- assert.notEqual(out?.generationCollision,true,label+': '+JSON.stringify(out)?.slice(0,300));
- assert.notEqual((await recordOf(w).catch(()=>null))?.reason,'backoff',label+': no retry checkpoint');
- if(label==='authority held'){assert.equal(thrown?.code,'discovery_unavailable',label+': the held authority refuses the checkpoint itself');}
- else{assert.equal(out?.stage,'error',label);assert.equal(out?.error,'discovery_fence',label);const stored=await recordOf(w);assert.equal(stored.stage,'error',label+': a persisted fail-closed checkpoint');assert.equal(stored.reason,'discovery_fence',label);}
+ assert.ok(!out?.fenceRevalidation,label+': never re-evaluated');
+ if(out){assert.equal(out.stage,'error',label);assert.equal(out.fenceBasis,basis,label);assert.equal((await recordOf(w)).reason,'discovery_fence',label);assert.equal((await recordOf(w)).fenceBasis,basis,label);}
+ else assert.ok(thrown,label+': fail closed');
 }
 // I. The assessment itself, on the real fixture: the decision follows the authoritative state read back after the refusal, not the completeness of the error's own classification.
 {
@@ -267,84 +341,67 @@ for(const [label,arrange] of [
  const refusal=extra=>Object.assign(new Error('discovery_fence'),{code:'discovery_fence',cause:new Error('Runtime error: CHECK constraint failed: ok = 1 (19)'),fenceGeneration:generation-1,...extra});
  const bare=()=>Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
  const assess=(error,run=RUN,held=lease)=>w.context.assessFenceRefusal(w.env,error,run,held);
- const view=async(error,run,held)=>{const out=await assess(error,run,held);return [out.safe,out.cause,out.basis];};
- // Whatever the refusal looks like, confirmed state is safe to re-evaluate; the cause only labels it.
+ const view=async(error,run,held)=>{const out=await assess(error,run,held);return [out.revalidate,out.cause,out.basis];};
+ // Whatever the refusal looks like, a confirmed state needs another chunk; the cause only labels it.
  assert.deepEqual(await view(refusal()),[true,'generation_moved','state_confirmed']);
- assert.deepEqual(await view(refusal({fenceGeneration:generation})),[true,'batch_fence','state_confirmed'],'the counter has not moved past what the fence expected: still safe, labelled');
+ assert.deepEqual(await view(refusal({fenceGeneration:generation})),[true,'batch_fence','state_confirmed'],'the counter has not moved past what the fence expected: still re-evaluated, labelled');
  assert.deepEqual(await view(refusal({fenceGeneration:undefined})),[true,'batch_check','state_confirmed'],'a CHECK without the generation');
  assert.deepEqual(await view(bare()),[true,'read_or_direct','state_confirmed'],'no cause at all (a read-side compare, a direct refusal, a partial diagnostic)');
- // Contradicting state is not.
- assert.deepEqual(await view(bare(),RUN,null),[true,'read_or_direct','state_confirmed'],'no lease to check is not a contradiction here (the caller always passes its hop lease)');
- assert.deepEqual(await view(bare(),'run-other'),[false,'read_or_direct','pointer_not_published'],'the pointer names another run');
+ // A fact that can still clear is re-evaluated too; it is named, never confused with a superseded run.
  sql(w.file,"UPDATE discovery_transfer SET state='loading'");
- assert.deepEqual(await view(refusal()),[false,'generation_moved','authority_loading']);
+ assert.deepEqual(await view(refusal()),[true,'generation_moved','authority_loading']);
  sql(w.file,"UPDATE discovery_transfer SET state='idle'");
  sql(w.file,"UPDATE discovery_lease SET lease_id='other-hop' WHERE id=1");
- assert.deepEqual(await view(bare()),[false,'read_or_direct','lease_lost'],'the hop lease is gone');
- sql(w.file,"UPDATE discovery_lease SET lease_id='"+lease.id+"' WHERE id=1");
+ assert.deepEqual(await view(bare()),[true,'read_or_direct','lease_lost'],'the hop lease is gone: the old hop writes nothing, a fresh hop may resume');
+ sql(w.file,"UPDATE discovery_lease SET lease_id='"+lease.id+"', expires_at=1 WHERE id=1");
+ assert.deepEqual(await view(bare()),[true,'read_or_direct','lease_lost'],'the hop lease expired');
+ sql(w.file,"UPDATE discovery_lease SET expires_at="+(Date.now()+60000)+" WHERE id=1");
  await setPointer(w.env,'candidate');
- assert.deepEqual(await view(bare()),[false,'read_or_direct','pointer_not_published']);
+ assert.deepEqual(await view(bare()),[true,'read_or_direct','pointer_unconfirmed']);
  await setPointer(w.env,null);
- assert.deepEqual(await view(bare()),[false,'read_or_direct','pointer_not_published'],'a missing pointer is not a match');
+ assert.deepEqual(await view(bare()),[true,'read_or_direct','pointer_unconfirmed'],'a missing pointer is unconfirmed, not superseded');
  await setPointer(w.env,'published');
- // Temporarily incomplete readback: still re-evaluated later (nothing is written now), with its own basis.
+ // Temporarily incomplete readback is re-evaluated later, with its own basis.
  const throwing={...w.env,BUCKET:{get:async()=>{throw new Error('R2 unavailable');}}};
- assert.deepEqual(await w.context.assessFenceRefusal(throwing,bare(),RUN,lease).then(out=>[out.safe,out.basis]),[true,'state_unreadable']);
+ assert.deepEqual(await w.context.assessFenceRefusal(throwing,bare(),RUN,lease).then(out=>[out.revalidate,out.basis]),[true,'state_unreadable']);
+ // Only a positively superseded run needs no further chunk of this series.
+ assert.deepEqual(await view(bare(),'run-other'),[false,'read_or_direct','run_superseded'],'the pointer names another run as published');
  sql(w.file,"UPDATE discovery_authority SET programme_run_id='run-other'");
  assert.deepEqual(await view(bare()),[false,'read_or_direct','other_programme'],'the authority moved to another run');
+ // The assessment is read-only: it never extends the lease (no renewal, no write).
+ const expiry=()=>sql(w.file,"SELECT expires_at FROM discovery_lease WHERE id=1")[0].expires_at;
+ sql(w.file,"UPDATE discovery_authority SET programme_run_id='"+RUN+"'");
+ const before=expiry();await view(refusal());assert.equal(expiry(),before,'the lease row is untouched by the assessment');
 }
-// K. AIR-687, the evening of 27 Nov 2026 end to end on the real fixture: a productive chunk, then a single `discovery_fence` at the hour boundary that carries NO cause (a read-side generation compare while the hourly writer bumps the
-// counter), so no classifier can recognise it; the old code answered `error`, `retryAt: null` and an hour of waiting. The state confirms the run, so the series re-evaluates after a short wait and the next real chunk does durable work
-// before the hour boundary, with no hourly Cron involved.
+// M. A refusal AFTER durable effects (the final status write of a chunk whose decisions and assignments are already committed). The existing mechanism is enough and is shown, not rebuilt: decisions and slot assignments are idempotent per
+// key, the refused chunk's real counts travel into the re-evaluation checkpoint so the report counts them once, and the retry neither loses nor repeats them. A replay of the same checkpoint adds nothing.
 {
  published.run=RUN;
- let fileRef=null,left=0;
- const wrapped={...Authority,selectActionableObservations:async(...args)=>{if(left>0){left--;sql(fileRef,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");throw fenceError();}return Authority.selectActionableObservations(...args);}};
- const w=await world({durations:[90,96],decision:null,fillers:400,authority:wrapped});fileRef=w.file;
- const wf=loadWorkflow(w);
- const meter={statements:0,batches:0};
- const decisions=()=>count(w.file,'discovery_decision');
- const chunkA=await wf.runWorkflowChunk(w.env,meter);
- assert.equal(chunkA.usefulProgress,true,'the productive chunk');
- const afterA=decisions();assert.ok(afterA>0);
- left=1;
- const chunkB=await wf.runWorkflowChunk(w.env,meter);
- assert.equal(chunkB.usefulProgress,false);assert.equal(chunkB.progress,true,'the refusal checkpoint was saved by this hop');
- assert.equal(chunkB.summary.fenceRevalidation,true);assert.equal(chunkB.summary.fenceCause,'read_or_direct');assert.equal(chunkB.summary.fenceBasis,'state_confirmed');assert.equal(chunkB.summary.failureKind,'fence');
- assert.equal(decisions(),afterA,'the refused chunk persisted nothing');
+ const w=await world({durations:[90,96],decision:null,fillers:400});
+ const wf=loadWorkflow(w);const meter={statements:0,batches:0},tally={total:0};
+ const decisions=()=>count(w.file,'discovery_decision'),shows=()=>count(w.file,'published_epg_show');
+ w.hook.left=1;w.hook.fn=(statements,file)=>{if(w.hook.left>0&&statusBatch(statements)&&count(file,'discovery_decision')>0){w.hook.left--;sql(file,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");}};
+ const settle=async(outcome,chunks)=>wf.settleWorkflowIfOwner(w.env,'inst-0',record=>wf.workflowProgressPatch(record,{outcome,pinned:RUN,series:0,chunks,meter,tally,chunkKey:'inst-0:'+chunks,ownVersion:{}}));
+ const refused=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(refused.summary.fenceRevalidation,true,JSON.stringify(refused.summary).slice(0,300));
+ const durable=decisions();
+ assert.ok(durable>0,'the decisions of the refused chunk are already durable: '+durable);
+ assert.ok(refused.summary.checked>0&&refused.usefulProgress===true,'the real work is reported, not zero: '+refused.summary.checked);
  const record=await recordOf(w);
- assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');assert.equal(record.fenceCollisions,1);assert.equal(record.fenceCause,'read_or_direct');assert.equal(record.fenceBasis,'state_confirmed');
- const wait=Date.parse(record.retryAt)-Date.now();
- assert.ok(wait>0&&wait<=31000,'the next action is a short re-evaluation, not the hour boundary: '+wait);
- const plan=wf.workflowPlan({published:RUN,pinned:RUN,record,lease:null,now:Date.now(),chunks:2,last:null,uncertainWrites:0,used:0});
- assert.equal(plan.action,'wait');assert.ok(plan.until-Date.now()<=31000,'the Workflow wakes at the retry: '+(plan.until-Date.now()));
- // The obstruction is gone: the real chunk resumes the queue before the next hour, with durable decisions and no duplicates.
+ assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');
+ const wait=Date.parse(record.retryAt)-Date.now();assert.ok(wait>0&&wait<=31000,'a short wait: '+wait);
+ await settle(refused,1);await settle(refused,1);
+ let report=(await wf.readWorkflowState(w.env)).record.report;
+ assert.equal(report.chunks,1,'a replayed checkpoint is counted once');assert.equal(report.checked,refused.summary.checked,'the report holds the refused chunk\'s real work once');
  clock.offset+=31000;
- const chunkC=await wf.runWorkflowChunk(w.env,meter);
- assert.equal(chunkC.usefulProgress,true,JSON.stringify(chunkC.summary));
- assert.ok(decisions()>afterA,'durable decisions after the recovery: '+afterA+' -> '+decisions());
+ const retried=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(retried.usefulProgress,true);
+ await settle(retried,2);
+ report=(await wf.readWorkflowState(w.env)).record.report;
+ assert.equal(decisions(),durable+retried.summary.checked,'the retry adds only new decisions: none lost, none repeated');
  assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT observation_key FROM discovery_decision GROUP BY observation_key)")[0].n,decisions(),'no duplicate decision');
- assert.ok(Date.now()+clock.offset<hourBoundary()+31000&&(Date.now()+clock.offset)-Date.now()<60000,'within seconds of the refusal, independent of the hourly cron');
- assert.equal((await recordOf(w)).fenceCollisions,undefined,'the counter is cleared by the first useful chunk');
+ assert.equal(report.checked,refused.summary.checked+retried.summary.checked,'the report neither loses nor repeats a contribution');
+ assert.equal(report.checked,decisions(),'and equals the durable decisions');
  clock.offset=0;
-}
-// L. Busy without a deadline of its own: for the Workflow executor it waits for the blocking fact (the live lease's expiry, else one short recheck); an external caller keeps the hourly contract.
-{
- published.run=RUN;
- for(const [label,arrange] of [
-  ['lease race',(w,state)=>{state.wrapped.readLease=async(...args)=>{if(state.reads++===0)return {handled:true,lease:null};return Authority.readLease(...args);};state.wrapped.acquireLease=async()=>({lease:null,busy:null});sql(w.file,"UPDATE discovery_lease SET lease_id='other-hop', expires_at="+(Date.now()+40000)+" WHERE id=1");}],
-  ['record moved by another hop',(w,state)=>{state.wrapped.readContinuation=async(...args)=>{const real=await Authority.readContinuation(...args);return state.reads++===0?real:{...real,etag:'moved-'+state.reads};};}],
- ]){
-  for(const caller of ['internal','http']){
-   const state={reads:0,wrapped:{...Authority}};
-   const w=await world({durations:[90,96],decision:verified({anchor:[90]}),authority:state.wrapped});
-   state.reads=0;arrange(w,state);
-   const out=await w.context.advanceDiscovery(w.env,caller==='internal'?{caller,chunkBudgetMs:60000}:{});
-   assert.equal(out.stage,'busy',label+' '+caller+': '+JSON.stringify(out).slice(0,200));
-   const until=Date.parse(out.discovery.nextCatchUpAt),span=until-Date.now();
-   if(caller==='internal')assert.ok(span>0&&span<=41000,label+': waits for the blocking fact, not the hour: '+span);
-   else assert.equal(new Date(until).toISOString(),new Date(hourBoundary()).toISOString(),label+': the external contract stays hourly');
-  }
- }
 }
 console.log('discovery fence collision ok');

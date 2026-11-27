@@ -982,8 +982,19 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
   h=harness({before:async name=>{if(name.startsWith('progress')&&conflictBudget===0&&!h.armed){h.armed=true;conflictBudget=2;}}});
   ended=await run(h,{chunkLimit:1});
   assert.equal(ended.reason,'rollover');assert.equal(record().recovery??null,null);
+  // AIR-687: a same-owner burst longer than the immediate retries no longer ends the instance for the hourly reconcile: the checkpoint sleeps a short durable interval, re-reads ownership and revision and is saved,
+  // with the count and the report contribution exactly once (the chunk is never repeated).
   fresh();armConflicts();
-  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;conflictBudget=3;}}});
+  let atBurst=null;
+  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;conflictBudget=7;}if(name.startsWith('rollover')&&atBurst===null)atBurst={chunks:record().chunksThisInstance,reported:record().report?.chunks??null,recovery:record().recovery??null};}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.equal(ended.deferred,undefined,'no deferred exit and no wait for the hourly reconcile');
+  assert.deepEqual(atBurst,{chunks:1,reported:1,recovery:null},'saved once, the report counts the chunk once, nothing charged');
+  assert.equal(h.slept.filter(item=>item.name.startsWith('conflict-sleep')).length,5,'a short durable sleep before each retry after the three immediate ones (seven conflicts): '+h.slept.map(item=>item.name).join(','));
+  assert.equal(h.names.filter(name=>/^chunk/.test(name)).length,1,'the chunk was run once, never repeated');
+  // Contention that outlasts the step cap still ends deferred, the record untouched.
+  fresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;conflictBudget=999;}}});
   ended=await run(h,{chunkLimit:1});
   assert.equal(ended.deferred,true);assert.equal(ended.reason,'checkpoint_unsaved_write_conflict');assert.equal(record().chunksThisInstance,0);
   // progress: another instance owns the record: that is lost ownership, a quiet stop, not a retry.
@@ -1005,6 +1016,10 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
   assert.equal(record().phase,'running','the terminal record is not written, so it is not claimed');assert.equal(record().recovery??null,null);
   stopFresh();armConflicts();
   h=harness({before:async name=>{if(name.startsWith('stop')&&!h.armed){h.armed=true;conflictBudget=3;}}});
+  ended=await run(h,{programmeRunId:OTHER});
+  assert.equal(ended.reason,'stale_generation');assert.equal(ended.deferred,undefined);assert.equal(record().phase,'stopped','AIR-687: three conflicts are retried and the terminal record is saved');
+  stopFresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('stop')&&!h.armed){h.armed=true;conflictBudget=999;}}});
   ended=await run(h,{programmeRunId:OTHER});
   assert.equal(ended.deferred,true);assert.equal(ended.reason,'stop_unsaved_write_conflict');assert.equal(record().phase,'running');
 

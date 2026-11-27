@@ -1175,8 +1175,8 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
  // hourly reconcile stays the fallback. A failure of the arming step itself is not caught here: the instance ends as before.
  // ADR 0103. A checkpoint (progress, final stop, recovery arming) is only done when it is confirmed persisted by the owner. `persist`
  // runs the step again until it is: a window refusal sleeps to the window's expiry and tries again (at most `windowRetryLimit` times,
- // each a bounded sleep), a lost compare-and-swap tries again without a sleep (at most WRITE_CONFLICT_RETRY_LIMIT times), and the step
- // cap bounds both. It never treats exhausted retries as a saved write and never as lost ownership: it answers `deferred`, and the
+ // each a bounded sleep), a lost compare-and-swap of the same owner tries again (WRITE_CONFLICT_RETRY_LIMIT times at once, then after a short
+ // durable sleep), and the step cap bounds both. It never treats exhausted retries as a saved write and never as lost ownership: it answers `deferred`, and the
  // caller ends the instance in an explicit deferred state that the hourly reconcile recovers (the record still names this instance).
  // No window refusal is charged to the stall or the recovery budget.
  const windowRetryLimit=Number.isInteger(payload?.windowRetryLimit)&&payload.windowRetryLimit>=1&&payload.windowRetryLimit<=WINDOW_RETRY_LIMIT?payload.windowRetryLimit:WINDOW_RETRY_LIMIT;
@@ -1192,7 +1192,11 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(last)));
     continue;
    }
-   if(++conflicts>=WRITE_CONFLICT_RETRY_LIMIT||steps>=DISCOVERY_WORKFLOW_STEP_CAP)return {kind:'deferred',cause:'conflict',result:last};
+   // AIR-687: a lost compare-and-swap of the SAME owner is contention, not lost ownership (that answers `lost` above). The first WRITE_CONFLICT_RETRY_LIMIT retries are immediate; after them the step sleeps a short durable interval
+   // (the same fallback a refused window write uses) and re-reads the record, its ownership and its revision before trying again, so a burst of conflicts no longer ends the instance for the hourly reconcile. The retried step is only
+   // the owner-gated checkpoint (its chunk is never repeated, and its report contribution is keyed by the chunk, so it is counted once). Only the existing step cap still ends the retries, as a deferred instance.
+   if(steps>=DISCOVERY_WORKFLOW_STEP_CAP)return {kind:'deferred',cause:'conflict',result:last};
+   if(++conflicts>=WRITE_CONFLICT_RETRY_LIMIT)await step.sleepUntil(stepName('conflict-sleep'),new Date(Date.now()+WINDOW_WAKE_FALLBACK_MS));
   }
  };
  const settleKind=result=>result?.saved===true?'saved':isWindowBusy(result?.reason)?'window':result?.reason==='other_instance'?'lost':'conflict';
