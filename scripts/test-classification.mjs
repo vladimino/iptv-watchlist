@@ -251,6 +251,9 @@ export const FILES={
  "letterboxd-lid-only-proof.mjs": {
   "suite": "core"
  },
+ "letterboxd-real-markup-h1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-lid-only-admission-d1.mjs": {
   "suite": "core"
  },
@@ -391,6 +394,12 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "film-metadata-provenance.mjs": {
+  "suite": "core"
+ },
+ "migration-0049-film-metadata-provenance.mjs": {
+  "suite": "core"
+ },
  "migration-0047-catalog-enrichment.mjs": {
   "suite": "core"
  },
@@ -430,10 +439,13 @@ export const FILES={
  "catalog-enrichment-wake.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-recorded-tmdb.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-discovery.mjs": {
   "suite": "core"
  },
- "migration-0049-discovery-enrichment.mjs": {
+ "migration-0050-discovery-enrichment.mjs": {
   "suite": "core"
  },
  "catalog-enrichment-bootstrap.mjs": {

@@ -7,7 +7,7 @@ Operational reference for the [Catalog Enrichment Producer](../reference/domain/
 | Operation | Gate |
 | --- | --- |
 | Apply `migrations/0047_catalog_enrichment.sql` | Owner production operation with its own preflight and readback; follows the operation-key schema apply. A deploy never applies it |
-| Apply `migrations/0049_discovery_enrichment_scope.sql` (Discovery scope intake) | Separate owner production operation ([AIR-685](https://trello.com/c/kfks9T3n)) with its own readback, after 0047; a deploy never applies it, and the code before the apply is the former code |
+| Apply `migrations/0050_discovery_enrichment_scope.sql` (Discovery scope intake) | Separate owner production operation ([AIR-685](https://trello.com/c/kfks9T3n)) with its own readback, after 0047; a deploy never applies it, and the code before the apply is the former code |
 | Activate the Discovery scope (C3c-A) | Separate owner production operation: sets `activated` and `enabled` in one batch only after `CatalogEnrichmentDiscovery.activationPreflight` reports no problem (schema applied, no `loading` transfer, no staged signal) and a compatible version is deployed; the cutoff is that activation, there is no bootstrap |
 | Activate the control and enable a scope | Owner production operation. Not reachable from the admin route |
 | Pause, resume | Owner, through `POST /api/admin/settings/catalog-enrichment` |

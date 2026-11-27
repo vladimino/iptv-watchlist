@@ -51,7 +51,7 @@ const isoYear=value=>{const match=/^(\d{4})/.exec(String(value||''));return matc
 const plainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const hasId=item=>plainObject(item)&&(typeof item.id==='number'||(typeof item.id==='string'&&item.id!==''));
 // The director job as TMDB names it. A localized request (`ru-RU`) may return the role in Russian; the recognized strings are an explicit, tested set. A response that lists crew but names no recognized director is NOT a verified
-// "no director": `directorsRecognized` is false and the producer records a visible gap instead of a silently partial set. (A recorded `ru-RU` fixture is an open acceptance condition: this set is not proof of what TMDB returns.)
+// "no director": `directorsRecognized` is false and the producer records a visible gap instead of a silently partial set. (Recorded `ru-RU` responses and an `en-US` reference show the job strings are not localized; tests/fixtures/tmdb-recorded.)
 const DIRECTOR_JOBS=new Set(['director','режиссер','режиссёр']);
 const isDirector=item=>typeof item?.job==='string'&&DIRECTOR_JOBS.has(item.job.trim().toLowerCase());
 // A credits section is READABLE only when every supported-role entry (each cast entry, each director) is a well-formed object with an id: a malformed supported entry makes the whole section unreadable (a repairable failure),
@@ -62,8 +62,7 @@ function readCredits(credits){
  if(!credits.crew.every(plainObject)||!credits.crew.filter(isDirector).every(hasId))return {status:'unreadable',items:[]};
  const cast=[...credits.cast].sort((a,b)=>(a.order??1e9)-(b.order??1e9)).map(item=>({role:'actor',key:String(item.id),name:item.name??null}));
  const directors=credits.crew.filter(isDirector).map(item=>({role:'director',key:String(item.id),name:item.name??null}));
- // A crew list that names NO recognized director cannot be told from a localized job string this parser does not know: it is not a verified set, whatever the cast says (a recorded `ru-RU` fixture is the open acceptance
- // condition that would settle the rule). It is unreadable, so it is repaired and backed off like any malformed section, never completed as a silently partial credit set.
+ // A crew list that names NO recognized director cannot be told from a localized job string this parser does not know: it is not a verified set, whatever the cast says (recorded `ru-RU` responses show the strings are not localized). It is unreadable, so it is repaired and backed off like any malformed section, never completed as a silently partial credit set.
  if(credits.crew.length>0&&directors.length===0)return {status:'unreadable',items:[],reason:'directors_not_recognized'};
  return {status:'ok',items:[...directors,...cast]};
 }

@@ -139,7 +139,8 @@ const Monitor=(()=>{
  const canonicalProducerFacts=(env,now,previous,{readOnly=false,previousReadable=true}={})=>guarded(async()=>{
   if(typeof CanonicalProducerWorkflow==='undefined'||!env?.DB)return null;
   if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return policy().canonicalProducerFacts({held:true,now});
-  const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env);
+  const prior=typeof previous?.lastLabel==='string'&&previous.lastLabel&&previous.closed!==true?previous.lastLabel:null;
+  const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env,{prior});
   const facts=policy().canonicalProducerFacts({read,previous,now,readOnly,previousReadable});
   // ADR 0208 decision 7 (AIR-594): the outcome delivery to the Events Log, a read-only VISIBILITY fact for the hourly Monitor only (pending count, oldest pending
   // outcome, readability). It is never an input of the Producer's verdict: a healthy Producer with undelivered reports stays healthy, and no alert comes from it.
@@ -228,7 +229,9 @@ const Monitor=(()=>{
    const discoveryKey=['discovery_stalled','discovery_unconfirmed'].find(key=>doc?.alerts?.issues?.[key])||null;
    const openDiscovery=discoveryKey?{key:discoveryKey,...doc.alerts.issues[discoveryKey]}:null;
    const evaluation=policy().evaluateAll(facts,{predictions:{...(doc?.predictions||{}),noProgressOpenSince:openPrediction?.firstSeenAt||null,openMetrics:openPrediction?.metrics||null,openMetricsAt:openPrediction?.metricsAt||null},
-    discovery:{open:openDiscovery,unknownSince:doc?.discovery?.unknownSince||null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
+    discovery:{open:openDiscovery,unknownSince:doc?.discovery?.unknownSince||null},
+    // AIR-692: the open canonical Producer no-progress incident is carried through an unready/unreadable tick or a stop without newer progress (no spurious recovery).
+    canonicalProducer:{open:doc?.alerts?.issues?.canonical_producer_no_progress?{key:'canonical_producer_no_progress',...doc.alerts.issues.canonical_producer_no_progress}:null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
    const plan=policy().planAlerts(evaluation.issues,doc?.alerts||{issues:{}},now);
    // Claim before delivery. The planned messages are committed to `monitor/state.json` (as the plan's alert state and an outbox with stable
    // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both

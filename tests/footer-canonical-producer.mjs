@@ -19,10 +19,14 @@ function setup({hold=false,monitor='on'}={}){
  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped('src/domain/monitor-policy.js','MonitorPolicy')+'\n'+scoped('src/catalog-poster-weekly.js','CatalogPosterWeekly')+'\n'+fs.readFileSync('src/monitor.js','utf8'),ctx);
  ctx.fetch=async()=>new Response('',{status:200});
  ctx.RatingsOrchestration={async readModel(){return {mode:'cloudflare',health:'healthy',failure:null};}};
- const world={P:'7f3c2a10-0000-4000-8000-00000000abcd',generation:10,publishedAt:at(T0),chain:null,run:null,reads:0,unreadable:false};
- ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold,async readProducerMonitorFacts(){
+ const world={P:'7f3c2a10-0000-4000-8000-00000000abcd',generation:10,publishedAt:at(T0),chain:null,run:null,reads:0,unreadable:false,ready:true,runs:{}};
+ ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold,async readProducerMonitorFacts(_env,{prior=null}={}){
   world.reads++;if(world.unreadable)throw new Error('d1 down');
-  return {ready:true,programmeRunId:world.P,generation:world.generation,label:world.P+':'+world.generation,publishedAt:world.publishedAt,chain:world.chain,run:world.run};}};
+  if(world.ready===false)return {ready:false};
+  const current=world.P+':'+world.generation;
+  // AIR-692: the conditional lookup of an earlier generation (a durably passed run is immutable), answered from `world.runs`.
+  const prove=prior&&prior!==current?{label:prior,run:world.runs?.[prior]||null}:null;
+  return {ready:true,programmeRunId:world.P,generation:world.generation,label:current,publishedAt:world.publishedAt,chain:world.chain,run:world.run,prior:prove};}};
  const env=baseEnv(bucket,{MONITOR:monitor,MONITOR_WEBHOOK_URL:'https://hooks.example/alert',DB:{}});
  bucket.set('sync.json',{runId:world.P,stage:'complete',updatedAt:at(T0-3*H),failures:[]});
  bucket.set('enrichment/prediction-queue.json',{pending:[],refreshedAt:at(T0-3*H),lastBatch:null});
@@ -326,5 +330,34 @@ async function agree(t,now,expected){
  await check({n_applied:0,n_noop:0,n_kept:0,n_failed:0},0,400,0,/обработано 0 из 400 единиц$/);
  await check({n_applied:'12',n_noop:'3',n_kept:'0'},15,400,0,/обработано 15 из 400 единиц$/);
  await check({n_applied:-1},null,400,0,/обработано: нет данных$/);
+}
+// 13. AIR-692: a normal idle after a proven pass is not "no progress" in the footer either, across the corrected rollover scenarios, and the page read writes nothing.
+{
+ // (a) previous generation observed pending, durably passed between ticks, superseded: the exact lookup closes the boundary.
+ const t=setup(),w=t.world;
+ w.chain=chain();w.run=run(w,{n_applied:50,updated_at:at(T0+20*MIN)});
+ await agree(t,T0+30*MIN,'waiting');
+ w.runs[label(w)]=run(w,{pass_state:'passed',applied_generation:label(w),n_applied:400,completed_at:at(T0+50*MIN)});
+ w.generation=11;w.publishedAt=at(T0+24*H);w.chain=null;w.run=null;
+ const r=await agree(t,T0+24*H+58*MIN,'waiting');
+ assert.notEqual(r.source.state,'failed');assert.notEqual(r.source.code,'producer_stalled');
+}
+{
+ // (b) a proven zero-unit pass, a long idle, an unready observation, then a new publication without a run: the closed boundary survives.
+ const t=setup(),w=t.world;
+ w.chain=chain({owner_state:'complete'});w.run=run(w,{pass_state:'passed',applied_generation:label(w),unit_count:0,completed_at:at(T0+10*MIN),updated_at:at(T0+10*MIN)});
+ await agree(t,T0+H,'current');
+ w.ready=false;t.clock.now=T0+22*H;await t.M.run(t.env,{now:T0+22*H});
+ w.ready=true;w.generation=11;w.publishedAt=at(T0+23*H);w.chain=null;w.run=null;
+ await agree(t,T0+24*H+MIN,'waiting');
+}
+{
+ // (c) an unfinished pass keeps its streak through an unready observation and a rollover: still a stall for the footer.
+ const t=setup(),w=t.world;
+ w.chain=chain();w.run=run(w,{n_applied:0,cursor_id:null,updated_at:at(T0)});
+ await agree(t,T0+MIN,'waiting');
+ w.ready=false;t.clock.now=T0+H;await t.M.run(t.env,{now:T0+H});
+ w.ready=true;w.generation=11;w.publishedAt=at(T0+3*H);w.run=null;
+ await agree(t,T0+4*H,'stalled');
 }
 console.log('footer canonical_producer source: ok');

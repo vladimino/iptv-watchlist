@@ -20,7 +20,7 @@ const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const template=path.join(root,'t.sqlite');
 assert.equal(sqlite(template,chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
-assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),49,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority) then 0032 (dormant EPG Channel authority), 0035 (dormant import receipts), 0036 (lookup indexes), 0037 (dormant Watchlist membership projection), 0038 (Producer outcome outbox, ADR 0208), 0039 (dormant receipt operation key, AIR-600), 0040 (retirement ledger movie_id index, AIR-667), 0041 (dormant identity evidence ledger, ADR 0213), 0042 (dormant identity evidence writer control, ADR 0215), 0043 (film_redirect target index, AIR-647)');
+assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),50,'the whole chain (0050 Discovery enrichment scope, dormant; 0049 provenance, dormant): 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority) then 0032 (dormant EPG Channel authority), 0035 (dormant import receipts), 0036 (lookup indexes), 0037 (dormant Watchlist membership projection), 0038 (Producer outcome outbox, ADR 0208), 0039 (dormant receipt operation key, AIR-600), 0040 (retirement ledger movie_id index, AIR-667), 0041 (dormant identity evidence ledger, ADR 0213), 0042 (dormant identity evidence writer control, ADR 0215), 0043 (film_redirect target index, AIR-647)');
 assert.equal(Number(one(template,'SELECT COUNT(*) FROM canonical_producer_chain')),0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 let n=0;
@@ -708,6 +708,17 @@ for(const [label,setup,expected] of [
  assert.equal(seen.length,3);
  assert.equal(withChain.chain.owner_state,'pending');
  assert.equal(withChain.label,'run-p:10');
+ // AIR-692: a remembered earlier generation adds exactly ONE more indexed SELECT of that exact source_generation (never more, never a write), answers null
+ // without a run and is not read at all when it is the published one.
+ seen.length=0;
+ const lookup=await readProducerMonitorFacts(env,{prior:'run-q:3'});
+ assert.equal(seen.length,4,'three statements plus one conditional lookup, got '+seen.length);
+ assert.ok(seen.every(text=>/^\s*SELECT/i.test(text)),'the lookup is a read');
+  assert.ok(/FROM canonical_producer_run WHERE origin='epg' AND source_generation='run-q:3'/.test(seen[seen.length-1]),'the lookup is by the exact generation, indexed, one row');
+ assert.deepEqual([lookup.prior.label,lookup.prior.run],['run-q:3',null]);
+ seen.length=0;
+ assert.equal((await readProducerMonitorFacts(env,{prior:'run-p:10'})).prior,null);
+ assert.equal(seen.length,3,'the published generation is never looked up again');
  // A dormant marker names nothing and reads one statement only.
  const prepared=database('prepared');
  const none=[];

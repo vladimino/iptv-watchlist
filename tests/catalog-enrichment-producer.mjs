@@ -93,6 +93,50 @@ const filmJson=file=>JSON.parse(rows(file,`SELECT film_json AS j FROM catalog_en
 }
 function file0(w){return w.file;}
 
+// ---- AIR-631 (PV1, ADR 0214 decision 4): the real C1 path DECLARES each core field it fills, so the first declared write after activation is attributed (planning is unchanged) ----
+{
+ const w=await world();
+ const up=upstream({});
+ await step(w,up);
+ // at mode `off` (the migration default) the declaration is ignored: today's rows, no field row
+ assert.equal(rows(w.file,'SELECT mode FROM film_metadata_provenance_control')[0].mode,'off');
+ sqlite(w.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
+ const done=await step(w,up,at(11));
+ assert.equal(done.state,'done');
+ const fieldRows=rows(w.file,`SELECT field,tier,source,origin,anchor_scheme,anchor_value,agreement,observed_at,language,language_basis FROM film_metadata_field WHERE film_id='${FILM}' ORDER BY field`);
+ assert.deepEqual(fieldRows.map(row=>row.field),['genres','poster','runtime','synopsis','url','year'],'every field the core write filled is attributed');
+ assert.ok(fieldRows.every(row=>row.tier==='automatic'&&row.origin==='catalog_enrichment'&&row.agreement==='confirmed'),'declared by the producer, agreement recorded');
+ // ADR 0224 on the REAL writer: on a blank field the verified Russian TMDB synopsis and poster outrank the assumed-English synopsis and the unlabelled poster of Letterboxd, and are persisted with their verified tag
+ assert.deepEqual(fieldRows.filter(row=>['synopsis','poster'].includes(row.field)).map(row=>[row.field,row.source,row.anchor_scheme,row.anchor_value,row.language,row.language_basis]),[['poster','tmdb','tmdb','603','ru','explicit'],['synopsis','tmdb','tmdb','603','ru','explicit']]);
+ // every other field keeps the fixed provider order (Letterboxd under its anchor) and carries no language
+ assert.deepEqual(fieldRows.filter(row=>!['synopsis','poster'].includes(row.field)).map(row=>[row.field,row.source,row.anchor_scheme,row.anchor_value,row.language,row.language_basis]),['genres','runtime','url','year'].map(field=>[field,'letterboxd','letterboxd','abc',null,null]));
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_history')[0].n,0,'a fill adds no history');
+ {// Letterboxd is the only observation (TMDB unavailable): its synopsis is persisted as ASSUMED English by the real writer, never as an explicit tag, and no other field carries a language
+  const lb=await world();
+  await step(lb,upstream({tm:'transport'}));
+  sqlite(lb.file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=2,updated_at='"+T+"',updated_by='test'");
+  await step(lb,upstream({tm:'transport'}),at(11));
+  const persisted=rows(lb.file,`SELECT field,source,language,language_basis FROM film_metadata_field WHERE film_id='${FILM}' ORDER BY field`);
+  assert.deepEqual(persisted.find(row=>row.field==='synopsis'),{field:'synopsis',source:'letterboxd',language:'en',language_basis:'assumed'});
+  assert.ok(persisted.filter(row=>row.field!=='synopsis').every(row=>row.language===null&&row.language_basis===null),'no other field carries a language');
+ }
+ {// provenance mode `off` and an absent schema: the declaration is ignored and today's values are written, no field row
+  const off=await world();
+  await step(off,upstream({}));await step(off,upstream({}),at(11));
+  assert.equal(rows(off.file,'SELECT COUNT(*) AS n FROM film_metadata_field')[0].n,0);
+  assert.equal(rows(off.file,`SELECT synopsis FROM film_metadata WHERE film_id='${FILM}'`)[0].synopsis,'tm synopsis','the flat values are the same at off');
+ }
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,'the producer\'s own provenance rows wake nothing');
+}
+{
+ // the same path at `off`: the declaration is ignored and no provenance is written
+ const w=await world();
+ const up=upstream({});
+ await step(w,up);await step(w,up,at(11));
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM film_metadata_field')[0].n,0,'`off` writes no field row');
+ assert.equal(meta(w.file).year,1999);
+}
+
 // ---- paused or inactive: nothing happens before a request ----
 {
  const w=await world();
@@ -617,5 +661,24 @@ function file0(w){return w.file;}
  const md=Object.fromEntries((mixedWrote.report.declarations||[]).map(item=>[item.field,item.source]));
  assert.deepEqual([md.synopsis,md.poster,md.year,md.url],['tmdb','tmdb','letterboxd','letterboxd'],'the selected value and its declaration implement the language rule only for synopsis and poster');
  assert.equal(rows(mixed.file,`SELECT synopsis FROM film_metadata WHERE film_id='${FILM}'`)[0].synopsis,'tm synopsis');
+}
+// ---- AIR-684: the producer on a RECORDED TMDB response (603, `ru-RU`, captured once under the owner's approval): the whole path from the real response shape to the stored rows and the observer's versions ----
+{
+ const recorded=JSON.parse(fs.readFileSync('tests/fixtures/tmdb-recorded/603-ru.json','utf8'));
+ const w=await world({lid:null,scope:'discovery'});
+ const up=upstream({lb:'404',tm:recorded});
+ for(let i=0;i<8;i++){const out=await step(w,up,at(10+i));if(['idle','not_admitted'].includes(out.state))break;}
+ const st=Object.fromEntries(rows(w.file,"SELECT part||':'||source||':'||slot AS k,status,source_version AS v FROM catalog_enrichment_state WHERE part<>'film'").map(r=>[r.k,r]));
+ assert.equal(st['core:tmdb:0'].status,'complete');assert.equal(st['localization:tmdb:0'].status,'complete');
+ const m=meta(w.file);
+ const ruOverview=recorded.translations.translations.find(entry=>entry.iso_639_1==='ru'&&entry.iso_3166_1==='RU').data.overview.trim();
+ assert.deepEqual([m.year,m.runtime,m.synopsis],[1999,136,ruOverview],'the real response filled the blank fields: the tagged Russian synopsis');
+ assert.deepEqual(JSON.parse(m.genres_json),['Боевик','Фантастика'],'genres through the id table, in the existing vocabulary');
+ assert.ok(m.poster.startsWith('https://image.tmdb.org/t/p/w500/')&&m.poster.endsWith('/2GfsfNLkJo2oOGTS9VZ4cPNM6tu.jpg'),'the stable selector picked the widest Russian poster by path');
+ assert.equal(rows(w.file,`SELECT COUNT(*) AS n FROM film_person_credit WHERE film_id='${FILM}'`)[0].n,recorded.credits.cast.length+2,'the whole recorded cast and both directors');
+ assert.equal(st['core:tmdb:0'].v,(await D.tmdbPartVersions(recorded,603)).core,'observer and producer: the same core version from the recorded response');
+ assert.equal(st['localization:tmdb:0'].v,(await D.tmdbPartVersions(recorded,603)).localization);
+ // the same recorded response observed again: nothing is written, nothing wakes, no epoch change
+ assert.deepEqual(await D.emitSourceChanged(w.env,{tmdbId:'603',movie:recorded,at:at(60)}),{state:'unchanged',parts:[]},'an identical complete observation of the recorded response is a no-op');
 }
 console.log('catalog enrichment producer: ok');

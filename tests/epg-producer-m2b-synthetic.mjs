@@ -115,7 +115,7 @@ const SMALL={
  assert.equal(stress.report.byKind.person_mutation.units,50);
  assert.equal(stress.report.byKind.person_mutation.noop,50);
  assert.equal(stress.report.byKind.person_state,undefined);
- assert.equal(stress.report.d1ReadsPerUnit.total,1*9+50*4+1*4);
+ assert.equal(stress.report.d1ReadsPerUnit.total,1*10+50*4+1*4);
  assert.equal(JSON.stringify(measured).includes('film:'),false);
  assert.equal(JSON.stringify(measured).includes('person:'),false);
  assert.equal(JSON.stringify(measured).includes('Synthetic'),false);
