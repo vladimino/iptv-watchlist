@@ -95,7 +95,9 @@ async function ancestors(db,survivors){
 // One page: Films with id > after, in id order. Returns the classified rows, the derived facts per Film, a summary, the next cursor and the
 // statements/rows the page read. options.coverage(filmId, aliases) -> {status, reason} supplies candidate coverage (ADR 0216 decision 6b);
 // without it coverage is `incomplete` (ratings_evidence_not_read), so no fingerprint or prediction is ever proved absent.
-export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAULT,coverage=null}={}){
+// options.ids (AIR-666): classify exactly these Films instead of a keyset page (at most `limit`, canonical `film:` ids, no duplicates); an id with no film row is
+// simply not in the result. `next` is then null. Everything else, the read-only guard and the marker generation checks included, is unchanged.
+export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAULT,coverage=null,ids=null}={}){
  const raw=database(env);
  if(!raw)throw failed('parity_unavailable');
  const size=Number(limit);
@@ -104,7 +106,8 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  const stats=counter(),db=readOnly(raw,stats);
  const names=await tableNames(db);
  const before=await markers(env,db,names);
- const page=(await read(db,'SELECT id FROM film WHERE id>? ORDER BY id LIMIT ?',[after,size])).map(row=>row.id);
+ if(ids!==null&&(!Array.isArray(ids)||ids.length>size||new Set(ids).size!==ids.length||ids.some(id=>typeof id!=='string'||!FILM.test(id))))throw failed('parity_invalid');
+ const page=ids===null?(await read(db,'SELECT id FROM film WHERE id>? ORDER BY id LIMIT ?',[after,size])).map(row=>row.id):(await chunked(db,'SELECT id FROM film WHERE id IN (/*ids*/)',ids)).map(row=>row.id).sort();
  const routes=await redirects(db,page);
  const survivors=[...new Set([...routes.values()].map(item=>item.survivor).filter(Boolean))];
  const both=[...new Set([...page,...survivors])];
@@ -178,8 +181,10 @@ export async function readDimensionParity(env,{after='',limit=PARITY_PAGE_DEFAUL
  }
  return {
   writes:0,
+  // The generations the classification was read under (tokens, not labels): a writer that must not outlive this proof asserts them inside its own batch.
+  pins:{filmPerson:Number.isInteger(before.film.generation)?before.film.generation:null,prediction:Number.isInteger(prediction.generation)?prediction.generation:null,ownerReview:Number.isInteger(before.owner.generation)?before.owner.generation:null},
   markers:{filmPerson:before.film.state,prediction:prediction.available?'open':prediction.reason,ownerReview:before.owner.available?'open':before.owner.reason},
-  films:page.length,next:page.length===size?page[page.length-1]:null,
+  films:page.length,next:ids===null&&page.length===size?page[page.length-1]:null,
   classified,facts,summary:summarize(classified),
   cost:{statements:stats.statements,rowsReturned:stats.rows},
  };
