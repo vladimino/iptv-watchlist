@@ -373,4 +373,21 @@ function file0(w){return w.file;}
  void snapshot;
  assert.equal(meta(w.file),null);
 }
+
+// ---- the ANCHOR SET fences the state publication: an anchor change commits while its inbox event is still pending ----
+{
+ const w=await world();
+ await step(w,upstream({}));                       // the anchor check opens the plan
+ const up=upstream({});
+ // a competing identity writer adds a second trusted tmdb-independent anchor value change: the Film's trusted claims change while the plan is in flight
+ const racing=async url=>{if(String(url).startsWith('https://api.themoviedb.org/'))sqlite(w.file,"UPDATE film_external_id SET value='604' WHERE film_id='"+FILM+"' AND scheme='tmdb'");return up(url);};
+ racing.calls=up.calls;
+ const out=await step(w,racing,at(12));
+ const pending=rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE kind='anchor_changed' AND subject='"+FILM+"' AND state='pending'")[0].n;
+ assert.ok(pending>=1,'the anchor change is still an unconsumed inbox event');
+ assert.equal(meta(w.file),null,'the plan whose anchors changed wrote no metadata');
+ const settled=rows(w.file,"SELECT part,status FROM catalog_enrichment_state WHERE part<>'film' AND status NOT IN ('due')");
+ assert.deepEqual(settled,[],'and settled no part row as current: '+JSON.stringify(out.state));
+ assert.ok((out.report?.units||[]).every(unit=>unit.state==='stale'),'every unit answered stale, none failed the Film');
+}
 console.log('catalog enrichment producer: ok');

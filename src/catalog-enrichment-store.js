@@ -12,7 +12,11 @@ export const LEASE_PROJECTION='catalog_enrichment';
 export const LEASE_TTL_MS=5*60000;
 export const SCOPES=Object.freeze(['rated','c3a','c3b','discovery']);
 // The scopes whose membership an `admitted` signal of a source may create.
-export const SOURCE_SCOPES=Object.freeze({rated:['rated','c3a'],watchlist:['c3b'],discovery:['discovery'],letterboxd:[]});
+export const SOURCE_SCOPES=Object.freeze({rated:['rated'],watchlist:['c3b'],discovery:['discovery'],letterboxd:[]});
+// A scope that is bootstrapped from existing members (not from a live emitter of its own) is addressed by the signal's PART: `admitted | tmdb:<n> | rated | c3a` is the c3a membership of that Film, a different key from its rated
+// membership, so the two scopes keep distinct authorized memberships and each deduplicates only its own overlap. The cutoff of the rated scope can never be bypassed by the c3a signal, and vice versa.
+export const PART_SCOPES=Object.freeze(['c3a']);
+export const signalScopes=signal=>PART_SCOPES.includes(signal?.part)?[signal.part]:(SOURCE_SCOPES[signal?.source]||[]);
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const instant=value=>{if(typeof value!=='string'||!ISO.test(value))throw failed('film_person_invalid');return value;};
 const marks=list=>list.map(()=>'?').join(',');
@@ -107,8 +111,8 @@ export async function runnableSignals(env,{now,limit=50}){
  const handle=db(env);
  // Eligibility is decided in SQL BEFORE the window: a signal whose source has no enabled scope is not a candidate, so held heads can never fill the LIMIT and hide runnable signals behind them.
  const sources=Object.keys(SOURCE_SCOPES).filter(source=>(SOURCE_SCOPES[source]||[]).length);
- const eligible=sources.map(source=>`(s.source=? AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope IN (${marks(SOURCE_SCOPES[source])})))`).join(' OR ')||'0';
- const eligibleParams=sources.flatMap(source=>[source,...SOURCE_SCOPES[source]]);
+ const eligible=[...sources.map(source=>`(s.source=? AND s.part='' AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope IN (${marks(SOURCE_SCOPES[source])})))`),...PART_SCOPES.map(()=>"(s.part=? AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope=?))")].join(' OR ')||'0';
+ const eligibleParams=[...sources.flatMap(source=>[source,...SOURCE_SCOPES[source]]),...PART_SCOPES.flatMap(scope=>[scope,scope])];
  const admitted=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,e.film_id AS film_id FROM enrichment_signal s JOIN film_external_id e ON e.scheme='tmdb' AND e.value=substr(s.subject,6) AND e.trusted=1 AND e.conflicting=0 WHERE s.kind='admitted' AND s.state='pending' AND s.acked_version<s.version AND s.subject LIKE 'tmdb:%' AND (s.retry_at IS NULL OR s.retry_at<=?) AND (${eligible}) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) ORDER BY s.armed_at LIMIT ?`,[now,...eligibleParams,limit]);
  const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=s.subject) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,limit]);
 
@@ -141,7 +145,7 @@ export function effectStatements({signal,guard,at}){
  const G=guard.sql,params=()=>[...guard.params];
  const filmId=signal.filmId||signal.subject;
  if(signal.kind==='admitted'){
-  const scopes=SOURCE_SCOPES[signal.source]||[];
+  const scopes=signalScopes(signal);
   return [
    [`INSERT OR IGNORE INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) SELECT ?,scope,?,? FROM catalog_enrichment_scope WHERE enabled=1 AND scope IN (${marks(scopes)}) AND ${G} ORDER BY CASE scope ${scopes.map((_,i)=>`WHEN ? THEN ${i}`).join(' ')} END LIMIT 1`,[filmId,at,[signal.kind,signal.subject,signal.source,signal.part].join('|'),...scopes,...params(),...scopes]],
    [`INSERT OR IGNORE INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,plan_epoch) SELECT ?,'film','*',0,'active','check_anchors',?,?,0 WHERE ${G}`,[filmId,at,at,...params()]],
@@ -165,7 +169,7 @@ export function ackStatement({signal,guard}){
 // with the next retry and never blocks another signal.
 export async function consumeSignal(env,{signal,generation,leaseId,now}){
  instant(now);
- const scopes=signal.kind==='admitted'?(SOURCE_SCOPES[signal.source]||[]):null;
+ const scopes=signal.kind==='admitted'?signalScopes(signal):null;
  if(signal.kind==='admitted'&&!scopes.length)return {consumed:false,reason:'no_scope'};
  const seen=await one(db(env),'SELECT acked_version FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=?',[signal.kind,signal.subject,signal.source??'',signal.part??'']);
  if(seen&&Number(seen.acked_version)>=signal.version)return {consumed:false,reason:'already_consumed'};

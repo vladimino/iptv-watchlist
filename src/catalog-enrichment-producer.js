@@ -21,6 +21,9 @@ const guardSql=ctx=>{
  const lease=Plan.leaseGuard(ctx.leaseId,ctx.now),control=Plan.controlGuard(ctx.generation);
  let sql=`${lease.sql} AND ${control.sql}`;const params=[...lease.params,...control.params];
  if(ctx.filmId){sql+=' AND EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)';params.push(ctx.filmId,ctx.filmId);}
+ // the ANCHOR SET the plan was read at (the trusted tmdb and letterboxd claims of the Film and their uniqueness): an anchor change commits independently of its inbox event, so a plan whose anchors changed after it was read must
+ // not publish its rows as current even while that event is still pending
+ if(ctx.anchorGuard){sql+=` AND ${ctx.anchorGuard.sql}`;params.push(...ctx.anchorGuard.params);}
  if(ctx.filmId&&Number.isInteger(ctx.planEpoch)){sql+=" AND EXISTS (SELECT 1 FROM catalog_enrichment_state pf WHERE pf.film_id=? AND pf.part='film' AND pf.source='*' AND pf.slot=0 AND pf.plan_epoch=?)";params.push(ctx.filmId,ctx.planEpoch);}
  return {sql,params};
 };
@@ -137,6 +140,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  if(filmRow.reason==='check_anchors'){filmRow={...filmRow,reason:null,retryAt:null,transportStreak:0};await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch});}
  // from here on every state-row effect is fenced by the plan epoch this plan was read at
  ctx.planEpoch=filmRow.planEpoch;
+ ctx.anchorGuard=Plan.anchorSetGuard(filmId,context.anchors);
  if(!filmRow.film)filmRow={...filmRow,film:known};
  writeWait.filmRow=filmRow;writeWait.known=filmRow.film;
  if(filmRow.status==='identity_disagreement')return {state:'blocked',reason:'identity_disagreement'};

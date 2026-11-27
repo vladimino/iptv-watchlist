@@ -261,9 +261,10 @@ BEGIN
  VALUES ('protection_released', OLD.film_id, '', OLD.dimension, 1, 0, 'pending', 'film_dimension', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 0)
  ON CONFLICT (kind, subject, source, part) DO UPDATE SET version = version + 1, state = 'pending', cause_ref = excluded.cause_ref, armed_at = excluded.armed_at, attempts = 0, last_error = NULL, retry_at = NULL;
 END;
--- The rated admission: gated by the rated scope's permanent `activated` flag, so it writes nothing until AIR-607 activates the scope. Subject `tmdb:<n>`, source `rated`.
+-- The rated admission: gated by the rated scope's permanent `activated` flag AND by the approved cohort predicate (`verified_at >= cutoff_at`, the same predicate the bootstrap applies), so it writes nothing until AIR-607 activates the scope
+-- and never admits a delayed or backdated row from before the cutoff. A scope with no cutoff admits nothing live. Subject `tmdb:<n>`, source `rated`.
 CREATE TRIGGER catalog_enrichment_rated_admitted AFTER INSERT ON film_rated_admission
-WHEN EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope = 'rated' AND activated = 1)
+WHEN EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope = 'rated' AND activated = 1 AND cutoff_at IS NOT NULL AND NEW.verified_at >= cutoff_at)
 BEGIN
  INSERT INTO enrichment_signal (kind, subject, source, part, version, acked_version, state, cause_ref, armed_at, attempts)
  VALUES ('admitted', 'tmdb:' || NEW.tmdb, 'rated', '', 1, 0, 'pending', 'film_rated_admission', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 0)

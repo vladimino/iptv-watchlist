@@ -30,9 +30,15 @@ Each scenario runs the real drainer (`src/catalog-enrichment-drain.js`) with the
 
 24 live Films (rated membership) and 24 background Films (held only by the historical widening) under a cap of five Films per run, so run indexes give a queue-latency resolution. Live Films finished by runs 0 to 5 (median 2); background Films progressed from the first run and finished by runs 0 to 9 (median 7). Live work is served first and the background share keeps progressing across the same runs. 10 runs, nine of them handovers, 34,474 statements for 48 Films.
 
-## `epg`: with and without a progressing publication
+## `epg`: the actual publication path with and without the producer
 
-12 Films drained with no publication (2 runs, 8,650 statements, 12 TMDB and 12 Wikidata requests) and again with a progressing publication evidence (a `loading` stage with a live publisher claim) for six runs, after which the stage ends. During the hold **no canonical unit was committed** and every held run ended in `yield`; the inbox, the anchor check and the fetch continued, and each held run cost one Film probe, so the hold added 12 upstream requests (six probes, two sources each) and about 180 statements in total. After the stage ended the queue drained in the next two runs. This is the producer side only: the EPG publication itself is not run here, so **EPG publication latency with the producer active is not measured**.
+The scenario runs the real `publishGeneration` of `src/published-epg.js` (staging, validation, publication under its own claim) and interleaves the drainer at the publisher's own `afterValidate` point, the only point of the publication where another writer can run between its steps. 12 Films, three cases:
+
+- **Publication alone:** about 26 ms on the stand-in. **Enrichment alone:** 2 runs, 8,602 statements, 12 TMDB and 12 Wikidata requests.
+- **Both:** six producer runs while the stage was `validated` with a live claim. Every one ended in `yield` with the evidence `epg_stage`; **no canonical unit was committed during the publication**; the first held run made one Film probe (2 upstream requests, 126 statements) and each of the other five made **no upstream request** (55 statements each: the rechecks run before any fetch because the previous run yielded). The publication's own time was about 15 ms with the producer running (the total of about 120 ms includes the producer's six runs), so it was not slowed by the producer; the stand-in's timings are too coarse for more than that. The publication completed (stage `published`), and the queue drained in the next two runs.
+- **A publisher that fails after validating:** the stage stays `validated`, nobody renews its claim, and after the claim expired the producer drained all 12 Films in two runs: a stalled publication does not hold enrichment past its own claim. The `held` cutover marker of the authority is not a hold at all.
+
+This measures the producer side and the publisher's own steps on the stand-in; **EPG publication latency on the Worker is not measured**.
 
 ## `populated`: a 20,000 Film catalog
 

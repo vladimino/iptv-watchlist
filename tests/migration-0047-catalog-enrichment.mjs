@@ -138,8 +138,14 @@ fails(copyOf(db,'down'),'UPDATE schema_contract SET version=46 WHERE id=1');
  assert.deepEqual(keys(file),[],'no scope row: an admission writes nothing');
  exec(file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',0,0,1,'"+T+"');"+admission('film:b','102'));
  assert.deepEqual(keys(file),[],'a scope row that is not activated: nothing');
+ // activated, but no approved cutoff yet: the live path admits nothing (the cohort predicate is the cutoff, not the activation)
  exec(file,"UPDATE catalog_enrichment_scope SET activated=1,enabled=0,revision=2 WHERE scope='rated';"+admission('film:c','103'));
- assert.deepEqual(keys(file),['admitted|tmdb:103|rated||v1'],'activated: one `admitted` signal, subject tmdb:<n>, source rated, even while disabled');
+ assert.deepEqual(keys(file),[],'activated without a cutoff: nothing');
+ // the approved cutoff: a row verified at or after it is admitted (even while the scope is disabled); a delayed or backdated row from before it is not
+ exec(file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:e',2,NULL,'E','"+T+"'),('film:f',2,NULL,'F','"+T+"');UPDATE catalog_enrichment_scope SET cutoff_at='"+T+"',revision=3 WHERE scope='rated';"+admission('film:e','105'));
+ assert.deepEqual(keys(file),['admitted|tmdb:105|rated||v1'],'at the cutoff: one `admitted` signal, subject tmdb:<n>, source rated, even while disabled');
+ exec(file,"DELETE FROM enrichment_signal;"+admission('film:f','106').replace("'"+T+"','q'","'2026-01-01T00:00:00.000Z','q'"));
+ assert.deepEqual(keys(file),[],'a backdated insert from before the cutoff is not admitted by the live path');
  fails(file,"UPDATE catalog_enrichment_scope SET activated=0 WHERE scope='rated'",/activated_once/);
  fails(file,"DELETE FROM catalog_enrichment_scope WHERE scope='rated'",/no_delete/);
  fails(file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',0,1,1,'"+T+"')");

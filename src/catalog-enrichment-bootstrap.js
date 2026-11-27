@@ -12,8 +12,8 @@ export const BOOTSTRAP_PAGE=50;
 export const BOOTSTRAP_MAX_PAGES=20;
 // The scopes with existing members. rated: the verified rated admissions at or after the approved cutoff; c3a: every admitted rated Film. (c3b and discovery have their own cards; discovery has no bootstrap.)
 const DEFINITIONS=Object.freeze({
- rated:{table:'film_rated_admission',cutoff:true},
- c3a:{table:'film_rated_admission',cutoff:false},
+ rated:{table:'film_rated_admission',cutoff:true,part:''},
+ c3a:{table:'film_rated_admission',cutoff:false,part:'c3a'}, // its own signal key (part = the scope): a distinct authorized membership, never the rated one
 });
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -37,7 +37,7 @@ export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE}){
  const done=page.length<pageSize;
  const fence="EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope=? AND revision=? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?)";
  const fenceParams=[scope,revision,cursor];
- const statements=page.map(item=>[`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) SELECT 'admitted',?,'rated','',1,0,'pending','bootstrap:'||?,?,0 WHERE ${fence} ON CONFLICT (kind,subject,source,part) DO NOTHING`,['tmdb:'+item.tmdb,scope,at,...fenceParams]]);
+ const statements=page.map(item=>[`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) SELECT 'admitted',?,'rated',?,1,0,'pending','bootstrap:'||?,?,0 WHERE ${fence} ON CONFLICT (kind,subject,source,part) DO NOTHING`,['tmdb:'+item.tmdb,definition.part,scope,at,...fenceParams]]);
  // the cursor advance is the LAST statement, with the same fence: it moves only when the page was read at the current revision and cursor
  statements.push([`UPDATE catalog_enrichment_scope SET bootstrap_cursor=?,bootstrap_state=?,updated_at=? WHERE scope=? AND revision=? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?`,[last,done?'done':'running',at,scope,revision,cursor]]);
  await handle.batch(statements.map(([sql,params])=>handle.prepare(sql).bind(...params)));

@@ -6,13 +6,14 @@ import {migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import * as B from '../src/catalog-enrichment-bootstrap.js';
+import * as S from '../src/catalog-enrichment-store.js';
 
 const T='2026-11-26T10:00:00.000Z';
 const OLD='2026-10-01T00:00:00.000Z',CUTOFF='2026-11-01T00:00:00.000Z',NEW='2026-11-10T00:00:00.000Z';
 const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);const o=String(r.stdout).trim();return o?JSON.parse(o):[];};
 const pad=n=>String(n).padStart(4,'0');
-const admission=(i,verified)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:r${pad(i)}',2,NULL,'R','${T}');INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:r${pad(i)}','${1000+i}','code${i}','${'a'.repeat(64)}','T',2000,'k','tmdb_${1000+i}','${verified}','q','${T}');`;
+const admission=(i,verified)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:r${pad(i)}',2,NULL,'R','${T}');INSERT INTO film_external_id VALUES ('film:r${pad(i)}','tmdb','${1000+i}',1,0,NULL);INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:r${pad(i)}','${1000+i}','code${i}','${'a'.repeat(64)}','T',2000,'k','tmdb_${1000+i}','${verified}','q','${T}');`;
 // 130 rated admissions: 30 before the cutoff and 100 at or after it
 function world({scope=true,enabled=1,cutoff=CUTOFF}={}){
  const file=migrated();
@@ -131,6 +132,32 @@ const scopeRow=file=>rows(file,"SELECT bootstrap_state,bootstrap_cursor,revision
  const out=await B.runBootstrap(env,{scope:'c3a',at:T,pageSize:50,maxPages:10});
  assert.deepEqual([out.outcome,out.rows],['done',130]);
  assert.equal(signals(file).length,130,'c3a bootstraps the whole admitted rated cohort, before the cutoff too');
+}
+
+
+// ---- distinct authorized memberships: the c3a signal is its own key, the cutoff of rated cannot be bypassed, and disabling one scope strands nothing of the other ----
+{
+ const {file,env}=world();
+ sql(file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('c3a',1,1,1,'${T}');INSERT INTO catalog_enrichment_control VALUES (1,'inactive',0,1,'${T}','owner');UPDATE catalog_enrichment_control SET state='active',generation=1,revision=2;`);
+ await B.runBootstrap(env,{scope:'rated',at:T,pageSize:50,maxPages:10});
+ await B.runBootstrap(env,{scope:'c3a',at:T,pageSize:50,maxPages:10});
+ const sig=rows(file,"SELECT COUNT(*) AS n,part FROM enrichment_signal GROUP BY part ORDER BY part");
+ assert.deepEqual(sig,[{n:100,part:''},{n:130,part:'c3a'}],'rated signals for the qualifying rows, c3a signals for every admitted Film: two distinct keys, no shared one');
+ // consume every signal through the real guarded consumer
+ const generation=(await S.readControl(env)).generation;
+ assert.equal((await S.acquireLease(env,{leaseId:'lease-boot-aaaa',now:T})).acquired,true);
+ for(let round=0;round<20;round++){
+  const batch=await S.runnableSignals(env,{now:T,limit:50});
+  if(!batch.length)break;
+  for(const signal of batch)await S.consumeSignal(env,{signal,generation:(await S.readControl(env)).generation,leaseId:'lease-boot-aaaa',now:T});
+ }
+ const members=film=>rows(file,`SELECT scope FROM catalog_enrichment_member WHERE film_id='${film}' ORDER BY scope`).map(row=>row.scope);
+ assert.deepEqual(members('film:r0005'),['c3a'],'a Film from before the cutoff is a c3a member only: the rated cutoff is not bypassed');
+ assert.deepEqual(members('film:r0050'),['c3a','rated'],'a Film at or after the cutoff holds both authorized memberships');
+ // disabling rated strands nothing that c3a holds: the Film keeps an enabled membership
+ sql(file,"UPDATE catalog_enrichment_scope SET enabled=0,revision=revision+1 WHERE scope='rated'");
+ const eligible=rows(file,"SELECT COUNT(DISTINCT film_id) AS n FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1")[0].n;
+ assert.equal(eligible,130,'every Film still has an enabled membership after rated is disabled');
 }
 
 // dormant: nothing in the Worker or any other module imports the bootstrap
