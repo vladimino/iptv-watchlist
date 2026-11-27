@@ -185,6 +185,81 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
  const chunk=await call(env,WRITE,{payload:retry({expectedRows:[{part:'credits',source:'tmdb',slot:1,status:'deferred_repair',updatedAt:T}]})});
  assert.equal(chunk.status,200);assert.equal(rows(file,"SELECT status FROM catalog_enrichment_state WHERE part='credits' AND slot=1")[0].status,'due','a credits chunk is retried by its own slot');
 }
+
+// ---- the owner retry is ONE compare-and-swap for the whole request: a competing write between the first read and the batch ----
+{
+ const T1='2026-11-26T10:05:00.000Z';
+ // a fresh world whose env runs `compete` once, after the route's own read and just before its batch
+ const racing=(compete)=>{
+  const file=migrated();
+  sql(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:a',2,NULL,'A','${T}');`);
+  activate(file);
+  sql(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,plan_epoch,due_since,updated_at) VALUES ('film:a','film','*',0,'active',3,'${T}','${T}');
+   INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,refresh_epoch,failures,due_since,updated_at) VALUES ('film:a','core','tmdb',0,'needs_attention','x',4,6,'${T}','${T}'),('film:a','core','letterboxd',0,'deferred_repair','y',7,3,'${T}','${T}');`);
+  let fired=false;
+  const env=baseEnv({DB:d1Standin(file,{onBatch:async()=>{if(!fired){fired=true;compete(file);}}})});
+  return {file,env};
+ };
+ const two=[{part:'core',source:'tmdb',slot:0,status:'needs_attention',updatedAt:T},{part:'core',source:'letterboxd',slot:0,status:'deferred_repair',updatedAt:T}];
+ const state=file=>JSON.stringify(rows(file,"SELECT part,source,slot,status,refresh_epoch,plan_epoch,updated_at,failures FROM catalog_enrichment_state ORDER BY 1,2,3"));
+ const payload={action:'retry',requestId:'req-0000cas1',filmId:'film:a',expectedRows:two};
+ // 1. two targets, ONE of them moved by a competing tick: the whole request is refused, the other target does not reset and the Film epoch does not move
+ {
+  const {file,env}=racing(f=>sql(f,`UPDATE catalog_enrichment_state SET status='deferred_repair',failures=failures+1,updated_at='${T1}' WHERE part='core' AND source='tmdb'`));
+  const before=state(file);
+  const out=await call(env,WRITE,{payload});
+  const after=JSON.parse(state(file));
+  assert.deepEqual([out.status,out.body.error,out.body.outcome],[409,'stale_rows','rejected'],'a moved row refuses the whole request');
+  const letter=after.find(row=>row.source==='letterboxd'),film=after.find(row=>row.part==='film'),moved=after.find(row=>row.source==='tmdb');
+  assert.deepEqual([letter.status,letter.refresh_epoch,letter.failures,letter.updated_at],['deferred_repair',7,3,T],'the OTHER target was not reset by the refused request');
+  assert.deepEqual([film.plan_epoch,film.updated_at],[3,T],'the Film epoch did not advance for a refused request');
+  assert.deepEqual([moved.status,moved.updated_at],['deferred_repair',T1],'only the competing write changed anything');
+  assert.ok(out.body.current.some(row=>row.source==='tmdb'&&row.updatedAt===T1),'the answer carries the current rows for the owner to reload');
+  void before;
+ }
+ // 2. a single target moved after the first read
+ {
+  const {file,env}=racing(f=>sql(f,`UPDATE catalog_enrichment_state SET updated_at='${T1}' WHERE part='core' AND source='tmdb'`));
+  const out=await call(env,WRITE,{payload:{...payload,requestId:'req-0000cas2',expectedRows:[two[0]]}});
+  assert.deepEqual([out.status,out.body.outcome],[409,'rejected']);
+  const after=JSON.parse(state(file));
+  assert.deepEqual([after.find(row=>row.part==='film').plan_epoch,after.find(row=>row.source==='tmdb').refresh_epoch,after.find(row=>row.source==='tmdb').status],[3,4,'needs_attention'],'neither the target nor the Film epoch changed');
+ }
+ // 3. a competing write to a selected row that is NOT a target (the Film row the owner also saw): still the whole request
+ {
+  const {file,env}=racing(f=>sql(f,`UPDATE catalog_enrichment_state SET updated_at='${T1}' WHERE part='film'`));
+  const out=await call(env,WRITE,{payload:{...payload,requestId:'req-0000cas3',expectedRows:[...two,{part:'film',source:'*',slot:0,status:'active',updatedAt:T}]}});
+  assert.deepEqual([out.status,out.body.outcome],[409,'rejected']);
+  assert.deepEqual(JSON.parse(state(file)).filter(row=>row.part==='core').map(row=>row.refresh_epoch),[7,4],'no target was reset');
+ }
+ // 4. no competitor: the request applies, both targets reset, the Film epoch rises exactly once, the commit is correlated to this request
+ {
+  const {file,env}=racing(()=>{});
+  const out=await call(env,WRITE,{payload:{...payload,requestId:'req-0000cas4'}});
+  assert.deepEqual([out.status,out.body.outcome],[200,'applied']);
+  const after=JSON.parse(state(file));
+  assert.deepEqual(after.filter(row=>row.part==='core').map(row=>[row.status,row.refresh_epoch]),[['due',8],['due',5]],'both targets reset');
+  assert.equal(after.find(row=>row.part==='film').plan_epoch,4,'the Film epoch rose exactly once');
+  assert.equal(rows(file,"SELECT json_extract(film_json,'$.ownerRetry') AS r FROM catalog_enrichment_state WHERE part='film'")[0].r,'req-0000cas4','the Film row records the request that committed');
+  // the answer names only this request's rows
+  assert.deepEqual(out.body.retried.map(row=>row.source).sort(),['letterboxd','tmdb']);
+ }
+ // 5. the readback is correlated: a lost answer is `applied` only when THIS request's marker is there, never because another request raised the epoch
+ {
+  const {file,env}=racing(()=>{});
+  // the batch commits but the answer is lost: the route must see its own marker and say applied
+  const lossy={...env,DB:new Proxy(env.DB,{get(target,prop){if(prop==='batch')return async list=>{await target.batch(list);throw new Error('network connection lost');};return target[prop];}})};
+  const out=await call(lossy,WRITE,{payload:{...payload,requestId:'req-0000cas5'}});
+  assert.deepEqual([out.status,out.body.outcome],[200,'applied'],'a commit whose answer was lost is proven by this request\'s own marker');
+  // another request raised the Film epoch and the batch of THIS one never committed: not applied
+  const other=racing(f=>sql(f,`UPDATE catalog_enrichment_state SET status='deferred_repair',updated_at='${T1}' WHERE part='core' AND source='tmdb';UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1,updated_at='${T1}' WHERE part='film'`));
+  const failing={...other.env,DB:new Proxy(other.env.DB,{get(target,prop){if(prop==='batch')return async list=>{try{await target.batch(list);}catch{/* the assertion refused it */}throw new Error('network connection lost');};return target[prop];}})};
+  const refused=await call(failing,WRITE,{payload:{...payload,requestId:'req-0000cas6'}});
+  assert.notEqual(refused.body.outcome,'applied','another request\'s epoch increase is never attributed to this one: '+JSON.stringify(refused.body.outcome));
+  assert.deepEqual(JSON.parse(state(other.file)).filter(row=>row.source==='letterboxd').map(row=>[row.status,row.refresh_epoch]),[['deferred_repair',7]],'and the refused request reset nothing');
+  void file;
+ }
+}
 // ---- the wake after a successful owner action: a resume or a retry kicks the drainer, a pause or a refusal does not ----
 {
  const {file,env}=world();activate(file);
