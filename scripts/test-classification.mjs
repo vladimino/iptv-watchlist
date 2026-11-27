@@ -379,6 +379,48 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "migration-0047-catalog-enrichment.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-plan.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-store.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-units.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-sources.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-producer.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-drain.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-settings.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-workflow.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-letterboxd-credits.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-monitor.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-events.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-wake.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-bootstrap.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },

@@ -33,6 +33,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Letterboxd baseline import (owner approval required)](letterboxd-baseline-import.md)
 - [Letterboxd Sync: slots, observation, activation order and rollback (live since 22 and 23 November 2026; owner approval required for every production step)](letterboxd-sync.md)
 - [Letterboxd Sync activation runbook: holdpoints B to F, preflight, the activation deployment and rollback (performed on 22 and 23 November 2026; the record of the plan and its receipts, not a plan to repeat)](letterboxd-activation.md)
+- [Catalog Enrichment Producer: operations and their gates, preflight, reading the state, pause, owner retry and rollback (dormant until an owner activates it)](catalog-enrichment-producer.md)
 - [Letterboxd Diary viewing history: activation, observation and rollback (owner approval required to switch on)](letterboxd-diary-history.md)
 - [Finds display-only title exclusion: build, placement and switch (owner approval required)](finds-display-exclusion.md)
 - [Immutable prediction versions: the writer and the completed historical materialization](prediction-versions.md)

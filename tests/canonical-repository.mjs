@@ -49,11 +49,17 @@ const beforeRefusal=await counts();
 await assert.rejects(()=>repo.applyLink({survivor:linked.survivor,redirect:linked.redirect,metadata,credits:[director]}),error=>error.code==='film_retirement_protected_rows'&&error.rows.some(row=>row.dimension==='localization'&&row.reasons.includes('reviewed')));
 assert.deepEqual(await counts(),beforeRefusal);
 await db.run("DELETE FROM film_dimension WHERE film_id='film:tmdb:1656' AND dimension='localization'");
+// AIR-605 (schema 47): the retired Film holds retained Catalog Enrichment rows (both tables reference the Film). The retirement moves the membership to the survivor and drops the state rows before the delete.
+exec(database,"CREATE TABLE catalog_enrichment_member (film_id TEXT NOT NULL REFERENCES film (id), scope TEXT NOT NULL, admitted_at TEXT NOT NULL, signal_key TEXT NOT NULL, PRIMARY KEY (film_id, scope)) STRICT;CREATE TABLE catalog_enrichment_state (film_id TEXT NOT NULL REFERENCES film (id), part TEXT NOT NULL, source TEXT NOT NULL, slot INTEGER NOT NULL, status TEXT NOT NULL, reason TEXT, due_since TEXT, updated_at TEXT NOT NULL, plan_epoch INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (film_id, part, source, slot)) STRICT;"); // the columns the transfer touches, in the shape of migration 0047 (this database holds schema v1 only)
+await db.run("INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) VALUES ('film:tmdb:1656','rated',?,'k')",[LATER]);
+await db.run("INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,plan_epoch) VALUES ('film:tmdb:1656','core','tmdb',0,'due',?,?,0)",[LATER,LATER]);
 const merged=await repo.applyLink({survivor:linked.survivor,redirect:linked.redirect,metadata,credits:[director]});
 assert.equal(merged.id,'film:28nq');
 assert.equal(merged.canonicalIdentity,'tmdb:1656');
 assert.equal(merged.dimensions.localization.status,'reviewed');
 assert.equal(merged.dimensions.localization.value,'Легенда Зорро');
+assert.deepEqual(await db.all('SELECT film_id,scope FROM catalog_enrichment_member'),[{film_id:'film:28nq',scope:'rated'}],'the membership moved to the survivor');
+assert.deepEqual((await db.all('SELECT film_id,part FROM catalog_enrichment_state')).map(row=>[row.film_id,row.part]),[['film:28nq','film']],'the retired Film state rows are gone and the survivor starts at check_anchors');
 assert.equal(merged.watchlist,true);
 assert.equal(merged.metadata.year,2005);
 assert.deepEqual(merged.credits,[director]);
