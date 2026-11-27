@@ -213,6 +213,50 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
  assert.equal(broken.letterboxd.identityCheck.ledgerUnreadable,true,'an unreadable ledger is a fact, not a zero');
  db.sql('ALTER TABLE watchlist_admission_pending_hidden RENAME TO watchlist_admission_pending');
 }
+// 2c. AIR-691: the fact reader and the policy TOGETHER, on the real owner requeue/createMissing path. A backlog is the ordinary queue; only a document with no free place for a waiting id is a cap refusal.
+{
+ const at=T('2026-11-21T09:45:00Z'),iso=new Date(at).toISOString();
+ const judge=async()=>{const facts=await run('Monitor.collect(__env,'+at+',null)');const check=facts.letterboxd.identityCheck;return {check,keys:[...run('MonitorPolicy').evaluateLetterboxd(facts.letterboxd,at).issues.map(issue=>issue.key).filter(key=>/identity_(cap_refused|backlog_full)/.test(key))]};};
+ const owner=async(action,lids,extra='')=>{const version=await run('LetterboxdFacts.readDiaryIdentityVersioned(__env).then(r=>r.version)');return run('LetterboxdFacts.ownerAction(__env,'+JSON.stringify({action,lids,createMissing:true,slugs:Object.fromEntries(lids.map(l=>[l,'slug-'+l])),expectedVersion:version,by:'owner',why:'test',at:iso})+')');};
+ const entry=(reason,over={})=>({reason,class:reason==='owner_dismissed'?'settled':'not_now',slug:null,attempts:0,streak:0,queuedAt:iso,lastAttemptAt:iso,nextAttemptAt:iso,...over});
+ const put=set=>run('LetterboxdFacts.updateDiaryIdentity(__env,{set:'+JSON.stringify(set)+'})');
+ // 1. owner requeue/createMissing into an empty document: a backlog with free room, a healthy slot, no cap_refused, no backlog_full
+ const waiting=Array.from({length:14},(_,i)=>'wait'+i);
+ assert.equal((await owner('requeue',waiting)).state,'applied');
+ let seen=await judge();
+ assert.equal(seen.check.backlog,14);assert.equal(seen.check.capFull,false);assert.equal(seen.check.capHeld,0);assert.deepEqual(seen.keys,[],'a backlog with free capacity is not a cap refusal: '+JSON.stringify(seen.check));
+ // 2. real exhaustion: 200 entries no one may evict, ids waiting -> cap_refused (not backlog_full)
+ const held=Object.fromEntries(Array.from({length:200},(_,i)=>['held'+i,entry('deferred')]));
+ await put(held);
+ seen=await judge();assert.deepEqual([seen.check.capHeld,seen.check.capFull,seen.check.backlogFull],[200,true,false]);assert.deepEqual(seen.keys,['letterboxd_identity_cap_refused']);
+ // 3. an evictable owner_dismissed entry is free room: the same waiting ids are an ordinary queue again
+ await put({held0:entry('owner_dismissed')});
+ seen=await judge();assert.deepEqual([seen.check.capHeld,seen.check.capFull],[199,false]);assert.deepEqual(seen.keys,[],'room freed by an evictable entry');
+ // 4. recovery: the freed place and a refilled one; an empty backlog never reports a refusal even with a full document
+ await put({held0:entry('deferred')});
+ assert.deepEqual((await judge()).keys,['letterboxd_identity_cap_refused']);
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{backlogRemove:'+JSON.stringify(waiting)+'})');
+ seen=await judge();assert.deepEqual([seen.check.backlog,seen.check.capFull],[0,false]);assert.deepEqual(seen.keys,[],'a full document without waiting ids is healthy');
+ // 5. the backlog at its real bound stays backlog_full
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{backlogAdd:'+JSON.stringify(Object.fromEntries(Array.from({length:2000},(_,i)=>['full'+i,{slug:null,queuedAt:iso,attempts:0}])))+'})');
+ seen=await judge();assert.equal(seen.check.backlogFull,true);assert.deepEqual(seen.keys,['letterboxd_identity_backlog_full']);
+ // 6. one snapshot (review of PR #1041): the document is read ONCE, so capacity and backlog come from the same version. An atomic transition (200 held, empty backlog) -> (199 held, one requeued id) that lands
+ // between two reads would combine into 200 held + 1 waiting, a refusal neither committed state has.
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{backlogRemove:'+JSON.stringify(Array.from({length:2000},(_,i)=>'full'+i))+'})');
+ assert.deepEqual([(await judge()).check.backlog,(await judge()).check.capHeld],[0,200],'the starting version: full document, nothing waiting');
+ await run(`(()=>{const F=LetterboxdFacts,identity=F.readDiaryIdentity,backlog=F.readDiaryBacklog;globalThis.__reads=[];
+  const move=()=>F.updateDiaryIdentity(__env,{set:{held0:${JSON.stringify(entry('owner_dismissed'))}},backlogAdd:{late:{slug:null,queuedAt:${JSON.stringify(iso)},attempts:0}}});
+  F.readDiaryIdentity=async env=>{__reads.push('identity');return identity(env);};
+  F.readDiaryBacklog=async env=>{__reads.push('backlog');await move();return backlog(env);};
+  globalThis.__undo=()=>{F.readDiaryIdentity=identity;F.readDiaryBacklog=backlog;};})()`);
+ const snap=await judge();const reads=[...await run('__reads')];await run('__undo()');
+ assert.deepEqual(reads,['identity'],'the document is read once and the backlog is its own field');
+ assert.deepEqual([snap.check.capHeld,snap.check.backlog,snap.check.capFull],[200,0,false]);assert.deepEqual(snap.keys,[],'no refusal is built from two versions');
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{set:{held0:'+JSON.stringify(entry('deferred'))+'},backlogRemove:["late"]})');
+ // restore the document for the slots below
+ await run('LetterboxdFacts.updateDiaryIdentity(__env,{clear:'+JSON.stringify(Object.keys(held))+',backlogRemove:'+JSON.stringify(Array.from({length:2000},(_,i)=>'full'+i))+'})');
+ assert.deepEqual([(await judge()).check.backlog,(await judge()).check.capHeld],[0,0]);
+}
 async function slot(now){
  const started=await LetterboxdSync.ensure(env,{now});
  const result=await LetterboxdSync.run(env,{slotKey:started.slot,series:0,epoch:1},step,{now:()=>now+60000,ports});
