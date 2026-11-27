@@ -1,5 +1,6 @@
 // AIR-675 / ADR 0217 (Accepted) decision 8b: the ONE common generator of the ATTACH ROOT, the causal root of the evidence row `film_has_id(film, tmdb_movie)` that a later verified TMDB movie of a lid-only Film writes.
-// PURE and DORMANT: no storage, network or clock; nothing calls it from a live path except the owner re-check (`src/letterboxd-lid-attach.js`), which refuses before its first effect while the attach is not activated.
+// PURE: no storage, network or clock. It is the ONE common generator for every real page-check route: the Diary and Watchlist check (`LetterboxdDiaryIdentity.checkOne`), the rated-archive step (`identityStep`) and the owner re-check
+// (`src/admin/lid-recheck.js`, whose attach is dormant until the writer is `on`). The first three write it as the causal root of their evidence rows; the owner re-check writes it as the root of the attach row.
 //
 // `attach_root = sha256([proof_version, lid, slug, path, tmdb, 'movie', title, year, source, tmdb_doc_digest])`: the existing page-check evidence digest of ADR 0207 decision 3 (`lid, slug, path, tmdb, title, year, source`)
 // extended with `proof_version`, the TMDB type, and the digest of the TMDB document fields the agreement check compares (id, title, original title, release year).
@@ -8,7 +9,9 @@
 //    step and the owner re-check checking the same page give the SAME root, and a different caller never manufactures independent corroboration (ADR 0213: independence counts distinct roots). This function takes NO route.
 //  - The agreement inputs are hashed in the normalized form `movieDetailAgrees` already compares (`agreementNorm`); nothing new is normalized.
 //  - Every input is stored on the intent row (`lid_recheck_intent`), so the root can be recomputed. No raw HTML is archived. Nothing is fabricated: a failed agreement check has no root (the caller never calls this).
-// An existing route's legacy digest (`pageCheckDigest` of the Diary, ADR 0207 decision 3) is NOT rewritten by this card: it stays the route's own provenance. Old and new encodings of one source are never counted as independent proof.
+// An existing route's legacy digest (`pageCheckDigest` of the Diary, the archive's own digest) is NOT rewritten: it stays the admission receipt's digest (replay compatibility) and route provenance on the evidence row. The coordinator
+// (`letterboxd-admission-d1.js`, `evidencePlans`) computes the receipt content digest from the LEGACY evidence key and adopts the legacy root for a source that already has a legacy evidence row, so old and new encodings of one source are never
+// counted as independent proof.
 import {agreementNorm} from './letterboxd-rated-admission.js';
 import {normalizeFilmUrl} from './letterboxd-lid-only-digest.js';
 

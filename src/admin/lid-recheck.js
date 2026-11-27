@@ -60,7 +60,7 @@ async function adminLidRecheckRoute(request,env,url){
  if(typeof LetterboxdLidAttach==='undefined'||typeof LetterboxdFacts==='undefined'||typeof LetterboxdRatedCandidates==='undefined'||typeof LetterboxdDiaryIdentity==='undefined')return adminError('reader_unavailable',503);
  const {lid,requestId}=parsed.value;
  try{
-  const out=await LetterboxdLidAttach.lidRecheck(env,{lid,requestId,reacquire:()=>lidRecheckSource(env,lid),ports:{link:args=>LetterboxdFacts.linkAttachedPair(env,args)}});
+  const out=await LetterboxdLidAttach.lidRecheck(env,{lid,requestId,reacquire:()=>lidRecheckSource(env,lid),ports:{link:args=>LetterboxdFacts.linkAttachedPair(env,args),complete:args=>LetterboxdFacts.completeAttachedLink(env,args)}});
   if(out.outcome==='request_conflict')return json({error:'request_conflict',lid,requestId},409);
   return json({lid,requestId,by:access.by,...out});
  }catch(error){

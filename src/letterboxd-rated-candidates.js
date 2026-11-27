@@ -397,7 +397,7 @@ const LetterboxdRatedCandidates = (() => {
     const root = commonRoot || legacy;
     const at = new Date().toISOString();
     const out = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: intended ? {tmdb: intended} : null, receipt: {tmdb: film.tmdb, archiveSha256: sha, title: film.title, year: film.year, filmPath: film.filmPath || null},
-      evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12) + ':legacy:' + legacy, sourceScope: sha, observedAt: at},
+      evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12) + ':legacy:' + legacy, sourceScope: sha, ...(commonRoot ? {legacySourceRoot: legacy} : {}), observedAt: at},
       // ADR 0222: the terminal review is the row's own D1 document write, committed in ONE batch with the history assertion of this attempt (`guard.statement`); a refused batch writes nothing and the attempt replans.
       finalize: async (result, guard) => {
         const reason = result.outcome === 'other_code' ? 'duplicate_tmdb' : result.outcome === 'conflict' ? 'historical_alias_conflict' : 'source_changed';
@@ -440,7 +440,7 @@ const LetterboxdRatedCandidates = (() => {
       return current;
     });
     if (outcome === 'already') {
-      if (atD1) await admitRatedAtD1(env, film, code, sha, evidence);
+      if (atD1) await admitRatedAtD1(env, film, code, sha, evidence, {commonRoot: recover.commonRoot || null});
       else {
         const stored = await writeAdmission(env, film);
         if (stored.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, stored.film);

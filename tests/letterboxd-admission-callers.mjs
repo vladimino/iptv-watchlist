@@ -1035,4 +1035,65 @@ const file=fresh('d1'),env=world(file);
  const bridge=rows(diaryDb,"SELECT source_root FROM film_identity_evidence WHERE method='alias_bridge' AND object_value='"+LID+"'");
  for(const row of bridge)assert.equal(row.source_root,expected,'the bridge row carries the common root too');
 }
+
+// ===== H. review of PR #1043 (P1-1 residual): receipt identity and root compatibility, on ONE database with a PRIOR legacy receipt and evidence =====
+{
+ reset();
+ const LID='Lg1',SLUG='fixture-legacy-2019',TM='900030';
+ add(LID,SLUG,TM,'Fixture Legacy',2019);
+ const detail=JSON.parse(movies.get(TM));
+ const common=(await attachRoot({lid:LID,slug:SLUG,path:'/film/'+SLUG+'/',tmdb:TM,title:'Fixture Legacy',year:2019,finalUrl:'https://letterboxd.com/film/'+SLUG+'/',detail})).root;
+ const legacy=createHash('sha256').update(JSON.stringify({lid:LID,slug:SLUG,path:'/film/'+SLUG+'/',tmdb:TM,title:'Fixture Legacy',year:2019,source:'letterboxd_diary_page'})).digest('hex');
+ const receipt={tmdb:TM,archiveSha256:legacy,title:'Fixture Legacy',year:2019,filmPath:'/film/'+SLUG+'/'};
+ const row=(route,root,extra={})=>({subject:{kind:'letterboxd_lid',value:LID},relation:'same_work',object:{kind:'tmdb_movie',value:TM},polarity:'asserts',route,method:'page_check',sourceRoot:root,sourceRef:'diary:'+LID,observedAt:new Date(NOW).toISOString(),...extra});
+ const NEWSTYLE=route=>row(route,common,{legacySourceRoot:legacy,legacyRoutes:['ratings_diary','watchlist_admission']});
+ const stamp=()=>new Date(NOW).toISOString();
+ const lidKeyReceipts=db=>rows(db,"SELECT request_id,state,content_digest,operation_key FROM canonical_write_receipt WHERE operation_key='admission:lid:"+LID+"' ORDER BY created_at,request_id");
+
+ // (1) the receipt CONTENT DIGEST: the same check made with the legacy-only input (the code before this change) and with the new input gives the SAME receipt digest
+ const oldDb=fresh('d1'),oldEnv=world(oldDb),newDb=fresh('d1'),newEnv=world(newDb);
+ const asOld=await D1.admitVerifiedFilm(oldEnv,{kind:'lid',lid:LID,receipt,evidence:row('ratings_diary',legacy),now:()=>stamp()});
+ const asNew=await D1.admitVerifiedFilm(newEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('ratings_diary'),now:()=>stamp()});
+ assert.deepEqual([asOld.outcome,asNew.outcome],['admitted','admitted']);
+ assert.equal(lidKeyReceipts(newDb)[0].content_digest,lidKeyReceipts(oldDb)[0].content_digest,'the receipt content digest is the LEGACY-keyed one, byte for byte (replay compatibility), not derived from the common root');
+ assert.deepEqual([evidence(oldDb)[0].source_root,evidence(newDb)[0].source_root],[legacy,common],'while the evidence row of the new check is rooted in the common root');
+
+ // (2) a PRIOR legacy receipt and evidence (written by the old code) is recovered by the new code: no new admission, no new receipt, no new evidence row
+ const beforeRows=JSON.stringify([admissionRows(oldDb),lidKeyReceipts(oldDb),evidence(oldDb)]);
+ const sameRoute=await D1.admitVerifiedFilm(oldEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('ratings_diary'),now:()=>stamp()});
+ assert.equal(sameRoute.outcome,'present',JSON.stringify(sameRoute));
+ assert.equal(JSON.stringify([admissionRows(oldDb),lidKeyReceipts(oldDb),evidence(oldDb)]),beforeRows,'a new check of the same source by the same route adds no row: the legacy root is adopted and its key already exists');
+ await seed(oldEnv,LID);
+ const real=await Identity.resolve(oldEnv,[{lid:LID,slug:SLUG}],opts({route:'ratings_diary'}));
+ assert.equal(real.outcomes.get(LID).class,'settled',JSON.stringify([...real.outcomes]));
+ assert.equal(evidence(oldDb).length,1,'the REAL Diary caller on the prior-legacy database also adds no second root');
+ assert.equal(lidKeyReceipts(oldDb).length,1,'and no second receipt under the key');
+
+ // (3) the SIBLING route (the legacy digest was shared by the Diary and the Watchlist step): its new check joins the legacy root, so ONE root stands for the source and nothing is counted as independent proof
+ const sibling=await D1.admitVerifiedFilm(oldEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('watchlist_admission'),now:()=>stamp()});
+ assert.equal(sibling.outcome,'present',JSON.stringify(sibling));
+ const roots=rows(oldDb,"SELECT route,source_root FROM film_identity_evidence WHERE subject_value='"+LID+"' ORDER BY seq");
+ assert.deepEqual(roots.map(r=>r.route),['ratings_diary','watchlist_admission'],'the genuinely new check of another route is its own row');
+ assert.equal(new Set(roots.map(r=>r.source_root)).size,1,'but under ONE root: the independence calculation (distinct roots) counts this source once');
+ assert.equal(roots[0].source_root,legacy);
+ // a repeat of that sibling check is idempotent
+ await D1.admitVerifiedFilm(oldEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('watchlist_admission'),now:()=>stamp()});
+ assert.equal(evidence(oldDb).length,2);
+
+ // (4) a source with NO legacy row records under the common root for every route (the new database above): two routes, one root
+ const second=await D1.admitVerifiedFilm(newEnv,{kind:'lid',lid:LID,receipt,evidence:NEWSTYLE('watchlist_admission'),now:()=>stamp()});
+ assert.equal(second.outcome,'present');
+ assert.deepEqual([...new Set(rows(newDb,"SELECT source_root FROM film_identity_evidence WHERE subject_value='"+LID+"'").map(r=>r.source_root))],[common]);
+
+ // (5) the rated-archive step on a source whose Diary evidence is common-rooted: the verified-row ("already") branch carries the root of the check it really made, so no legacy archive root is written beside it
+ const SHA2='f'.repeat(64),KEY2='letterboxd/imports/'+SHA2+'/rated-candidates.json';
+ setDocD1(newDb,KEY2,{schemaVersion:1,archiveSha256:SHA2,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[LID]:{code:LID,state:'pending',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name:'Fixture Legacy',year:2019,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:null}},checkpoint:{cursor:null,stopped:null}});
+ await seed(newEnv,LID);
+ const archive=await Candidates.identityStep(newEnv,{sha:SHA2,fetchImpl});
+ assert.equal(archive.verified,true,JSON.stringify(archive));
+ const archiveRow=rows(newDb,"SELECT source_root,source_ref,source_scope FROM film_identity_evidence WHERE route='letterboxd_rated_archive' AND subject_value='"+LID+"'");
+ assert.equal(archiveRow.length,1);assert.equal(archiveRow[0].source_root,common,'the archive check of a page already admitted is rooted in the common root of the check it made');
+ assert.match(archiveRow[0].source_ref,/:legacy:[0-9a-f]{64}$/);
+ assert.equal(rows(newDb,"SELECT COUNT(DISTINCT source_root) AS n FROM film_identity_evidence WHERE subject_value='"+LID+"'")[0].n,1,'every route, ONE root');
+}
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');

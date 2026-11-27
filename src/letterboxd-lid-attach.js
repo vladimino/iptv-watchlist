@@ -261,8 +261,18 @@ export async function linkAttachedIntent(env,{intent,ports,now}={}){
   throw error;
  }
  const after=await readIntent(env,intent.requestId);
- if(after&&after.state==='settled'&&after.outcome==='attached'&&after.linkState===out?.state)return result(out.state,{intentRequestId:intent.requestId,...(out.factKey?{factKey:out.factKey}:{}),...(owner.ok?{}:{reason:owner.reason})});
+ if(after&&after.state==='settled'&&after.outcome==='attached'&&after.linkState===out?.state){
+  const projection=out.state==='linked'?await completeProjection(ports,{lid:intent.lid,tmdb:intent.proof.tmdb}):null;
+  return result(out.state,{intentRequestId:intent.requestId,...(out.factKey?{factKey:out.factKey}:{}),...(owner.ok?{}:{reason:owner.reason}),...(projection?{projection}:{})});
+ }
  return owed('intent_not_settled');
+}
+// The second half of a Diary-first link (the fact record of the lid's key gains the movie id and projects both aliases): idempotent, run after the atomic settlement and again on a repeat of a settled `linked` intent whose record does not
+// carry the movie yet. Its failure never un-settles the intent: it is reported as `projection: 'pending'` and the same requestId repeats it.
+async function completeProjection(ports,{lid,tmdb,pendingOnly=false}){
+ if(!ports||typeof ports.complete!=='function')return null;
+ try{const done=await ports.complete({lid,tmdb,pendingOnly});return done?.state==='conflict'?'conflict':done?.state==='absent'?'pending':'done';}
+ catch{return 'pending';}
 }
 
 // ---- the coordinator (ADR 0217 decision 8a) ----
@@ -280,8 +290,8 @@ export async function lidRecheck(env,input={}){
  if(!await hasIntentTable(db))throw failed('admission_unavailable');
  let intent=await readIntent(env,requestId);
  if(intent&&intent.lid!==lid)return result('request_conflict',{requestId});
- // A settled intent is answered by readback only: no gate, no fetch, no write.
- if(intent&&intent.state==='settled')return readbackResult(intent,{replay:true});
+ // A settled intent is answered by readback only: no gate, no fetch, no canonical or intent write. The one possible effect is the idempotent completion of the Diary-first record when a settled `linked` intent finds it still without the movie.
+ if(intent&&intent.state==='settled')return readbackWithProjection(intent,input);
  // The Ratings link is owed after an attach: the link step has its own fences (markers, ownership, ratings domain), and turning the writer off later must not strand it.
  if(intent&&intent.outcome==='attached')return resumeLink(env,{intent,input});
  await attachGates(env);
@@ -396,6 +406,14 @@ export async function lidRecheck(env,input={}){
  }
 }
 
+async function readbackWithProjection(intent,input){
+ const out=readbackResult(intent,{replay:true});
+ if(intent.outcome==='attached'&&intent.linkState==='linked'&&intent.proof){
+  const projection=await completeProjection(input.ports,{lid:intent.lid,tmdb:intent.proof.tmdb,pendingOnly:true});
+  if(projection&&projection!=='done')out.projection=projection;
+ }
+ return out;
+}
 function readbackResult(intent,extra={}){
  const base={requestId:intent.requestId,lid:intent.lid,id:intent.filmId,attachRoot:intent.proof?.attachRoot??null,tmdb:intent.proof?.tmdb??null,intentState:intent.state,linkState:intent.linkState,...extra};
  if(intent.outcome==='attached'){

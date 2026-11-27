@@ -27,8 +27,27 @@ import {historyGuard,ownedAttemptCondition,reconcileOperationKey,runOperationKey
 import {admitLidOnlyFilm,admitRatedFilm,hasLidAdmissionTable,lidOnlyFilmId,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN,admissionDigestD1} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,readAdmissionAuthority} from './letterboxd-admission-authority.js';
-import {planIdentityEvidence,recordIdentityEvidenceKeyed} from './identity-evidence.js';
+import {planIdentityEvidence,readEvidence,recordIdentityEvidenceKeyed} from './identity-evidence.js';
 
+// AIR-675 / ADR 0217 decision 8b. A caller that made a REAL page check hands the evidence input with the ONE common root as `sourceRoot` and its own LEGACY root as `legacySourceRoot` (with `legacyRoutes`: the routes that shared that legacy
+// encoding; default the caller's own). Two things follow, and neither rewrites history:
+//  - the receipt's content digest is computed from the LEGACY evidence key, exactly as the code before this change computed it, so a receipt written then is recovered, replayed and compared identically now (no new admission, no new obligation);
+//  - when an evidence row of the LEGACY root already exists for this source (under any of `legacyRoutes`, by its own key: a lookup the writers may make, never a reader of the ledger), this check records under THAT root, so one source has ONE root and
+//    the later check can neither add a second root beside it nor count as independent corroboration (ADR 0213: independence counts distinct roots). A source with no legacy row records under the common root.
+// The input without `legacySourceRoot` (a check with no common root, or an old caller) is used as given.
+async function evidencePlans(env,evidence){
+ if(!evidence)return {evidence:null,plan:null,legacyPlan:null};
+ const {legacySourceRoot,legacyRoutes,...rest}=evidence;
+ if(typeof legacySourceRoot!=='string'){const plan=await planIdentityEvidence(rest);return {evidence:rest,plan,legacyPlan:plan};}
+ const legacyPlan=await planIdentityEvidence({...rest,sourceRoot:legacySourceRoot});
+ const routes=Array.isArray(legacyRoutes)&&legacyRoutes.length?legacyRoutes:[rest.route];
+ for(const route of routes){
+  let held=null;
+  try{held=await readEvidence(env,(await planIdentityEvidence({...rest,route,sourceRoot:legacySourceRoot})).evidenceKey);}catch{held=null;}
+  if(held){const adopted={...rest,sourceRoot:legacySourceRoot};return {evidence:adopted,plan:await planIdentityEvidence(adopted),legacyPlan};}
+ }
+ return {evidence:rest,plan:await planIdentityEvidence(rest),legacyPlan};
+}
 export const ADMISSION_KINDS=Object.freeze(['lid','inferred_import','short_code']);
 const LID=/^[A-Za-z0-9_-]{1,80}$/;
 const SHORT=/^[A-Za-z0-9_-]{1,40}$/;
@@ -125,8 +144,9 @@ export async function admitVerifiedFilm(env,input={}){
   const checked=verifiedAdmission('tmdb_'+String(got.receipt?.tmdb??''),{...got.receipt,sourceCode:code,verifiedAt:at});
   if(!checked.ok){const error=failed('admission_not_verified');error.reason=checked.reason;throw error;}
   const admission=checked.admission;
-  const evidence=got.evidence?await planIdentityEvidence(got.evidence):null;
-  src={admission,tmdb:admission.tmdb,evidenceInput:got.evidence||null,evidence,evidenceDigest:evidence?.evidenceKey??admission.archiveSha256,
+  const plans=await evidencePlans(env,got.evidence);
+  const evidence=plans.plan;
+  src={admission,tmdb:admission.tmdb,evidenceInput:plans.evidence,evidence,evidenceDigest:plans.legacyPlan?.evidenceKey??admission.archiveSha256,
    receipt:{tmdb:admission.tmdb,sourceCode:code,archiveSha256:admission.archiveSha256,title:admission.title,year:admission.year,filmPath:got.receipt?.filmPath??null,verifiedAt:at}};
   return src;
  };
@@ -241,7 +261,8 @@ export async function admitVerifiedFilm(env,input={}){
  // operation runs under its own key `evidence:<evidence_key>` and its completion is PROVEN before the item is reported complete. The evidence to record is the one of a check THIS call performed, or the one an
  // earlier call kept (`pendingEvidence`); a recovery that made no check records none.
  const performed=src&&!src.fail?src.evidenceInput:null;
- const toRecord=out.outcome==='present'&&out.id?(performed||input.pendingEvidence||null):null;
+ const kept=input.pendingEvidence?(await evidencePlans(env,input.pendingEvidence)).evidence:null;
+ const toRecord=out.outcome==='present'&&out.id?(performed||kept||null):null;
  if(toRecord){
   let ev;
   try{ev=await recordIdentityEvidenceKeyed(env,{evidence:toRecord,filmId:out.id,now:clock,policy},{run:runOperationKey});}

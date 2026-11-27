@@ -313,7 +313,7 @@ const LetterboxdDiaryIdentity=(()=>{
     if(intended===null||intended===String(verdict.tmdb)){if(!(await intend(item,verdict.tmdb)))return {ok:false,reason:'deferred'};}
     const evidenceSha256=await pageCheckDigest(item,verdict);
     return {ok:true,receipt:{tmdb:verdict.tmdb,archiveSha256:evidenceSha256,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath},
-     evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:outcome.commonRoot||evidenceSha256,sourceRef:'diary:'+lid+':legacy:'+evidenceSha256,observedAt:iso(clock())}};
+     evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:outcome.commonRoot||evidenceSha256,sourceRef:'diary:'+lid+':legacy:'+evidenceSha256,...(outcome.commonRoot?{legacySourceRoot:evidenceSha256,legacyRoutes:['ratings_diary','watchlist_admission']}:{}),observedAt:iso(clock())}};
    };
    const finalize=async(result,guard)=>{
     record(item,result.outcome==='source_unavailable'?String(result.reason||'check_failed'):D1_TERMINAL[result.outcome]||'admission_failed');

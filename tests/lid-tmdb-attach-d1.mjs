@@ -544,4 +544,59 @@ const NOLINK=()=>({link:async()=>{const e=new Error('write_contention');e.code='
  await assert.rejects(()=>facts.linkAttachedPair({BUCKET:bucket},{lid:'Ab1',tmdb:'603',extra:[['SELECT 1',[]]],statementsFor:()=>[]}),error=>error.code==='atomic_unavailable');
  await assert.rejects(()=>facts.linkAttachedPair(env,{lid:'Ab1',tmdb:'603',extra:[],statementsFor:()=>[]}),error=>error.code==='atomic_unavailable','a call without a guard statement is refused');
 }
+
+// ===== 8c (second review of PR #1043, P1-4): the real Diary-first record, read through BOTH aliases by the actual consumers =====
+{
+ const file=fresh();await mint(file);
+ const env=envOf(file);
+ const Fx=vm.runInContext('LetterboxdFacts',ctx);
+ // a REAL Diary-first fact record with an observation, written by the real writer (the lid's key is lb-Ab1)
+ const seeded=await Fx.applyDiaryEvidence(env,[{lid:'Ab1',watchedDate:'2026-11-15',rating:4,ratingState:'rated',sourceRef:'diary:viewing:1'}]);
+ assert.equal(seeded.written,1);
+ const recordKeyOf=key=>'letterboxd/facts/films/'+key+'.json';
+ const readRecord=()=>{const found=rows(file,'SELECT body FROM ratings_document WHERE key='+sqlText(recordKeyOf('lb-Ab1'))+' ORDER BY part');return JSON.parse(found.map(r=>r.body).join(''));};
+ const before=readRecord();
+ assert.equal(getLinks(file)['letterboxd:Ab1'],'lb-Ab1');assert.equal((await Fx.diaryLinks(env,['Ab1'])).get('Ab1').tmdb,null,'before the attach the record has no movie');
+ assert.deepEqual(rows(file,'SELECT alias_id,fact_key,actual_rating FROM ratings_view ORDER BY alias_id'),[{alias_id:'Ab1',fact_key:'lb-Ab1',actual_rating:4}]);
+ const out=await lidRecheck(env,{lid:'Ab1',requestId:'req-1',reacquire:async()=>found(),ports:{...linkPort(env),complete:args=>Fx.completeAttachedLink(env,args)},now:clock()});
+ assert.deepEqual([out.outcome,out.terminal,out.factKey,out.projection],['linked',true,'lb-Ab1','done'],JSON.stringify(out));
+ // the fact key and its history survive: no key renamed, the observation and rating of the record are exactly what the real writer wrote
+ assert.deepEqual(getLinks(file),{'letterboxd:Ab1':'lb-Ab1','tmdb:603':'lb-Ab1'});
+ const after=readRecord();
+ assert.deepEqual(after.rating,before.rating,'the rating observation survives');assert.deepEqual(after.watched,before.watched,'and the watched observation');
+ assert.deepEqual([after.links.letterboxd,after.links.tmdb],['Ab1','603'],'the record now carries the movie id');
+ // the ACTUAL consumers read the value through BOTH aliases: the Facts link read and the ratings view the Worker serves
+ assert.equal((await Fx.diaryLinks(env,['Ab1'])).get('Ab1').tmdb,'603');
+ assert.deepEqual(rows(file,'SELECT alias_id,fact_key,watched,actual_rating,rating_known FROM ratings_view ORDER BY alias_id'),
+  [{alias_id:'Ab1',fact_key:'lb-Ab1',watched:1,actual_rating:4,rating_known:1},{alias_id:'tmdb_603',fact_key:'lb-Ab1',watched:1,actual_rating:4,rating_known:1}],'the rating 4 reads back through the lid AND the movie alias');
+ // a repeat of the settled request is a readback with nothing pending: no write at all
+ const snap=JSON.stringify([rows(file,'SELECT * FROM ratings_document ORDER BY key,part'),rows(file,'SELECT * FROM ratings_view ORDER BY alias_id'),intents(file)]);
+ const again=await lidRecheck(env,{lid:'Ab1',requestId:'req-1',ports:{...linkPort(env),complete:args=>Fx.completeAttachedLink(env,args)},now:clock()});
+ assert.deepEqual([again.outcome,again.replay,again.projection],['linked',true,undefined]);
+ assert.equal(JSON.stringify([rows(file,'SELECT * FROM ratings_document ORDER BY key,part'),rows(file,'SELECT * FROM ratings_view ORDER BY alias_id'),intents(file)]),snap);
+ // a record whose completion failed after the settlement is repaired by the same requestId (idempotent), the intent staying settled
+ const broken=fresh();await mint(broken);const benv=envOf(broken);
+ await Fx.applyDiaryEvidence(benv,[{lid:'Ab1',watchedDate:'2026-11-15',rating:3,ratingState:'rated',sourceRef:'diary:viewing:1'}]);
+ const flaky={...linkPort(benv),complete:async()=>{throw new Error('projection down');}};
+ const first=await lidRecheck(benv,{lid:'Ab1',requestId:'req-1',reacquire:async()=>found(),ports:flaky,now:clock()});
+ assert.deepEqual([first.outcome,first.projection],['linked','pending'],JSON.stringify(first));
+ assert.equal(intents(broken)[0].state,'settled','the settlement is not undone');assert.equal((await Fx.diaryLinks(benv,['Ab1'])).get('Ab1').tmdb,null);
+ const repaired=await lidRecheck(benv,{lid:'Ab1',requestId:'req-1',ports:{...linkPort(benv),complete:args=>Fx.completeAttachedLink(benv,args)},now:clock()});
+ assert.equal(repaired.outcome,'linked');assert.equal((await Fx.diaryLinks(benv,['Ab1'])).get('Ab1').tmdb,'603');
+ assert.deepEqual(rows(broken,'SELECT alias_id,actual_rating FROM ratings_view ORDER BY alias_id'),[{alias_id:'Ab1',actual_rating:3},{alias_id:'tmdb_603',actual_rating:3}]);
+}
+{
+ // ANOTHER LID's record: the same-scheme conflict of the existing alias protocol. `letterboxd:Other` already points at lb-Ab1 and Ab1 has no mapping: linking would put `letterboxd:Ab1` and the movie on the OTHER record, so it is a proved
+ // conflict and that record stays untouched
+ const {file}=await attached();
+ setLinks(file,{'letterboxd:Other':'lb-Ab1'});
+ const out=await runOnce(file);
+ assert.deepEqual([out.outcome,out.terminal],['alias_conflict',true],JSON.stringify(out));
+ assert.deepEqual(getLinks(file),{'letterboxd:Other':'lb-Ab1'},'the existing record is untouched');
+ assert.deepEqual(intents(file).map(i=>[i.state,i.link_state]),[['settled','alias_conflict']]);
+ // the lid's OWN record already holds a second Letterboxd id: the same predicate, nothing linked
+ const two=await attached();setLinks(two.file,{'letterboxd:Ab1':'k1','letterboxd:Other':'k1'});
+ const refused=await runOnce(two.file);
+ assert.equal(refused.outcome,'alias_conflict',JSON.stringify(refused));assert.deepEqual(getLinks(two.file),{'letterboxd:Ab1':'k1','letterboxd:Other':'k1'});
+}
 console.log('Lid TMDB attach (AIR-675, tests 9, 10, 11 and 16 and the fenced Ratings link) passed.');
