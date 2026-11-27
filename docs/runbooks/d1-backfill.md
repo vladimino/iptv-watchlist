@@ -297,3 +297,7 @@ Record in a dated file under `docs/evidence/d1-migration/`:
 - Runs: for each run, command (without secrets), status, applied, resumed, reconciled, pending, stop reason, adapter statistics, and with `--staged-generation` the `staged` section and its gate.
 - Result: parity (denominator, missing, extra, mismatched), receipts audit, class A blockers (must be empty), class B families with dispositions, class C list with the acknowledgement reference, delta result.
 - Statement that no Worker path writes D1, Scheduled Tasks and flags are unchanged, and R2 remains authoritative.
+
+## Retiring the unused 0001 identity tables (migration 0054, AIR-625)
+
+Schema-only and not a backfill: `migrations/0054_retire_legacy_identity_assertion_tables.sql` drops three tables that were empty on 27 Nov 2026. It needs production at schema 53, a reviewed single-purpose operator (pattern of [AIR-594](../evidence/d1-migration/air-594-0038-apply-2026-11-24.md)) and its own owner GO. Preflight must show schema 53, the three tables present with 0 rows and no dependent object; any row or dependency means stop and report, no drop. Readback: schema 54, the three tables absent, other row counts unchanged. Rollback is roll-forward by a new file that re-creates the `0001` definitions. Details: [AIR-625 evidence](../evidence/d1-migration/air-625-legacy-identity-tables-retirement-2026-11-27.md).
