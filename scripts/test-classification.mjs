@@ -257,6 +257,9 @@ export const FILES={
  "letterboxd-lid-only-admission-d1.mjs": {
   "suite": "core"
  },
+ "admin-lid-recheck-route.mjs": {
+  "suite": "core"
+ },
  "lid-attach-helpers.mjs": {
   "suite": "core"
  },

@@ -9,9 +9,12 @@ const LID_RECHECK_ACTION='letterboxd_lid_recheck';
 const LID_RECHECK_BODY_LIMIT=1024;
 const LID_RECHECK_LID=/^[A-Za-z0-9_-]{1,80}$/;
 const LID_RECHECK_REQUEST=/^[\x21-\x7e]{1,200}$/;
-// The bounded source check of ONE lid: the boxd.it redirect and the film page, then the TMDB movie document, by the ACCEPTED verified movie check (`pageEvidence`, `tmdbCheckState`, `movieDetailAgrees`); no new proof semantics, no
-// raw HTML kept. A typed state of ADR 0217 decision 3 other than `tmdb_movie` is returned as the state itself (the coordinator makes it a terminal outcome); a transport stop is `tmdb_unavailable` (non-terminal, no attempt).
-// The page's own shortlink must be the lid (a page that does not name it is `page_refused`, never attached).
+// The bounded source check of ONE lid, by the ACCEPTED verified movie check and nothing stricter (ADR 0217 decision 8b: "no new proof semantics"): `LetterboxdRatedCandidates.follow` (the boxd.it redirect, the ADR 0166 hop limits and hosts), the typed
+// TMDB state of the page (`tmdbCheckState`), then `LetterboxdDiaryIdentity.verifyPage` and `verify` (the very functions of the Diary and Watchlist check: the page's slug is the redirect's landing slug, a PRESENT shortlink that names another lid or a
+// canonical path that contradicts the landing is refused, exactly one movie id of type `movie`, a title and exactly one year; the TMDB movie document must agree). A real page may carry no `<link rel="shortlink">` and no canonical tag (AIR-678
+// captures): their absence is handled by the existing rules (it refuses nothing here), as it is by the Diary check; only a PRESENT contradiction refuses. The redirect binding is kept: the lid resolves through boxd.it to ONE film page and every
+// identity input is read from that landing. A typed state of ADR 0217 decision 3 other than `tmdb_movie` is returned as the state itself (the coordinator makes it a terminal outcome); a transport stop is `tmdb_unavailable` (non-terminal, no
+// attempt). No raw HTML is kept and H1 (`tmdb_none`) is NOT produced or relaxed here.
 async function lidRecheckSource(env,lid,{fetchImpl=fetch}={}){
  const net=typeof UpstreamCooldown==='undefined'?fetchImpl:UpstreamCooldown.createCoordinator(env,{caller:'lid-recheck'}).guard(fetchImpl);
  const state=checked=>checked.retryClass==='transport'||checked.state==='tmdb_unavailable'?{ok:true,state:'tmdb_unavailable',reason:checked.outcome||'tmdb_unavailable'}:{ok:true,state:checked.state};
@@ -20,11 +23,17 @@ async function lidRecheckSource(env,lid,{fetchImpl=fetch}={}){
  if(page&&typeof page.html==='string'){try{evidence=LetterboxdIdentity.pageEvidence(page.html,page.landing,letterboxdPageTools());}catch{evidence=null;}}
  let checked=LetterboxdRatedAdmission.tmdbCheckState({fetched:page,evidence});
  if(checked.state!=='page_movie')return state(checked);
- if(evidence.shortCode!==lid||evidence.canonicalPath&&evidence.canonicalPath!==evidence.path)return {ok:true,state:'page_refused'};
- const found=await LetterboxdRatedCandidates.movieDetail(env,checked.tmdbId,net);
+ const landing=/^\/film\/([a-z0-9-]{1,200})\/$/.exec(new URL(String(page.landing?.href??page.landing)).pathname);
+ if(!landing)return {ok:true,state:'page_refused',reason:'landing_not_film'};
+ const slug=landing[1];
+ const seen=LetterboxdDiaryIdentity.verifyPage({lid,slug,page},letterboxdPageTools());
+ if(seen.state!=='page_ok')return {ok:true,state:'page_refused',reason:seen.reason};
+ const found=await LetterboxdRatedCandidates.movieDetail(env,seen.tmdb,net);
  checked=LetterboxdRatedAdmission.tmdbCheckState({fetched:page,evidence,detail:found});
  if(checked.state!=='tmdb_movie')return state(checked);
- return {ok:true,state:'tmdb_movie',proof:{slug:String(evidence.path).replace(/^\/film\/|\/$/g,''),path:evidence.path,finalUrl:String(page.landing?.href??page.landing),tmdb:checked.tmdbId,title:evidence.title,year:evidence.years[0],detail:found.detail}};
+ const verdict=LetterboxdDiaryIdentity.verify({lid,slug,page,detail:found.detail},letterboxdPageTools());
+ if(verdict.state!=='verified')return {ok:true,state:'tmdb_disagrees',reason:verdict.reason};
+ return {ok:true,state:'tmdb_movie',proof:{slug,path:verdict.filmPath,finalUrl:String(page.landing?.href??page.landing),tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,detail:found.detail}};
 }
 async function lidRecheckBody(request){
  const length=request.headers.get('Content-Length');
@@ -48,7 +57,7 @@ async function adminLidRecheckRoute(request,env,url){
  if(!access.ok)return adminError(access.code,access.status);
  const parsed=await lidRecheckBody(request);
  if(parsed.error)return adminError(parsed.error,400);
- if(typeof LetterboxdLidAttach==='undefined'||typeof LetterboxdFacts==='undefined'||typeof LetterboxdRatedCandidates==='undefined')return adminError('reader_unavailable',503);
+ if(typeof LetterboxdLidAttach==='undefined'||typeof LetterboxdFacts==='undefined'||typeof LetterboxdRatedCandidates==='undefined'||typeof LetterboxdDiaryIdentity==='undefined')return adminError('reader_unavailable',503);
  const {lid,requestId}=parsed.value;
  try{
   const out=await LetterboxdLidAttach.lidRecheck(env,{lid,requestId,reacquire:()=>lidRecheckSource(env,lid),ports:{link:args=>LetterboxdFacts.linkAttachedPair(env,args)}});
