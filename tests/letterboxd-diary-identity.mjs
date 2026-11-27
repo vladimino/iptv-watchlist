@@ -42,6 +42,9 @@ vm.runInContext(scoped('src/letterboxd-match.js', 'LetterboxdMatch') + '\n' + sc
 for (const file of ['src/letterboxd-facts.js', 'src/letterboxd-rated-candidates.js', process.env.DIARY_IDENTITY_SRC || 'src/letterboxd-diary-identity.js']) run(file);
 installRawViewProjection(ctx); // AIR-558
 const Facts = vm.runInContext('LetterboxdFacts', ctx), Identity = vm.runInContext('LetterboxdDiaryIdentity', ctx);
+// AIR-670 / ADR 0217 decision 3: the typed outcomes ride the existing retry contract (ADR 0207 decision 4b): charged ones are `definite`, the unavailable one is `transport`; nothing new is `gone` or settled.
+for (const reason of ['tmdb_contradiction', 'page_unreadable', 'tmdb_fetch_failed', 'tmdb_not_movie']) assert.equal(Identity.classify(reason), 'definite', reason);
+assert.equal(Identity.classify('tmdb_unavailable'), 'transport');
 const env = {BUCKET: bucket, TMDB_API_READ_ACCESS_TOKEN: 'fixture-token'};
 
 const filmPage = ({lid, slug, title, year, tmdbIds = ['900001'], type = 'movie', shortlink = true, canonicalSlug = slug}) => {
@@ -701,6 +704,104 @@ assert.deepEqual([pending().Cls1.attempts, pending().Cls1.reason], [0, 'deferred
  reset(); await seed('Sg03', 3);
  out = await Identity.resolve(env, items(['Sg03', 'x']), opts({fetchImpl: async () => http(403, big)}));
  assert.equal(pending().Sg03.reason, 'oversized', 'without coordination the oversized body is classified as today'); assert.equal(pending().Sg03.attempts, 1);
+}
+
+// AIR-670 / ADR 0217 decision 3: the whole chain, dormant: a real fetch answer (follow, movieDetail through the bounded fetch) -> the real page parser (pageEvidence) -> the typed state and outcome (tmdbCheckState)
+// -> the class the EXISTING retry classifier gives that outcome (AIR-599). Nothing here is wired to a live path.
+{
+  const RA = vm.runInContext('LetterboxdRatedAdmission', ctx), RC = vm.runInContext('LetterboxdRatedCandidates', ctx), LI = vm.runInContext('LetterboxdIdentity', ctx), tools = vm.runInContext('letterboxdPageTools()', ctx);
+  const tokenEnv = {TMDB_API_READ_ACCESS_TOKEN: 't'};
+  const base = () => filmPage({lid: 'Ch1', slug: 'chain-one-2020', title: 'Chain One', year: 2020, tmdbIds: ['900001']});
+  const good = JSON.stringify({id: 900001, media_type: 'movie', title: 'Chain One', release_date: '2020-05-01'});
+  const cooldown = until => () => {throw Object.assign(new Error('cooldown'), {code: 'upstream_cooldown', until});};
+  // pageHtml: the film page (null: answer with `pageStatus`); doc: the TMDB document answer (a string is a 200 body, a function is the response or throws)
+  const chain = async ({pageHtml = base(), pageStatus = null, pageHeaders = {}, doc = good, fetchImpl = null} = {}) => {
+    reset(); site.set('Ch1', pageStatus ? {status: pageStatus, headers: pageHeaders} : {landing: 'chain-one-2020', html: pageHtml}); tmdbDocs.set('900001', doc);
+    const f = fetchImpl || ctx.fetch;
+    const fetched = await RC.follow(f, 'Ch1');
+    const evidence = fetched.html ? LI.pageEvidence(fetched.html, fetched.landing, tools) : null;
+    const page = RA.tmdbCheckState({fetched, evidence});
+    if (page.state !== 'page_movie') return {out: page, page, requested: false};
+    const detail = await RC.movieDetail(tokenEnv, page.tmdbId, f);
+    return {out: RA.tmdbCheckState({fetched, evidence, detail}), page, requested: true};
+  };
+  const expectTyped = async (label, input, [state, outcome, retryClass], extra = {}) => {
+    const {out} = await chain(input);
+    assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits], [state, outcome, retryClass, false], label);
+    assert.equal(Identity.classify(outcome), retryClass, label + ': the existing classifier gives the same class');
+    for (const [key, value] of Object.entries(extra)) assert.equal(out[key], value, label + ' keeps ' + key);
+  };
+  // control: the valid movie path is unchanged: the page alone does not admit, the agreeing document does
+  {
+    const {out, page, requested} = await chain();
+    assert.deepEqual([page.state, page.admits, requested, out.state, out.admits, out.tmdbId, out.outcome], ['page_movie', false, true, 'tmdb_movie', true, '900001', null]);
+  }
+  // the page followed by a TMDB answer that is not an agreeing movie never admits
+  await expectTyped('TMDB 404', {doc: () => http(404, '')}, ['tmdb_missing', 'tmdb_contradiction', 'definite']);
+  await expectTyped('TMDB 400', {doc: () => http(400, '')}, ['tmdb_failed', 'tmdb_fetch_failed', 'definite']);
+  await expectTyped('TMDB 401', {doc: () => http(401, '')}, ['tmdb_failed', 'tmdb_fetch_failed', 'definite']);
+  await expectTyped('TMDB unparseable', {doc: 'not json'}, ['tmdb_failed', 'tmdb_fetch_failed', 'definite']);
+  await expectTyped('TMDB oversized', {doc: 'x'.repeat(1000001)}, ['tmdb_failed', 'tmdb_fetch_failed', 'definite']);
+  await expectTyped('TMDB tv', {doc: JSON.stringify({id: 900001, media_type: 'tv', title: 'Chain One', release_date: '2020-05-01'})}, ['tmdb_tv', 'tmdb_not_movie', 'definite']);
+  await expectTyped('TMDB title mismatch', {doc: JSON.stringify({id: 900001, media_type: 'movie', title: 'Other', release_date: '2020-05-01'})}, ['tmdb_disagrees', 'detail_title_mismatch', 'definite']);
+  await expectTyped('TMDB id mismatch', {doc: JSON.stringify({id: 8, media_type: 'movie', title: 'Chain One', release_date: '2020-05-01'})}, ['tmdb_disagrees', 'detail_id_mismatch', 'definite']);
+  // TMDB transport answers: no attempt, queue place kept, cooldown information carried (AIR-599)
+  await expectTyped('TMDB 500', {doc: () => http(500, '')}, ['tmdb_unavailable', 'upstream_5xx', 'transport']);
+  await expectTyped('TMDB 503', {doc: () => http(503, '')}, ['tmdb_unavailable', 'upstream_5xx', 'transport']);
+  await expectTyped('TMDB 429', {doc: () => http(429, '')}, ['tmdb_unavailable', 'rate_limited', 'transport']);
+  await expectTyped('TMDB 403', {doc: () => http(403, '')}, ['tmdb_unavailable', 'forbidden', 'transport']);
+  await expectTyped('TMDB network failure', {doc: () => {throw new TypeError('network');}}, ['tmdb_unavailable', 'network_error', 'transport'], {network: true});
+  await expectTyped('TMDB timeout', {doc: () => {throw Object.assign(new Error('t'), {name: 'TimeoutError'});}}, ['tmdb_unavailable', 'timeout', 'transport']);
+  await expectTyped('TMDB enforced cooldown', {doc: cooldown(123456)}, ['tmdb_unavailable', 'upstream_cooldown', 'transport'], {until: 123456});
+  // the film page's own answers
+  await expectTyped('page 503', {pageStatus: 503}, ['tmdb_unavailable', 'upstream_5xx', 'transport']);
+  await expectTyped('page 500', {pageStatus: 500}, ['tmdb_unavailable', 'upstream_5xx', 'transport']);
+  await expectTyped('page 404', {pageStatus: 404}, ['page_not_read', 'not_found', 'gone']);
+  await expectTyped('page 418', {pageStatus: 418}, ['page_not_read', 'fetch_failed', 'definite']);
+  await expectTyped('page 403', {pageStatus: 403}, ['tmdb_unavailable', 'forbidden', 'transport']);
+  await expectTyped('page 429', {pageStatus: 429}, ['tmdb_unavailable', 'rate_limited', 'transport']);
+  await expectTyped('challenge behind a 200', {pageHtml: '<html><title>Just a moment...</title><script src="/cdn-cgi/challenge-platform/x"></script></html>'}, ['tmdb_unavailable', 'challenge', 'transport']);
+  await expectTyped('page network failure', {fetchImpl: () => {throw new TypeError('network');}}, ['tmdb_unavailable', 'network_error', 'transport'], {network: true});
+  await expectTyped('page enforced cooldown', {fetchImpl: cooldown(777)}, ['tmdb_unavailable', 'upstream_cooldown', 'transport'], {until: 777});
+  await expectTyped('oversized page', {pageHtml: 'x'.repeat(3000001)}, ['tmdb_unreadable', 'page_unreadable', 'definite']);
+  // the movie path's page evidence is mandatory and reuses the live reasons: a page with a missing or contradictory year is refused before TMDB is asked, even with an agreeing TMDB document
+  {
+    const noYear = base().replace(' (2020)"', '"').replace(/"releasedEvent":\[[^\]]*\]/, '"releasedEvent":[]');
+    const twoYears = base().replace('"startDate":"2020"', '"startDate":"2021"');
+    for (const [label, pageHtml, reason] of [['missing page year', noYear, 'page_year_missing'], ['contradictory OG and JSON-LD years', twoYears, 'page_year_inconsistent']]) {
+      const {out, requested} = await chain({pageHtml});
+      assert.deepEqual([out.state, out.outcome, out.retryClass, out.admits, requested], ['page_refused', reason, 'definite', false, false], label);
+      const page = RC.follow ? await RC.follow(ctx.fetch, 'Ch1') : null;
+      assert.equal(Identity.verifyPage({lid: 'Ch1', slug: 'chain-one-2020', page}, tools).reason, reason, label + ': the live check refuses the same page with the same reason');
+      assert.equal(Identity.classify(reason), 'definite', label);
+    }
+  }
+  // unreadable pages, read by the real parser: truncated, no id block, several ids, and a malformed id or type that the parser drops from its arrays
+  const withTypes = (type, html = base()) => html.replace(' data-tmdb-type="movie"', type === null ? '' : ' data-tmdb-type="' + type + '"');
+  const unreadable = [
+    ['truncated page', base().replace('</html>', '')],
+    ['no id block', filmPage({lid: 'Ch1', slug: 'chain-one-2020', title: 'Chain One', year: 2020, tmdbIds: []})],
+    ['several valid ids', filmPage({lid: 'Ch1', slug: 'chain-one-2020', title: 'Chain One', year: 2020, tmdbIds: ['900001', '900002']})],
+    ['valid id plus a malformed id', filmPage({lid: 'Ch1', slug: 'chain-one-2020', title: 'Chain One', year: 2020, tmdbIds: ['900001', 'broken']})],
+    ['malformed id only', filmPage({lid: 'Ch1', slug: 'chain-one-2020', title: 'Chain One', year: 2020, tmdbIds: ['broken']})],
+    ['id the parser reads but a TMDB id cannot be (leading zero)', filmPage({lid: 'Ch1', slug: 'chain-one-2020', title: 'Chain One', year: 2020, tmdbIds: ['0123']})],
+    ['valid type plus a malformed type', base().replace('</body>', '<i data-tmdb-type="?"></i></body>')],
+    ['malformed type only', withTypes('?')],
+    ['uppercase type', withTypes('Movie')],
+    ['no type marker', withTypes(null)],
+    ['unknown type', withTypes('person')],
+    ['movie and tv markers', base().replace('</body>', '<i data-tmdb-type="tv"></i></body>')],
+  ];
+  for (const [label, pageHtml] of unreadable) await expectTyped(label, {pageHtml}, ['tmdb_unreadable', 'page_unreadable', 'definite']);
+  // the movie page that the live check would verify is not made unreadable by the controls above; a TV page needs no TMDB request
+  {const {out, requested} = await chain({pageHtml: withTypes('tv')}); assert.deepEqual([out.state, out.outcome, requested], ['tmdb_tv', 'tmdb_not_movie', false]);}
+  // the transport reasons of the existing classifier and of the typed states stay in step
+  for (const reason of Identity.TRANSPORT_REASONS) {
+    assert.equal(Identity.classify(reason), 'transport', reason);
+    assert.deepEqual([RA.tmdbCheckState({fetched: {stop: reason}}).state, RA.tmdbCheckState({fetched: {stop: reason}}).retryClass], ['tmdb_unavailable', 'transport'], reason + ': a transport reason of the classifier is a transport state');
+  }
+  for (const reason of ['tmdb_contradiction', 'page_unreadable', 'tmdb_fetch_failed', 'tmdb_not_movie', 'detail_title_mismatch']) assert.equal(Identity.classify(reason), 'definite', reason);
+  assert.equal(Identity.classify('not_found'), 'gone');
 }
 
 console.log('letterboxd-diary-identity: ok');
