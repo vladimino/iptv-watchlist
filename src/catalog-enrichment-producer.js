@@ -84,7 +84,20 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const partial=(report,reason='budget')=>({state:'partial',report:{...report,partial:reason}});
  // The WRITE BOUNDARY: before every group of canonical writes the drainer is asked (1) whether the remaining statement budget covers it and (2) whether a progressing EPG publication holds the writes. Fetching, anchor checks and the planning rows above
  // this boundary are not held; a held boundary stops the Film here with everything persisted so far, and the Film resumes from D1 when the hold ends.
- const mayWrite=async()=>{if(!canStart())return 'budget';if(budget&&typeof budget.writesHeld==='function'&&await budget.writesHeld())return 'held';return null;};
+ // A Film that stopped at a held boundary is flagged (`writeWaitSince` in its Film row): the next run asks the hold question BEFORE fetching, so waiting for a publication costs a cheap local check, never a repeated upstream probe.
+ const writeWait={filmRow:null,known:null};
+ const markWait=async on=>{
+  const {filmRow:row,known:state}=writeWait;
+  if(!row||!state||(!!state.writeWaitSince)===on)return;
+  if(on)state.writeWaitSince=now;else delete state.writeWaitSince;
+  await putRow(env,ctx,{...row,film:state},{expectEpoch:row.planEpoch});
+ };
+ const mayWrite=async()=>{
+  if(!canStart())return 'budget';
+  if(budget&&typeof budget.writesHeld==='function'&&await budget.writesHeld()){await markWait(true);return 'held';}
+  await markWait(false); // writes can progress again: the wait is over
+  return null;
+ };
  const control=await readControl(env);
  if(control.state!=='active'||control.generation!==generation)return {state:'not_active'};
  const ctx={leaseId,generation,now,filmId};
@@ -124,6 +137,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  if(filmRow.reason==='check_anchors'){filmRow={...filmRow,reason:null,retryAt:null,transportStreak:0};await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch});}
  // from here on every state-row effect is fenced by the plan epoch this plan was read at
  ctx.planEpoch=filmRow.planEpoch;
+ if(!filmRow.film)filmRow={...filmRow,film:known};
+ writeWait.filmRow=filmRow;writeWait.known=filmRow.film;
  if(filmRow.status==='identity_disagreement')return {state:'blocked',reason:'identity_disagreement'};
  // the rows of the applicable sources; a missing one is created due, a removed source becomes not_applicable (its earlier writes remain)
  const need=[];
@@ -159,6 +174,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const resumeRows=dueRows.filter(row=>row.part==='credits'&&plans[row.source]&&plans[row.source].rows.includes(row));
  const toFetch=[...new Set(dueRows.filter(row=>!resumeRows.includes(row)).map(row=>row.source))];
  if(!toFetch.length&&!resumeRows.length)return {state:'idle'};
+ // waiting for a progressing publication: recheck the hold before any upstream request, so the wait repeats no probe
+ if(toFetch.length&&(known.writeWaitSince||budget?.holdSuspected)&&budget&&typeof budget.writesHeld==='function'&&await budget.writesHeld())return partial(report,'held');
  report.fetched=[...toFetch];
  const lbAnchor=context.anchors.letterboxd,tmdbAnchor=context.anchors.tmdb;
  const answers={};

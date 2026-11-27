@@ -9,6 +9,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as D from '../src/catalog-enrichment-drain.js';
 import * as S from '../src/catalog-enrichment-store.js';
+import {publishGeneration} from '../src/published-epg.js';
 import {CODE_VERSION} from '../src/catalog-enrichment-producer.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-enrich-drain-'));
@@ -268,7 +269,7 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  setStage('loading',far);assert.deepEqual(await D.epgPublicationWindow(w.env,base),{until:base+D.EPG_RECHECK_MS,evidence:'epg_stage'});
  setStage('validated',far);assert.equal((await D.epgPublicationWindow(w.env,base)).evidence,'epg_stage');
  sqlite(w.file,'DELETE FROM published_epg_stage');
- sqlite(w.file,"UPDATE published_epg_authority SET cutover='held' WHERE id=1");assert.equal((await D.epgPublicationWindow(w.env,base)).evidence,'epg_cutover_held');
+ sqlite(w.file,"UPDATE published_epg_authority SET cutover='held' WHERE id=1");assert.equal(await D.epgPublicationWindow(w.env,base),null,'the held cutover marker has no publisher and no heartbeat: it is not a hold, it could hold enrichment forever');
  sqlite(w.file,"UPDATE published_epg_authority SET cutover='open' WHERE id=1");
  setLease('epg',far);assert.deepEqual(await D.epgPublicationWindow(w.env,base),{until:base+D.EPG_RECHECK_MS,evidence:'epg_lease'});
  // a held publication: the inbox, the anchor check and the fetch continue, the canonical WRITES do not
@@ -282,11 +283,13 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  const probes=up.calls.length;
  // repeated yields do not loop: each is one parked answer with a wake time, and each costs at most one Film probe
  for(let i=0;i<3;i++){const again=await D.drain(w.env,{runId:'run-epg-r'+i,clock,tools:{},fetchImpl:up});assert.equal(again.stop,'yield');assert.ok(again.wakeAt);}
- assert.ok(up.calls.length<=probes+3*2,'a repeated yield is bounded: '+up.calls.length);
+ assert.equal(up.calls.length,probes,'waiting for the publication repeats NO upstream probe: the Film is flagged and the hold is rechecked before the fetch');
+ assert.ok(JSON.parse(rows(w.file,"SELECT film_json AS j FROM catalog_enrichment_state WHERE part='film' AND film_json LIKE '%writeWaitSince%' LIMIT 1")[0].j).writeWaitSince,'the wait is recorded on the Film row');
  assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM canonical_write_receipt')[0].n,0);
  // the moment the publication ends the work runs
  setLease('epg',base-1);
  assert.equal((await run(w,up)).stop,'idle');assert.equal(metaCount(w.file),3,'the held work completes right after the publication ends');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE film_json LIKE '%writeWaitSince%'")[0].n,0,'the wait flag is cleared once writes progress');
 }
 
 // ---- a contention failure defers the Film DURABLY with a short backoff and never touches the 72 h clock ----
@@ -466,6 +469,49 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
   assert.equal(found,'film:tmdb:69999','the eligible Film behind a head of 2x the page budget is reached by continuing from the cursor');
   assert.ok(picks>=2&&picks<=4,'in a bounded number of picks: '+picks);
   assert.equal((await D.dueFilms(w.env,{now,skip,cursors})).examined.live<=D.MAX_PAGES*50,true,'each pick stays within its page budget');
+ }
+}
+
+// ---- the ACTUAL publication path (src/published-epg.js `publishGeneration`) with the producer running: the hold, no repeated probe, the publication completes, the work resumes; and a failing publisher never holds ----
+{
+ const programme=(run)=>({runId:run,updatedAt:'2026-11-01T12:00:00.000Z',watchlistCount:1,films:[{id:'film:tmdb:100',title:'t',shows:[]}]});
+ const listing={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:tmdb:100',title:'t',shows:[]}]};
+ const arm=w=>sqlite(w.file,"UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+ // A. a publisher whose stage is validated (a live claim) while the producer runs
+ {
+  const w=world(4);arm(w);
+  const up=upstream();
+  const seen=[];
+  const out=await publishGeneration({DB:w.env.DB},{programmeRunId:'run-A',phase:'published',expectedProgrammeRunId:null,programme:programme('run-A'),watchlist:listing},{now:Date.parse(clock()),owner:'writer-a',afterValidate:async()=>{
+   for(let i=0;i<3;i++)seen.push(await run(w,up));
+  }});
+  assert.ok(out,'the publication itself completed with the producer running');
+  assert.deepEqual(seen.map(r=>r.stop),['yield','yield','yield'],'the producer held its writes at the write boundary while the stage was validated');
+  assert.ok(seen.every(r=>r.reason==='epg_stage'),'the evidence is the publication\'s own stage');
+  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE state='applied'")[0].n,0,'no canonical write during the publication');
+  assert.equal(seen.slice(1).reduce((n,r)=>n+r.counts.requests,0),0,'and the waiting runs sent no upstream request: one probe per hold, then cheap local checks');
+  assert.equal(rows(w.file,"SELECT state FROM published_epg_stage")[0].state,'published','the stage reached published');
+  const after=await run(w,up);
+  assert.equal(after.stop,'idle');assert.equal(metaCount(w.file),4,'the held work completed as soon as the publication ended');
+ }
+ // B. a FAILING publisher: its stage stays validated with a claim that is no longer renewed; the hold ends by itself when the claim expires, and the producer is not parked by it
+ {
+  const w=world(3);arm(w);
+  const up=upstream();
+  const start=Date.parse(clock());
+  await assert.rejects(publishGeneration({DB:w.env.DB},{programmeRunId:'run-B',phase:'published',expectedProgrammeRunId:null,programme:programme('run-B'),watchlist:listing},{now:start,claimTtlMs:1000,owner:'writer-b',afterValidate:async()=>{
+   // inside the claim: held
+   const held=await run(w,up,{clock:()=>new Date(start+500).toISOString()});
+   assert.equal(held.stop,'yield');
+   throw new Error('publisher crashed');
+  }}),/publisher crashed/);
+  assert.equal(rows(w.file,"SELECT state FROM published_epg_stage")[0].state,'validated','the failed publisher left a validated stage');
+  // after the claim expired nothing holds: the work completes
+  const after=await run(w,up,{clock:()=>new Date(start+60000).toISOString()});
+  assert.equal(after.stop,'idle');assert.equal(metaCount(w.file),3,'a stalled publication never holds enrichment past its own claim');
+  // the held cutover marker is not a hold either
+  const w2=world(2);arm(w2);sqlite(w2.file,"UPDATE published_epg_authority SET cutover='held' WHERE id=1");
+  assert.equal((await run(w2,upstream())).stop,'idle');assert.equal(metaCount(w2.file),2,'the owner-gated held cutover has no publisher: it holds nothing');
  }
 }
 console.log('catalog enrichment drain: ok');

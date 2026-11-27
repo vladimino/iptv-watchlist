@@ -103,29 +103,52 @@ const reports={
    readingTheClasses:'a lower run index is earlier; live Films are served first while background Films keep progressing across the same runs',totals:total,
    pendingSignals:count(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")};
  },
- // ---- epg: with and without a progressing publication ----
+ // ---- epg: the ACTUAL publication path (src/published-epg.js `publishGeneration`) with and without the producer running ----
  async epg(){
   const films=num(0,12);
-  const measure=async hold=>{
+  const {publishGeneration}=await import('../src/published-epg.js');
+  const programme=run=>({runId:run,updatedAt:'2026-11-01T12:00:00.000Z',watchlistCount:1,films:[{id:'film:tmdb:1000',title:'t',shows:[]}]});
+  const listing={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:tmdb:1000',title:'t',shows:[]}]};
+  const build=()=>{
    const w=world();
    const ids=Array.from({length:films},(_,i)=>1000+i);
-   assert.equal(sqlite(w.file,ids.map(filmSql).join('')+'DELETE FROM enrichment_signal;'+activate(['rated'])+ids.map(signal).join('')).status,0);
-   const up=upstream(12);
-   const STAGE=(state,claim)=>`DELETE FROM published_epg_stage;INSERT INTO published_epg_stage (programme_run_id,target_programme_run_id,phase,payload_sha256,state,owner_token,claim_nonce,claim_generation,claim_expires_at,chunk_count,member_count,show_count,document_count,created_at,updated_at) VALUES ('run-1','run-1','published','${'a'.repeat(64)}','${state}','tok',NULL,1,${claim},1,0,0,0,'${T}','${T}');`;
-   const farClaim=Date.parse(T)+30*86400000;
-   if(hold)assert.equal(sqlite(w.file,STAGE('loading',farClaim)).status,0);
-   const heldRuns=hold?6:0;
-   const runs=await runUntilIdle(w,up,{between:async i=>{if(hold&&i===heldRuns-1)assert.equal(sqlite(w.file,'DELETE FROM published_epg_stage;').status,0);}});
-   const receiptsDuringHold=hold?runs.slice(0,heldRuns).reduce((sum,run)=>sum+run.units,0):0;
-   return {runs:runs.length,stops:stops(runs),yields:totals(runs).yields,upstreamRequests:up.requests,canonicalUnitsCommittedWhileHeld:receiptsDuringHold,filmsDrained:count(w.file,'SELECT COUNT(*) AS n FROM film_metadata'),statements:totals(runs).statements,
-    note:hold?`${heldRuns} runs under a progressing stage (loading, live publisher claim), then the stage ends`:'no publication'};
+   assert.equal(sqlite(w.file,ids.map(filmSql).join('')+'DELETE FROM enrichment_signal;'+activate(['rated'])+ids.map(signal).join('')+"UPDATE published_epg_authority SET mode='d1' WHERE id=1;").status,0);
+   return w;
   };
-  const without=await measure(false),withHold=await measure(true);
-  assert.equal(withHold.canonicalUnitsCommittedWhileHeld,0,'no canonical write while the publication progresses');
-  assert.equal(withHold.filmsDrained,films);
-  return {fixture:{films,publicationEvidence:'published_epg_stage in state loading with a live claim; its removal ends the hold'},withoutPublication:without,withProgressingPublication:withHold,
-   extraUpstreamRequestsCausedByTheHold:withHold.upstreamRequests.tmdb+withHold.upstreamRequests.wikidata-without.upstreamRequests.tmdb-without.upstreamRequests.wikidata,
-   limits:'this is the producer side only: the EPG publication itself is not run here, so EPG publication latency with the producer active is NOT measured'};
+  const timed=async fn=>{const t0=performance.now();const value=await fn();return {value,ms:Math.round((performance.now()-t0)*10)/10};};
+  // 1. the publication alone
+  const alone=build();
+  const aloneRun=await timed(()=>publishGeneration({DB:alone.env.DB},{programmeRunId:'run-alone',phase:'published',expectedProgrammeRunId:null,programme:programme('run-alone'),watchlist:listing},{now:Date.parse(clock()),owner:'writer-alone'}));
+  // 2. the enrichment alone
+  const enrichmentAlone=build();
+  const upAlone=upstream(12);
+  const enrichmentRuns=await runUntilIdle(enrichmentAlone,upAlone);
+  // 3. both: drain runs happen while the stage is validated (a live claim); the publication then completes and the queue drains
+  const both=build();
+  const upBoth=upstream(12);
+  const heldRuns=[];
+  let producerMs=0;
+  const publication=await timed(()=>publishGeneration({DB:both.env.DB},{programmeRunId:'run-both',phase:'published',expectedProgrammeRunId:null,programme:programme('run-both'),watchlist:listing},{now:Date.parse(clock()),owner:'writer-both',afterValidate:async()=>{
+   const d0=performance.now();
+   for(let i=0;i<6;i++){const r=await D.drain(both.env,{runId:'harness-held-'+i,clock,tools:{},fetchImpl:upBoth});heldRuns.push({stop:r.stop,reason:r.reason,units:r.counts.units,requests:r.counts.requests,statements:r.counts.statements});}
+   producerMs=performance.now()-d0;
+  }}));
+  const afterRuns=await runUntilIdle(both,upBoth);
+  assert.equal(heldRuns.reduce((sum,run)=>sum+run.units,0),0,'no canonical unit committed while the publication progressed');
+  assert.equal(count(both.file,"SELECT COUNT(*) AS n FROM published_epg_stage WHERE state='published'"),1,'the publication completed');
+  assert.equal(count(both.file,'SELECT COUNT(*) AS n FROM film_metadata'),films,'and the queue drained afterwards');
+  // 4. a publisher that FAILS after validating: the claim is not renewed; once it expires nothing holds
+  const stalled=build();
+  const start=Date.parse(clock());
+  await publishGeneration({DB:stalled.env.DB},{programmeRunId:'run-stalled',phase:'published',expectedProgrammeRunId:null,programme:programme('run-stalled'),watchlist:listing},{now:start,claimTtlMs:1000,owner:'writer-stalled',afterValidate:async()=>{throw new Error('publisher crashed');}}).catch(()=>{});
+  const stalledRuns=await runUntilIdle(stalled,upstream(12),{drainOptions:{clock:()=>new Date(start+60000).toISOString()}});
+  return {fixture:{films,publication:'published-epg publishGeneration, one programme and one watchlist film',evidence:'the publisher\'s own stage claim'},
+   publicationAlone:{ms:aloneRun.ms},
+   enrichmentAlone:{runs:enrichmentRuns.length,statements:totals(enrichmentRuns).statements,upstreamRequests:upAlone.requests},
+   publicationWithTheProducerRunning:{publicationTotalMs:publication.ms,producerRunsInsideItMs:Math.round(producerMs*10)/10,publicationOwnMs:Math.round((publication.ms-producerMs)*10)/10,heldRuns:heldRuns.map(run=>({stop:run.stop,reason:run.reason,requests:run.requests,statements:run.statements})),canonicalUnitsCommittedWhileHeld:0,
+    upstreamRequestsWhileHeld:heldRuns.reduce((sum,run)=>sum+run.requests,0),drainAfterThePublication:{runs:afterRuns.length,stops:stops(afterRuns),statements:totals(afterRuns).statements}},
+   stalledPublisher:{runs:stalledRuns.length,stops:stops(stalledRuns),filmsDrained:count(stalled.file,'SELECT COUNT(*) AS n FROM film_metadata'),note:'a stage left validated by a crashed publisher holds nothing once its claim has expired'},
+   limits:'wall times are of the sqlite3 CLI stand-in; the publisher and the drainer are interleaved in one process at the publisher\'s own afterValidate point, which is the only point of the publication where another writer can run between its steps'};
  },
  // ---- populated: examined rows, statements and wall time on a populated catalog ----
  async populated(){

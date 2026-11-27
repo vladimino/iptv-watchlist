@@ -132,12 +132,13 @@ export async function repairPending(env){
  const row=await one(database(env),"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>?",[CODE_VERSION]);
  return Number(row?.n??0)>0;
 }
-// The narrow EPG yield (ADR 0219 decision 6, P4 = B). The evidence that an EPG publication or seal phase is ACTIVE AND PROGRESSING comes from the publication's OWN durable state, read at the write boundary:
-//   - a stage of the published EPG (`published_epg_stage`) that is `loading` or `validated` and whose publisher claim is still live (`claim_expires_at` ahead): the staging and validation of a programme generation is in progress;
-//   - the `held` cutover marker of the published EPG authority: the authority itself refuses concurrent writers;
+// The narrow EPG yield (ADR 0219 decision 6, P4 = B). The evidence that an EPG publication or seal phase is ACTIVE AND PROGRESSING comes from the publication's OWN durable claim, read at the write boundary:
+//   - a stage of the published EPG (`published_epg_stage`) that is `loading` or `validated` and whose publisher claim is still live (`claim_expires_at` ahead; the publisher renews it with every chunk, so a publisher that stopped
+//     renewing stops holding enrichment within the contract's own claim TTL);
 //   - the EPG-held resolver lease (`discovery_lease` with `holder_kind = 'epg'` and an expiry ahead).
-// A stage whose claim expired (a stalled publisher), a Discovery-held lease, no row and an unreadable row are NOT a hold: a failed or stalled EPG never holds enrichment and no timeout is invented. The hold ends the moment that state
-// changes, so the caller re-checks on a SHORT interval (EPG_RECHECK_MS) instead of waiting for a lease expiry. -> {until: ms, evidence} or null.
+// The `held` cutover marker of the published EPG authority is NOT a hold: it is an owner-gated authority state with no publisher and no heartbeat, so it could hold enrichment forever; the authority fences of the canonical writers still
+// apply to every write. A stage whose claim expired (a stalled publisher), a published stage, a Discovery-held lease, no row and an unreadable row are NOT a hold: a failed or stalled EPG never holds enrichment and no timeout is
+// invented. The hold ends the moment that state changes, so the caller re-checks on a SHORT interval (EPG_RECHECK_MS) instead of waiting for a lease expiry. -> {until: ms, evidence} or null.
 export const EPG_RECHECK_MS=15000;
 export const HOLD_CACHE_MS=5000;
 export async function epgPublicationWindow(env,nowMs){
@@ -145,8 +146,6 @@ export async function epgPublicationWindow(env,nowMs){
  const probe=async(sql,params=[])=>{try{return await one(handle,sql,params);}catch{return null;}};
  const stage=await probe("SELECT MAX(claim_expires_at) AS expiresAt FROM published_epg_stage WHERE state IN ('loading','validated') AND claim_expires_at IS NOT NULL AND claim_expires_at>?",[nowMs]);
  if(Number.isFinite(Number(stage?.expiresAt))&&Number(stage.expiresAt)>nowMs)return {until:Math.min(Number(stage.expiresAt),nowMs+EPG_RECHECK_MS),evidence:'epg_stage'};
- const held=await probe("SELECT 1 AS held FROM published_epg_authority WHERE id=1 AND cutover='held'");
- if(held?.held)return {until:nowMs+EPG_RECHECK_MS,evidence:'epg_cutover_held'};
  const lease=await probe("SELECT expires_at AS expiresAt FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND holder_kind='epg'");
  const until=Number(lease?.expiresAt);
  return Number.isFinite(until)&&until>nowMs?{until:Math.min(until,nowMs+EPG_RECHECK_MS),evidence:'epg_lease'}:null;
@@ -195,7 +194,8 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  const {env,counter}=countingEnv(rawEnv);
  // The background share is measured in COMMITTED units across runs (a handover must not reset it): the recent runs' outbox entries are the baseline.
  let baseLive=0,baseBackground=0;
- try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
+ let holdSuspected=false,newest=true;
+ try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);if(newest){holdSuspected=c.stop==='yield';newest=false;}baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
  const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,bySource:{}};
  const holdCache={at:null,value:null},cursors=new Map();
  const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed,requests:sent.n}});
@@ -262,12 +262,15 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     // the narrow yield, asked at the WRITE boundary (see processFilm): an injected predicate for offline runs, the publication's own state otherwise
     // the answer is reused for HOLD_CACHE_MS of the run's own clock: every write boundary would otherwise repeat three reads. A publication that starts inside the window can see a few more enrichment writes, which the canonical
     // Film/Person authority fence in each write batch still serializes; the hold is a courtesy to the publication, not a correctness fence.
+    // `holdSuspected`: the previous run ended in a yield, so the publication hold is rechecked BEFORE any upstream request of this run (one probe per hold episode, then cheap local checks)
+    holdSuspected,
     writesHeld:async()=>{
      const nowMs=Date.parse(clock());
      if(holdCache.at!==null&&nowMs-holdCache.at<HOLD_CACHE_MS&&!shouldYield){if(holdCache.value){held=holdCache.value;return true;}return false;}
      const hold=shouldYield?await shouldYield():await epgPublicationWindow(env,nowMs);
      holdCache.at=nowMs;holdCache.value=hold||null;
-     if(hold){held=hold;return true;}return false;}};
+     if(hold){held=hold;return true;}
+     gate.holdSuspected=false;return false;}};
    try{step=await processFilm(env,{filmId:pick.filmId,leaseId,generation,now:clock(),tools,fetchImpl,coordinator,budget:gate});}
    catch(error){
     // Reactive yield (ADR 0219 decision 6): a storage or authority failure defers THIS Film for the rest of the run and the independent work continues; repeated failures back the whole run off. Never a crash.
