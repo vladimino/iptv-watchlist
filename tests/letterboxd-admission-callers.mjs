@@ -612,25 +612,26 @@ const file=fresh('d1'),env=world(file);
   assert.equal(admissionRows(file).filter(entry=>entry.source_code==='Oz2').length,1);
  }
 
- // (2b) review P1-2: the receipt is still PENDING but its window EXPIRES before an effect batch is built (between the mark and the link, or before the mark): the deadline is enforced at the effect, so nothing late lands.
- // Receipts cannot be edited (triggers), so the clock of the Worker code is skewed: the attempt keeps its `pending` receipt, only time passes.
+ // (2b) review P1-2 (and its residual): the receipt stays PENDING but its window passes AFTER an effect batch was built and BEFORE the database executes it. The deadline is compared in the batch's own SQL with the time the
+ // database runs it at, so the already-bound mark or link batch fails. Test seam: the stand-in rewrites the database clock expression of that one batch to a later instant at execution (the statements were bound earlier).
  {
-  const RealDate=ctx.Date;let skewMs=0;
-  ctx.Date=class extends RealDate{constructor(...args){if(args.length)super(...args);else super(RealDate.now()+skewMs);}static now(){return RealDate.now()+skewMs;}};
-  try{
-   // `at`: the batch that, once it ran, lets the window expire (a batch's guard is built BEFORE it runs): the reservation (so the FIRST effect batch is late) or the first effect batch (so the SECOND is late)
-   for(const [lid,at,chunk] of [['Oy1','reserve',21],['Oy2','effect',22]]){
-    let expired=0;
-    const out=await commit(watch(async list=>{if(!expired&&kindOf(list)===at){expired++;skewMs=3*3600000;}}),body([item(lid,'7200'+chunk)],chunk));
-    skewMs=0;
-    assert.equal(expired,1,lid+': the window expired while the receipt was still pending');
-    assert.deepEqual([out.status,out.json.code],[409,'admission_not_settled'],lid+' '+JSON.stringify(out.json));
-    assert.equal(await Facts.resolveAlias(env,'letterboxd:'+lid),null,lid+': no late link');
-    assert.equal(admissionRows(file).filter(entry=>entry.source_code===lid).length,0,lid+': no admission');
-    assert.equal(lidReceipts(lid).some(entry=>entry.state==='applied'),false,lid+': never applied');
-    assert.equal(lidReceipts(lid).length,1,lid+': one receipt, which the next attempt supersedes');
-   }
-  }finally{ctx.Date=RealDate;}
+  const NOW="strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+  // `at`: the batch after which the NEXT effect batch is delayed past the deadline: the reservation (the FIRST effect batch is late) or the first effect batch (the SECOND, the link, is late)
+  for(const [lid,at,chunk] of [['Oy1','reserve',21],['Oy2','effect',22]]){
+   let armed=0,late=0;
+   const out=await commit(watch(async list=>{
+    const kind=kindOf(list);
+    if(!armed&&kind===at){armed++;return;}
+    if(armed&&!late&&kind==='effect'){late++;for(const entry of list)entry.text=entry.text.split(NOW).join("'2099-01-01T00:00:00.000Z'");}
+   }),body([item(lid,'7200'+chunk)],chunk));
+   assert.equal(late,1,lid+': a bound effect batch reached execution after the deadline');
+   assert.deepEqual([out.status,out.json.code],[409,'admission_not_settled'],lid+' '+JSON.stringify(out.json));
+   assert.equal(await Facts.resolveAlias(env,'letterboxd:'+lid),null,lid+': no late link');
+   assert.equal(admissionRows(file).filter(entry=>entry.source_code===lid).length,0,lid+': no admission');
+   assert.equal(lidReceipts(lid).some(entry=>entry.state==='applied'),false,lid+': never applied');
+   // the receipt was `pending` (inside nobody's abandonment) when the batch ran; the failed effect leaves it unresolved (`unknown`), never applied, and the next attempt supersedes it
+   assert.equal(lidReceipts(lid).length,1,lid+': one receipt');assert.ok(['pending','unknown','failed'].includes(lidReceipts(lid)[0].state),lid+': unresolved, not applied: '+lidReceipts(lid)[0].state);
+  }
  }
 
  // (3) the code is linked elsewhere AFTER the reservation: the link finds the conflict, the attempt is not settled, nothing is admitted, no chunk receipt

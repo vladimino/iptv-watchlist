@@ -53,7 +53,14 @@ export async function planAdmissionD1(env,{tmdb,sourceCode}){
  // AIR-672 / ADR 0217 decision 5b: a lid-only Film for this lid is never attached or duplicated by a TMDB-proved admission (natural sync never attaches). Read while migration 0047 is applied; before it there is no such row.
  if(await hasLidAdmissionTable(db)){
   const lidOnly=await one(db,'SELECT film_id FROM film_lid_admission WHERE lid=?',[sourceCode]);
-  if(lidOnly)return {outcome:'lid_only',id:lidOnly.film_id,reason:'lid_only_present'};
+  if(lidOnly){
+   // The existing row is classified by the SAME ownership validation as the lid-only kind (complete, non-conflicting ownership, no redirect): a row whose claim moved, was duplicated or untrusted, or whose Film became a
+   // redirect source is never reported as a lid-only Film that settles an item.
+   const own=await planLidOnlyD1(env,{lid:sourceCode});
+   if(own.outcome==='present_lid_only')return {outcome:'lid_only',id:own.id,reason:'lid_only_present'};
+   if(own.outcome==='redirect')return {outcome:'redirect',id:own.id};
+   return {outcome:'conflict',id:own.id??lidOnly.film_id,reason:'lid_only_ownership_incomplete'};
+  }
  }
  const target=await resolveAdmissionFilm(env,tmdb);
  if(target.redirected)return {outcome:'redirect',id:target.id};
@@ -184,9 +191,10 @@ export async function admitVerifiedFilm(env,input={}){
      // AIR-672 / ADR 0217 decision 5b: the caller's pre-canonical effects (the inferred import's mark and link) run INSIDE this owned execution, after the reservation. `statement` is the assertion of the exact currently
      // owned pending attempt, for the caller to add to each of its own batches (Ratings `admissionGuards`); an expired or abandoned attempt can therefore never land a late effect.
      if(typeof input.beforeCanonical==='function'){
-      // The deadline is enforced AT THE EFFECT: `statement` is a function that the Ratings carrier calls every time it builds a batch, so each pre-canonical batch compares the receipt's window with the time it is built at,
-      // never with a time frozen when the hook started (a pending attempt that expires between the mark and the link cannot land the link).
-      const statement=()=>{const owned=ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey,requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock()});return [fenced.assertSql(owned.sql),owned.params];};
+      // The deadline is enforced AT THE EFFECT, in the batch's own SQL: the assertion compares the receipt's window with the time the DATABASE executes the statement at, so a batch built in time but delayed past the
+      // deadline (a queued write, a slow link) still fails, and so does every later batch of the attempt. No Worker clock enters it.
+      const owned=ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey,requestId:ctx2.requestId,attempt:ctx2.attempt});
+      const statement=[fenced.assertSql(owned.sql),owned.params];
       await input.beforeCanonical({requestId:ctx2.requestId,attempt:ctx2.attempt,operationKey,statement});
      }
      return admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,

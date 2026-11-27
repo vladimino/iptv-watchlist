@@ -410,6 +410,47 @@ const pending=(file,id,key,next,target='film:lb:Ab1')=>sqlite(file,"INSERT INTO 
  assert.notEqual(afterRedirect.out.outcome,'present_lid_only','an applied receipt whose Film is a redirect source is not reported as present_lid_only');
 }
 
+// ===== review P1-3 (alternate path): the TMDB-proved kinds classify an existing lid-only row with the SAME ownership validation =====
+{
+ const item=kind=>({kind,lid:'Ab1',receipt:{tmdb:'603',archiveSha256:sha('e'),title:'The Matrix',year:1999,filmPath:'/film/the-matrix/'},evidence:null,now:clock(9000)});
+ const kinds=['lid','short_code','inferred_import'];
+ const make=async()=>{const file=fresh();assert.equal((await run(file)).out.outcome,'admitted_lid_only');return file;};
+ // positive controls: complete ownership settles (kind lid) or is refused by its own rule (rated, inferred), never attached
+ {
+  const file=await make();const before=snapshot(file);
+  assert.deepEqual([(await admitVerifiedFilm(envOf(file),item('lid'))).outcome,(await admitVerifiedFilm(envOf(file),item('short_code'))).outcome,(await admitVerifiedFilm(envOf(file),item('inferred_import'))).outcome],['present_lid_only','needs_review','conflict']);
+  assert.equal(snapshot(file),before);
+ }
+ const broken=[
+  ['the trusted claim moved to another Film',"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:x',1,'"+STAMP+"');UPDATE film_external_id SET film_id='film:x' WHERE scheme='letterboxd' AND value='Ab1'"],
+  ['a second row of the lid on another Film',"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:x',1,'"+STAMP+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:x','letterboxd','Ab1',0,0,'{}')"],
+  ['the claim is no longer trusted',"UPDATE film_external_id SET trusted=0 WHERE scheme='letterboxd' AND value='Ab1'"],
+  ['the claim is conflicting',"UPDATE film_external_id SET trusted=0,conflicting=1 WHERE scheme='letterboxd' AND value='Ab1'"],
+  ['the claim was removed',"DELETE FROM film_external_id WHERE scheme='letterboxd' AND value='Ab1'"],
+ ];
+ for(const [label,sql] of broken){
+  for(const kind of kinds){
+   const file=await make();sqlite(file,sql);const before=snapshot(file);
+   const out=await admitVerifiedFilm(envOf(file),item(kind));
+   assert.notEqual(out.outcome,'present_lid_only',label+' ('+kind+'): never a lid-only success');
+   assert.deepEqual([out.outcome,out.reason,out.terminal],['conflict','lid_only_ownership_incomplete',true],label+' ('+kind+') '+JSON.stringify(out));
+   assert.equal(snapshot(file),before,label+' ('+kind+'): nothing written, no attach');
+  }
+ }
+ // the owning Film is a redirect source: non-terminal for every kind, never settled
+ for(const kind of kinds){
+  const file=await make();sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:t1',1,'"+STAMP+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:Ab1','film:t1','"+STAMP+"')");const before=snapshot(file);
+  const out=await admitVerifiedFilm(envOf(file),item(kind));
+  assert.deepEqual([out.outcome,out.terminal],['redirect',false],'redirect source ('+kind+') '+JSON.stringify(out));assert.equal(snapshot(file),before);
+ }
+ // a redirect loop fails closed (never a success)
+ {
+  const file=await make();sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:t1',1,'"+STAMP+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:lb:Ab1','film:t1','"+STAMP+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:t1','film:lb:Ab1','"+STAMP+"')");
+  const out=await admitVerifiedFilm(envOf(file),item('lid')).catch(error=>({outcome:'error',code:error.code}));
+  assert.ok(['conflict','redirect','error'].includes(out.outcome)&&out.outcome!=='present_lid_only','a loop is never a success: '+JSON.stringify(out));
+ }
+}
+
 // ===== 16. statement count: the lid-only batch within the cap =====
 {
  const file=fresh();let counted=0;
