@@ -25,8 +25,8 @@ const ids = ['posters-snapshot-text', 'posters-loading', 'posters-error', 'poste
 for (const id of ids) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.match(html, /<script src="\/admin-posters\.js"><\/script>/);
 assert.match(html, /<a href="\/admin\/posters" aria-current="page" data-return-carry>Постеры<\/a>/);
-assert.match(shell, /<a href="\/admin\/posters" id="admin-view-posters" data-return-carry>Постеры<\/a><a href="\/admin\/channels" data-return-carry>Каналы<\/a><\/nav>/, 'the catalog shell links to the poster page');
-assert.match(limbo, /<a href="\/admin\/posters" data-return-carry>Постеры<\/a><a href="\/admin\/channels" data-return-carry>Каналы<\/a><\/nav>/, 'the limbo page links to the poster page');
+assert.match(shell, /<a href="\/admin\/posters" id="admin-view-posters" data-return-carry>Постеры<\/a><a href="\/admin\/channels" data-return-carry>Каналы<\/a><a href="\/admin\/settings" data-return-carry>Настройки<\/a><\/nav>/, 'the catalog shell links to the poster page');
+assert.match(limbo, /<a href="\/admin\/posters" data-return-carry>Постеры<\/a><a href="\/admin\/channels" data-return-carry>Каналы<\/a><a href="\/admin\/settings" data-return-carry>Настройки<\/a><\/nav>/, 'the limbo page links to the poster page');
 assert.match(html, /<option value="10" selected>10 \(максимум\)<\/option><\/select>/);
 assert.doesNotMatch(html, /value="(?:1[1-9]|[2-9]\d)"[^>]*>[^<]*<\/option><\/select><\/label>\s*<label class="limbo-field">Вызовов/, 'no batch above ten');
 assert.doesNotMatch(html, /fetch\(|\/api\//);

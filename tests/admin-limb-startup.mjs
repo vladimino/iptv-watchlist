@@ -24,14 +24,14 @@ const PAGES = {
 };
 
 // ---- the served pages: routes, nav, no identity queue on the Limbo page ----
-const NAV = [['/admin', 'Каталог'], ['/admin/health', 'Здоровье данных'], ['/admin/letterboxd', 'Архив Letterboxd'], ['/admin/limb', 'Лимб'], ['/admin/identity', 'Идентификация'], ['/admin/posters', 'Постеры'], ['/admin/channels', 'Каналы']];
+const NAV = [['/admin', 'Каталог'], ['/admin/health', 'Здоровье данных'], ['/admin/letterboxd', 'Архив Letterboxd'], ['/admin/limb', 'Лимб'], ['/admin/identity', 'Идентификация'], ['/admin/posters', 'Постеры'], ['/admin/channels', 'Каналы'], ['/admin/settings', 'Настройки']];
 for (const route of ['/admin', '/admin/health', '/admin/letterboxd', '/admin/limb', '/admin/identity', '/admin/posters', '/admin/channels']) {
   const asset = ASSETS[route];
   assert.ok(asset, route + ' is a served page');
   const nav = asset.body.match(/<nav class="admin-views"[^>]*>[\s\S]*?<\/nav>/);
   assert.ok(nav, route + ' has the sections nav');
   const links = [...nav[0].matchAll(/<a\b([^>]*)>([^<]*)<\/a>/g)].map(match => [match[1].match(/href="([^"]+)"/)[1], match[2]]);
-  assert.deepEqual(links, NAV, route + ': the same seven tabs in the same order');
+  assert.deepEqual(links, NAV, route + ': the same eight tabs in the same order');
   const current = [...nav[0].matchAll(/<a\b([^>]*aria-current="page"[^>]*)>([^<]*)<\/a>/g)].map(match => match[1].match(/href="([^"]+)"/)[1]);
   // /admin/health is the catalog document (the page script marks the health tab at runtime), so its served markup marks the catalog tab.
   assert.deepEqual(current, [route === '/admin/health' ? '/admin' : route], route + ': exactly its own tab is current');
@@ -166,4 +166,4 @@ for (const page of ['limb', 'identity']) {
     p.done();
   }
 }
-console.log('admin-limb-startup: two pages, two served bundles; each starts only its own read, sends one GET to its own route and none to the other, throws nothing; the identity queue is not on the Limbo page; seven tabs on every owner page');
+console.log('admin-limb-startup: two pages, two served bundles; each starts only its own read, sends one GET to its own route and none to the other, throws nothing; the identity queue is not on the Limbo page; eight tabs on every owner page');

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Настройки</title>
+  <meta name="description" content="Страница владельца: управление обогащением каталога — пауза, возобновление, состояние прогона, паузы источников и строки, требующие внимания.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ настройки</span></div>
+  </header>
+  <main class="admin-shell">
+    <a class="return-home" data-return-home href="/">На главную</a>
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">ВЛАДЕЛЕЦ · УПРАВЛЕНИЕ</p>
+        <h1>Настройки</h1>
+        <p class="admin-intro">Обогащение каталога: работает оно или на паузе, завершается ли прогон после паузы, какие источники сейчас отдыхают и какие строки ждут вас. Открытие страницы только читает. Галочка меняет одно: пауза или возобновление. Активировать производитель или расширить его область отсюда нельзя.</p>
+      </div>
+    </section>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin" data-return-carry>Каталог</a><a href="/admin/health" data-return-carry>Здоровье данных</a><a href="/admin/letterboxd" data-return-carry>Архив Letterboxd</a><a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/identity" data-return-carry>Идентификация</a><a href="/admin/posters" data-return-carry>Постеры</a><a href="/admin/channels" data-return-carry>Каналы</a><a href="/admin/settings" aria-current="page" data-return-carry>Настройки</a></nav>
+      <div class="admin-main">
+    <p id="settings-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="settings-snapshot-text">Состояние ещё не прочитано.</span></p>
+    <p id="settings-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем состояние…</p>
+    <p id="settings-error" class="admin-state admin-state-error" role="alert" hidden></p>
+    <section aria-labelledby="settings-control-title" class="admin-card settings-control">
+      <div class="settings-control-head">
+        <h2 id="settings-control-title">Обогащение каталога</h2>
+        <button type="button" id="settings-reread" class="admin-more settings-reread">Перечитать</button>
+      </div>
+      <label class="settings-toggle"><input type="checkbox" id="settings-toggle" disabled><span id="settings-toggle-label">Производитель работает</span></label>
+      <p id="settings-toggle-text" class="settings-source">Состояние ещё не прочитано.</p>
+      <p id="settings-revision" class="muted"></p>
+      <p id="settings-outcome" class="admin-state" role="status" aria-live="polite" hidden></p>
+    </section>
+    <section aria-labelledby="settings-drain-title" class="admin-card settings-drain">
+      <h2 id="settings-drain-title">Прогон и пауза</h2>
+      <div id="settings-drain"><p class="muted">Появится после чтения.</p></div>
+    </section>
+    <section aria-labelledby="settings-backlog-title" class="admin-card settings-backlog">
+      <h2 id="settings-backlog-title">Очередь</h2>
+      <div id="settings-backlog"><p class="muted">Появится после чтения.</p></div>
+      <div id="settings-scopes"></div>
+    </section>
+    <section aria-labelledby="settings-cooldowns-title" class="admin-card settings-cooldowns-card">
+      <h2 id="settings-cooldowns-title">Паузы источников</h2>
+      <div id="settings-cooldowns"><p class="muted">Появится после чтения.</p></div>
+    </section>
+    <section aria-labelledby="settings-attention-title" class="admin-card settings-attention">
+      <h2 id="settings-attention-title">Требуют внимания</h2>
+      <p class="settings-source">«Повторить» возвращает выбранные строки в очередь и ничего не пишет в метаданные. Если строки изменились после чтения, запрос отклоняется целиком.</p>
+      <div id="settings-attention"><p class="muted">Появится после чтения.</p></div>
+    </section>
+      </div>
+    </div>
+  </main>
+  <script src="/return-home.js"></script>
+  <script src="/admin-settings.js"></script>
+  <script src="/status-footer.js"></script>
+</body>
+</html>

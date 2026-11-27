@@ -27,6 +27,9 @@ assets['/admin-identity-group.js']={body:bundleAdmin([fs.readFileSync('src/admin
 assets['/admin/posters']={body:fs.readFileSync('public/admin-posters.html','utf8'),type:'text/html'};
 // The poster page: the GET client, the explicit POST client of the maintenance route, the pure run logic and the page script.
 assets['/admin-posters.js']={body:bundleAdmin([fs.readFileSync('src/admin/client.js','utf8'),fs.readFileSync('src/admin/posters-client.js','utf8'),fs.readFileSync('src/admin/posters-run.js','utf8'),fs.readFileSync('public/admin-posters.js','utf8')]),type:'text/javascript'};
+assets['/admin/settings']={body:fs.readFileSync('public/admin-settings.html','utf8'),type:'text/html'};
+// Card CU (AIR-611): the settings page. The GET client, the explicit POST client of the owner control route, the pure view logic and the page script.
+assets['/admin-settings.js']={body:bundleAdmin([fs.readFileSync('src/admin/client.js','utf8'),fs.readFileSync('src/admin/settings-client.js','utf8'),fs.readFileSync('src/admin/settings-view.js','utf8'),fs.readFileSync('public/admin-settings.js','utf8')]),type:'text/javascript'};
 assets['/admin/channels']={body:fs.readFileSync('public/admin-channels.html','utf8'),type:'text/html'};
 // AIR-562: the Channel page. The pure parse/validate/view module is the same source the Worker scopes; the playlist is parsed in the page and only normalized entries are sent.
 assets['/admin-channels.js']={body:bundleAdmin([scoped('src/domain/epg-channel-admin.js','EpgChannelAdmin'),fs.readFileSync('src/admin/channels-client.js','utf8'),fs.readFileSync('public/admin-channels.js','utf8')]),type:'text/javascript'};
