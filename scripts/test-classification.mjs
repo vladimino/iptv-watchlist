@@ -439,6 +439,9 @@ export const FILES={
  "admin-film-metadata-api.mjs": {
   "suite": "core"
  },
+ "admin-film-metadata-page.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-workflow.mjs": {
   "suite": "core"
  },

@@ -94,6 +94,8 @@ const context = vm.createContext({
   document, URL, URLSearchParams, Promise, Date, Intl, JSON, Object, Array, String, Number, Boolean, Map, Set, Error, RegExp, Math,
   crypto: {randomUUID: () => 'req-fixed'},
   setTimeout, clearTimeout,
+  // AIR-635: the provenance panel has its own test (admin-film-metadata-page.mjs); here it renders nothing
+  adminFilmMetadataSection: () => '', adminBindFilmMetadata: () => {},
   adminSaveFilmTitle: async (id, body) => {
     saved.push({id, body});
     if (typeof context.editOnSave === 'function') context.editOnSave();
