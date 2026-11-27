@@ -1070,6 +1070,9 @@ export const FILES={
  "film-localization-reconciler.mjs": {
   "suite": "core"
  },
+ "film-person-gate-reuse.mjs": {
+  "suite": "core"
+ },
  "film-person-backfill.mjs": {
   "suite": "core"
  },

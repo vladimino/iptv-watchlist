@@ -88,6 +88,45 @@ async function readState(env,{servedOnly}){
  return {state,r2Allowed:state==='r2'||state==='prepared',open:state==='open',held:state==='held',generation,version:numeric,baseline:baseline.state};
 }
 
+// AIR-688: a TIME-BOUNDED, OPERATION-SCOPED reuse of the writer gate. A drain (or any other long operation) that creates a scope with `createGateReuse()` and carries it as `env.gateReuse` lets the fenced writers
+// skip the four marker, fence, baseline and schema-contract reads at every writer entry while the snapshot is younger than `ttlMs`. What stays authoritative is unchanged and is NOT read from the snapshot: every
+// canonical batch still asserts `mode='d1' AND cutover='open' AND generation=?` (and any producer or Letterboxd epoch fence) INSIDE its own transaction, so a marker that moved after the snapshot fails the batch whole
+// (the failed CHECK re-reads the marker FRESH, `readAuthority`, and drops the snapshot). Only an `open` state is kept; a non-open, unreadable or failed read keeps nothing, and a snapshot is handed out as a COPY, because
+// the writers bind a producer fence onto the gate object. Receipt lookups and the reconcile step are never served from here. Without `env.gateReuse` the behaviour is exactly the fresh read of every call.
+export const GATE_REUSE_TTL_MS=5000;
+export function createGateReuse({ttlMs=GATE_REUSE_TTL_MS,now=()=>Date.now()}={}){
+ if(!Number.isFinite(ttlMs)||ttlMs<0)throw failed('film_person_invalid');
+ return {ttlMs,now,gate:null,at:0,facts:new Map(),stats:{hits:0,misses:0,drops:0,factHits:0,factMisses:0}};
+}
+// The gate of a fenced WRITER (use it where the writer takes its gate; a post-failure re-read, a report or a transition keeps `readAuthority`).
+export async function readWriterGate(env){
+ const scope=env?.gateReuse;
+ if(!scope)return readAuthority(env);
+ if(scope.gate&&scope.now()-scope.at<scope.ttlMs){scope.stats.hits++;return {...scope.gate};}
+ scope.gate=null;scope.stats.misses++;
+ const gate=await readAuthority(env);
+ if(gate.state==='open'){scope.gate={...gate};scope.at=scope.now();}
+ return {...gate};
+}
+// Forget the snapshot (a failed batch, a moved marker). Safe to call without a scope.
+export function dropGateReuse(env){
+ const scope=env?.gateReuse;
+ if(!scope)return;
+ if(scope.gate||scope.facts.size)scope.stats.drops++;
+ scope.gate=null;scope.facts.clear();
+}
+// A schema fact that only moves FORWARD (a migration is never undone): a POSITIVE answer (`keep(value)` true) is kept for the same bounded time under `key`; every other answer is returned and not kept. Without a scope it just reads.
+export async function reuseSchemaFact(env,key,read,keep){
+ const scope=env?.gateReuse;
+ if(!scope)return read();
+ const hit=scope.facts.get(key);
+ if(hit&&scope.now()-hit.at<scope.ttlMs){scope.stats.factHits++;return hit.value;}
+ scope.stats.factMisses++;// an expired entry is simply read past: it is expired for every later call too, and a positive answer replaces it
+ const value=await read();
+ if(keep(value))scope.facts.set(key,{value,at:scope.now()});
+ return value;
+}
+
 // AIR-374 P1 / ADR 0117 (Accepted owner decision 1). HISTORICAL (the enrichment projector was removed in AIR-537 slice 3; these symbols are retained, pinned by
 // tests/projector-marker-guard.mjs). The ONE source of the enrichment projector's marker fence. Every SQL batch the projector
 // wrote asserted, in the same atomic batch, the marker mode, cutover and generation it read BEFORE its diff, whatever flag is set. The
