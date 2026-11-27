@@ -136,7 +136,7 @@ const EXPECTED_ROOT=await ROOT();
  assert.deepEqual([intent.state,intent.outcome,intent.link_state,intent.film_id,intent.attach_root,intent.tmdb,intent.attempt_request_id],['settled','attached','linked','film:lb:Ab1',EXPECTED_ROOT,'603',rec[1].request_id]);
  // the Ratings alias exists: both ids on one fact key; no film_rated_admission row (outside the enrichment scope)
  const links=getLinks(file);
- assert.equal(links['letterboxd:Ab1'],links['tmdb:603']);assert.ok(links['tmdb:603']);
+ assert.deepEqual(links,{'letterboxd:Ab1':'lb-Ab1','tmdb:603':'lb-Ab1'},'the lid keeps its OWN fact key lb-<lid> and gains the movie alias; no tmdb-<n> key is made');
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM film_rated_admission')[0].n,0);
  // both permalinks resolve to the same Film: by the lid (its proof row) and by the movie (its trusted claim)
  assert.equal((await resolveAdmissionFilm(env,'603')).id,'film:lb:Ab1');
@@ -398,12 +398,13 @@ const attached=async(portOverride)=>{
  assert.equal(retired.outcome,'link_blocked',JSON.stringify(retired));
 }
 {
- // FALLBACK, exact lost-response reconciliation: the alias is in the document already (an earlier batch landed, its response was lost); the guarded update settles the intent and asserts the document version
+ // LOST RESPONSE: the alias is in the document already. The settlement is NOT a separate unfenced update: the document is rewritten unchanged by the guarded batch that carries the intent settlement
  const {file,env}=await attached();
  setLinks(file,{'letterboxd:Ab1':'lb-key-1','tmdb:603':'lb-key-1'});
  const out=await lidRecheck(env,{lid:'Ab1',requestId:'req-1',ports:linkPort(env),now:clock()});
- assert.deepEqual([out.outcome,out.terminal,out.fallback],['linked',true,true],JSON.stringify(out));
+ assert.deepEqual([out.outcome,out.terminal,out.factKey],['linked',true,'lb-key-1'],JSON.stringify(out));
  assert.deepEqual(intents(file).map(i=>[i.state,i.link_state]),[['settled','linked']]);
+ assert.deepEqual(getLinks(file),{'letterboxd:Ab1':'lb-key-1','tmdb:603':'lb-key-1'},'the document is unchanged');
 }
 {
  // the primary path settles the intent in the SAME batch as the alias: a batch that fails writes neither
@@ -433,4 +434,114 @@ const attached=async(portOverride)=>{
  assert.deepEqual((await planAttachState(env,{lid:'Ab1'})).outcome,'attachable');
  assert.equal(await readIntent(env,'nope'),null);
 }
-console.log('Lid TMDB attach (AIR-675, tests 9, 10, 11 and 16) passed.');
+
+// ===== 8c (review of PR #1043, P1): the link is fenced by the existing document compare-and-swap and the markers, for EVERY outcome =====
+const seedParts=(file,value,{parts=2,etagOf=body=>createHash('sha256').update(body).digest('hex')}={})=>{
+ const body=JSON.stringify(value),size=Math.ceil(body.length/parts),etag=etagOf(body);
+ sqlite(file,'DELETE FROM ratings_document WHERE key='+sqlText(LINKS)+';'+Array.from({length:parts},(_,i)=>'INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('+sqlText(LINKS)+','+i+','+sqlText(body.slice(i*size,(i+1)*size))+','+sqlText(etag)+",'2026-11-27T09:00:00.000Z')").join(';'));
+};
+const partsOf=file=>rows(file,'SELECT part,etag FROM ratings_document WHERE key='+sqlText(LINKS)+' ORDER BY part');
+const runOnce=(file,options,ports)=>{const env=envOf(file,options);return lidRecheck(env,{lid:'Ab1',requestId:'req-1',ports:ports??linkPort(env),now:clock()});};
+const NOLINK=()=>({link:async()=>{const e=new Error('write_contention');e.code='write_contention';throw e;}});
+{
+ // a MULTIPART links document, replaced between the read and the settlement: the stale batch writes nothing (the exact part count and etag are in the batch); the retried one links at the NEW version
+ const {file}=await attached(NOLINK().link?NOLINK():undefined);
+ const big={};for(let i=0;i<40;i++)big['letterboxd:Z'+i]='lb-Z'+i;
+ seedParts(file,big,{parts:3});assert.equal(partsOf(file).length,3);
+ let replaced=false;
+ const out=await runOnce(file,{onBatch:async list=>{if(!replaced&&list.some(item=>/UPDATE lid_recheck_intent SET state='settled'/.test(item.text))){replaced=true;seedParts(file,{...big,'letterboxd:Other':'lb-Other'},{parts:2});}}});
+ assert.equal(replaced,true,'the document was replaced between the read and the batch');
+ assert.deepEqual([out.outcome,out.terminal,out.factKey],['linked',true,'lb-Ab1'],JSON.stringify(out));
+ const links=getLinks(file);
+ assert.equal(links['letterboxd:Ab1'],'lb-Ab1');assert.equal(links['tmdb:603'],'lb-Ab1','BOTH aliases are in the document the intent was settled against');
+ assert.equal(links['letterboxd:Other'],'lb-Other','the replacement was kept, not overwritten by the stale version');
+ assert.deepEqual(intents(file).map(i=>[i.state,i.link_state]),[['settled','linked']]);
+}
+{
+ // a multipart document already holding both aliases (lost response): settled unchanged; one holding neither is never reported as linked
+ const {file}=await attached();
+ const big={'letterboxd:Ab1':'lb-Ab1','tmdb:603':'lb-Ab1'};for(let i=0;i<40;i++)big['letterboxd:Z'+i]='lb-Z'+i;
+ seedParts(file,big,{parts:3});
+ const out=await runOnce(file);
+ assert.equal(out.outcome,'linked',JSON.stringify(out));assert.deepEqual(getLinks(file),big);
+ assert.equal(partsOf(file).length>=1,true);
+}
+{
+ // the LID's own fact key, from a real Diary-first record: the movie alias joins `lb-<lid>` (with the record's history), no key is renamed or created from the movie
+ const {file}=await attached();
+ setLinks(file,{'letterboxd:Ab1':'lb-diary-1','letterboxd:Other':'lb-Other'});
+ const out=await runOnce(file);
+ assert.deepEqual([out.outcome,out.factKey],['linked','lb-diary-1'],JSON.stringify(out));
+ assert.deepEqual(getLinks(file),{'letterboxd:Ab1':'lb-diary-1','letterboxd:Other':'lb-Other','tmdb:603':'lb-diary-1'},'readback through both aliases gives ONE key; nothing else moved');
+ // ... and the Facts record of that key is the one the Ratings protocol reads (history kept): the record document is untouched by the link
+ // no link at all: the key is lb-<lid>, never tmdb-<n>
+ const none=await attached();setLinks(none.file,{});
+ assert.equal((await runOnce(none.file)).factKey,'lb-Ab1');assert.equal(getLinks(none.file)['tmdb:603'],'lb-Ab1');
+}
+{
+ // a competing movie fact key (the movie is mapped to ANOTHER key, the lid not linked yet): a PROVED conflict, nothing linked, the existing mapping is not reused
+ const {file}=await attached();
+ setLinks(file,{'tmdb:603':'tmdb-603'});
+ const out=await runOnce(file);
+ assert.deepEqual([out.outcome,out.terminal],['alias_conflict',true],JSON.stringify(out));
+ assert.deepEqual(getLinks(file),{'tmdb:603':'tmdb-603'},'no lid alias was written');
+ // the lid key already holds ANOTHER movie id
+ const other=await attached();setLinks(other.file,{'letterboxd:Ab1':'lb-Ab1','tmdb:999':'lb-Ab1'});
+ assert.equal((await runOnce(other.file)).outcome,'alias_conflict');
+}
+{
+ // a conflict CLEARED before the terminal write: the document moved, so the guarded batch refuses and the retried one re-decides at the new version (linked, not alias_conflict)
+ const {file}=await attached();
+ setLinks(file,{'letterboxd:Ab1':'k1','tmdb:603':'k2'});
+ let cleared=false;
+ const out=await runOnce(file,{onBatch:async list=>{if(!cleared&&list.some(item=>/UPDATE lid_recheck_intent SET state='settled'/.test(item.text))){cleared=true;setLinks(file,{'letterboxd:Ab1':'lb-Ab1'});}}});
+ assert.equal(cleared,true);
+ assert.deepEqual([out.outcome,out.terminal],['linked',true],JSON.stringify(out));
+ assert.deepEqual(getLinks(file),{'letterboxd:Ab1':'lb-Ab1','tmdb:603':'lb-Ab1'});
+}
+{
+ // a LOST intent compare-and-swap (another caller raised the revision): the batch is refused whole, nothing is linked, the intent stays owed, and the next call links
+ const {file}=await attached();
+ let taken=false;
+ const out=await runOnce(file,{onBatch:async list=>{if(!taken&&list.some(item=>/UPDATE lid_recheck_intent SET state='settled'/.test(item.text))){taken=true;sqlite(file,"UPDATE lid_recheck_intent SET revision=revision+1,updated_at='2026-11-27T13:00:00.000Z' WHERE request_id='req-1'");}}});
+ assert.equal(taken,true);
+ assert.deepEqual([out.outcome,out.terminal],['link_owed',false],JSON.stringify(out));
+ assert.deepEqual(getLinks(file),{},'no alias landed with a lost compare-and-swap');
+ assert.deepEqual(intents(file).map(i=>[i.state,i.link_state]),[['open','owed']]);
+ const next=await runOnce(file);assert.equal(next.outcome,'linked',JSON.stringify(next));
+}
+{
+ // a MARKER that moved between the read and the batch (the admission marker leaves d1): refused whole, owed, no alias
+ const {file}=await attached();
+ let moved=false;
+ const out=await runOnce(file,{onBatch:async list=>{if(!moved&&list.some(item=>/UPDATE lid_recheck_intent SET state='settled'/.test(item.text))){moved=true;sqlite(file,"UPDATE letterboxd_admission_authority SET mode='closed',generation=generation+1");}}});
+ assert.equal(moved,true);
+ assert.deepEqual([out.outcome,out.terminal],['link_owed',false],JSON.stringify(out));
+ assert.deepEqual(getLinks(file),{});assert.equal(intents(file)[0].state,'open');
+ // the Ratings domain held or not authoritative: nothing written, owed (the terminal settlements are as fenced as the link)
+ const held=await attached();sqlite(held.file,"UPDATE ratings_domain_authority SET cutover='held', generation=generation+1");
+ setLinks(held.file,{'letterboxd:Ab1':'k1','tmdb:603':'k2'});
+ const refused=await runOnce(held.file);
+ assert.equal(refused.outcome,'link_owed',JSON.stringify(refused));assert.equal(intents(held.file)[0].state,'open','a conflict is not settled while Ratings is not authoritative');
+ const blockedHeld=await attached();sqlite(blockedHeld.file,"UPDATE film_external_id SET trusted=0 WHERE scheme='tmdb' AND value='603'");sqlite(blockedHeld.file,"UPDATE ratings_domain_authority SET cutover='held', generation=generation+1");
+ assert.equal((await runOnce(blockedHeld.file)).outcome,'link_owed','a proved correction is not settled while Ratings is not authoritative either');assert.equal(intents(blockedHeld.file)[0].state,'open');
+}
+{
+ // a correction CLEARED before the terminal write (the claim is trusted again between the read and the batch): refused whole, the retried call links
+ const {file}=await attached();
+ sqlite(file,"UPDATE film_external_id SET trusted=0 WHERE scheme='tmdb' AND value='603'");
+ let healed=false;
+ const out=await runOnce(file,{onBatch:async list=>{if(!healed&&list.some(item=>/UPDATE lid_recheck_intent SET state='settled'/.test(item.text))){healed=true;sqlite(file,"UPDATE film_external_id SET trusted=1 WHERE scheme='tmdb' AND value='603'");}}});
+ assert.equal(healed,true);
+ assert.equal(out.outcome,'link_owed',JSON.stringify(out));assert.deepEqual(intents(file).map(i=>[i.state,i.link_state]),[['open','owed']],'the stale correction was not recorded');
+ assert.equal((await runOnce(file)).outcome,'linked');
+}
+{
+ // the R2 stand-in (a store that cannot batch) refuses whole: it never links without the guards
+ const {file,env}=await attached();
+ const facts=vm.runInContext('LetterboxdFacts',ctx);
+ const bare=env.DB;void bare;
+ await assert.rejects(()=>facts.linkAttachedPair({BUCKET:bucket},{lid:'Ab1',tmdb:'603',extra:[['SELECT 1',[]]],statementsFor:()=>[]}),error=>error.code==='atomic_unavailable');
+ await assert.rejects(()=>facts.linkAttachedPair(env,{lid:'Ab1',tmdb:'603',extra:[],statementsFor:()=>[]}),error=>error.code==='atomic_unavailable','a call without a guard statement is refused');
+}
+console.log('Lid TMDB attach (AIR-675, tests 9, 10, 11 and 16 and the fenced Ratings link) passed.');

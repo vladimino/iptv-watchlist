@@ -189,15 +189,13 @@ function recordRatingChange(record,incoming,effective){
 
  // Links a film's trusted aliases to one record key; an alias already pointing elsewhere is an alias_conflict for review.
  // `expectKey` (AIR-559): the record key an inferred import has already marked; a key that moved meanwhile is refused as an alias_conflict, so an inferred alias never lands on an unmarked record.
- // AIR-675 / ADR 0217 decision 8c: `extra` is a list of [sql, params] statements that commit in the SAME D1 batch as the links document (the owner re-check's intent settlement and its ownership predicates); `report.changed` tells
- // the caller whether the document was actually written (false: the alias was already there, so no batch ran and `extra` did not commit). Without D1 ownership of the document a write with `extra` is refused whole (`atomic_unavailable`).
- async function linkFilm(env,links,{expectKey=null,extra=[],report=null}={}){
+ async function linkFilm(env,links,{expectKey=null}={}){
   // Writers always know the Letterboxd id, so no record exists without one and two records of one film can only meet as an
   // alias_conflict; joining them is the convergence migration, which is not implemented in this phase.
   if(!links?.letterboxd||!LID.test(String(links.letterboxd)))throw new FactsError('invalid_identity','A fact record needs a Letterboxd id');
   const aliases=aliasesOf(links);
   let factKey=null;
-  const written=await casJSON(env,FACTS_KEYS.links,{},index=>{
+  await casJSON(env,FACTS_KEYS.links,{},index=>{
    const keys=[...new Set(aliases.map(alias=>index[alias]).filter(Boolean))];
    if(keys.length>1)throw new FactsError('alias_conflict','Aliases point at different records');
    factKey=keys[0]||factKeyFor(links);
@@ -206,16 +204,35 @@ function recordRatingChange(record,incoming,effective){
    for(const [alias,key] of Object.entries(index))if(key===factKey&&!aliases.includes(alias)&&aliases.some(mine=>mine.split(':')[0]===alias.split(':')[0]))throw new FactsError('alias_conflict','Record already has another '+alias.split(':')[0]+' id');
    let changed=false;for(const alias of aliases)if(index[alias]!==factKey){index[alias]=factKey;changed=true;}
    return changed?index:null;
-  },{extra});
-  if(report)report.changed=written?.changed===true;
+  });
   return factKey;
  }
- // AIR-675: the Ratings alias of ONE attached pair, with the existing protocol (linkFilm, then the conflict note of linkOrNote). -> {state:'linked', factKey, changed} | {state:'alias_conflict'}. Any other failure is thrown for the caller.
- async function linkAttachedPair(env,{lid,tmdb,extra=[]}){
+ // AIR-675 / ADR 0217 decision 8c: the Ratings alias of ONE attached pair, by the EXISTING document compare-and-swap (`casJSON` over `links.json`: the exact part count and `etag` of the version it read, the Ratings authority and its fences).
+//  - The pair joins the LID's own fact key (`index['letterboxd:<lid>']`, or `lb-<lid>` when the lid is not linked yet): that key gains the movie alias, and **no key is renamed or created from the movie** (`factKeyFor({letterboxd, tmdb})` would
+//    make `tmdb-<n>`, which is not this handoff). A movie already mapped to ANOTHER fact key, or a lid key that already holds another movie id, is a PROVED `alias_conflict`: nothing is linked.
+//  - The write is ALWAYS made, also when the alias is already there (a lost response) and when the outcome is a conflict or a blocked correction: the document is rewritten unchanged, so the caller's guarded statements (`statementsFor(state)`:
+//    the markers, the ownership predicates, the intent update) commit in the SAME D1 batch as an exact-version compare-and-swap, and a document that moved, a marker that moved or a lost intent revision refuses the whole batch.
+//  - `extra` must already hold ONE guard statement when passed: a store that cannot batch (the R2 stand-in) then refuses the write whole (`atomic_unavailable`) instead of linking without the guards. The array is refilled on every attempt.
+//  - `blocked: true` (the caller proved that the ownership of either claim no longer holds) writes no alias and settles only through the caller's statements. No conflict note is written here: the intent records the outcome.
+ async function linkAttachedPair(env,{lid,tmdb,extra,statementsFor,blocked=false}){
   if(!LID.test(String(lid||''))||!TMDB.test(String(tmdb||'')))throw new FactsError('invalid_identity','An attached pair needs a Letterboxd id and a TMDB id');
-  const links={letterboxd:String(lid),tmdb:String(tmdb)},report={};
-  try{const factKey=await linkFilm(env,links,{extra,report});return {state:'linked',factKey,changed:report.changed===true};}
-  catch(error){if(error.code!=='alias_conflict')throw error;await noteConflict(env,links,'alias_conflict');return {state:'alias_conflict'};}
+  if(!Array.isArray(extra)||!extra.length||typeof statementsFor!=='function')throw new FactsError('atomic_unavailable','The attached pair link needs its guard statements');
+  const prefix=extra.length,aliasLid='letterboxd:'+lid,aliasMovie='tmdb:'+tmdb,result={};
+  await casJSON(env,FACTS_KEYS.links,{},index=>{
+   extra.length=prefix;
+   let state;
+   if(blocked)state='link_blocked';
+   else{
+    const lidKey=index[aliasLid]||'lb-'+lid,movieKey=index[aliasMovie]??null;
+    const otherMovie=Object.entries(index).some(([alias,key])=>key===lidKey&&alias.startsWith('tmdb:')&&alias!==aliasMovie);
+    if((movieKey!==null&&movieKey!==lidKey)||otherMovie)state='alias_conflict';
+    else{state='linked';result.factKey=lidKey;result.changed=index[aliasLid]!==lidKey||index[aliasMovie]!==lidKey;index[aliasLid]=lidKey;index[aliasMovie]=lidKey;}
+   }
+   result.state=state;
+   extra.push(...statementsFor(state));
+   return index;
+  },{extra});
+  return result;
  }
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
  // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.

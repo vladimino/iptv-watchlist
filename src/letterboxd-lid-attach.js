@@ -59,16 +59,15 @@ async function openIntent(env,{requestId,lid,at}){
  }catch(error){if(!/lid_recheck_intent_taken|UNIQUE constraint failed: lid_recheck_intent/i.test(String(error?.message||error)))throw failed('film_person_unavailable',error);}
  return readIntent(env,requestId);
 }
-// One guarded intent update on the intent as THIS caller read it (state `open`, the revision it read, optionally no outcome yet). true when it matched (a trigger raises the revision), false when the intent moved.
+// One guarded intent update on the intent as THIS caller read it (state `open`, the revision it read, optionally no outcome yet). The answer is the REAL result of THIS statement (`RETURNING`: one affected row, the next revision), never an
+// inference from a later read, which could be another caller's write: true when it matched, false when the intent moved (a lost compare-and-swap) or a trigger refused it.
 async function updateIntent(env,{requestId,revision,set,params,openOnly=true,noOutcome=false,extraWhere='',extraParams=[]}){
  const db=database(env);
- const sql='UPDATE lid_recheck_intent SET '+set+',revision=revision+1,updated_at=? WHERE request_id=? AND revision=?'+(openOnly?" AND state='open'":'')+(noOutcome?' AND outcome IS NULL':'')+extraWhere;
- const before=await readIntent(env,requestId);
- if(!before||before.revision!==revision)return false;
- try{await db.prepare(sql).bind(...params,requestId,revision,...extraParams).run();}
+ const sql='UPDATE lid_recheck_intent SET '+set+',revision=revision+1,updated_at=? WHERE request_id=? AND revision=?'+(openOnly?" AND state='open'":'')+(noOutcome?' AND outcome IS NULL':'')+extraWhere+' RETURNING revision';
+ let row;
+ try{row=await db.prepare(sql).bind(...params,requestId,revision,...extraParams).first();}
  catch(error){if(/lid_recheck_intent_update|CHECK constraint failed/i.test(String(error?.message||error)))return false;throw failed('film_person_unavailable',error);}
- const after=await readIntent(env,requestId);
- return !!after&&after.revision===revision+1;
+ return !!row&&Number(row.revision)===revision+1;
 }
 // A terminal outcome that wrote nothing canonical: the intent is settled, once, against the revision read.
 const settleTerminal=(env,{requestId,revision,outcome,at,extraWhere='',extraParams=[]})=>updateIntent(env,{requestId,revision,set:"state='settled',outcome=?",params:[outcome,at],noOutcome:true,extraWhere,extraParams});
@@ -224,62 +223,46 @@ async function readOwnership(env,intent){
 }
 const ratingsAssertion=(sql,params)=>["UPDATE ratings_domain_cas SET ok=CASE WHEN "+sql+" THEN 1 ELSE 0 END WHERE id=1",params];
 
-// The link step of ONE open intent whose attach landed (`link_state = owed`). It never re-attaches and never fetches. `ports.link({lid, tmdb, extra})` is the EXISTING Ratings alias protocol (`LetterboxdFacts.linkAttachedPair`:
-// ADR 0166 link step) and commits `extra` in the SAME D1 batch as the alias document; it returns {state:'linked'|'alias_conflict', changed}. A store that cannot batch refuses (`atomic_unavailable`): fail closed, `owed` stays.
-// -> {outcome:'linked'|'alias_conflict'|'link_blocked'} (the intent is settled) | {outcome:'link_owed', reason} (nothing settled; the same requestId retries).
+// The link step of ONE open intent whose attach landed (`link_state = owed`). It never re-attaches and never fetches. `ports.link({lid, tmdb, extra, statementsFor, blocked})` is the EXISTING Ratings alias protocol over the document
+// compare-and-swap (`LetterboxdFacts.linkAttachedPair`: the exact part count and `etag` it read, the Ratings authority and its fences). EVERY outcome, including an alias already present, a proved conflict and a proved correction, commits as a
+// guarded write of THAT document in ONE D1 batch with: the Film/Person marker and admission marker generations, the ownership predicates (their negation for a blocked correction), and the intent settlement matched on `owed` and the
+// revision read (its `changes()` asserted). There is no second, unfenced settlement: a document that moved, a marker that moved, a store that cannot batch (it refuses whole, `atomic_unavailable`) or a lost intent revision leaves the intent
+// `owed` and the same requestId retries. The lid keeps its OWN fact key (`lb-<lid>`, or the key it already has): it gains the movie alias, nothing is renamed.
+// -> {outcome:'linked'|'alias_conflict'|'link_blocked'} (the intent is settled by that very batch) | {outcome:'link_owed', reason} (nothing settled).
 export async function linkAttachedIntent(env,{intent,ports,now}={}){
  const clock=clockOf(now);
  if(!intent||intent.state!=='open'||intent.outcome!=='attached'||intent.linkState!=='owed'||!intent.proof)throw failed('film_person_invalid');
  if(!ports||typeof ports.link!=='function')throw failed('film_person_invalid');
  const owed=reason=>result('link_owed',{reason,intentRequestId:intent.requestId});
- const settle=async(linkState,at)=>{
-  const ok=await updateIntent(env,{requestId:intent.requestId,revision:intent.revision,set:"state='settled',link_state=?",params:[linkState,at],extraWhere:" AND outcome='attached' AND link_state='owed'"});
-  return ok;
- };
  // Fail closed outside Film/Person `d1`/`open` and the admission marker `d1`: nothing is written, the intent stays `owed`.
  let authority,filmGate;
  try{authority=await readAdmissionAuthority(env);if(admissionRoute(authority)!=='d1')return owed('admission_not_d1');filmGate=assertWritable(await readAuthority(env));}
  catch(error){if(error?.code==='film_person_unavailable'||error?.code==='letterboxd_admission_closed'||error?.code==='film_person_fence'||error?.code==='film_person_held')return owed(error.code);throw error;}
  const owner=await readOwnership(env,intent);
- if(!owner.ok){
-  // A PROVED correction (the claim was reassigned, a merge, a redirect or a retirement now applies): blocked for owner review, and no alias is written.
-  return await settle('link_blocked',clock())?result('link_blocked',{reason:owner.reason,intentRequestId:intent.requestId}):owed('intent_moved');
- }
- const cond=ownershipCondition({id:owner.id,lid:intent.lid,tmdb:intent.proof.tmdb});
+ const cond=owner.ok?ownershipCondition({id:owner.id,lid:intent.lid,tmdb:intent.proof.tmdb}):null;
  const markers=d1BatchCondition(authority);
  const at=clock();
- // The extra statements of the Ratings link batch: the markers and the ownership as predicates of the SAME batch, then the intent update (`linked`, settled, revision + 1), then its assertion.
- const extra=[
-  ratingsAssertion("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?) AND ("+markers.sql+')',[filmGate.generation,...markers.params]),
-  ratingsAssertion(cond.sql,cond.params),
-  ["UPDATE lid_recheck_intent SET state='settled',link_state='linked',revision=revision+1,updated_at=? WHERE request_id=? AND state='open' AND outcome='attached' AND link_state='owed' AND revision=?",[at,intent.requestId,intent.revision]],
-  ratingsAssertion('changes()>=1',[]),
- ];
- let linked;
- try{linked=await ports.link({lid:intent.lid,tmdb:intent.proof.tmdb,extra});}
+ const markerStatement=ratingsAssertion("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?) AND ("+markers.sql+')',[filmGate.generation,...markers.params]);
+ // The statements of the outcome the document step decided, in the SAME batch as the (unchanged or extended) document write.
+ const statementsFor=state=>{
+  const settle=[["UPDATE lid_recheck_intent SET state='settled',link_state=?,revision=revision+1,updated_at=? WHERE request_id=? AND state='open' AND outcome='attached' AND link_state='owed' AND revision=?",[state,at,intent.requestId,intent.revision]],ratingsAssertion('changes()>=1',[])];
+  if(state==='link_blocked'){
+   // A PROVED correction is asserted AGAIN in the batch: the ownership still does not hold at the write (a conflict cleared in between refuses the batch and the next call re-reads).
+   const held=ownershipCondition({id:owner.id??intent.filmId,lid:intent.lid,tmdb:intent.proof.tmdb});
+   return [ratingsAssertion('NOT ('+held.sql+')',held.params),...settle];
+  }
+  return [ratingsAssertion(cond.sql,cond.params),...settle];
+ };
+ let out;
+ try{out=await ports.link({lid:intent.lid,tmdb:intent.proof.tmdb,extra:[markerStatement],statementsFor,blocked:!owner.ok});}
  catch(error){
-  // Transient: a moved epoch or `etag`, contention, a store that cannot batch. Never terminal; the same requestId retries.
+  // Transient: a moved epoch or `etag`, contention, a held or not-d1 Ratings domain, a store that cannot batch. Never terminal; the same requestId retries.
   if(typeof error?.code==='string')return owed(error.code);
   throw error;
  }
- if(linked.state==='alias_conflict')return await settle('alias_conflict',clock())?result('alias_conflict',{intentRequestId:intent.requestId}):owed('intent_moved');
  const after=await readIntent(env,intent.requestId);
- if(after&&after.state==='settled'&&after.linkState==='linked')return result('linked',{intentRequestId:intent.requestId,factKey:linked.factKey??null});
- // FALLBACK, exact lost-response reconciliation: the alias is already in the document (`changed: false`, an earlier batch or a store that could not carry the statement), so the batch above wrote nothing. The guarded update
- // below asserts, in ITS OWN statement, the actual `links.json` document version (part count and the single etag), the matching alias mapping of the document (one part), the ownership predicates, the intent `owed` and its
- // revision. It never relies on an earlier read; a document that moved since matches nothing and the same requestId retries.
- if(linked.state==='linked'&&after&&after.state==='open'&&after.linkState==='owed'){
-  const parts=await many(database(env),"SELECT part,etag FROM ratings_document WHERE key='letterboxd/facts/links.json' ORDER BY part");
-  const etags=[...new Set(parts.map(row=>row.etag))];
-  if(parts.length&&etags.length===1){
-   const mapped=parts.length===1?" AND (SELECT json_extract(body,?) FROM ratings_document WHERE key='letterboxd/facts/links.json' AND part=0) IS NOT NULL AND (SELECT json_extract(body,?) FROM ratings_document WHERE key='letterboxd/facts/links.json' AND part=0)=(SELECT json_extract(body,?) FROM ratings_document WHERE key='letterboxd/facts/links.json' AND part=0)":'';
-   const aliasParams=parts.length===1?['$."letterboxd:'+intent.lid+'"','$."letterboxd:'+intent.lid+'"','$."tmdb:'+intent.proof.tmdb+'"']:[];
-   const ok=await updateIntent(env,{requestId:intent.requestId,revision:after.revision,set:"state='settled',link_state='linked'",params:[clock()],extraWhere:" AND outcome='attached' AND link_state='owed' AND (SELECT COUNT(*) FROM ratings_document WHERE key='letterboxd/facts/links.json')=? AND (SELECT COUNT(DISTINCT etag) FROM ratings_document WHERE key='letterboxd/facts/links.json')=1 AND (SELECT MIN(etag) FROM ratings_document WHERE key='letterboxd/facts/links.json')=? AND ("+cond.sql+')'+mapped,
-    extraParams:[parts.length,etags[0],...cond.params,...aliasParams]});
-   if(ok)return result('linked',{intentRequestId:intent.requestId,fallback:true});
-  }
- }
- return owed('link_not_settled');
+ if(after&&after.state==='settled'&&after.outcome==='attached'&&after.linkState===out?.state)return result(out.state,{intentRequestId:intent.requestId,...(out.factKey?{factKey:out.factKey}:{}),...(owner.ok?{}:{reason:owner.reason})});
+ return owed('intent_not_settled');
 }
 
 // ---- the coordinator (ADR 0217 decision 8a) ----
