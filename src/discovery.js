@@ -1091,7 +1091,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const revalidatedFirst=new Set();
  const revalidateDrift=async(key,previous,candidate,plan)=>{
    try{
-    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
+    // AIR-684 (ADR 0224): the revalidation is the one observer of the shared Russian-first projection, so its existing detail call (its `alternative_titles` kept) also carries the tagged image lists, exactly as the producer's own fetch
+    // does (`TMDB_DETAIL_QUERY` in the enrichment sources): the same request, never a second one.
+    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles,images&include_image_language=ru,en,null');
     if(await noteCatalogSourceChange(env,previous.tmdbId,movie,lease)==='failed'){revalidation.deferred++;return 'break';}
     const known=knownScorerCandidates(aliasIndex,candidate);
     // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.

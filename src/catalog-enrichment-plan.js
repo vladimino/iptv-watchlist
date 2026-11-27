@@ -225,16 +225,74 @@ export function selectRussianTitle(translations){
 // ONE pure projection of what a verified response says about a part, used by BOTH the producer (it stores the result as the part's `source_version` when the part is complete) and every observer of the same source
 // (the Discovery revalidation), so the two cannot disagree about what a part is. A part whose section is not VERIFIED (an unreadable or unsupported section, a failed response) has no version (null): it is never
 // signalled, never compared and never read as "no data". `anchor` is the identity the response was fetched for.
-// core: the producer's own source and the approved field set. A Letterboxd answer hashes every approved field (year, runtime, synopsis, poster, url, genres). A TMDB answer hashes the COMPARABLE projection of its response
-// (`parseTmdb(...).comparable`): year, runtime, url, the English overview of the translations list and the genre ids, none of which depends on the request language (the producer fetches without a language, a Discovery detail is
-// `ru-RU`). The TMDB poster path depends on the request language and has no comparable representation in the response, so it is the one approved field a TMDB version does not cover. A TMDB answer whose comparable projection is
-// unverified (an unreadable translations section) has NO version.
-export function coreVersion(source,anchor,fields,comparable=null){
- if(source==='tmdb'){
-  if(!comparable)return null;
-  return digestOf({source,anchor,part:'core',fields:{year:fields?.year??null,runtime:fields?.runtime??null,url:fields?.url??null,synopsis:comparable.synopsis??null,genres:comparable.genres??[]}});
+// ---- the Russian-first TMDB projection (ADR 0224) ----
+// ONE normalized projection of a TMDB detail response (`language=ru-RU`, `append_to_response=credits,translations,images`, `include_image_language=ru,en,null`), built by `parseTmdb` from these pure selectors and consumed
+// identically by the producer (it writes the selected values and stores the version) and by every observer. Each selected field is `{value, language, languageBasis, coverage}` with coverage `verified`, `absent`, `unreadable`
+// or `ambiguous`; `language` is an explicit provider tag or null (unknown); `languageBasis` is `explicit`, `owner_default` (the Letterboxd synopsis assumption) or null. A verified response does not imply a verified language.
+export const PROJECTION_VERSION=2;
+export const GENRE_MAPPING_REVISION=1;
+// The reviewed TMDB genre id -> existing vocabulary (the Russian words of `GENRE_MAP` in `src/sources.js`, keyed there by the English names kept here). No other taxonomy. An id with no entry is a coverage GAP, never an invented label.
+export const TMDB_GENRES=Object.freeze({28:['Action','Боевик'],12:['Adventure','Приключения'],16:['Animation','Мультфильм'],35:['Comedy','Комедия'],80:['Crime','Криминал'],99:['Documentary','Документальный'],18:['Drama','Драма'],10751:['Family','Семейный'],14:['Fantasy','Фэнтези'],36:['History','Исторический'],27:['Horror','Ужасы'],10402:['Music','Музыкальный'],9648:['Mystery','Детектив'],10749:['Romance','Мелодрама'],878:['Science Fiction','Фантастика'],10770:['TV Movie','Телефильм'],53:['Thriller','Триллер'],10752:['War','Военный'],37:['Western','Вестерн']});
+const isId=value=>typeof value==='number'?Number.isInteger(value):typeof value==='string'&&/^\d+$/.test(value);
+// -> {coverage, ids:[sorted numeric strings], labels:[mapped, in id order], unmapped:[ids]}. A missing or malformed list is unreadable; a present empty list is a valid empty set.
+export function mapGenres(genres){
+ if(!Array.isArray(genres)||!genres.every(item=>plain(item)&&isId(item.id)))return {coverage:'unreadable',ids:[],labels:[],unmapped:[]};
+ const ids=[...new Set(genres.map(item=>String(item.id)))].sort((a,b)=>Number(a)-Number(b));
+ return {coverage:'verified',ids,labels:ids.filter(id=>TMDB_GENRES[id]).map(id=>TMDB_GENRES[id][1]),unmapped:ids.filter(id=>!TMDB_GENRES[id])};
+}
+const overviewOf=entry=>typeof entry?.data?.overview==='string'?entry.data.overview.trim():'';
+// The synopsis: a nonblank overview of an explicitly tagged Russian `translations` entry (several distinct: the RU region decides, otherwise ambiguous); only when Russian is VERIFIED absent, an explicitly tagged English one (US on a
+// tie, otherwise one distinct value). The top-level `overview` is never proof of language. A missing, malformed or ambiguous section is not an absence.
+export function selectSynopsis(translations){
+ const empty=(coverage)=>({value:null,language:null,languageBasis:null,coverage});
+ if(selectRussianTitle(translations).status==='unreadable'||!translations.translations.every(plain))return empty('unreadable');
+ const pick=(language,regionFirst)=>{
+  const entries=translations.translations.filter(entry=>entry.iso_639_1===language&&overviewOf(entry));
+  if(!entries.length)return {status:'none'};
+  const distinct=list=>[...new Set(list.map(overviewOf))];
+  const all=distinct(entries);
+  if(all.length===1)return {status:'value',value:all[0]};
+  const regional=distinct(entries.filter(entry=>entry.iso_3166_1===regionFirst));
+  return regional.length===1?{status:'value',value:regional[0]}:{status:'ambiguous'};
+ };
+ const ru=pick('ru','RU');
+ if(ru.status==='value')return {value:ru.value,language:'ru',languageBasis:'explicit',coverage:'verified'};
+ if(ru.status==='ambiguous')return empty('ambiguous');
+ const en=pick('en','US');
+ if(en.status==='value')return {value:en.value,language:'en',languageBasis:'explicit',coverage:'verified'};
+ if(en.status==='ambiguous')return empty('ambiguous');
+ return empty('absent');
+}
+// The poster: a verified Russian-language image of `images.posters[]`, else an English one, else (P1-A) a language-neutral one (`iso_639_1 = null`), else the top-level `poster_path` with its language known only when the same file is
+// listed in `images` (otherwise unknown). Within a tier the greater width, then the lexically smaller `file_path` (P2-A): votes and list order never decide. A missing or malformed images section is unreadable (the value is then the
+// top-level path of unknown language, for writing only: it has no version). -> {path, language, coverage}
+export function selectPoster(images,topLevel){
+ const top=typeof topLevel==='string'&&topLevel.startsWith('/')?topLevel:null;
+ const posters=plain(images)&&Array.isArray(images.posters)?images.posters:null;
+ if(!posters||!posters.every(item=>plain(item)&&typeof item.file_path==='string'&&item.file_path.startsWith('/')&&Number.isFinite(item.width)&&(item.iso_639_1===null||typeof item.iso_639_1==='string')))return {path:top,language:null,coverage:'unreadable'};
+ const order=(a,b)=>b.width-a.width||(a.file_path<b.file_path?-1:a.file_path>b.file_path?1:0);
+ for(const language of ['ru','en',null]){
+  const tier=posters.filter(item=>item.iso_639_1===language).sort(order);
+  if(tier.length)return {path:tier[0].file_path,language,coverage:'verified'};
  }
- return digestOf({source,anchor,part:'core',fields:{year:fields?.year??null,runtime:fields?.runtime??null,synopsis:fields?.synopsis??null,poster:fields?.poster??null,url:fields?.url??null,genres:fields?.genres??[]}});
+ if(top){const listed=posters.find(item=>item.file_path===top);return {path:top,language:listed&&typeof listed.iso_639_1==='string'?listed.iso_639_1:null,coverage:'verified'};}
+ return {path:null,language:null,coverage:'absent'};
+}
+const comparableCoverage=value=>value==='verified'||value==='absent';
+// core: a Letterboxd version covers every approved field and the owner-approved assumed-English basis of its synopsis (ADR 0224 P4-B). A TMDB version covers the whole Russian-first projection (all six selected fields with their
+// language, evidence basis and coverage, the normalized genre ids with the reviewed mapping revision and the unmapped ids) and the projection version, never timestamps, votes or the image list. It exists only when EVERY selected
+// field is verified coverage (a verified absence included); an unreadable or ambiguous section leaves it null.
+export function coreVersion(source,anchor,fields,projection=null){
+ if(source==='tmdb'){
+  if(!projection||!comparableCoverage(projection.synopsis?.coverage)||!comparableCoverage(projection.poster?.coverage)||projection.genres?.coverage!=='verified')return null;
+  return digestOf({source,anchor,part:'core',projectionVersion:PROJECTION_VERSION,genreMappingRevision:GENRE_MAPPING_REVISION,
+   fields:{year:fields?.year??null,runtime:fields?.runtime??null,url:fields?.url??null,
+    synopsis:{value:projection.synopsis.value??null,language:projection.synopsis.language??null,basis:projection.synopsis.languageBasis??null,coverage:projection.synopsis.coverage},
+    poster:{path:projection.poster.path??null,language:projection.poster.language??null,coverage:projection.poster.coverage},
+    genres:{ids:projection.genres.ids,labels:projection.genres.labels,unmapped:projection.genres.unmapped}}});
+ }
+ const synopsis=fields?.synopsis??null;
+ return digestOf({source,anchor,part:'core',projectionVersion:PROJECTION_VERSION,fields:{year:fields?.year??null,runtime:fields?.runtime??null,synopsis:synopsis===null?null:{value:synopsis,language:'en',basis:'owner_default'},poster:fields?.poster??null,url:fields?.url??null,genres:fields?.genres??[]}});
 }
 // localization: the selected typed title, or its verified absence. Ambiguous, unreadable and unsupported coverage has none.
 export const localizationVersion=(source,anchor,title)=>title?.status==='value'?digestOf({source,anchor,title:title.value}):title?.status==='absent'?digestOf({source,anchor,title:null,status:'absent'}):null;

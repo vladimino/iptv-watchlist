@@ -237,6 +237,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const stored=context.stored;
  const core=Plan.decideCore({applicable,hasLetterboxdAnchor:hasLb,agreed,disagreement:false,stored,answers:coreAnswers,pendingSince,now});
  report.conflicts.push(...core.conflicts);
+ // an id of the TMDB genre list with no entry in the reviewed mapping is a visible coverage GAP: the part completes with it, never as a silent partial genre set (ADR 0224)
+ if(answers.tmdb?.status==='ok'&&(answers.tmdb.projection?.genres?.unmapped||[]).length&&!core.gaps.includes('genres_unmapped'))core.gaps.push('genres_unmapped');
  const metadataEligible=!context.locked&&dueRows.some(row=>row.part==='core');
  const writeFields=Object.keys(core.writes);
  if(metadataEligible&&writeFields.length){
@@ -254,7 +256,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source));
    for(const row of next){
     const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
-    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.fields||{},answers[row.source]?.comparable??null),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
+    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.fields||{},answers[row.source]?.projection??null),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
    }
    if(core.fallbackFill.length||core.unconfirmedAgreement.length||core.storedDiffers.length){
     const refreshed=(await readRows(env,filmId)).find(row=>row.part==='film');
@@ -265,7 +267,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   // A refresh whose verified answer has nothing left to fill (every core field already holds a value, fill-only) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
   // (a verified source change) would stay due for ever and a later equal observation could never be told from a change.
   for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&answers[item.source]?.status==='ok'&&['due','deferred_repair'].includes(item.status))){
-   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].fields,answers[row.source].comparable??null),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
+   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].fields,answers[row.source].projection??null),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
   }
  }
  // ---- localization: each applicable source writes its OWN row, needing only its own anchor ----
@@ -305,6 +307,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   let expected=null,chunks=null,digestOfSet=null,creditsVersion=null;
   if(fresh){
    expected=Plan.expectedCredits(choice.source,fresh);
+   if(answers[choice.source]?.credits?.directorsRecognized===false)expected.gaps.push({gap:'directors_not_recognized'});
    chunks=Plan.chunkCredits(expected.items);
    digestOfSet=await Plan.expectedDigest(expected.items);
    creditsVersion=await Plan.creditsVersion(choice.source,rowOf('credits',choice.source)?.anchor??null,answers[choice.source].credits);

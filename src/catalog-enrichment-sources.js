@@ -8,7 +8,7 @@
 // - the page tools (`parseFilm`, `attr`, `extractYear`) are injected: they live in the Worker's scoped source module and cannot be imported.
 import {allowedHop,isFilmPage,isChallenge,pageEvidence} from './letterboxd-identity.js';
 import {UpstreamCooldownSkip} from './upstream-cooldown.js';
-import {selectRussianTitle} from './catalog-enrichment-plan.js';
+import {selectRussianTitle,selectSynopsis,selectPoster,mapGenres} from './catalog-enrichment-plan.js';
 
 export const TIMEOUT_MS=Object.freeze({tmdb:12000,letterboxd:15000,wikidata:15000});
 export const POSTER_BASE='https://image.tmdb.org/t/p/w500';
@@ -45,40 +45,36 @@ async function textOf(response){
 }
 
 // ---- TMDB ----
+// ONE detail request shape for the producer's own fetch and every observer (the Discovery revalidation adds its existing `alternative_titles` to the same call): Russian first, with the tagged translations and image lists in it.
+export const TMDB_DETAIL_QUERY='language=ru-RU&append_to_response=credits,translations,images&include_image_language=ru,en,null';
 const isoYear=value=>{const match=/^(\d{4})/.exec(String(value||''));return match?Number(match[1]):null;};
 const plainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const hasId=item=>plainObject(item)&&(typeof item.id==='number'||(typeof item.id==='string'&&item.id!==''));
-// A credits section is READABLE only when every entry of a supported role is a well-formed object with an id: a cast entry, and a crew entry whose job is `Director`. A malformed supported entry is never filtered out of a "complete"
-// set; it makes the whole section unreadable (a repairable failure). A crew entry of another job carries no credit and is not judged.
+// The director job as TMDB names it. A localized request (`ru-RU`) may return the role in Russian; the recognized strings are an explicit, tested set. A response that lists crew but names no recognized director is NOT a verified
+// "no director": `directorsRecognized` is false and the producer records a visible gap instead of a silently partial set. (A recorded `ru-RU` fixture is an open acceptance condition: this set is not proof of what TMDB returns.)
+const DIRECTOR_JOBS=new Set(['director','режиссер','режиссёр']);
+const isDirector=item=>typeof item?.job==='string'&&DIRECTOR_JOBS.has(item.job.trim().toLowerCase());
+// A credits section is READABLE only when every supported-role entry (each cast entry, each director) is a well-formed object with an id: a malformed supported entry makes the whole section unreadable (a repairable failure),
+// never a "complete" set with the entry filtered out. A crew entry of another job carries no credit and is not judged.
 function readCredits(credits){
  if(!plainObject(credits)||!Array.isArray(credits.cast)||!Array.isArray(credits.crew))return {status:'unreadable',items:[]};
  if(!credits.cast.every(hasId))return {status:'unreadable',items:[]};
- if(!credits.crew.every(plainObject)||!credits.crew.filter(item=>item.job==='Director').every(hasId))return {status:'unreadable',items:[]};
+ if(!credits.crew.every(plainObject)||!credits.crew.filter(isDirector).every(hasId))return {status:'unreadable',items:[]};
  const cast=[...credits.cast].sort((a,b)=>(a.order??1e9)-(b.order??1e9)).map(item=>({role:'actor',key:String(item.id),name:item.name??null}));
- const directors=credits.crew.filter(item=>item.job==='Director').map(item=>({role:'director',key:String(item.id),name:item.name??null}));
- return {status:'ok',items:[...directors,...cast]};
+ const directors=credits.crew.filter(isDirector).map(item=>({role:'director',key:String(item.id),name:item.name??null}));
+ return {status:'ok',items:[...directors,...cast],directorsRecognized:directors.length>0||credits.crew.length===0};
 }
-// What a request language cannot change, from the SAME response: the genre IDS (the names are localized) and the English (en-US) overview of the translations list (the producer's own fetch is made without a language and answers in
-// English; a Discovery detail is requested in `ru-RU`, so its own `overview` is Russian). The poster path has no such representation in this response (it depends on the request language) and is NOT part of the comparable version.
-// null when the translations section is unreadable: the comparable core is then unverified, never a guess.
-function comparableOf(json){
- const t=json.translations;
- // the same judgement of the section as the Russian title selection: a missing or malformed translations section (or a Russian entry without data) is unverified for BOTH
- if(selectRussianTitle(t).status==='unreadable')return null;
- if(!t.translations.every(plainObject))return null;
- const english=t.translations.find(entry=>entry.iso_639_1==='en'&&entry.iso_3166_1==='US');
- const overview=typeof english?.data?.overview==='string'&&english.data.overview.trim()?english.data.overview.trim():null;
- // the genre ids are verified coverage only as a list whose every entry has an id: a MISSING or malformed list is unverified (null), while a present empty list is a valid empty set
- if(!Array.isArray(json.genres)||!json.genres.every(hasId))return null;
- return {synopsis:overview,genres:json.genres.map(genre=>String(genre.id))};
-}
+// The ONE parser of the Russian-first projection (ADR 0224). `fields` are the values the producer writes (year, runtime, url, the selected synopsis and poster, the genres in the existing Russian vocabulary); `projection` carries the
+// same selections with their language, evidence basis and coverage, and is what the version is computed over. A request language changes none of the selection rules: the Russian translation or poster is taken from the tagged lists.
 export function parseTmdb(json,id){
  if(!plainObject(json)||String(json.id)!==String(id))return null;
+ const synopsis=selectSynopsis(json.translations);
+ const poster=selectPoster(json.images,json.poster_path);
+ const genres=mapGenres(json.genres);
  return {
-  fields:{year:isoYear(json.release_date),runtime:Number.isInteger(json.runtime)&&json.runtime>0?json.runtime:null,synopsis:typeof json.overview==='string'&&json.overview.trim()?json.overview.trim():null,
-   poster:typeof json.poster_path==='string'&&json.poster_path.startsWith('/')?POSTER_BASE+json.poster_path:null,url:'https://www.themoviedb.org/movie/'+id,
-   genres:Array.isArray(json.genres)?json.genres.map(genre=>genre?.name).filter(Boolean):[]},
-  comparable:comparableOf(json),
+  fields:{year:isoYear(json.release_date),runtime:Number.isInteger(json.runtime)&&json.runtime>0?json.runtime:null,synopsis:synopsis.value,
+   poster:poster.path?POSTER_BASE+poster.path:null,url:'https://www.themoviedb.org/movie/'+id,genres:genres.labels},
+  projection:{synopsis,poster,genres},
   credits:readCredits(json.credits),
   title:selectRussianTitle(json.translations),
  };
@@ -86,7 +82,7 @@ export function parseTmdb(json,id){
 export async function fetchTmdb(env,{id,coordinator=null,fetchImpl=fetch,timeoutMs=TIMEOUT_MS.tmdb}){
  if(!/^[1-9]\d{0,11}$/.test(String(id)))return failedAnswer('invalid_anchor');
  const token=typeof env?.TMDB_API_READ_ACCESS_TOKEN==='string'?env.TMDB_API_READ_ACCESS_TOKEN:'';
- const url='https://api.themoviedb.org/3/movie/'+id+'?append_to_response=credits,translations';
+ const url='https://api.themoviedb.org/3/movie/'+id+'?'+TMDB_DETAIL_QUERY;
  const sent=await send({coordinator,fetchImpl,url,init:{headers:{accept:'application/json',...(token?{authorization:'Bearer '+token}:{})}},timeoutMs});
  if(sent.answer)return sent.answer;
  const {response}=sent;

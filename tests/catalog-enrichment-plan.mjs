@@ -233,18 +233,36 @@ function CORE_ALL(waiting,reason){return P.CORE_FIELDS.every(field=>waiting[fiel
 }
 // ---- AIR-684: the source version projection shared by the producer and every observer (ADR 0219 decision 2) ----
 {
- const fields={year:1999,runtime:136,synopsis:'a',poster:'https://img/a.jpg',url:'https://www.themoviedb.org/movie/603',genres:['Action']};
- const comparable={synopsis:'english overview',genres:['28','878']};
- const core=await P.coreVersion('tmdb','603',fields,comparable);
+ // core, TMDB: the whole Russian-first projection (ADR 0224): all six selected fields, language and basis, genre ids with the mapping revision
+ const fields={year:1999,runtime:136,url:'https://www.themoviedb.org/movie/603',synopsis:'Хакер.',poster:'https://image.tmdb.org/t/p/w500/ru.jpg',genres:['Боевик']};
+ const projection=over=>({synopsis:{value:'Хакер.',language:'ru',languageBasis:'explicit',coverage:'verified'},poster:{path:'/ru.jpg',language:'ru',coverage:'verified'},genres:{coverage:'verified',ids:['28'],labels:['Боевик'],unmapped:[]},...over});
+ const core=await P.coreVersion('tmdb','603',fields,projection());
  assert.match(core,/^[0-9a-f]{64}$/);
- assert.equal(await P.coreVersion('tmdb','603',{...fields,synopsis:'другое',poster:'https://img/b.jpg',genres:['Боевик']},comparable),core,'a TMDB response of another request language: its own overview, poster path and genre NAMES are not what is compared');
- assert.notEqual(await P.coreVersion('tmdb','603',{...fields,runtime:137},comparable),core);
- assert.notEqual(await P.coreVersion('tmdb','603',fields,{...comparable,synopsis:'a changed english overview'}),core,'the English overview is covered');
- assert.notEqual(await P.coreVersion('tmdb','603',fields,{...comparable,genres:['28']}),core,'the genre ids are covered');
- assert.equal(await P.coreVersion('tmdb','603',fields,null),null,'an unverified comparable projection (unreadable translations) has no version');
- assert.notEqual(await P.coreVersion('tmdb','604',fields,comparable),core,'the anchor is part of the identity');
- const lb=await P.coreVersion('letterboxd','abc',fields);
- for(const change of [{year:2000},{runtime:100},{synopsis:'b'},{poster:'https://img/b.jpg'},{url:'https://letterboxd.com/film/x/'},{genres:['Drama']}])assert.notEqual(await P.coreVersion('letterboxd','abc',{...fields,...change}),lb,'a Letterboxd version covers every approved field: '+Object.keys(change));
+ assert.equal(await P.coreVersion('tmdb','603',{...fields,poster:'https://other/p.jpg',genres:['Другое']},projection()),core,'what is written is not what is compared: the version is the projection (the selected path and language, the ids)');
+ for(const [name,change] of [['year',[{year:2000},projection()]],['runtime',[{runtime:137},projection()]],['synopsis value',[{},projection({synopsis:{value:'Другой.',language:'ru',languageBasis:'explicit',coverage:'verified'}})]],
+  ['synopsis language',[{},projection({synopsis:{value:'Хакер.',language:'en',languageBasis:'explicit',coverage:'verified'}})]],['synopsis basis',[{},projection({synopsis:{value:'Хакер.',language:'ru',languageBasis:'owner_default',coverage:'verified'}})]],
+  ['poster path',[{},projection({poster:{path:'/ru2.jpg',language:'ru',coverage:'verified'}})]],['poster language',[{},projection({poster:{path:'/ru.jpg',language:null,coverage:'verified'}})]],
+  ['genre ids',[{},projection({genres:{coverage:'verified',ids:['28','878'],labels:['Боевик','Фантастика'],unmapped:[]}})]],['unmapped ids',[{},projection({genres:{coverage:'verified',ids:['28','99999'],labels:['Боевик'],unmapped:['99999']}})]]])
+  assert.notEqual(await P.coreVersion('tmdb','603',{...fields,...change[0]},change[1]),core,name+' is covered');
+ assert.notEqual(await P.coreVersion('tmdb','604',fields,projection()),core,'the anchor is part of the identity');
+ // a verified ABSENCE is comparable coverage with its own version; an unreadable or ambiguous section has none
+ const absentPoster=await P.coreVersion('tmdb','603',fields,projection({poster:{path:null,language:null,coverage:'absent'}}));
+ assert.match(absentPoster,/^[0-9a-f]{64}$/);assert.notEqual(absentPoster,core);
+ assert.match(await P.coreVersion('tmdb','603',fields,projection({synopsis:{value:null,language:null,languageBasis:null,coverage:'absent'}})),/^[0-9a-f]{64}$/);
+ for(const part of [{synopsis:{coverage:'unreadable',value:null}},{synopsis:{coverage:'ambiguous',value:null}},{poster:{coverage:'unreadable',path:'/t.jpg'}},{genres:{coverage:'unreadable',ids:[],labels:[],unmapped:[]}}])assert.equal(await P.coreVersion('tmdb','603',fields,projection(part)),null,JSON.stringify(part)+' leaves the core unverified');
+ assert.equal(await P.coreVersion('tmdb','603',fields,null),null);
+ assert.equal(P.PROJECTION_VERSION,2);assert.equal(P.GENRE_MAPPING_REVISION,1);
+ // Letterboxd: every approved field plus the owner-approved assumed-English basis of its synopsis
+ const lb=await P.coreVersion('letterboxd','abc',{...fields,genres:['Drama']});
+ for(const change of [{year:2000},{runtime:100},{synopsis:'b'},{poster:'https://img/b.jpg'},{url:'https://letterboxd.com/film/x/'},{genres:['Comedy']}])assert.notEqual(await P.coreVersion('letterboxd','abc',{...fields,genres:['Drama'],...change}),lb,'a Letterboxd version covers every approved field: '+Object.keys(change));
+ assert.equal(await P.coreVersion('letterboxd','abc',{...fields,genres:['Drama']},projection()),lb,'a Letterboxd version ignores the TMDB projection');
+ // the reviewed genre table: ids to the EXISTING vocabulary, the very words of GENRE_MAP in the Worker source
+ const text=fs.readFileSync('src/sources.js','utf8');
+ const map=Object.fromEntries([...text.match(/const GENRE_MAP=\{([^}]*)\}/)[1].matchAll(/(?:'([^']+)'|(\w+)):'([^']+)'/g)].map(m=>[m[1]||m[2],m[3]]));
+ assert.equal(Object.keys(P.TMDB_GENRES).length,Object.keys(map).length,'one entry per word of the existing vocabulary');
+ for(const [id,[english,russian]] of Object.entries(P.TMDB_GENRES))assert.equal(map[english],russian,'genre '+id+' '+english+' keeps the existing word');
+ assert.deepEqual(P.mapGenres([{id:878},{id:28},{id:28},{id:424242}]),{coverage:'verified',ids:['28','878','424242'],labels:['Боевик','Фантастика'],unmapped:['424242']},'sorted, deduplicated, the unmapped id kept as a gap');
+ assert.equal(P.mapGenres(undefined).coverage,'unreadable');assert.equal(P.mapGenres([{id:'x'}]).coverage,'unreadable');assert.equal(P.mapGenres([]).coverage,'verified');
  const items=[{role:'director',key:'12',name:'D'},{role:'actor',key:'11',name:'A'}];
  const credits=await P.creditsVersion('tmdb','603',{status:'ok',items});
  assert.match(credits,/^[0-9a-f]{64}$/);

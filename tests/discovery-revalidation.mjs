@@ -82,10 +82,10 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
  if(catalog){const seeded=await Authority.upsertAdmissions(setup,{[catalog.id]:catalog},{lease:taken.lease});assert.deepEqual(seeded.written,[catalog.id],JSON.stringify(seeded));}
  await Authority.releaseLease(setup,taken.lease);
  const env={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
- const fetched=[];
- const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]},translations:{translations:movieTitles.translations},alternative_titles:{titles:movieTitles.alternatives}};
+ const fetched=[],queries=[];
+ const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]},translations:{translations:movieTitles.translations},images:{posters:[]},alternative_titles:{titles:movieTitles.alternatives}};
  const context=vm.createContext({console,Date:SteppedDate,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
-  fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);clock.offset+=slowAll.ms;if(parsed.pathname.includes('/movie/'))clock.offset+=advance.ms;if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));const wanted=Number((parsed.pathname.match(/\/movie\/(\d+)/)||[])[1]);return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?(movies[wanted]||movie):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
+  fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);if(parsed.pathname.includes('/movie/'))queries.push(parsed.search);clock.offset+=slowAll.ms;if(parsed.pathname.includes('/movie/'))clock.offset+=advance.ms;if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));const wanted=Number((parsed.pathname.match(/\/movie\/(\d+)/)||[])[1]);return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?(movies[wanted]||movie):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:authority,...(enrichment?{CatalogEnrichmentDiscovery:EnrichmentDiscovery,CatalogEnrichmentRunner:enrichment.runner}:{}),pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
@@ -99,7 +99,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
    return await context.resolveDiscoveryChunk(env,report,24,lease.lease);
   }finally{await Authority.releaseLease(env,lease.lease);}
  };
- return {file,env,chunk,fetched,item,context};
+ return {file,env,chunk,fetched,queries,item,context};
 }
 const decisionOf=(file,key='film r|2001')=>JSON.parse(sql(file,`SELECT payload_json FROM discovery_decision WHERE observation_key='${key}'`)[0].payload_json);
 const admissionOf=(file,id)=>JSON.parse(sql(file,`SELECT payload_json FROM discovery_admission WHERE film_id='${id}'`)[0].payload_json);
@@ -525,9 +525,11 @@ const hopsUntilStop=async(context,env,limit)=>{
  globalThis.CatalogEnrichmentRunner=runner;// the module is a real ES module in this realm: it reads the runner global exactly as the bundled Worker does
  {
   // a Film that holds a retained Discovery membership: the verified response becomes durable signals, the producer is woken, and the outcome of the revalidation is written
-  const {file,chunk}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
+  const {file,chunk,queries}=await world({durations:[90,96],decision:verified({anchor:[90]}),enrichment:{runner}});
   seedFilm(file);calls.length=0;
   const first=await chunk();
+  assert.equal(queries.length,1,'one detail call');
+  assert.equal(decodeURIComponent(queries[0]),'?language=ru-RU&append_to_response=credits,translations,alternative_titles,images&include_image_language=ru,en,null','the revalidation\'s existing call (its alternative_titles kept) also carries the tagged image lists: the producer\'s request shape, never a second request');
   assert.equal(first.revalidation.revalidated,1);
   assert.deepEqual(decisionOf(file).anchor,[90,96],'the revalidation outcome is durable');
   assert.deepEqual(signals(file),['core=pending@v1','credits=pending@v1','localization=pending@v1'],'one signal per VERIFIED part of the detail');

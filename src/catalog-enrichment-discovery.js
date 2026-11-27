@@ -7,8 +7,8 @@
 //     the verified outcome retryable;
 //   - `activationPreflight`: the READ-ONLY proof C3c-A needs before it sets `activated` (compatible emitter and settlement deployed, no transfer loading, no stale staged signal, no unexpected membership).
 // DORMANT: nothing reads the preflight in the Worker, and the emitter is a no-op without the scope tables, without the Discovery scope's retained members and without an active producer; it never fetches, never writes a canonical
-// table and never touches the control. The Discovery detail is requested in `ru-RU`, so the core version covers only what a request language cannot change (year, runtime, url): a localized synopsis, genre name or poster path is
-// not a change (the producer still writes every approved field). A part whose section is not verified is never signalled; the first observation is compared by the PRODUCER against its stored `source_version`, never assumed.
+// table and never touches the control. The Discovery detail uses the producer's own request shape (ADR 0224: `ru-RU`, translations and images in the same call), so both read the same Russian-first projection through the one parser
+// and the core version covers all six selected fields. A part whose section is not verified is never signalled; the producer decides, from its own stored `source_version`, whether a signalled part needs a fetch.
 import {parseTmdb} from './catalog-enrichment-sources.js';
 import {coreVersion,creditsVersion,localizationVersion} from './catalog-enrichment-plan.js';
 import {database,failed,many,one} from './film-person-authority.js';
@@ -23,7 +23,7 @@ export async function tmdbPartVersions(movie,tmdbId){
  const parsed=parseTmdb(movie,String(tmdbId));
  if(!parsed)return null;
  const anchor=String(tmdbId);
- return {core:await coreVersion('tmdb',anchor,parsed.fields,parsed.comparable),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
+ return {core:await coreVersion('tmdb',anchor,parsed.fields,parsed.projection),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
 }
 // One statement per verified part, each followed by `SELECT changes()` so the caller reads the rows THIS batch changed (never a count over the catalog). A part is written only for a Film that holds a Discovery membership at the
 // time of the write and still holds the trusted, non-conflicting, non-redirected claim; with a `lease`, only while the Discovery lease of this revalidation is still held. And only when the producer's APPLIED state does not already

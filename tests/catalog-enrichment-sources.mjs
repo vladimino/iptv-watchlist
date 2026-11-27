@@ -14,15 +14,21 @@ const fetchOf=routes=>{const calls=[];const impl=async(url,init)=>{calls.push(St
 const env={TMDB_API_READ_ACCESS_TOKEN:'dummy'};
 
 // ---- TMDB ----
-const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:' A hacker. ',poster_path:'/p.jpg',genres:[{id:1,name:'Action'},{id:2,name:'Sci-Fi'}],
+const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:' A hacker. ',poster_path:'/top.jpg',genres:[{id:28,name:'боевик'},{id:878,name:'фантастика'}],
  credits:{cast:[{id:2,name:'B',order:1},{id:1,name:'A',order:0}],crew:[{id:9,name:'D',job:'Director'},{id:8,name:'W',job:'Writer'}]},
- translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}},{iso_639_1:'de',iso_3166_1:'DE',data:{title:'Matrix'}}]},...over});
+ translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'Хакер.'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'A hacker.'}}]},
+ images:{posters:[{iso_639_1:'en',file_path:'/en.jpg',width:1000},{iso_639_1:'ru',file_path:'/ru-small.jpg',width:500},{iso_639_1:'ru',file_path:'/ru.jpg',width:2000},{iso_639_1:null,file_path:'/neutral.jpg',width:3000}]},...over});
 {
- const impl=fetchOf([['https://api.themoviedb.org/3/movie/603?append_to_response=credits,translations',json(200,movie())]]);
+ const impl=fetchOf([['https://api.themoviedb.org/3/movie/603?'+X.TMDB_DETAIL_QUERY,json(200,movie())]]);
+ assert.equal(X.TMDB_DETAIL_QUERY,'language=ru-RU&append_to_response=credits,translations,images&include_image_language=ru,en,null','ONE request shape: Russian first, with the tagged translations and image lists in the same call');
  const answer=await X.fetchTmdb(env,{id:'603',fetchImpl:impl});
  assert.equal(answer.status,'ok');
- assert.deepEqual(answer.fields,{year:1999,runtime:136,synopsis:'A hacker.',poster:'https://image.tmdb.org/t/p/w500/p.jpg',url:'https://www.themoviedb.org/movie/603',genres:['Action','Sci-Fi']});
+ assert.deepEqual(answer.fields,{year:1999,runtime:136,synopsis:'Хакер.',poster:'https://image.tmdb.org/t/p/w500/ru.jpg',url:'https://www.themoviedb.org/movie/603',genres:['Боевик','Фантастика']},'the Russian synopsis from the tagged translation, the wider Russian poster, the genres in the EXISTING vocabulary through the id table');
+ assert.deepEqual(answer.projection.synopsis,{value:'Хакер.',language:'ru',languageBasis:'explicit',coverage:'verified'});
+ assert.deepEqual(answer.projection.poster,{path:'/ru.jpg',language:'ru',coverage:'verified'});
+ assert.deepEqual(answer.projection.genres,{coverage:'verified',ids:['28','878'],labels:['Боевик','Фантастика'],unmapped:[]});
  assert.deepEqual(answer.credits.items.map(item=>item.role+':'+item.key),['director:9','actor:1','actor:2'],'every supported credit, directors first, the cast in source order');
+ assert.equal(answer.credits.directorsRecognized,true);
  assert.deepEqual(answer.title,{status:'value',value:'Матрица'},'the Russian title comes from the response\'s own translations, with no separate fetch');
  assert.equal(impl.calls.length,1,'one request');
  // no cap on the cast
@@ -33,6 +39,7 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
  assert.deepEqual([noCredits.status,noCredits.credits.status],['ok','unreadable']);
  const noTr=await X.fetchTmdb(env,{id:'603',fetchImpl:fetchOf([['https://api',json(200,movie({translations:{}}))]])});
  assert.deepEqual(noTr.title,{status:'unreadable'});
+ assert.equal(noTr.projection.synopsis.coverage,'unreadable','a missing translations section is not a verified absence of a synopsis');
  // the response of another movie, or not JSON
  assert.equal((await X.fetchTmdb(env,{id:'603',fetchImpl:fetchOf([['https://api',json(200,movie({id:1}))]])})).reason,'unexpected_document');
  assert.equal((await X.fetchTmdb(env,{id:'603',fetchImpl:fetchOf([['https://api',res(200,'<html>')]])})).reason,'unparsable_response');
@@ -41,6 +48,54 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
  let seen=null;
  await X.fetchTmdb(env,{id:'603',fetchImpl:fetchOf([['https://api',(url,init)=>{seen=init;return json(200,movie());}]])});
  assert.equal(seen.headers.authorization,'Bearer dummy');
+}
+// ---- the appended images payload (ADR 0224): a large realistic response still parses; an oversized one is a repairable failure, never a verified absence ----
+{
+ const entry=(i,lang)=>({aspect_ratio:0.667,height:3000,iso_639_1:lang,file_path:'/'+'p'.repeat(30)+i+'.jpg',vote_average:5.1,vote_count:12,width:2000});
+ const big=movie({images:{backdrops:Array.from({length:300},(_,i)=>({...entry(i,null),aspect_ratio:1.778,height:1080,width:1920})),logos:Array.from({length:60},(_,i)=>entry(1000+i,'en')),posters:[...Array.from({length:150},(_,i)=>entry(i,'en')),...Array.from({length:25},(_,i)=>entry(2000+i,'ru')),...Array.from({length:40},(_,i)=>entry(3000+i,null))]}});
+ const withoutImages=JSON.stringify(movie({images:undefined})).length,withImages=JSON.stringify(big).length;
+ console.log('AIR-684 payload (synthetic, characters): detail without images '+withoutImages+', a large realistic images section '+withImages+', cap '+3000000);
+ assert.ok(withImages<3000000,'a large realistic list stays inside the existing body cap');
+ const answer=await X.fetchTmdb(env,{id:'603',fetchImpl:fetchOf([['https://api',json(200,big)]])});
+ assert.equal(answer.status,'ok');assert.equal(answer.projection.poster.path.startsWith('/ppp'),true);assert.equal(answer.projection.poster.language,'ru');
+ // over the cap: a repairable failure (the body is refused), never read as an absence and never a different request
+ const huge=res(200,'x'.repeat(3000001),{});
+ const refused=await X.fetchTmdb(env,{id:'603',fetchImpl:fetchOf([['https://api',huge]])});
+ assert.equal(refused.status,'failed');assert.equal(refused.reason,'unparsable_response');
+}
+// ---- the Russian-first projection (ADR 0224), through the ONE parser ----
+{
+ const parse=over=>X.parseTmdb(movie(over),603);
+ // synopsis: Russian first; a tagged English one only after a VERIFIED Russian absence; the top-level overview is never proof of a language
+ assert.equal(parse({translations:{translations:[{iso_639_1:'en',iso_3166_1:'US',data:{overview:'English.'}}]}}).projection.synopsis.language,'en');
+ assert.deepEqual(parse({translations:{translations:[{iso_639_1:'en',iso_3166_1:'US',data:{overview:'English.'}}]}}).fields.synopsis,'English.','Russian verified absent: the explicitly tagged English overview');
+ assert.equal(parse({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{overview:'  '}},{iso_639_1:'en',iso_3166_1:'US',data:{overview:'E'}}]}}).projection.synopsis.language,'en','a blank Russian overview is an absence');
+ assert.deepEqual(parse({translations:{translations:[{iso_639_1:'de',iso_3166_1:'DE',data:{overview:'Deutsch'}}]}}).projection.synopsis,{value:null,language:null,languageBasis:null,coverage:'absent'},'neither language: a verified absence; the top-level overview is NOT used');
+ assert.equal(parse({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{overview:'Один'}},{iso_639_1:'ru',iso_3166_1:'UA',data:{overview:'Два'}}]}}).projection.synopsis.value,'Один','several Russian values: the RU region decides');
+ assert.equal(parse({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'UA',data:{overview:'Один'}},{iso_639_1:'ru',iso_3166_1:'BY',data:{overview:'Два'}}]}}).projection.synopsis.coverage,'ambiguous');
+ assert.equal(parse({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:null}]}}).projection.synopsis.coverage,'unreadable');
+ // poster: ru, then en, then language-neutral, then the top-level path of unknown language; wider first, then the path; votes never decide
+ assert.equal(parse({}).projection.poster.path,'/ru.jpg');
+ assert.equal(parse({images:{posters:[{iso_639_1:'ru',file_path:'/b.jpg',width:500,vote_average:1},{iso_639_1:'ru',file_path:'/a.jpg',width:500,vote_average:9}]}}).projection.poster.path,'/a.jpg','equal width: the smaller path, whatever the votes');
+ assert.deepEqual(parse({images:{posters:[{iso_639_1:'en',file_path:'/en.jpg',width:100},{iso_639_1:null,file_path:'/n.jpg',width:900}]}}).projection.poster,{path:'/en.jpg',language:'en',coverage:'verified'},'English before language-neutral');
+ assert.deepEqual(parse({images:{posters:[{iso_639_1:null,file_path:'/n.jpg',width:900}]}}).projection.poster,{path:'/n.jpg',language:null,coverage:'verified'},'language-neutral before the top-level path');
+ assert.deepEqual(parse({images:{posters:[]}}).projection.poster,{path:'/top.jpg',language:null,coverage:'verified'},'the top-level path of unknown language as the last resort, never labelled');
+ assert.deepEqual(parse({images:{posters:[]},poster_path:null}).projection.poster,{path:null,language:null,coverage:'absent'},'no poster anywhere is a verified absence');
+ assert.equal(parse({images:undefined}).projection.poster.coverage,'unreadable');assert.equal(parse({images:undefined}).fields.poster,'https://image.tmdb.org/t/p/w500/top.jpg','an unreadable images section never blocks writing the top-level path');
+ assert.equal(parse({images:{posters:[{iso_639_1:'ru',file_path:'/x.jpg'}]}}).projection.poster.coverage,'unreadable','a malformed poster entry');
+ const order=parse({images:{posters:[{iso_639_1:'ru',file_path:'/a.jpg',width:1},{iso_639_1:'ru',file_path:'/b.jpg',width:2}]}}).projection.poster.path;
+ assert.equal(parse({images:{posters:[{iso_639_1:'ru',file_path:'/b.jpg',width:2},{iso_639_1:'ru',file_path:'/a.jpg',width:1}]}}).projection.poster.path,order,'list order never decides');
+ // genres: through the reviewed id table into the existing vocabulary; an unmapped id is a gap, not a label; an empty list differs from a missing one
+ assert.deepEqual(parse({genres:[{id:878,name:'x'},{id:28,name:'y'},{id:99999,name:'new'}]}).projection.genres,{coverage:'verified',ids:['28','878','99999'],labels:['Боевик','Фантастика'],unmapped:['99999']});
+ assert.deepEqual(parse({genres:[]}).projection.genres,{coverage:'verified',ids:[],labels:[],unmapped:[]});
+ assert.equal(parse({genres:undefined}).projection.genres.coverage,'unreadable');assert.equal(parse({genres:[{id:28},{name:'no id'}]}).projection.genres.coverage,'unreadable');
+ // credits: a malformed supported entry makes the section unreadable; another job is not judged; a crew that names no recognized director is reported, not silently partial
+ assert.equal(parse({credits:{cast:[{id:1},{name:'no id'}],crew:[]}}).credits.status,'unreadable');
+ assert.equal(parse({credits:{cast:[{id:1}],crew:[{job:'Director',name:'no id'}]}}).credits.status,'unreadable');
+ assert.equal(parse({credits:{cast:[{id:1}],crew:[null]}}).credits.status,'unreadable');
+ assert.equal(parse({credits:{cast:[{id:1}],crew:[{job:'Editor'}]}}).credits.status,'ok');
+ assert.deepEqual(parse({credits:{cast:[{id:1}],crew:[{id:5,job:'Writer'}]}}).credits.directorsRecognized,false,'crew without a recognized director is a visible gap');
+ assert.equal(parse({credits:{cast:[{id:1}],crew:[{id:5,job:'Режиссёр'}]}}).credits.items[0].key,'5','the localized job strings of the explicit set are recognized (a recorded ru-RU fixture is still an open acceptance condition)');
 }
 // ---- outcome classes ----
 {

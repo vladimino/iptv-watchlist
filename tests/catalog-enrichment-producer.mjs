@@ -45,7 +45,7 @@ const extractYear=text=>/\((\d{4})\)/.exec(String(text))?.[1]?Number(/\((\d{4})\
 const parseFilm=html=>{const ld=/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html);if(!ld)throw new Error('Film metadata missing');const meta=JSON.parse(ld[1]);const person=(list,role)=>(list||[]).map(item=>{const slug=/\/(?:actor|director)\/([a-z0-9-]+)\//.exec(item.url||'')?.[1];return {id:role+'/'+(slug||item.name),original:item.name,name:item.name};});return {creditsComplete:true,original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};};
 const tools={parseFilm,attr,extractYear};
 const lbPage=({tmdb=['603'],actors=[{name:'Neo',url:'/actor/neo/'},{name:'Trinity',url:'/actor/trinity/'}],year=1999,runtime=136,synopsis='lb synopsis'}={})=>`<html><head><link rel="shortlink" href="https://boxd.it/abc"><link rel="canonical" href="https://letterboxd.com/film/the-matrix/"><meta property="og:title" content="The Matrix (1999)"><script type="application/ld+json">${JSON.stringify({name:'The Matrix',year,runtime,description:synopsis,image:'https://img/lb.jpg',genre:['Sci-Fi'],director:[{name:'Lana',url:'/director/lana/'}],actor:actors})}</script></head><body>${tmdb.map(id=>`<div data-tmdb-id="${id}" data-tmdb-type="movie"></div>`).join('')}</body></html>`;
-const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'tm synopsis',poster_path:'/p.jpg',genres:[{id:28,name:'Action'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
+const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'top-level overview (never proof of a language)',poster_path:'/p.jpg',genres:[{id:28,name:'боевик'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'tm synopsis'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]},images:{posters:[{iso_639_1:'en',file_path:'/en.jpg',width:900},{iso_639_1:'ru',file_path:'/ru.jpg',width:600}]},...over});
 function upstream({lb='page',tm=movie(),wd=[]}={}){
  const calls=[];
  const impl=async url=>{
@@ -461,18 +461,40 @@ function file0(w){return w.file;}
  await consumeAll(w,at(101));
  assert.equal(rows(w.file,"SELECT status FROM catalog_enrichment_state WHERE film_id='"+FILM+"' AND part='credits' AND slot=7")[0].status,'not_applicable','a superseded slot is not resurrected');
  assert.equal(cv.length,64);
- // an English overview and genre ids are covered by the TMDB core version; the response's own (localized) overview, poster path and genre names are not
- const en=(over={})=>movie({genres:[{id:28,name:'Action'},{id:878,name:'Science Fiction'}],translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'ru'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]},overview:'english synopsis',runtime:150,credits:changedCredits.credits,...over});
+ // the shared Russian-first projection: a synopsis-only change, a poster-only change, the appearance of a Russian value, a genre id change and an unmapped id are observed; response order and the top-level overview are not
+ const ru=(over={})=>movie({runtime:150,credits:changedCredits.credits,...over});
  const w2=await world({lid:null,scope:'discovery'});
- await done(w2,upstream({lb:'404',tm:en()}));
- const stored=rows(w2.file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v;
- assert.equal(stored,(await D.tmdbPartVersions(en({overview:'русский обзор',poster_path:'/ru.jpg',genres:[{id:28,name:'Боевик'},{id:878,name:'Фантастика'}]}),603)).core,'full comparable coverage (English overview, genre ids): a localized response of the same movie is equal');
+ await done(w2,upstream({lb:'404',tm:ru()}));
+ const base=rows(w2.file,"SELECT source_version AS v,status FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0];
+ assert.equal(base.status,'complete');assert.equal(base.v,(await D.tmdbPartVersions(ru(),603)).core,'the producer stored the very version an observer computes');
  wakes.length=0;
- assert.equal((await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:en({overview:'русский обзор',poster_path:'/ru.jpg',genres:[{id:28,name:'Боевик'},{id:878,name:'Фантастика'}]}),at:at(50)})).state,'unchanged');
+ const same=ru({overview:'another top-level text',genres:[{id:28,name:'другое имя'}],images:{posters:[{iso_639_1:'ru',file_path:'/ru.jpg',width:600,vote_average:9.9},{iso_639_1:'en',file_path:'/en.jpg',width:900,vote_average:1}]}});
+ assert.equal((await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:same,at:at(50)})).state,'unchanged','the top-level overview, the genre names, the votes and the list order are not what is compared');
  assert.deepEqual(wakes,[]);
- const revised=en({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'ru'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'a revised english synopsis'}}]}});
- assert.equal((await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:revised,at:at(51)})).parts.includes('core'),true,'a change of the English overview is detected');
- assert.equal((await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:en({genres:[{id:28,name:'Action'}]}),at:at(52)})).parts.includes('core'),true,'a change of the genre ids is detected');
+ const emit=async over=>(await D.emitSourceChanged(w2.env,{tmdbId:'603',movie:ru(over),at:at(51)})).parts;
+ assert.deepEqual(await emit({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'revised synopsis'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]}}),['core'],'a synopsis-only change');
+ assert.deepEqual(await emit({images:{posters:[{iso_639_1:'ru',file_path:'/ru2.jpg',width:700},{iso_639_1:'en',file_path:'/en.jpg',width:900}]}}),['core'],'a poster-only change (the selected Russian poster)');
+ assert.deepEqual(await emit({genres:[{id:28,name:'x'},{id:878,name:'y'}]}),['core'],'a genre id change');
+ assert.deepEqual(await emit({genres:[{id:28,name:'x'},{id:424242,name:'new'}]}),['core'],'an unmapped id is part of the version');
+ // English fallback, then the appearance of a previously absent Russian value
+ const w3=await world({lid:null,scope:'discovery'});
+ const noRuSynopsis=ru({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]}});
+ await done(w3,upstream({lb:'404',tm:noRuSynopsis}));
+ assert.equal(meta(w3.file).synopsis,'english synopsis','Russian verified absent: the tagged English overview is the fallback');
+ assert.equal((await D.emitSourceChanged(w3.env,{tmdbId:'603',movie:noRuSynopsis,at:at(50)})).state,'unchanged');
+ assert.deepEqual((await D.emitSourceChanged(w3.env,{tmdbId:'603',movie:ru(),at:at(52)})).parts,['core'],'the appearance of a Russian synopsis reopens the part');
+ await consumeAll(w3,at(60));
+ assert.equal(rows(w3.file,"SELECT status FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].status,'due');
+ await done(w3,upstream({lb:'404',tm:ru()}),61);
+ assert.equal(meta(w3.file).synopsis,'english synopsis','fill-only: the refresh finds nothing blank; the Russian upgrade of a stored English value is AIR-633 (enforce), not this part');
+ assert.equal(rows(w3.file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v,(await D.tmdbPartVersions(ru(),603)).core,'the part completed at the observed version and stopped');
+ // an unmapped genre id completes the part WITH a visible gap and still has a version
+ const w4=await world({lid:null,scope:'discovery'});
+ await done(w4,upstream({lb:'404',tm:ru({genres:[{id:28,name:'x'},{id:424242,name:'new'}]})}));
+ assert.equal(rows(w4.file,"SELECT status FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].status,'complete_with_gaps');
+ assert.match(rows(w4.file,"SELECT gaps_json FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].gaps_json,/genres_unmapped/);
+ assert.ok(rows(w4.file,"SELECT source_version AS v FROM catalog_enrichment_state WHERE part='core' AND source='tmdb'")[0].v,'a partial mapping still has a version: the table revision reopens it');
+ assert.deepEqual(JSON.parse(meta(w4.file).genres_json),['Боевик'],'only mapped words are written, in the existing vocabulary');
 }
 {
  // 6. verified ABSENCE of a Russian title persists its own comparable version and is dropped without a fetch; a missing or malformed section emits nothing
@@ -487,7 +509,7 @@ function file0(w){return w.file;}
  const calls=up.calls.length;
  assert.equal(rows(w.file,"SELECT status FROM catalog_enrichment_state WHERE part='localization' AND source='tmdb'")[0].status,'complete_with_gaps');
  // a Russian title that APPEARS later is a change of the verified coverage
- assert.deepEqual((await D.emitSourceChanged(w.env,{tmdbId:'603',movie:movie(),at:at(55)})).parts,['localization'],'a title that appears after a verified absence');
+ assert.deepEqual((await D.emitSourceChanged(w.env,{tmdbId:'603',movie:movie(),at:at(55)})).parts,['core','localization'],'a Russian title and a Russian synopsis that appear after a verified absence');
  // missing or malformed sections are not verified coverage: nothing is signalled for them
  const broken=movie({credits:undefined,translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:null}]},runtime:111});
  assert.deepEqual(await D.emitSourceChanged(w.env,{tmdbId:'603',movie:broken,at:at(70)}),{state:'unchanged',parts:[]},'an unreadable translations section leaves both the title and the comparable core unverified; a missing credits section is unverified too');
