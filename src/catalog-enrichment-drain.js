@@ -50,14 +50,18 @@ export async function relevanceFacts(env,filmIds){
  const facts=new Map(filmIds.map(id=>[id,{personal:null,available:null,cohorts:new Set()}]));
  if(!filmIds.length)return facts;
  const json=JSON.stringify(filmIds);
+ // A READ THAT FAILS IS NOT AN ABSENCE: the result keeps `ok:false` and every fact derived from it stays unknown (null), so an unreadable Watchlist or admission table can never become proof that a Film is not personal.
+ const read=async(sql,params)=>{try{return {ok:true,rows:await many(handle,sql,params)};}catch{return {ok:false,rows:[]};}};
  const [watch,rated,scopes]=await Promise.all([
-  many(handle,'SELECT film_id FROM watchlist_film WHERE film_id IN (SELECT value FROM json_each(?))',[json]).catch(()=>[]),
-  many(handle,'SELECT film_id FROM film_rated_admission WHERE film_id IN (SELECT value FROM json_each(?))',[json]).catch(()=>[]),
-  many(handle,'SELECT film_id,scope FROM catalog_enrichment_member WHERE film_id IN (SELECT value FROM json_each(?))',[json]).catch(()=>[]),
+  read('SELECT film_id FROM watchlist_film WHERE film_id IN (SELECT value FROM json_each(?))',[json]),
+  read('SELECT film_id FROM film_rated_admission WHERE film_id IN (SELECT value FROM json_each(?))',[json]),
+  read('SELECT film_id,scope FROM catalog_enrichment_member WHERE film_id IN (SELECT value FROM json_each(?))',[json]),
  ]);
- const positive=new Set([...watch,...rated].map(row=>row.film_id));
+ const positive=new Set([...watch.rows,...rated.rows].map(row=>row.film_id));
+ const negativeReadable=watch.ok&&rated.ok&&scopes.ok; // a "not personal" claim needs every source of personal facts to have been readable
  const held=new Map();
- for(const row of scopes){if(!held.has(row.film_id))held.set(row.film_id,new Set());held.get(row.film_id).add(row.scope);}
+ for(const row of scopes.rows){if(!held.has(row.film_id))held.set(row.film_id,new Set());held.get(row.film_id).add(row.scope);}
+ // The PUBLISHED EPG programme facts of the pinned generation. null: the authority or its members are unreadable, not pinned to a D1 generation, or the generation is not open (a projection or authority lag is unknown, never a negative).
  let members=null;
  try{
   const pinned=await one(handle,"SELECT programme_run_id FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id IS NOT NULL");
@@ -66,30 +70,50 @@ export async function relevanceFacts(env,filmIds){
  for(const id of filmIds){
   const fact=facts.get(id),scopeSet=held.get(id)||new Set();
   for(const scope of scopeSet)fact.cohorts.add(scope==='c3a'?'history':'live');
-  if(!scopeSet.size)fact.cohorts.add('live');
-  fact.personal=positive.has(id)?true:(scopeSet.size&&[...scopeSet].every(scope=>scope==='discovery')?false:null);
+  if(!scopeSet.size)fact.cohorts.add('live'); // an unreadable or empty membership is live by default
+  fact.personal=positive.has(id)?true:(negativeReadable&&scopeSet.size&&[...scopeSet].every(scope=>scope==='discovery')?false:null);
   fact.available=members?members.has(id):null;
  }
  return facts;
 }
 
-// Due Films. A pick EXAMINES at most `window` rows at the head of the state index PER COHORT (ordered by retry_at, then due_since: a backed-off or failing item has its retry_at in the future, so it leaves the head and cannot
-// block independent work), classifies exactly those Films by the authoritative facts above and applies the priority rule. -> {live, background, examined:{live,history}}, oldest first within a class.
-export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set()}){
+// Due Films, by INDEXED PAGING. Per cohort a pick pages through the two partial indexes of migration 0047 (the runnable part rows, and the Films that still need their anchor check) in index order with a keyset cursor over
+// (run-after time, due since, Film, part, source, slot). A page reads at most `window` index rows; the rows read ARE the examined work (reported exactly), whatever the filters then do to them, so a head of blocked rows, of
+// repeated slots of one Film or of Films skipped in this run can neither hide the rows behind it nor make the work unbounded: paging goes on (at most MAX_PAGES pages per stream) until `window` distinct runnable Films are found.
+// A backed-off item has its run-after time in the future, so it is not in the scanned range at all. The authoritative facts are read only for the Films found. Rows held back by an owner lock or an identity disagreement are
+// returned in `blocked` so the drainer can defer them DURABLY (they then leave the head). -> {live, background, blocked, examined:{live,history}, pages}, oldest first within a class.
+export const MAX_PAGES=4;
+const LOCKED_CORE="(s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))";
+const STREAMS=Object.freeze({
+ runnable:{where:"s.part<>'film' AND s.status IN ('due','deferred_repair')",key:'COALESCE(s.retry_at,\'\'),s.due_since,s.film_id,s.part,s.source,s.slot',cursor:['','','','','',0],extra:`, ${LOCKED_CORE} AS locked, EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement') AS disagree`},
+ anchor:{where:"s.part='film' AND s.status='active' AND s.reason='check_anchors'",key:'COALESCE(s.retry_at,\'\'),s.due_since,s.film_id',cursor:['','',''],extra:', 0 AS locked, 0 AS disagree'},
+});
+export async function dueFilms(env,{now,window=BUDGET.window,skip=new Set(),maxPages=MAX_PAGES}){
  const handle=database(env);
- const base=`FROM catalog_enrichment_state s WHERE s.cohort=? AND s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_state f WHERE f.film_id=s.film_id AND f.part='film' AND f.status='identity_disagreement')`;
- const examined={live:0,history:0},picked=new Map();
+ const examined={live:0,history:0},picked=new Map(),blocked=[];
+ let pages=0;
  for(const cohort of ['live','history']){
-  const rows=await many(handle,`SELECT s.film_id AS film_id,s.due_since AS due_since,s.retry_at AS retry_at ${base} AND ((s.part<>'film' AND s.status IN ('due','deferred_repair') AND (s.retry_at IS NULL OR s.retry_at<=?) AND NOT (s.part='core' AND EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id=s.film_id AND d.dimension='metadata' AND (d.status='reviewed' OR COALESCE(d.authority,'')='owner')))) OR (s.part='film' AND s.reason='check_anchors' AND (s.retry_at IS NULL OR s.retry_at<=?))) ORDER BY s.retry_at,s.due_since,s.film_id LIMIT ?`,[cohort,now,now,window]);
-  examined[cohort]=rows.length;
-  for(const row of rows){
-   if(skip.has(row.film_id))continue;
-   const known=picked.get(row.film_id);
-   if(!known||row.due_since<known.dueSince)picked.set(row.film_id,{filmId:row.film_id,dueSince:row.due_since});
+  for(const stream of Object.values(STREAMS)){
+   let cursor=stream.cursor,found=0;
+   for(let page=0;page<maxPages&&found<window;page++){
+    const tuple=cursor.map(()=>'?').join(',');
+    const rows=await many(handle,`SELECT r.*, EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=r.film_id) AS enabled FROM (SELECT s.film_id AS film_id,s.part AS part,s.source AS source,s.slot AS slot,s.due_since AS due_since,s.retry_at AS retry_at,COALESCE(s.retry_at,'') AS ra${stream.extra} FROM catalog_enrichment_state s WHERE s.cohort=? AND ${stream.where} AND COALESCE(s.retry_at,'')<=? AND (${stream.key})>(${tuple}) ORDER BY ${stream.key} LIMIT ?) AS r ORDER BY r.ra,r.due_since,r.film_id,r.part,r.source,r.slot`,[cohort,now,...cursor,window]);
+    pages++;examined[cohort]+=rows.length;
+    for(const row of rows){
+     if(!Number(row.enabled)||skip.has(row.film_id))continue; // a disabled scope holds its work; a Film skipped in this run stays out of the run
+     if(Number(row.disagree)||Number(row.locked)){blocked.push({filmId:row.film_id,part:row.part,why:Number(row.disagree)?'identity_disagreement':'owner_locked'});continue;}
+     const known=picked.get(row.film_id);
+     if(!known)found++; // DISTINCT Films: the repeated slots of one Film are one Film
+     if(!known||row.due_since<known.dueSince)picked.set(row.film_id,{filmId:row.film_id,dueSince:row.due_since});
+    }
+    if(rows.length<window)break; // the index range is exhausted
+    const last=rows[rows.length-1];
+    cursor=stream===STREAMS.runnable?[last.ra,last.due_since,last.film_id,last.part,last.source,Number(last.slot)]:[last.ra,last.due_since,last.film_id];
+   }
   }
  }
  const facts=await relevanceFacts(handle,[...picked.keys()]);
- const out={live:[],background:[],examined};
+ const out={live:[],background:[],blocked,examined,pages};
  for(const entry of [...picked.values()].sort((a,b)=>a.dueSince<b.dueSince?-1:a.dueSince>b.dueSince?1:a.filmId<b.filmId?-1:1)){
   const fact=facts.get(entry.filmId);
   out[priorityClass({cohorts:fact.cohorts,personal:fact.personal,available:fact.available})].push({...entry,personal:fact.personal,available:fact.available});
@@ -131,9 +155,25 @@ export async function deferFilm(env,{filmId,leaseId,generation,now}){
  await database(env).prepare(`UPDATE catalog_enrichment_state SET transport_streak=?,retry_at=?,updated_at=? WHERE film_id=? AND ((part<>'film' AND status IN ('due','deferred_repair')) OR (part='film' AND reason='check_anchors')) AND ${guard.sql}`).bind(streak,retryAt,now,filmId,...guard.params).run();
  return retryAt;
 }
+// Rows held back by an owner lock on the metadata or by an identity disagreement are not due work for anyone but the owner: they are deferred DURABLY for an hour (guarded by the lease and the control generation) so they leave the head
+// of the index. They carry `reason = 'owner_blocked'`, which keeps them out of the due-time wake: nothing is waiting for the clock, only for the owner. The release of the lock or the anchor change reopens them at once (the reopening effect clears the retry time and the reason). At most DEFER_BLOCKED_LIMIT Films per pick, so the cleanup itself is bounded.
+export const BLOCKED_DEFER_MS=3600000,DEFER_BLOCKED_LIMIT=20;
+export async function deferBlocked(env,{blocked,leaseId,generation,now}){
+ const films=[...new Map(blocked.map(item=>[item.filmId,item])).values()].slice(0,DEFER_BLOCKED_LIMIT);
+ if(!films.length)return 0;
+ const retryAt=new Date(Date.parse(now)+BLOCKED_DEFER_MS).toISOString();
+ const guard=await repairGuard(null,leaseId,generation,now);
+ let deferred=0;
+ for(const item of films){
+  const part=item.why==='owner_locked'?"AND part='core'":"AND part<>'film'";
+  await database(env).prepare(`UPDATE catalog_enrichment_state SET retry_at=?,reason='owner_blocked',updated_at=? WHERE film_id=? ${part} AND status IN ('due','deferred_repair') AND (retry_at IS NULL OR retry_at<?) AND ${guard.sql}`).bind(retryAt,now,item.filmId,retryAt,...guard.params).run();
+  deferred++;
+ }
+ return deferred;
+}
 // The earliest time a deferred item becomes runnable again, or null: the due time of a parked run.
 export async function earliestWake(env,{now}){
- const row=await one(database(env),`SELECT MIN(s.retry_at) AS at FROM catalog_enrichment_state s WHERE s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND s.retry_at>?`,[now]);
+ const row=await one(database(env),`SELECT MIN(s.retry_at) AS at FROM catalog_enrichment_state s WHERE s.film_id IN (SELECT m.film_id FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1) AND s.part<>'film' AND s.status IN ('due','deferred_repair') AND COALESCE(s.reason,'')<>'owner_blocked' AND s.retry_at>?`,[now]);
  // A backed-off SIGNAL (a failed consume retries hourly) is a due-time too: the park wakes for it, so a pending signal never waits for the cron alone. Over-waking on a signal whose scope is off is harmless (the re-check finds nothing runnable).
  const sig=await one(database(env),"SELECT MIN(retry_at) AS at FROM enrichment_signal WHERE state='pending' AND acked_version<version AND retry_at IS NOT NULL");
  const times=[row?.at,sig?.at].filter(Boolean).sort();
@@ -190,6 +230,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     if(outcome.consumed){consumed++;counts.signals++;}
    }
    const due=await dueFilms(env,{now:clock(),skip});
+   if(due.blocked.length){try{counts.deferred+=await deferBlocked(env,{blocked:due.blocked,leaseId,generation,now:clock()});}catch{/* the in-run pass still excludes them: they are not picked */}}
    const klass=nextClass({hasLive:due.live.length>0,hasBackground:due.background.length>0,committedLive:baseLive+counts.committedLive,committedBackground:baseBackground+counts.committedBackground});
    if(!klass){
     if(consumed)continue; // new work may have become due by the signals just consumed

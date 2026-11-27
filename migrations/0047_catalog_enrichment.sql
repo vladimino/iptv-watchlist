@@ -98,8 +98,10 @@ CREATE TABLE catalog_enrichment_state (
  CHECK (part <> 'film' OR status IN ('active', 'identity_disagreement')),
  CHECK (part = 'film' OR status <> 'active')
 ) STRICT;
--- The indexed due selection: examined rows per cohort at the head of this index, then the policy of decision 5.
-CREATE INDEX catalog_enrichment_state_due ON catalog_enrichment_state (status, cohort, retry_at, due_since, film_id);
+-- The indexed due selection (ADR 0219 decision 5): two PARTIAL indexes, one per kind of runnable row, ordered by the run-after time (`COALESCE(retry_at, '')`: a row with no retry is due now and sorts first) and then by how long
+-- it has been due. A pick pages through ONE of them per cohort with a keyset cursor, so the rows it examines are exactly the rows it reads (bounded per page) and a blocked or repeated head never hides what is behind it.
+CREATE INDEX catalog_enrichment_state_runnable ON catalog_enrichment_state (cohort, COALESCE(retry_at, ''), due_since, film_id, part, source, slot) WHERE part <> 'film' AND status IN ('due', 'deferred_repair');
+CREATE INDEX catalog_enrichment_state_anchor ON catalog_enrichment_state (cohort, COALESCE(retry_at, ''), due_since, film_id) WHERE part = 'film' AND status = 'active' AND reason = 'check_anchors';
 
 -- 5. The receipt-key generation of one logical unit (a part of a Film, or a Person unit shared by several Films). Advanced only by a compare-and-swap on generation and history fingerprint; never deleted.
 CREATE TABLE catalog_enrichment_unit_generation (

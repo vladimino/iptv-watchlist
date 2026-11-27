@@ -313,4 +313,63 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  sqlite(w.file,"UPDATE enrichment_signal SET retry_at=NULL");
  assert.equal((await run(w,upstream())).counts.signals,1,'at its due time the signal is consumed');
 }
+
+// ---- bounded examination by indexed paging: a head wider than the window, disabled scopes, repeated slots, locked rows ----
+{
+ const T0=T;
+ const state=(film,part,source,slot,status,due,retry='NULL',cohort='live')=>`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,cohort,retry_at,due_since,updated_at) VALUES ('${film}','${part}','${source}',${slot},'${status}','${cohort}',${retry},'${due}','${T0}');`;
+ const film=id=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',2,NULL,'K','${T0}');`;
+ const member=(id,scope)=>`INSERT INTO catalog_enrichment_member VALUES ('film:tmdb:${id}','${scope}','${T0}','k${id}');`;
+ const early=i=>`2026-11-01T00:${String(Math.floor(i/60)).padStart(2,'0')}:${String(i%60).padStart(2,'0')}.000Z`;
+ const late=i=>`2026-11-20T00:00:${String(i).padStart(2,'0')}.000Z`;
+
+ // 1. 120 Films of a DISABLED scope sit ahead of 10 runnable rated Films: paging reaches them, and the rows read are reported exactly
+ {
+  const w=world(0);
+  sqlite(w.file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',1,0,1,'"+T0+"');");
+  sqlite(w.file,Array.from({length:120},(_,i)=>film(2000+i)+member(2000+i,'discovery')+state('film:tmdb:'+(2000+i),'core','tmdb',0,'due',early(i))).join('')+Array.from({length:10},(_,i)=>film(3000+i)+member(3000+i,'rated')+state('film:tmdb:'+(3000+i),'core','tmdb',0,'due',late(i))).join(''));
+  const d=await D.dueFilms(w.env,{now:'2026-11-26T10:00:00.000Z'});
+  const found=new Set([...d.live,...d.background].map(item=>item.filmId));
+  assert.equal(found.size,10,'the disabled head did not hide the runnable Films behind it');
+  assert.ok([...found].every(id=>id.startsWith('film:tmdb:3')));
+  assert.ok(d.examined.live>=130&&d.examined.live<=D.MAX_PAGES*50*2,'the examined rows are the index rows actually read, bounded by the page budget: '+d.examined.live);
+  assert.ok(d.pages>=3,'it paged: '+d.pages);
+ }
+ // 2. one Film with 100 repeated slots ahead of 10 other Films never occupies the whole first page
+ {
+  const w=world(0);
+  sqlite(w.file,film(4000)+member(4000,'rated')+Array.from({length:100},(_,i)=>state('film:tmdb:4000','credits','tmdb',i,'due',early(0))).join('')+Array.from({length:10},(_,i)=>film(4100+i)+member(4100+i,'rated')+state('film:tmdb:4'+String(100+i),'core','tmdb',0,'due',late(i))).join(''));
+  const d=await D.dueFilms(w.env,{now:'2026-11-26T10:00:00.000Z'});
+  assert.equal(new Set([...d.live,...d.background].map(item=>item.filmId)).size,11,'the 100 slots of one Film and the 10 other Films are all found');
+ }
+ // 3. owner-locked rows at the head are reported as blocked and deferred durably: they leave the head
+ {
+  const w=world(0);
+  sqlite(w.file,Array.from({length:120},(_,i)=>film(5000+i)+member(5000+i,'rated')+state('film:tmdb:'+(5000+i),'core','tmdb',0,'due',early(i))+`INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES ('film:tmdb:${5000+i}','metadata','reviewed','owner',NULL,NULL,NULL,'owner',NULL,NULL,NULL,0,'none','${T0}');`).join('')+Array.from({length:5},(_,i)=>film(5200+i)+member(5200+i,'rated')+state('film:tmdb:'+(5200+i),'core','tmdb',0,'due',late(i))).join(''));
+  const now='2026-11-26T10:00:00.000Z';
+  const first=await D.dueFilms(w.env,{now});
+  assert.equal(new Set([...first.live,...first.background].map(item=>item.filmId)).size,5,'the five ordinary Films are found behind 120 locked ones');
+  assert.ok(first.blocked.length>=50&&first.blocked.every(item=>item.why==='owner_locked'));
+  const generation=(await S.readControl(w.env)).generation;
+  assert.equal((await S.acquireLease(w.env,{leaseId:'lease-defer-aaaa',now})).acquired,true);
+  const deferred=await D.deferBlocked(w.env,{blocked:first.blocked,leaseId:'lease-defer-aaaa',generation,now});
+  assert.ok(deferred>0&&deferred<=D.DEFER_BLOCKED_LIMIT,'a bounded number of Films is deferred per pick: '+deferred);
+  const after=rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE retry_at IS NOT NULL")[0].n;
+  assert.equal(after,deferred,'the deferral is durable and writes only the retry time of the blocked rows');
+  const second=await D.dueFilms(w.env,{now});
+  assert.ok(second.examined.live<=first.examined.live,'the deferred rows left the head');
+ }
+ // 4. an unreadable fact source is UNKNOWN, never a negative: a Discovery-only Film stays live when the Watchlist read fails
+ {
+  const w=world(0);
+  sqlite(w.file,"INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',1,1,1,'"+T0+"');"+film(6000)+member(6000,'discovery')+state('film:tmdb:6000','core','tmdb',0,'due',late(0)));
+  const readable=await D.relevanceFacts(w.env,['film:tmdb:6000']);
+  assert.equal(readable.get('film:tmdb:6000').personal,false,'a readable absence on a Discovery-only Film is a negative');
+  const broken={DB:d1Standin(w.file,{rewrite:sql=>/FROM watchlist_film WHERE film_id IN/.test(sql)?'SELECT broken FROM nowhere':sql})};
+  const unknown=await D.relevanceFacts(broken,['film:tmdb:6000']);
+  assert.equal(unknown.get('film:tmdb:6000').personal,null,'an unreadable Watchlist is unknown, not "not personal"');
+  const picked=await D.dueFilms(broken,{now:'2026-11-26T10:00:00.000Z'});
+  assert.equal(picked.live.length,1,'the Film stays live when its facts are unknown');
+ }
+}
 console.log('catalog enrichment drain: ok');
