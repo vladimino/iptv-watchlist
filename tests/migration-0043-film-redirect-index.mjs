@@ -19,6 +19,7 @@ const exec=(file,text)=>{const result=run(file,text);if(result.status!==0)throw 
 const rows=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=String(result.stdout).trim();return out?JSON.parse(out):[];};
 const version=file=>Number(rows(file,'SELECT version FROM schema_contract WHERE id=1')[0].version);
 const objects=file=>rows(file,"SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").map(item=>item.type+':'+item.name);
+const RETIRED=['table:identity_assertion','table:identity_rule_version','table:identity_application'];// retired by 0054 (AIR-625), empty in production
 let copies=0;
 const copyOf=(file,name)=>{const target=file.replace(/\.sqlite$/,'-'+name+'-'+(copies++)+'.sqlite');fs.copyFileSync(file,target);return target;};
 const dump=file=>{const result=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<30});if(result.status!==0)throw new Error(result.stderr);return String(result.stdout).split('\n');};
@@ -127,9 +128,9 @@ assert.deepEqual(objects(after),[...objects(before),'index:'+INDEX].sort(),'exac
 refuse(copyOf(after,'again'),'a second apply on version 43');
 assert.equal(version(migrated(42)),42,'the chain through 0042 ends at version 42');
 assert.ok(!objects(migrated(42)).includes('index:'+INDEX),'the chain through 0042 has no such index');
-assert.equal(version(migrated()),53,'the full chain ends at version 53 (0053, AIR-693, after 0050, AIR-684, after 0049, AIR-631, after 0048, AIR-672, after 0047, AIR-605, after 0046, AIR-602, after 0045, AIR-604, after 0044, AIR-639, which follows this 0043)');
+assert.equal(version(migrated()),54,'the full chain ends at version 54 (0054, AIR-625, after 0053, AIR-693, after 0050, AIR-684, after 0049, AIR-631, after 0048, AIR-672, after 0047, AIR-605, after 0046, AIR-602, after 0045, AIR-604, after 0044, AIR-639, which follows this 0043)');
 assert.ok(objects(migrated()).includes('index:'+INDEX),'the full chain carries the index');
-assert.ok(objects(migrated(42)).every(name=>objects(migrated()).includes(name)),'0043 keeps every earlier object');
+assert.ok(objects(migrated(42)).every(name=>RETIRED.includes(name)||objects(migrated()).includes(name)),'0043 keeps every earlier object');
 
 const shape=rows(after,"SELECT name,\"unique\" AS uniq,partial FROM pragma_index_list('film_redirect')").find(item=>item.name===INDEX);
 assert.equal(shape.uniq,0,'non-unique');assert.equal(shape.partial,0,'not partial');

@@ -472,6 +472,9 @@ export const FILES={
  "migration-0053-provenance-other-language.mjs": {
   "suite": "core"
  },
+ "migration-0054-retire-identity-assertion.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-bootstrap.mjs": {
   "suite": "core"
  },
