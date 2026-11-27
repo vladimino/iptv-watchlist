@@ -46,4 +46,4 @@ These are executable tests on the same stand-in, not measurements: priority spli
 
 - Wall time and CPU on the Worker, real D1 latency and billed rows, TMDB, Letterboxd and Wikidata response times and rate limits.
 - A Letterboxd-anchored Film in the harness itself, a real EPG seal phase (the yield predicate is injected), trigger fan-out cost on a populated catalog and recovery-scan cost on a large retained set.
-- The Cloudflare Workflow platform itself: a whole drain is one step in the wrapper, so step-level replay limits are not measured.
+- The Cloudflare Workflow platform itself: the wrapper runs bounded slices of the instance budget as steps, but the harness calls the drainer directly, so platform step and replay limits are not measured.
