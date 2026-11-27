@@ -347,6 +347,15 @@ for(const [name,seed,detail] of [
  {const w=world(47);sql(w.file,'CREATE TABLE film_metadata_field_v53 (film_id TEXT)');
   const out=await Op.execute('status',{binding:w.db,clock:at(MID)});assert.ok(out.chain.extra.includes('table:film_metadata_field_v53'));assert.ok(out.chain.early.includes('table:film_metadata_field_v53'));
   assert.equal(out.plan[54].decision,'partial_schema');await stop(run(w.db,params(54,47)),'partial_schema');}
+ // string literals are compared verbatim: a changed case inside an index predicate or CHECK is a different constraint (it accepted two pending rows for one operation key)
+ {assert.notEqual(Op.normalizeSql("state IN ('pending', 'failed')"),Op.normalizeSql("state IN ('PENDING', 'failed')"));
+  assert.notEqual(Op.normalizeSql("x NOT GLOB '*[^a-z]*'"),Op.normalizeSql("x NOT GLOB '*[^A-Z]*'"));
+  assert.equal(Op.normalizeSql('CREATE TABLE IF NOT EXISTS "A_b" (x TEXT -- c\n)'),Op.normalizeSql('create table a_b(x text)'),'harmless formatting (comments, spacing, quoting, case outside literals, IF NOT EXISTS) is still ignored');
+  const w=world(40);
+  const index=sql(w.file,"SELECT name,sql FROM sqlite_master WHERE type='index' AND name='canonical_write_receipt_operation_unresolved'")[0];
+  assert.ok(index&&index.sql.includes("'pending'"),'the real partial index of the operation-key guarantee exists');
+  rewrite(w.file,'canonical_write_receipt_operation_unresolved',"'pending'","'PENDING'");
+  await refusesWithoutWrite(w,'predecessor_unverified',chain=>assert.deepEqual(chain.changed,['index:canonical_write_receipt_operation_unresolved']));}
  // a known IF NOT EXISTS definition is compared as stored: the downgrade trigger replaced by a weaker body
  {const w=world(40);sql(w.file,"DROP TRIGGER schema_contract_no_downgrade;CREATE TRIGGER schema_contract_no_downgrade BEFORE UPDATE OF version ON schema_contract BEGIN SELECT 1; END");
   await refusesWithoutWrite(w,'predecessor_unverified',chain=>assert.deepEqual(chain.changed,['trigger:schema_contract_no_downgrade']));}
@@ -454,4 +463,48 @@ for(const [name,seed,detail] of [
  const refused=await Op.runD1MigrationWindowProduction({argv:A('--target','iptv','--apply','--through','47','--start','38','--confirm','apply','--manifest-sha256',Op.manifestSha256(),'--operator-sha256',Op.operatorSha256()),deps:{binding:db},clock:at(MID)});
  assert.equal(refused.exit,3);assert.equal(refused.result.reason,'start_mismatch');assert.equal(refused.result.writes,false);
 }
+// ---- the REAL production composition (no deps): mocked fetch for describe, the strict reads, the bookmark and one actual per-file transport path ----
+{
+ const {PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID}=await import('../scripts/published-epg-production.mjs');
+ const {file}=world(38);
+ const calls=[];
+ const lite=(input,json)=>{const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+input,encoding:'utf8',maxBuffer:1<<28});return result;};
+ // `malformed(sqlText)` true answers that read without a result array
+ const makeFetch=({malformed=()=>false}={})=>async(url,init)=>{
+  calls.push({url:String(url),method:init.method,body:init.body});
+  const answer=(body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
+  if(String(url).endsWith('/time_travel/bookmark'))return answer({success:true,result:{bookmark:'bookmark-'+calls.length}});
+  if(init.method==='GET')return answer({success:true,result:{uuid:PRODUCTION_DATABASE_ID,name:'iptv'}});
+  const body=JSON.parse(init.body);
+  if(body.batch){
+   // a {batch} body: one transaction, rolled back whole by a statement error
+   const result=lite('BEGIN;\n'+body.batch.map(item=>item.sql).join('\n')+'\nCOMMIT;');
+   if(result.status!==0)return answer({success:false,errors:[{message:String(result.stderr).trim()}]},400);
+   return answer({success:true,result:body.batch.map(()=>({success:true,results:[],meta:{rows_written:1}}))});
+  }
+  const text=String(body.sql);
+  if(malformed(text))return answer({success:true,result:[{success:true}]});
+  const result=lite(text,true);
+  if(result.status!==0)return answer({success:false,errors:[{message:String(result.stderr).trim()}]},400);
+  const out=String(result.stdout).trim();
+  return answer({success:true,result:[{success:true,results:out?JSON.parse(out):[],meta:{rows_written:0}}]});
+ };
+ const env={D1_BACKFILL_ACCOUNT_ID:PRODUCTION_ACCOUNT_ID,D1_BACKFILL_API_TOKEN:'SECRET-TOKEN-VALUE',NODE_USE_ENV_PROXY:''};
+ const status=await Op.runD1MigrationWindowProduction({argv:A('--target','iptv'),env,fetchImpl:makeFetch(),clock:at(MID)});
+ assert.equal(status.exit,0,JSON.stringify(status.result).slice(0,400));assert.equal(status.result.schemaVersion,38);assert.equal(status.result.plan[47].decision,'apply');
+ assert.equal(status.result.chain.verified,true);
+ assert.equal(calls.filter(call=>call.method==='POST'&&call.body.includes('"batch"')).length,0,'the status sends no batch');
+ // a malformed strict read refuses the status before anything else
+ const bad=await Op.runD1MigrationWindowProduction({argv:A('--target','iptv'),env,fetchImpl:makeFetch({malformed:text=>text.includes('FROM prediction_lease')}),clock:at(MID)});
+ assert.equal(bad.exit,3);assert.equal(bad.result.reason,'unknown_state');assert.equal(JSON.stringify(bad).includes('SECRET-TOKEN-VALUE'),false);
+ // the apply through the real adapter: describe, bookmark before, one {batch} per file with a readback in between, bookmark after
+ calls.length=0;
+ const applied=await Op.runD1MigrationWindowProduction({argv:A('--target','iptv','--apply','--through','47','--start','38','--confirm','apply','--manifest-sha256',Op.manifestSha256(),'--operator-sha256',Op.operatorSha256()),env,fetchImpl:makeFetch(),clock:at(MID)});
+ assert.equal(applied.exit,0,JSON.stringify(applied.result).slice(0,500));assert.equal(applied.result.writeState,'committed');assert.deepEqual(applied.result.applied.map(item=>item.version),[39,40,41,42,43,44,45,46,47]);
+ assert.ok(applied.result.bookmarkBefore&&applied.result.bookmarkAfter&&applied.result.bookmarkBefore!==applied.result.bookmarkAfter,'the recovery bookmark is read before and after');
+ assert.equal(calls.filter(call=>call.method==='POST'&&call.body.includes('"batch"')).length,9,'one {batch} request per file through the real adapter');
+ assert.equal(version(file),47);
+ assert.equal(JSON.stringify(applied).includes('SECRET-TOKEN-VALUE'),false);
+}
+
 console.log('d1-migration-window-production: ok');

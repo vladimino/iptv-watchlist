@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
-import {createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
+import {createPublishedBinding,STATEMENT_BYTES,migrationStatements,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {CHAIN_BOUNDARY_MARGIN_MS} from '../src/canonical-producer-fence.js';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -90,9 +90,40 @@ export function stepStatements(item,bytes=fileBytes(item)){
 // fingerprint (type, table, normalized CREATE text) of EVERY object, including the base v38 objects, the ALTERed tables, the renamed v53 tables and the IF NOT EXISTS
 // definitions, so a status never certifies a predecessor by version and names alone. Its SHA-256 is part of the manifest digest the GO names.
 export const REFERENCE_PATH=path.join(ROOT,'scripts/d1-migration-window-reference.json');
-// Comments, whitespace, quoting, letter case and IF NOT EXISTS are dropped from both sides: the operator sends extracted statements (no comments), a database built from the
-// raw file keeps them, and SQLite quotes a renamed table. Everything else (every column, CHECK, default, trigger body) counts.
-export const normalizeSql=text=>String(text||'').replace(/--[^\n]*/g,'').replace(/\/\*[\s\S]*?\*\//g,'').replace(/["`]/g,'').replace(/\s+/g,'').toLowerCase().replace(/ifnotexists/g,'');
+// Only harmless formatting is normalized, token by token: comments, whitespace, identifier quoting (SQLite quotes a renamed table), identifier letter case and `IF NOT EXISTS`
+// (the operator sends extracted statements without comments; a database built from the raw file keeps them). String literals are kept VERBATIM, case and spacing included:
+// `IN ('pending', ...)` and `IN ('PENDING', ...)`, or two GLOB patterns, are different constraints and must stay different.
+export function normalizeSql(text){
+ const source=String(text||'');
+ const tokens=[];
+ let index=0;
+ while(index<source.length){
+  const character=source[index],next=source[index+1];
+  if(/\s/.test(character)){index++;continue;}
+  if(character==='-'&&next==='-'){while(index<source.length&&source[index]!=='\n')index++;continue;}
+  if(character==='/'&&next==='*'){const end=source.indexOf('*/',index+2);index=end<0?source.length:end+2;continue;}
+  if(character==="'"){
+   let end=index+1;
+   while(end<source.length){if(source[end]==="'"){if(source[end+1]==="'"){end+=2;continue;}break;}end++;}
+   tokens.push(source.slice(index,end+1));index=end+1;continue;
+  }
+  if(character==='"'||character==='`'){
+   let end=index+1;
+   while(end<source.length){if(source[end]===character){if(source[end+1]===character){end+=2;continue;}break;}end++;}
+   tokens.push(source.slice(index+1,end).toLowerCase());index=end+1;continue;
+  }
+  if(/[A-Za-z0-9_$]/.test(character)){let end=index+1;while(end<source.length&&/[A-Za-z0-9_$]/.test(source[end]))end++;tokens.push(source.slice(index,end).toLowerCase());index=end;continue;}
+  tokens.push(character);index++;
+ }
+ const kept=[];
+ for(let i=0;i<tokens.length;i++){
+  if(tokens[i]==='if'&&tokens[i+1]==='not'&&tokens[i+2]==='exists'){i+=2;continue;}
+  kept.push(tokens[i]);
+ }
+ // a single space only where two word-like tokens meet; everything else joins without one
+ const wordy=token=>/^[a-z0-9_$]/.test(token)&&token[0]!=="'";
+ return kept.reduce((out,token,i)=>out+(i>0&&wordy(kept[i-1].slice(-1))&&wordy(token[0])?' ':'')+token,'');
+}
 export const objectFingerprint=row=>[row.type,row.tbl??row.tbl_name,sha256(normalizeSql(row.sql)).slice(0,16)];
 // Names that SQLite or the platform own: never part of the comparison.
 export const ownedName=name=>name.startsWith('sqlite_')||name.startsWith('_cf_');
@@ -407,8 +438,14 @@ export function parseArgs(argv){
  return {command,params:{through,start,manifestSha256:parsed.manifestSha256,operatorSha256:parsed.operatorSha256}};
 }
 
-// The production binding reads through allStrict: a response without a result array is an error, never an empty table.
-const strictBinding=(binding,adapter)=>({...binding,prepare:sql=>({bind:(...params)=>{const bound=binding.prepare(sql).bind(...params);return {...bound,async all(){return {results:await adapter.allStrict(sql,params)};}};}})});
+// The production binding reads through allStrict: a response without a result array is an error, never an empty table. A statement without bound parameters is sent exactly as
+// written (the shared binding would read a `?` inside a literal or a GLOB pattern of a migration file as a placeholder and refuse it): the window never binds a parameter.
+const strictBinding=(binding,adapter)=>({...binding,prepare:sql=>({bind:(...params)=>{
+ if(params.length)throw new OperatorStop('usage',2,{reason:'window_binds_no_parameters'});
+ const bytes=Buffer.byteLength(sql,'utf8');
+ if(bytes>STATEMENT_BYTES)throw new OperatorStop('batch_too_large',3);
+ return {text:sql,async all(){return {results:await adapter.allStrict(sql,[])};},async first(){return (await adapter.allStrict(sql,[]))[0]??null;}};
+}})});
 
 export async function runD1MigrationWindowProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,deps=null,clock=Date.now,root=ROOT}={}){
  // `ctx` outlives the try: whatever happened before a failure (the committed prefix, the file whose batch was sent, the recovery bookmark) is reported on EVERY exit.

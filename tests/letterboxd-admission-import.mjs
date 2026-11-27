@@ -21,7 +21,9 @@ const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-admiss
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+// IPTV_TEST_SCHEMA_CAP (AIR-603): build the template only up to that migration, so the checkpoint A (v47) compatibility proof can run this importer test on the v47 schema; unset, every migration
+const cap=Number(process.env.IPTV_TEST_SCHEMA_CAP||Infinity);
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=cap).sort();
 const template=path.join(root,'template.sqlite');
 sqlite(template,files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 const STAMP='2026-11-26T10:00:00.000Z';

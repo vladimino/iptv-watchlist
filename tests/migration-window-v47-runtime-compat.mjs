@@ -6,6 +6,7 @@
 //       the 0047 emitters write the eligible `admitted` signal in that batch; the producer consumes it and processes the rated unit (core, localization, credits) WITHOUT any provenance table;
 //   no R2 authority write (the environment has no bucket: any use would throw), no Discovery scope, no LID-only table, no writer control row.
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import * as Authority from '../src/discovery-authority.js';
 import * as D from '../src/catalog-enrichment-discovery.js';
 import * as Admission from '../src/letterboxd-admission-authority.js';
@@ -99,4 +100,15 @@ const before=rows("SELECT COUNT(*) n FROM enrichment_signal WHERE source='discov
 await Authority.ingestLedger(env,{programmeRunId:'run-603',handoff:true,lease:lease2,items:(async function*(){yield obs('obs-a');})()});
 assert.equal(rows("SELECT COUNT(*) n FROM enrichment_signal WHERE source='discovery'")[0].n,before,'the Discovery ingest emits no enrichment signal at v47');
 assert.equal(rows('SELECT version FROM schema_contract WHERE id=1')[0].version,47);
+
+// 6. A2's mandatory mutable document import/parity, on the v47 schema: the existing importer test (inventory, plan, closed-only import, manifest last, parity, rollback before the flip,
+//    refusal after it) is run with its template built only up to migration 47 (the operator's v47 equals the plain chain to 47, asserted in the operator test). A cap below the
+//    admission marker (45) must FAIL it, proving the cap really applies.
+{
+ const importer=cap=>spawnSync(process.execPath,['tests/letterboxd-admission-import.mjs'],{env:{...process.env,IPTV_TEST_SCHEMA_CAP:String(cap)},encoding:'utf8',maxBuffer:1<<26});
+ const v47=importer(47);
+ assert.equal(v47.status,0,'the importer test passes on the v47 schema: '+String(v47.stderr).slice(-400));
+ assert.match(String(v47.stdout),/import.*passed/i);
+ assert.notEqual(importer(45).status,0,'control: below the admission marker the same test fails, so the schema cap is effective');
+}
 console.log('migration-window-v47-runtime-compat: ok');
