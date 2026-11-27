@@ -73,7 +73,10 @@ const lockGuard=filmId=>({sql:"NOT EXISTS (SELECT 1 FROM film_dimension WHERE fi
 // group of a Film (core, a localization row, each Person, each credits chunk): a Film spans as many steps and instances as it needs, progress is durable per unit, and nothing here caps credits or Films.
 export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetchImpl=fetch,coordinator=null,budget=null}){
  const canStart=()=>!budget||budget.canStart();
- const partial=report=>({state:'partial',report:{...report,partial:'budget'}});
+ const partial=(report,reason='budget')=>({state:'partial',report:{...report,partial:reason}});
+ // The WRITE BOUNDARY: before every group of canonical writes the drainer is asked (1) whether the remaining statement budget covers it and (2) whether a progressing EPG publication holds the writes. Fetching, anchor checks and the planning rows above
+ // this boundary are not held; a held boundary stops the Film here with everything persisted so far, and the Film resumes from D1 when the hold ends.
+ const mayWrite=async()=>{if(!canStart())return 'budget';if(budget&&typeof budget.writesHeld==='function'&&await budget.writesHeld())return 'held';return null;};
  const control=await readControl(env);
  if(control.state!=='active'||control.generation!==generation)return {state:'not_active'};
  const ctx={leaseId,generation,now};
@@ -212,7 +215,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const guards=[...writeFields.map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
   const metadata={updatedAt:now,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},metadata,...(sync?{sync:{metadataAt:now}}:{}),requireExisting:true,guards};
-  if(!canStart())return partial(report);
+  {const stop=await mayWrite();if(stop)return partial(report,stop);}
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.core(filmId),input,now:()=>now});
   report.units.push({part:'core',state:unit.state});
   if(['applied','noop','settled'].includes(unit.state)){
@@ -243,7 +246,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const sourceVersion=await sha({source,anchor:row.anchor,title:title.value});
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},localization:{sources:[{source,value:title.value,sourceVersion,observedAt:now,provenance:{anchor:row.anchor}}]},requireExisting:true,
    guards:[Plan.anchorSetGuard(filmId,context.anchors),Plan.epochGuard(filmId,{part:'localization',source,refreshEpoch:row.refreshEpoch,planEpoch:filmRow.planEpoch}),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)]};
-  if(!canStart())return partial(report);
+  {const stop=await mayWrite();if(stop)return partial(report,stop);}
   const unit=await runUnit(env,{kind:'facts',unitKey:unitKeys.localization(filmId,source),input,now:()=>now});
   report.units.push({part:'localization',source,state:unit.state});
   if(['applied','noop','settled'].includes(unit.state))await putRow(env,ctx,{...row,status:'complete',sourceVersion,failures:0,retryAt:null,pendingSince:null,reason:null},{expectEpoch:row.refreshEpoch});
@@ -299,7 +302,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
     // every unit of the chunk asserts the anchor set, the Film's plan epoch and the chunk row's own epoch, the lease and the control generation
     const guards=[Plan.anchorSetGuard(filmId,context.anchors),Plan.epochGuard(filmId,{part:'credits',source:choice.source,slot:chunk.slot,refreshEpoch:slotRow.refreshEpoch,planEpoch:filmRow.planEpoch}),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
     for(const personId of missing.persons){
-     if(!canStart())return partial(report);
+     {const stop=await mayWrite();if(stop)return partial(report,stop);}
      const item=chunk.items.find(entry=>entry.personId===personId);
      const unit=await runUnit(env,{kind:'person',unitKey:unitKeys.person(personId),input:{id:personId,at:now,person:{roleId:item.roleId,contractVersion:context.film.contractVersion},guards},now:()=>now});
      report.units.push({part:'person',state:unit.state});
@@ -307,7 +310,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
      else people.add(personId);
     }
     if(missing.persons.every(personId=>people.has(personId))){
-     if(!canStart())return partial(report);
+     {const stop=await mayWrite();if(stop)return partial(report,stop);}
      const unit=await runUnit(env,{kind:'credits',unitKey:unitKeys.credits(filmId,choice.source,chunk.slot),input:{id:filmId,at:now,credits:missing.credits.map(item=>({personId:item.personId,role:item.role})),guards},now:()=>now});
      report.units.push({part:'credits',slot:chunk.slot,state:unit.state});
      if(['applied','noop','settled'].includes(unit.state)){for(const item of missing.credits)have.add(item.personId+'|'+item.role);await putRow(env,ctx,{...slotRow,status:'complete',failures:0,retryAt:null,pendingSince:null,film:{wroteCredits:true}});}

@@ -102,14 +102,23 @@ export async function repairPending(env){
  const row=await one(database(env),"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND COALESCE(code_version,'')<>?",[CODE_VERSION]);
  return Number(row?.n??0)>0;
 }
-// The narrow EPG yield (ADR 0219 decision 6, P4 = B). Evidence that an EPG publication or seal phase is ACTIVE AND PROGRESSING is its own live lease on the catalog resolver lease: `discovery_lease` held by `holder_kind = 'epg'`
-// with an expiry still ahead. A Discovery-held lease, no lease, an expired lease and an unreadable row are NOT a hold (a failed or stalled EPG never holds enrichment, and no timeout is invented). -> {until: ms} or null.
+// The narrow EPG yield (ADR 0219 decision 6, P4 = B). The evidence that an EPG publication or seal phase is ACTIVE AND PROGRESSING comes from the publication's OWN durable state, read at the write boundary:
+//   - a stage of the published EPG (`published_epg_stage`) that is `loading` or `validated` and whose publisher claim is still live (`claim_expires_at` ahead): the staging and validation of a programme generation is in progress;
+//   - the `held` cutover marker of the published EPG authority: the authority itself refuses concurrent writers;
+//   - the EPG-held resolver lease (`discovery_lease` with `holder_kind = 'epg'` and an expiry ahead).
+// A stage whose claim expired (a stalled publisher), a Discovery-held lease, no row and an unreadable row are NOT a hold: a failed or stalled EPG never holds enrichment and no timeout is invented. The hold ends the moment that state
+// changes, so the caller re-checks on a SHORT interval (EPG_RECHECK_MS) instead of waiting for a lease expiry. -> {until: ms, evidence} or null.
+export const EPG_RECHECK_MS=15000;
 export async function epgPublicationWindow(env,nowMs){
- try{
-  const lease=await one(database(env),"SELECT expires_at AS expiresAt FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND holder_kind='epg'");
-  const until=Number(lease?.expiresAt);
-  return Number.isFinite(until)&&until>nowMs?{until}:null;
- }catch{return null;}
+ const handle=database(env);
+ const probe=async(sql,params=[])=>{try{return await one(handle,sql,params);}catch{return null;}};
+ const stage=await probe("SELECT MAX(claim_expires_at) AS expiresAt FROM published_epg_stage WHERE state IN ('loading','validated') AND claim_expires_at IS NOT NULL AND claim_expires_at>?",[nowMs]);
+ if(Number.isFinite(Number(stage?.expiresAt))&&Number(stage.expiresAt)>nowMs)return {until:Math.min(Number(stage.expiresAt),nowMs+EPG_RECHECK_MS),evidence:'epg_stage'};
+ const held=await probe("SELECT 1 AS held FROM published_epg_authority WHERE id=1 AND cutover='held'");
+ if(held?.held)return {until:nowMs+EPG_RECHECK_MS,evidence:'epg_cutover_held'};
+ const lease=await probe("SELECT expires_at AS expiresAt FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND holder_kind='epg'");
+ const until=Number(lease?.expiresAt);
+ return Number.isFinite(until)&&until>nowMs?{until:Math.min(until,nowMs+EPG_RECHECK_MS),evidence:'epg_lease'}:null;
 }
 // Durable per-item deferral after a contention or authority-fence failure: a SHORT bounded backoff on the Film's due rows (1, 5, 15 minutes, then hourly; ADR 0098 tiers), guarded by the lease and the control generation. It sets no
 // pending_since, consumes no failure and sets no cooldown: the 72 h fallback never counts a local failure. The Film resumes by itself when the retry is due.
@@ -180,10 +189,6 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     const outcome=await consumeSignal(env,{signal,generation,leaseId,now:clock()});
     if(outcome.consumed){consumed++;counts.signals++;}
    }
-   // The narrow EPG yield: while an EPG publication or seal phase is active and progressing (its own live lease) the WRITE units of a new step do not start. Fetching, planning and the inbox above continue; the run parks until
-   // the holder's lease expiry at the latest (a kick wakes it earlier), so a repeated yield is one parked wait, never a loop.
-   const hold=shouldYield?await shouldYield():await epgPublicationWindow(env,Date.parse(clock()));
-   if(hold){const until=typeof hold==='object'&&Number.isFinite(hold.until)?hold.until:Date.parse(clock())+60000;counts.yields++;return finish('yield',{wakeAt:new Date(Math.max(until,Date.parse(clock())+1000)).toISOString(),reason:'epg_publication'});}
    const due=await dueFilms(env,{now:clock(),skip});
    const klass=nextClass({hasLive:due.live.length>0,hasBackground:due.background.length>0,committedLive:baseLive+counts.committedLive,committedBackground:baseBackground+counts.committedBackground});
    if(!klass){
@@ -195,7 +200,10 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
    const pick=due[klass][0];
    let step;
    // the unit-group gate: before EVERY group of units of a Film the producer asks whether the remaining budget covers it plus the finalize-and-successor reserve (no whole-Film-fit rule: a Film resumes from its persisted state)
-   const gate={canStart:()=>counter.statements+(budget.unitEstimate||60)+budget.reserve<=budget.statements&&counter.statements<budget.handoverAt};
+   let held=null;
+   const gate={canStart:()=>counter.statements+(budget.unitEstimate||60)+budget.reserve<=budget.statements&&counter.statements<budget.handoverAt,
+    // the narrow yield, asked at the WRITE boundary (see processFilm): an injected predicate for offline runs, the publication's own state otherwise
+    writesHeld:async()=>{const hold=shouldYield?await shouldYield():await epgPublicationWindow(env,Date.parse(clock()));if(hold){held=hold;return true;}return false;}};
    try{step=await processFilm(env,{filmId:pick.filmId,leaseId,generation,now:clock(),tools,fetchImpl,coordinator,budget:gate});}
    catch(error){
     // Reactive yield (ADR 0219 decision 6): a storage or authority failure defers THIS Film for the rest of the run and the independent work continues; repeated failures back the whole run off. Never a crash.
@@ -219,6 +227,12 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     counts.requests=Object.values(counts.bySource).reduce((sum,entry)=>sum+entry.requests,0);
    }
    if(['idle','blocked','not_admitted','absent','redirected'].includes(step.state)||(step.state==='done'&&!step.report.units.length))skip.add(pick.filmId);
+   if(step.state==='partial'&&held){
+    // the Film stopped at a held write boundary with its progress durable; no further Film is started in this run (each would stop at the same boundary), and the run parks for a SHORT re-check, not until a lease expiry
+    counts.yields++;
+    const until=typeof held==='object'&&Number.isFinite(held.until)?held.until:Date.parse(clock())+EPG_RECHECK_MS;
+    return finish('yield',{wakeAt:new Date(Math.max(until,Date.parse(clock())+1000)).toISOString(),reason:typeof held==='object'&&held.evidence?held.evidence:'epg_publication'});
+   }
    if(step.state==='partial')return finish('handover'); // progress is durable per unit: the successor resumes this Film from D1, without a new upstream request
    // a Film that made no progress (blocked, a parked source, a replan that only settled a marker) leaves the head by its own retry_at or state; a replan is cheap and continues at once
    if(step.state==='absent'||step.state==='redirected'||step.state==='not_admitted')await handle.prepare("UPDATE catalog_enrichment_state SET reason=NULL WHERE film_id=? AND part='film' AND reason='check_anchors'").bind(pick.filmId).run().catch(()=>{});

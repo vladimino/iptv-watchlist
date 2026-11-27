@@ -150,7 +150,7 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  sqlite(w.file,"UPDATE projection_run SET lease_until='2020-01-01T00:00:00.000Z'");
  const up=upstream();
  const yielded=await run(w,up,{shouldYield:async()=>true});
- assert.equal(yielded.stop,'yield');assert.equal(up.calls.length,0,'a yield starts no new step');
+ assert.equal(yielded.stop,'yield');assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM canonical_write_receipt')[0].n,0,'a yield writes nothing canonical');assert.ok(up.calls.length<=2,'the held write boundary stops the run after at most one Film probe (TMDB and Wikidata): '+up.calls.length);
  assert.equal((await run(w,up)).stop,'idle');assert.equal(metaCount(w.file),3,'an expired lease is reacquired');
 }
 // ---- a storage failure defers the Film, the independent work continues, repeated failures back the run off ----
@@ -251,35 +251,42 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
  const firstHistory=order.findIndex(id=>id.startsWith('5')),lastLive=order.map(id=>id.startsWith('4')).lastIndexOf(true);
  assert.ok(firstHistory>=0&&firstHistory<lastLive,'background Films were served while live Films were still arriving, across handovers: '+order.join(','));
 }
-// ---- the narrow EPG yield: only an EPG-held, live lease holds the WRITES; inbox and planning continue; a repeated yield is a parked wait, not a loop ----
+// ---- the narrow EPG yield, decided at the WRITE boundary from the publication's own state; inbox, anchor checks and planning continue; a repeated yield is a short parked wait, not a loop ----
 {
  const w=world(3);
- const nowMs=()=>Date.parse(T)+86400000;
- const setLease=(holder,expiresAt)=>sqlite(w.file,`INSERT INTO discovery_lease (id,lease_id,expires_at,holder_kind) VALUES (1,'epg-lease',${expiresAt},${holder?`'${holder}'`:'NULL'}) ON CONFLICT(id) DO UPDATE SET lease_id='epg-lease',expires_at=${expiresAt},holder_kind=${holder?`'${holder}'`:'NULL'};`);
- const far=Date.parse(T)+3600000;
+ const base=Date.parse(T);
+ const setLease=(holder,expiresAt)=>sqlite(w.file,`INSERT INTO discovery_lease (id,lease_id,expires_at,holder_kind) VALUES (1,'epg-lease',${expiresAt},${holder?`'${holder}'`:'NULL'}) ON CONFLICT(id) DO UPDATE SET lease_id='epg-lease',expires_at=${expiresAt},holder_kind=${holder?`'${holder}'`:'NULL'}`);
+ const setStage=(state,claim)=>sqlite(w.file,`DELETE FROM published_epg_stage;INSERT INTO published_epg_stage (programme_run_id,target_programme_run_id,phase,payload_sha256,state,owner_token,claim_nonce,claim_generation,claim_expires_at,chunk_count,member_count,show_count,document_count,created_at,updated_at) VALUES ('run-1','run-1','published','${'a'.repeat(64)}','${state}','tok',NULL,1,${claim},1,0,0,0,'${T}','${T}')`);
+ const far=base+3600000;
  const up=upstream();
- // a Discovery-held lease is not an EPG publication: no yield
- setLease('discovery',far);
- assert.equal(await D.epgPublicationWindow(w.env,Date.parse(T)),null);
- // an expired EPG lease and no lease are not a hold either: a failed or stalled EPG never holds enrichment
- setLease('epg',Date.parse(T)-1);
- assert.equal(await D.epgPublicationWindow(w.env,Date.parse(T)),null);
- // a live EPG lease: the writes yield
- setLease('epg',far);
- assert.deepEqual(await D.epgPublicationWindow(w.env,Date.parse(T)),{until:far});
+ // evidence that is NOT a hold: a Discovery-held lease, an expired EPG lease, no stage, a stalled stage (its publisher claim expired) and a published stage
+ setLease('discovery',far);assert.equal(await D.epgPublicationWindow(w.env,base),null,'a Discovery lease is not an EPG publication');
+ setLease('epg',base-1);assert.equal(await D.epgPublicationWindow(w.env,base),null,'an expired EPG lease is not a hold');
+ setStage('loading',base-1);assert.equal(await D.epgPublicationWindow(w.env,base),null,'a stalled stage (expired claim) never holds enrichment');
+ setStage('published',far);assert.equal(await D.epgPublicationWindow(w.env,base),null,'a published stage is finished');
+ // evidence that IS a hold, each with a SHORT re-check (not the lease expiry)
+ setStage('loading',far);assert.deepEqual(await D.epgPublicationWindow(w.env,base),{until:base+D.EPG_RECHECK_MS,evidence:'epg_stage'});
+ setStage('validated',far);assert.equal((await D.epgPublicationWindow(w.env,base)).evidence,'epg_stage');
+ sqlite(w.file,'DELETE FROM published_epg_stage');
+ sqlite(w.file,"UPDATE published_epg_authority SET cutover='held' WHERE id=1");assert.equal((await D.epgPublicationWindow(w.env,base)).evidence,'epg_cutover_held');
+ sqlite(w.file,"UPDATE published_epg_authority SET cutover='open' WHERE id=1");
+ setLease('epg',far);assert.deepEqual(await D.epgPublicationWindow(w.env,base),{until:base+D.EPG_RECHECK_MS,evidence:'epg_lease'});
+ // a held publication: the inbox, the anchor check and the fetch continue, the canonical WRITES do not
  const held=await D.drain(w.env,{runId:'run-epg-1',clock,tools:{},fetchImpl:up});
- assert.equal(held.stop,'yield');assert.equal(held.reason,'epg_publication');
- assert.ok(Date.parse(held.wakeAt)>=Date.parse(T)&&Date.parse(held.wakeAt)<=far+1000,'the run parks until the holder\'s lease expiry at the latest: '+held.wakeAt);
- assert.equal(held.counts.signals,3,'the inbox is consumed while the writes yield (it writes only the producer\'s own state)');
- assert.equal(held.counts.films,0);assert.equal(up.calls.length,0,'no upstream request and no Film write during the publication');
- assert.equal(metaCount(w.file),0);assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM canonical_write_receipt')[0].n,0,'no canonical write');
+ assert.equal(held.stop,'yield');assert.equal(held.reason,'epg_lease');
+ assert.ok(Date.parse(held.wakeAt)<=Date.parse(clock())+D.EPG_RECHECK_MS,'the run parks for a SHORT re-check, not until the lease expiry: '+held.wakeAt);
+ assert.equal(held.counts.signals,3,'the inbox is consumed while the writes yield');
+ assert.ok(up.calls.length>=1&&up.calls.length<=2,'safe work continued: the Film was planned and fetched once (TMDB and Wikidata): '+up.calls.length);
+ assert.equal(metaCount(w.file),0);assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM canonical_write_receipt')[0].n,0,'no canonical write during the publication');
  assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_member")[0].n,3,'the memberships were recorded');
- // repeated yields do not loop: each is one parked answer with a wake time
+ const probes=up.calls.length;
+ // repeated yields do not loop: each is one parked answer with a wake time, and each costs at most one Film probe
  for(let i=0;i<3;i++){const again=await D.drain(w.env,{runId:'run-epg-r'+i,clock,tools:{},fetchImpl:up});assert.equal(again.stop,'yield');assert.ok(again.wakeAt);}
- assert.equal(up.calls.length,0);
- // when the publication ends the work runs
- setLease('epg',Date.parse(T)-1);
- assert.equal((await run(w,up)).stop,'idle');assert.equal(metaCount(w.file),3,'the held work completes after the window');
+ assert.ok(up.calls.length<=probes+3*2,'a repeated yield is bounded: '+up.calls.length);
+ assert.equal(rows(w.file,'SELECT COUNT(*) AS n FROM canonical_write_receipt')[0].n,0);
+ // the moment the publication ends the work runs
+ setLease('epg',base-1);
+ assert.equal((await run(w,up)).stop,'idle');assert.equal(metaCount(w.file),3,'the held work completes right after the publication ends');
 }
 
 // ---- a contention failure defers the Film DURABLY with a short backoff and never touches the 72 h clock ----
