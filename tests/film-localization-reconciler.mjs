@@ -443,7 +443,8 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
   const walk=d=>fs.existsSync(d)?fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?(e.name==='node_modules'?[]:walk(path.join(d,e.name))):[path.join(d,e.name)]):[];
   for(const file of walk(dir))if(!file.endsWith('src/film-localization-reconciler.js')&&/\.(js|mjs|yml|yaml|json|html)$/.test(file)&&fs.readFileSync(file,'utf8').includes('film-localization-reconciler.js'))importers.push(file);
  }
- assert.deepEqual(importers,[],'no Worker, route, MCP tool, Workflow, cron, script or workflow imports the reconciler');
+ // AIR-666: the dormant stage-6 retirement reuses the reconciler's counted D1 binding (`countedEnv`) instead of a second copy; it is itself imported by nothing (its own test).
+ assert.deepEqual(importers.map(file=>file.replace(/\\/g,'/')),['src/film-dimension-retirement.js'],'no Worker, route, MCP tool, Workflow, cron, script or workflow imports the reconciler, except the dormant retirement that reuses its D1 query counter');
  // AIR-683: the build bundles the module, but the ONLY entry the Worker calls is the read-only diagnosis (the owner-only MCP tool); no mutation entry is referenced outside this module and its tests.
  assert.ok(fs.readFileSync('build.mjs','utf8').includes('film-localization-reconciler.js'),'the build bundles the module for the read-only diagnosis');
  const workerCalls=[];

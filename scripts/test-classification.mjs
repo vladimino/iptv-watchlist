@@ -979,6 +979,9 @@ export const FILES={
  "film-dimension-parity.mjs": {
   "suite": "core"
  },
+ "film-dimension-retirement.mjs": {
+  "suite": "core"
+ },
  "film-localization-projection-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."

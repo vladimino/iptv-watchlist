@@ -335,11 +335,14 @@ const DIAGNOSE_END_RESERVE=10,DIAGNOSE_FIRST_FILM_ESTIMATE=16;
 const bump=(map,key)=>{map[key]=(map[key]||0)+1;};
 const STATEMENT=Symbol('statement');
 // Counts every D1 execution of a call. A prepared statement counts when it is executed (first, all, run, raw); a batch counts once, as D1 does. Statements prepared here are unwrapped for batch.
-function countedEnv(env){
+// With `limit` (AIR-666) the meter also ENFORCES: an execution that would be the limit+1th is refused locally with `d1_query_budget` BEFORE it reaches the binding, so no query beyond the budget is
+// ever sent. Without it the meter only counts, exactly as before.
+export function countedEnv(env,{limit=null}={}){
  const db=database(env),counter={n:0};
  if(!db)throw failed('film_person_unavailable');
- const wrap=statement=>({[STATEMENT]:statement,bind:(...args)=>wrap(statement.bind(...args)),first:(...args)=>{counter.n++;return statement.first(...args);},all:(...args)=>{counter.n++;return statement.all(...args);},run:(...args)=>{counter.n++;return statement.run(...args);},raw:(...args)=>{counter.n++;return statement.raw(...args);}});
- const wrapped={prepare:sql=>wrap(db.prepare(sql)),batch:statements=>{counter.n++;return db.batch(statements.map(item=>item?.[STATEMENT]??item));}};
+ const tick=()=>{if(limit!==null&&counter.n>=limit)throw failed('d1_query_budget');counter.n++;};
+ const wrap=statement=>({[STATEMENT]:statement,bind:(...args)=>wrap(statement.bind(...args)),first:(...args)=>{tick();return statement.first(...args);},all:(...args)=>{tick();return statement.all(...args);},run:(...args)=>{tick();return statement.run(...args);},raw:(...args)=>{tick();return statement.raw(...args);}});
+ const wrapped={prepare:sql=>wrap(db.prepare(sql)),batch:statements=>{tick();return db.batch(statements.map(item=>item?.[STATEMENT]??item));}};
  return {env:typeof env.prepare==='function'?wrapped:{...env,DB:wrapped},counter};
 }
 async function readPins(env){
