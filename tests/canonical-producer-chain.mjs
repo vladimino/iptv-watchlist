@@ -708,6 +708,17 @@ for(const [label,setup,expected] of [
  assert.equal(seen.length,3);
  assert.equal(withChain.chain.owner_state,'pending');
  assert.equal(withChain.label,'run-p:10');
+ // AIR-692: a remembered earlier generation adds exactly ONE more indexed SELECT of that exact source_generation (never more, never a write), answers null
+ // without a run and is not read at all when it is the published one.
+ seen.length=0;
+ const lookup=await readProducerMonitorFacts(env,{prior:'run-q:3'});
+ assert.equal(seen.length,4,'three statements plus one conditional lookup, got '+seen.length);
+ assert.ok(seen.every(text=>/^\s*SELECT/i.test(text)),'the lookup is a read');
+  assert.ok(/FROM canonical_producer_run WHERE origin='epg' AND source_generation='run-q:3'/.test(seen[seen.length-1]),'the lookup is by the exact generation, indexed, one row');
+ assert.deepEqual([lookup.prior.label,lookup.prior.run],['run-q:3',null]);
+ seen.length=0;
+ assert.equal((await readProducerMonitorFacts(env,{prior:'run-p:10'})).prior,null);
+ assert.equal(seen.length,3,'the published generation is never looked up again');
  // A dormant marker names nothing and reads one statement only.
  const prepared=database('prepared');
  const none=[];
