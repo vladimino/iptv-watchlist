@@ -1383,6 +1383,31 @@ function validateCatalog(films){
   seen.add(token);
  }
 }
+// AIR-684 (ADR 0219 decision 3): the explicit provenance of a catalog transfer. ONLY the resolver run that publishes the catalog declares `context.admission = {origin: 'resolver', programmeRunId}`, and only when that run is
+// the one the authority gate names; an import, a restore, an operator tool or any other caller passes nothing (or something else) and is non-authoritative: its origin stays NULL. The loading statement stamps the origin and
+// the transfer identity (`programme_run_id`) in the same statement that sets `loading`; schema 48's triggers stage the movie admissions inserted meanwhile and settle them at the commit. Before schema 48 is applied the
+// columns do not exist and the statement is the former one, so the code is safe to deploy first.
+const transferOrigin=(context,gate)=>{
+ const declared=context?.admission;
+ return declared&&declared.origin==='resolver'&&typeof declared.programmeRunId==='string'&&declared.programmeRunId&&declared.programmeRunId===gate.programmeRunId?{origin:'resolver',programmeRunId:declared.programmeRunId}:null;
+};
+// AIR-684 (ADR 0219 decision 2): the causal wake. After an admission batch or a transfer commit, make idle runnable Catalog Enrichment work start without waiting for the reconcile cron. Best effort and AFTER the commit
+// (never inside a batch, no network in a transaction): a lost wake is recovered by the reconcile, an old Worker version has no hook, and while the producer is dormant (not bundled, schema absent, control not active) it is a no-op.
+async function wakeEnrichment(env){
+ if(typeof CatalogEnrichmentRunner==='undefined')return;
+ try{if(await CatalogEnrichmentRunner.hasRunnable(env,{now:new Date().toISOString()}))await CatalogEnrichmentRunner.kick(env);}catch{/* the reconcile recovers a lost wake */}
+}
+const originColumns=new WeakSet();
+async function transferHasOrigin(db){
+ if(originColumns.has(db))return true;
+ const row=await one(db,"SELECT 1 AS ok FROM pragma_table_info('discovery_transfer') WHERE name='origin_batches'");
+ if(row)originColumns.add(db);
+ return !!row;
+}
+// A resolver publication stamps `origin`, the identity and `origin_batches` (the batches value this statement writes: every right-hand side reads the row before the update); anything else is the former statement.
+const loadingTransfer=origin=>origin
+ ?['UPDATE discovery_transfer SET state=\'loading\', programme_run_id=?, origin=\'resolver\', origin_batches=batches+1, batches=batches+1 WHERE id=1',[origin.programmeRunId]]
+ :['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]];
 export async function replaceCatalog(env,films,context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -1392,11 +1417,12 @@ export async function replaceCatalog(env,films,context={}){
  const gate=await readAuthority(env);
  assertOpen(gate);
  const db=database(env);
+ const origin=(await transferHasOrigin(db))?transferOrigin(context,gate):null;
  const current=gate;
  await commit(db,[
   fence(current,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
   [FENCE_SQL,[]],
-  ['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]],
+  loadingTransfer(origin),
   ['UPDATE discovery_admission SET state=\'pending\' WHERE state=\'current\'',[]],
  ]);
  let pending=[];
@@ -1423,6 +1449,7 @@ export async function replaceCatalog(env,films,context={}){
  }catch(error){throw error.code?error:failed('discovery_unavailable',error);}
  const stuck=await one(db,'SELECT COUNT(*) AS n FROM discovery_admission WHERE state=\'pending\'');
  if(Number(stuck?.n||0)!==0)throw failed('discovery_conflict');
+ await wakeEnrichment(env);
  return {handled:true};
 }
 // A chunk writes the decisions and the admissions it just made, not the whole map. Each key is one atomic batch behind
@@ -1851,6 +1878,7 @@ export async function upsertAdmissions(env,films,context={}){
   const budget=Number.isFinite(context.canonicalDeadline)?context.canonicalDeadline:Number.isFinite(context.deadline)?context.deadline:null;
   try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:Object.fromEntries(entries.map(row=>[row[0],row[1]])),written,deadline:budget});}catch{/* discovery keeps its own outcome */}
  }
+ if(written.length)await wakeEnrichment(env);
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
 // AIR-579. One structured log line per whole-catalog read that RESOLVED: the rows returned, the application elapsed time awaiting the query, and whether the caller's projection was used (`null` when the read was

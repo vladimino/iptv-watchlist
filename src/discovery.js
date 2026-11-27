@@ -392,12 +392,20 @@ async function publishedGenerationMatches(env,seenRunId){
  const generation=await publishedPointer(env);
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
 }
+// AIR-684 (ADR 0219 decision 2): a revalidation reads a TMDB movie detail with credits and translations. The verified per-part digests of that response go to the Catalog Enrichment inbox as `source_changed`, for a Film that already
+// holds a retained Discovery membership only. Best effort and silent: the module is in the Worker scope only (offline imports of this file have none), a Film outside the scope or an absent schema writes nothing, and a failure never
+// fails or delays the chunk (the producer's own events and the reconcile recover a missed signal). It fetches nothing and writes no canonical table.
+async function noteCatalogSourceChange(env,tmdbId,movie){
+ if(typeof CatalogEnrichmentDiscovery==='undefined')return;
+ try{await CatalogEnrichmentDiscovery.emitSourceChanged(env,{tmdbId:String(tmdbId),movie});}catch{/* never a Discovery failure */}
+}
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}
  if(!await publishedGenerationMatches(env,seenRunId))return false;
  const generation=await publishedPointer(env);
- if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);}
- if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films);return true;
+ if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films,{admission:{origin:'resolver',programmeRunId:seenRunId}});}
+ // AIR-684 (ADR 0219 decision 3): this is the resolver run's own publication of the catalog, the one writer that declares an authoritative origin; every other caller of the catalog writer passes none.
+ if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films,{admission:{origin:'resolver',programmeRunId:seenRunId}});return true;
 }
 // Owner-triggered poster hydration for catalog records that were stored without a poster: a permanent owner-only maintenance
 // route behind the Worker's Cloudflare Access, with no switch of its own (the former CATALOG_POSTER_HYDRATION is retired, ADR
@@ -1068,6 +1076,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const revalidateDrift=async(key,previous,candidate,plan)=>{
    try{
     const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
+    await noteCatalogSourceChange(env,previous.tmdbId,movie);
     const known=knownScorerCandidates(aliasIndex,candidate);
     // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
     // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.
