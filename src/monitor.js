@@ -62,8 +62,7 @@ const Monitor=(()=>{
   const model=await LetterboxdSync.readModel(env,{now});
   return model.mode==='external'?null:{...model,identityCheck:await identityCheckFacts(env,now)};
  });
- // AIR-599 / ADR 0207 decision 4b: ONE fact reader of the shared Letterboxd check (both callers), read only: the newest real check that got an answer, the due Diary entries, the backlog (any id in it was
- // refused by a full document: `cap_refused`; at its bound: `backlog_full`), the due ledger rows and the ledger rows pending longer than 14 days. A missing `lastCheckAt` falls back to the newest charged
+ // AIR-599 / ADR 0207 decision 4b: ONE fact reader of the shared Letterboxd check (both callers), read only: the newest real check that got an answer, the due Diary entries, the backlog (a cap refusal only when the document has no free place for it: `capFull`; at its bound: `backlog_full`), the due ledger rows and the ledger rows pending longer than 14 days. A missing `lastCheckAt` falls back to the newest charged
  // check of the entries; with neither, the age is unknown and not reported as stale.
  const identityCheckFacts=async(env,now)=>{
   if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdDiaryIdentity==='undefined'||typeof LetterboxdFacts.readDiaryBacklog!=='function')return null;
@@ -78,9 +77,12 @@ const Monitor=(()=>{
    const ledger=typeof WatchlistD1!=='undefined'&&typeof WatchlistD1.admissionReport==='function'?await WatchlistD1.admissionReport(env,{now,overdueBefore:new Date(now-14*86400000).toISOString(),retainedReasons:[...D.TRANSPORT_REASONS]}):{ok:false};
    const backlogEntries=Object.values(backlog.ids||{}).filter(Boolean);
    const backlogCount=backlogEntries.length;
+   // AIR-691: a non-empty backlog is the ordinary queue (an owner requeue or createMissing puts an id there whatever the free room); only a document with no free place for a waiting id is a cap refusal. Every entry but an
+   // evictable `owner_dismissed` one holds a place (the same count the Diary phase uses for its free slots).
+   const capacity=Number.isInteger(LetterboxdFacts.DIARY_IDENTITY_CAP)?LetterboxdFacts.DIARY_IDENTITY_CAP:200,held=entries.length,capFull=backlogCount>0&&held>=capacity;
    // The oldest place of any owed work: the baseline of "never answered" (every owed item has a durable queue time: its entry, its backlog record or its first-seen snapshot header).
    const times=[...owed.map(stamp),...backlogEntries.map(item=>String(item.queuedAt||'')),ledger.ok&&ledger.oldestWorkAt?String(ledger.oldestWorkAt):''].filter(Boolean).sort();
-   return {lastCheckAt:typeof doc.lastCheckAt==='string'?doc.lastCheckAt:charged.at(-1)||null,work:owed.length+backlogCount+(ledger.ok?ledger.pendingDue:0),oldestWorkAt:times[0]||null,atCap:entries.filter(entry=>(Number(entry.attempts)||0)>=cap).length,backlog:backlogCount,backlogFull:backlogCount>=LetterboxdFacts.DIARY_BACKLOG_CAP,ledgerUnreadable:!ledger.ok,overdue:ledger.ok?ledger.overdue:null,overdueUnknown:ledger.ok?ledger.overdueUnknown:null};
+   return {lastCheckAt:typeof doc.lastCheckAt==='string'?doc.lastCheckAt:charged.at(-1)||null,work:owed.length+backlogCount+(ledger.ok?ledger.pendingDue:0),oldestWorkAt:times[0]||null,atCap:entries.filter(entry=>(Number(entry.attempts)||0)>=cap).length,backlog:backlogCount,capHeld:held,capacity,capFull,backlogFull:backlogCount>=LetterboxdFacts.DIARY_BACKLOG_CAP,ledgerUnreadable:!ledger.ok,overdue:ledger.ok?ledger.overdue:null,overdueUnknown:ledger.ok?ledger.overdueUnknown:null};
   }catch{return {error:'unreadable'};}
  };
  // AIR-556. Prediction progress is confirmed work only, read through the same helpers as the Footer (enrichment.js: queue slices, retry budget, run
