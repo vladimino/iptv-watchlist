@@ -163,7 +163,9 @@ CREATE TRIGGER catalog_enrichment_scope_fence_insert AFTER INSERT ON catalog_enr
 BEGIN
  UPDATE catalog_enrichment_control SET generation = generation + 1, revision = revision + 1, updated_at = NEW.updated_at WHERE id = 1 AND state <> 'inactive';
 END;
+-- A bootstrap advancing its own cursor and state is NOT a configuration change: only a change of the flags, the cutoff or the revision fences the control generation (otherwise every bootstrap page would stop the drainer).
 CREATE TRIGGER catalog_enrichment_scope_fence_update AFTER UPDATE ON catalog_enrichment_scope
+WHEN OLD.enabled IS NOT NEW.enabled OR OLD.activated IS NOT NEW.activated OR OLD.cutoff_at IS NOT NEW.cutoff_at OR OLD.revision IS NOT NEW.revision
 BEGIN
  UPDATE catalog_enrichment_control SET generation = generation + 1, revision = revision + 1, updated_at = NEW.updated_at WHERE id = 1 AND state <> 'inactive';
 END;

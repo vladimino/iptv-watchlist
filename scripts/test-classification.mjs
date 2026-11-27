@@ -415,6 +415,9 @@ export const FILES={
  "catalog-enrichment-wake.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-bootstrap.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
