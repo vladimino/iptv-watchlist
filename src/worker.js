@@ -2852,6 +2852,7 @@ async function routeRequest(request,env,execution){
   if(url.pathname.startsWith('/api/admin/letterboxd-archive/'))return await adminLetterboxdArchiveRoute(request,env,url);
   if(url.pathname==='/api/admin/discovery-recovery')return await adminDiscoveryRecoveryRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/discovery-recovery/'))return await adminDiscoveryReconsiderRoute(request,env,url);
+  if(url.pathname.startsWith('/api/admin/films/')&&url.pathname.endsWith('/metadata'))return await adminFilmMetadataRoute(request,env,url); // AIR-634 (PV3): the owner metadata API of one Film, GET is a pure read, POST is owner-only
   if(request.method==='POST'&&url.pathname.startsWith('/api/admin/films/')&&url.pathname.endsWith('/title-review'))return await filmTitleReviewRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/people/')&&url.pathname.endsWith('/name-review'))return await adminPersonNameRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/'))return await adminReadRoute(request,env,url);
