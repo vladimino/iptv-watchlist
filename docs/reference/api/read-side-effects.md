@@ -86,4 +86,6 @@ The dormant multi-alias history reader `readFilmHistory` ([film history](film-hi
 
 ## Catalog Enrichment effective state
 
+`GET /api/admin/films/<id>/metadata` (AIR-634, ADR 0214 decision 9) reads the Film's `film_metadata`, its per-field provenance, the Catalog Enrichment state rows, the redirect sources and one bounded page of `film_metadata_history`. It issues only `SELECT` statements, repairs nothing and writes nothing; the GET write audit holds it to no effect in every scenario (a sample path is registered in `tests/get-write-baseline.mjs`). `POST` on the same path is the owner-only command route. See the [admin API](admin.md#film-metadata-owner-api-apiadminfilmsidmetadata).
+
 `GET /api/admin/settings` reads the producer's control row, scopes, newest outbox entry, inbox counts, due counts, active upstream cooldowns and the rows that need attention. It issues only `SELECT` statements, writes nothing, makes no outbound request and starts no run; the GET write audit holds it to no effect in every scenario. `POST /api/admin/settings/catalog-enrichment` is registered as POST-only: a GET on it is `405` with no effect. See the [admin API](admin.md#catalog-enrichment-control-apiadminsettings).
