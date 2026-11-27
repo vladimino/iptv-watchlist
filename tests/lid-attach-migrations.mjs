@@ -1,8 +1,8 @@
-// AIR-675 / ADR 0217 (Accepted) delivery step 6, schema tests ("Schema tests exact predecessor and replay"): migration 0049 (`lid_recheck_intent`) and migration 0050 (the writer control admits `lid_tmdb_attach`),
+// AIR-675 / ADR 0217 (Accepted) delivery step 6, schema tests ("Schema tests exact predecessor and replay"): migration 0050 (`lid_recheck_intent`) and migration 0051 (the writer control admits `lid_tmdb_attach`),
 // on the sqlite3-CLI D1 stand-in. No Worker, R2, network or production.
-// 0049: the refusal of a wrong predecessor (and what a refused file creates), the accepted file (one empty table, version 49), every CHECK, the compare-and-swap discipline (revision +1 on every update, frozen settled
+// 0050: the refusal of a wrong predecessor (and what a refused file creates), the accepted file (one empty table, version 50), every CHECK, the compare-and-swap discipline (revision +1 on every update, frozen settled
 //   row, immutable ids, attach columns written once, link state only owed -> terminal), and no delete.
-// 0050: the refusal of a wrong predecessor, the rebuild that keeps every control row and the whole append-only history (own seq, AUTOINCREMENT continues), the same eight triggers and unique index, the sixth writer
+// 0051: the refusal of a wrong predecessor, the rebuild that keeps every control row and the whole append-only history (own seq, AUTOINCREMENT continues), the same eight triggers and unique index, the sixth writer
 //   activated, drained and deactivated through the same compare-and-swap, a seventh writer still refused, and the old guarantees (append-only, stale generation, direct control writes) unchanged.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,10 +10,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 
-const INTENT='0049_lid_recheck_intent.sql',WRITER='0050_lid_tmdb_attach_writer.sql',PRE_INTENT='0048_film_lid_admission.sql';
+const INTENT='0050_lid_recheck_intent.sql',WRITER='0051_lid_tmdb_attach_writer.sql',PRE_INTENT='0049_film_metadata_provenance.sql';
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
-assert.equal(files[files.indexOf(INTENT)-1],PRE_INTENT,'0049 follows 0048');
-assert.equal(files[files.indexOf(WRITER)-1],INTENT,'0050 follows 0049');
+assert.equal(files[files.indexOf(INTENT)-1],PRE_INTENT,'0050 follows 0049');
+assert.equal(files[files.indexOf(WRITER)-1],INTENT,'0051 follows 0050');
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lid-attach-mig-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const read=name=>fs.readFileSync('migrations/'+name,'utf8');
@@ -27,34 +27,34 @@ const copy=source=>{const file=path.join(root,'w-'+(n++)+'.sqlite');fs.copyFileS
 const objects=file=>one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','trigger','index')");
 const chainTo=name=>files.slice(0,files.indexOf(name)).map(read).join('\n');
 
-const t48=path.join(root,'t48.sqlite');ok(t48,chainTo(INTENT));
-assert.equal(one(t48,'SELECT version FROM schema_contract WHERE id=1'),48);
-const t49=path.join(root,'t49.sqlite');fs.copyFileSync(t48,t49);ok(t49,read(INTENT));
-const t50=path.join(root,'t50.sqlite');fs.copyFileSync(t49,t50);ok(t50,read(WRITER));
+const tPre=path.join(root,'tPre.sqlite');ok(tPre,chainTo(INTENT));
+assert.equal(one(tPre,'SELECT version FROM schema_contract WHERE id=1'),49);
+const tIntent=path.join(root,'tIntent.sqlite');fs.copyFileSync(tPre,tIntent);ok(tIntent,read(INTENT));
+const tWriter=path.join(root,'tWriter.sqlite');fs.copyFileSync(tIntent,tWriter);ok(tWriter,read(WRITER));
 
-// ===== 0049: the predecessor and what it creates =====
+// ===== 0050: the predecessor and what it creates =====
 {
  const stale=path.join(root,'t47.sqlite');ok(stale,chainTo(PRE_INTENT));
  const before=objects(stale);
  refused(stale,read(INTENT));
  assert.equal(objects(stale),before,'a refused file creates nothing');
  assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),47);
- const noWriter=copy(t48);ok(noWriter,'DROP TRIGGER identity_evidence_writer_update;DROP TRIGGER identity_evidence_writer_insert;DROP TRIGGER identity_evidence_writer_change_apply;DROP TABLE identity_evidence_writer');
+ const noWriter=copy(tPre);ok(noWriter,'DROP TRIGGER identity_evidence_writer_update;DROP TRIGGER identity_evidence_writer_insert;DROP TRIGGER identity_evidence_writer_change_apply;DROP TABLE identity_evidence_writer');
  refused(noWriter,read(INTENT));
- const taken=copy(t48);ok(taken,'CREATE TABLE lid_recheck_intent_x (a INTEGER)');
+ const taken=copy(tPre);ok(taken,'CREATE TABLE lid_recheck_intent_x (a INTEGER)');
  refused(taken,read(INTENT));
- assert.equal(objects(t49),objects(t48)+7,'exactly the table, its two indexes and its four triggers are new');
- assert.equal(one(t49,'SELECT version FROM schema_contract WHERE id=1'),49);
- assert.equal(one(t49,'SELECT COUNT(*) FROM lid_recheck_intent'),0,'empty');
- refused(copy(t49),read(INTENT),/./);
+ assert.equal(objects(tIntent),objects(tPre)+7,'exactly the table, its two indexes and its four triggers are new');
+ assert.equal(one(tIntent,'SELECT version FROM schema_contract WHERE id=1'),50);
+ assert.equal(one(tIntent,'SELECT COUNT(*) FROM lid_recheck_intent'),0,'empty');
+ refused(copy(tIntent),read(INTENT),/./);
  // the version never goes down
- refused(copy(t49),'UPDATE schema_contract SET version=48 WHERE id=1',/schema_contract_downgrade/);
+ refused(copy(tIntent),'UPDATE schema_contract SET version=49 WHERE id=1',/schema_contract_downgrade/);
 }
 
-// ===== 0049: the table =====
+// ===== 0050: the table =====
 const HEX='a'.repeat(64);
 const AT="'2026-11-27T10:00:00.000Z'";
-const fresh=()=>copy(t49);
+const fresh=()=>copy(tIntent);
 const open=(id='req-1',lid='Ab1')=>"INSERT INTO lid_recheck_intent (request_id,lid,state,revision,created_at,updated_at) VALUES ('"+id+"','"+lid+"','open',1,"+AT+","+AT+");";
 const PROOF="proof_version=1,tmdb='603',final_url='https://letterboxd.com/film/m/',slug='m',canonical_path='/film/m/',title='M',year=1999,tmdb_doc_digest='"+HEX+"',attach_root='"+HEX+"'";
 {
@@ -78,7 +78,7 @@ const PROOF="proof_version=1,tmdb='603',final_url='https://letterboxd.com/film/m
  refused(f,"UPDATE lid_recheck_intent SET revision=2,"+PROOF.replace("attach_root='"+HEX+"'","attach_root='"+'A'.repeat(64)+"'")+" WHERE request_id='req-1'",/CHECK/i);
 }
 
-// ===== 0049: the compare-and-swap discipline =====
+// ===== 0050: the compare-and-swap discipline =====
 {
  const f=fresh();ok(f,open());
  // every update raises the revision by exactly one
@@ -124,12 +124,12 @@ const PROOF="proof_version=1,tmdb='603',final_url='https://letterboxd.com/film/m
  refused(s,"UPDATE lid_recheck_intent SET revision=3,outcome='tmdb_retired' WHERE request_id='req-s'",/lid_recheck_intent_update/);
 }
 
-// ===== 0050: the predecessor and the rebuild =====
+// ===== 0051: the predecessor and the rebuild =====
 const AT2='2026-11-27T12:00:00.000Z';
 const change=(writer,kind,from,to,generation,extra={})=>"INSERT INTO identity_evidence_writer_change (writer,kind,from_state,to_state,generation,reason,deployed_version,evidence_link,drain_evidence,break_from,recorded_at) VALUES ('"+writer+"','"+kind+"','"+from+"','"+to+"',"+generation+",'a reason','v1','https://trello.com/c/x',"+(extra.drain?"'"+extra.drain+"'":'NULL')+","+(extra.breakFrom?"'"+extra.breakFrom+"'":'NULL')+",'"+(extra.at||AT2)+"');";
 {
- // a database at 49 with real history: a writer that went off -> pending -> on -> off -> pending -> on, another that is pending, and one that is absent
- const base=copy(t49);
+ // a database at 50 with real history: a writer that went off -> pending -> on -> off -> pending -> on, another that is pending, and one that is absent
+ const base=copy(tIntent);
  ok(base,change('discovery_decision','activate','off','pending',1,{at:'2026-11-27T10:00:00.000Z'})+change('discovery_decision','drain_complete','pending','on',2,{drain:'only v2 serves',at:'2026-11-27T10:30:00.000Z'})
   +change('discovery_decision','deactivate','on','off',3,{at:'2026-11-27T11:00:00.000Z'})+change('discovery_decision','activate','off','pending',4,{at:'2026-11-27T11:10:00.000Z'})
   +change('discovery_decision','drain_complete','pending','on',5,{drain:'again',at:'2026-11-27T11:20:00.000Z'})
@@ -138,15 +138,15 @@ const change=(writer,kind,from,to,generation,extra={})=>"INSERT INTO identity_ev
   triggers:rows(base,"SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").map(r=>r.name),indexes:rows(base,"SELECT name FROM sqlite_master WHERE type='index' ORDER BY name").map(r=>r.name)};
  assert.equal(before.history.length,6);
 
- const stale=path.join(root,'t48b.sqlite');fs.copyFileSync(t48,stale);
+ const stale=path.join(root,'tPreB.sqlite');fs.copyFileSync(tPre,stale);
  const staleBefore=objects(stale);refused(stale,read(WRITER));assert.equal(objects(stale),staleBefore,'a refused file creates nothing');
- const noIndex=copy(t49);ok(noIndex,'DROP INDEX identity_evidence_writer_change_writer');refused(noIndex,read(WRITER));
- const noTrigger=copy(t49);ok(noTrigger,'DROP TRIGGER identity_evidence_writer_change_current');refused(noTrigger,read(WRITER));
- const noIntent=copy(t49);ok(noIntent,'DROP TRIGGER lid_recheck_intent_keep;DROP TABLE lid_recheck_intent');refused(noIntent,read(WRITER));
- const leftover=copy(t49);ok(leftover,'CREATE TABLE identity_evidence_writer_hold (a INTEGER)');refused(leftover,read(WRITER));
+ const noIndex=copy(tIntent);ok(noIndex,'DROP INDEX identity_evidence_writer_change_writer');refused(noIndex,read(WRITER));
+ const noTrigger=copy(tIntent);ok(noTrigger,'DROP TRIGGER identity_evidence_writer_change_current');refused(noTrigger,read(WRITER));
+ const noIntent=copy(tIntent);ok(noIntent,'DROP TRIGGER lid_recheck_intent_keep;DROP TABLE lid_recheck_intent');refused(noIntent,read(WRITER));
+ const leftover=copy(tIntent);ok(leftover,'CREATE TABLE identity_evidence_writer_hold (a INTEGER)');refused(leftover,read(WRITER));
 
  const f=copy(base);ok(f,read(WRITER));
- assert.equal(one(f,'SELECT version FROM schema_contract WHERE id=1'),50);
+ assert.equal(one(f,'SELECT version FROM schema_contract WHERE id=1'),51);
  assert.deepEqual(rows(f,'SELECT * FROM identity_evidence_writer ORDER BY writer'),before.control,'every control row is unchanged');
  assert.deepEqual(rows(f,'SELECT * FROM identity_evidence_writer_change ORDER BY seq'),before.history,'the append-only history is unchanged, with its own seq values');
  assert.deepEqual(rows(f,"SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").map(r=>r.name),before.triggers,'the same triggers');
@@ -155,7 +155,7 @@ const change=(writer,kind,from,to,generation,extra={})=>"INSERT INTO identity_ev
  assert.equal(one(f,"SELECT seq FROM sqlite_sequence WHERE name='identity_evidence_writer_change'"),6,'AUTOINCREMENT continues after the highest seq');
  refused(copy(f),read(WRITER),/./);
  // replay on an empty control: the same file on a database with no rows
- assert.equal(one(t50,'SELECT COUNT(*) FROM identity_evidence_writer'),0);assert.equal(one(t50,'SELECT version FROM schema_contract WHERE id=1'),50);
+ assert.equal(one(tWriter,'SELECT COUNT(*) FROM identity_evidence_writer'),0);assert.equal(one(tWriter,'SELECT version FROM schema_contract WHERE id=1'),51);
 
  // the sixth writer: the same compare-and-swap, history and coverage as the others
  const g=copy(f);
@@ -187,4 +187,4 @@ const change=(writer,kind,from,to,generation,extra={})=>"INSERT INTO identity_ev
  // the import-run triggers of 0044 still resolve their writer table
  assert.equal(one(g,"SELECT COUNT(*) FROM identity_evidence_writer WHERE state='on'"),1);
 }
-console.log('Lid recheck intent and attach writer migrations (AIR-675, 0049 and 0050) passed.');
+console.log('Lid recheck intent and attach writer migrations (AIR-675, 0050 and 0051) passed.');

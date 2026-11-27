@@ -240,7 +240,7 @@ const EXPECTED_ROOT=await ROOT();
   const file=fresh({mode});await assert.rejects(()=>recheck(file),code('letterboxd_admission_closed'),'mode '+mode);
   assert.equal(intents(file).length,0);
  }
- // migration 0050 (or 0049) not applied: the schema refuses before any effect
+ // migration 0051 (or 0050) not applied: the schema refuses before any effect
  {const file=fresh();await mint(file);sqlite(file,'DROP TRIGGER lid_recheck_intent_keep;DROP TABLE lid_recheck_intent');
   await assert.rejects(()=>recheck(file),code('admission_unavailable'));}
  // an invalid lid or request id

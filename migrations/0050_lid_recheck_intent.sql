@@ -1,9 +1,9 @@
--- Schema v49: the owner re-check intent `lid_recheck_intent` (AIR-675, delivery step 6 of ADR 0217, Accepted, decisions 7 and 8; choices L1 and M1 of the owner's disposition of 25 Nov 2026).
+-- Schema v50: the owner re-check intent `lid_recheck_intent` (AIR-675, delivery step 6 of ADR 0217, Accepted, decisions 7 and 8; choices L1 and M1 of the owner's disposition of 25 Nov 2026).
 -- ONE additive STRICT table, one index and four triggers. No data migration. DORMANT and INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it is a separate, action-specific
 -- owner approval (ADR 0217 delivery step 7b), in the exact schema chain and after the `film_lid_admission` apply (0048). No delivered writer reads or writes the table before the attach activation (ADR 0217
--- delivery step 11, owner L3 GO), and the owner route that would write it refuses before its first effect while the evidence writer `lid_tmdb_attach` is not `on` (migration 0050).
--- It follows a complete version 48 and refuses anything else before the table is created: the first statement inserts a row that CHECK (id = 1) forbids (id 0) and so aborts the file (a second apply, a missing
--- schema_contract row and a wrong version included). The version becomes 49 and never goes down.
+-- delivery step 11, owner L3 GO), and the owner route that would write it refuses before its first effect while the evidence writer `lid_tmdb_attach` is not `on` (migration 0051).
+-- It follows a complete version 49 and refuses anything else before the table is created: the first statement inserts a row that CHECK (id = 1) forbids (id 0) and so aborts the file (a second apply, a missing
+-- schema_contract row and a wrong version included). The version becomes 50 and never goes down.
 --
 -- One row is the durable intent of ONE owner request `POST /api/admin/letterboxd/lid-recheck {lid, requestId}` (ADR 0217 decision 8a):
 --   * `request_id` (primary key) and `lid` are bound for life: the same `request_id` with another lid is refused `request_conflict` by the writer, and a trigger forbids ever changing either.
@@ -18,7 +18,7 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
  (SELECT COUNT(*) FROM schema_contract) = 1
- AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 48)
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 49)
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'table' AND name IN ('film_lid_admission', 'canonical_write_receipt', 'film_external_id', 'film_redirect', 'identity_evidence_writer', 'identity_evidence_writer_change', 'film_identity_evidence')
@@ -109,6 +109,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 49,
-    note = 'Schema v49: the owner re-check intent lid_recheck_intent (AIR-675, ADR 0217 decision 8a: revision compare-and-swap, no delete). Empty; no data change. Version 49 follows a complete version 48.'
-WHERE id = 1 AND version = 48;
+SET version = 50,
+    note = 'Schema v50: the owner re-check intent lid_recheck_intent (AIR-675, ADR 0217 decision 8a: revision compare-and-swap, no delete). Empty; no data change. Version 50 follows a complete version 49.'
+WHERE id = 1 AND version = 49;

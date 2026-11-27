@@ -1,4 +1,4 @@
--- Schema v50: the identity evidence writer `lid_tmdb_attach` (AIR-675, delivery step 6 of ADR 0217, Accepted, decisions 7 and 8; ADR 0215 Accepted, decision 4). A SEPARATE forward migration: 0042 is never edited.
+-- Schema v51: the identity evidence writer `lid_tmdb_attach` (AIR-675, delivery step 6 of ADR 0217, Accepted, decisions 7 and 8; ADR 0215 Accepted, decision 4). A SEPARATE forward migration: 0042 is never edited.
 -- ADR 0217 decision 7: the delivered writer control admits exactly five writers, in the CHECK of `identity_evidence_writer` and of `identity_evidence_writer_change`. The attach writer cannot simply be turned on, so
 -- this file extends BOTH tables' writer CHECK by one value, `lid_tmdb_attach`, and changes nothing else. SQLite cannot alter a CHECK, so both tables are rebuilt with the SAME columns, constraints, unique index and
 -- triggers as 0042 (the table and trigger text below is taken from 0042 verbatim except the writer list), and every existing row is copied with its values unchanged (the control rows, and the append-only history with its
@@ -6,15 +6,15 @@
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it is a separate owner approval, part of the exact pre-activation chain of the attach (ADR 0217 delivery step 7b). It
 -- does NOT activate the writer: a writer with NO control row is `off` (ADR 0215 decision 4), and the attach refuses `evidence_writer_inactive` until the owner's activation (`pending`, drain evidence, then `on`).
 -- No Worker version that does not contain the attach reads or writes the new value, so an older Worker is unaffected (it reads the five writers it knows; a sixth row is invisible to it, and it cannot write one).
--- It follows a complete version 49 and refuses anything else before an object is touched: the first statement inserts a row that CHECK (id = 1) forbids (id 0) and so aborts the file. The version becomes 50 and never
--- goes down. Atomicity: a file is applied as one transaction; any failure rolls the rebuild back whole and leaves the version at 49.
+-- It follows a complete version 50 and refuses anything else before an object is touched: the first statement inserts a row that CHECK (id = 1) forbids (id 0) and so aborts the file. The version becomes 51 and never
+-- goes down. Atomicity: a file is applied as one transaction; any failure rolls the rebuild back whole and leaves the version at 50.
 -- Identifiers, digests, versions, evidence links and ISO-8601 UTC times only: no title, name, payload or personal data.
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
  (SELECT COUNT(*) FROM schema_contract) = 1
- AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 49)
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 50)
  AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('identity_evidence_writer', 'identity_evidence_writer_change', 'film_identity_evidence', 'lid_recheck_intent')) = 4
  AND (
   SELECT COUNT(*) FROM sqlite_master
@@ -183,6 +183,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 50,
-    note = 'Schema v50: the identity evidence writer control admits the sixth writer lid_tmdb_attach (AIR-675, ADR 0217 decision 7); both tables rebuilt with their rows and triggers unchanged. Inert until the owner activates the writer. Version 50 follows a complete version 49.'
-WHERE id = 1 AND version = 49;
+SET version = 51,
+    note = 'Schema v51: the identity evidence writer control admits the sixth writer lid_tmdb_attach (AIR-675, ADR 0217 decision 7); both tables rebuilt with their rows and triggers unchanged. Inert until the owner activates the writer. Version 51 follows a complete version 50.'
+WHERE id = 1 AND version = 50;

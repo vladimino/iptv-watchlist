@@ -20,10 +20,10 @@ import {fenced} from './canonical-mutations.js';
 import {evidenceKeyOf,normalizeEvidence,KNOWN_ALIAS_SCOPES} from './identity-evidence.js';
 
 export const WRITER_SCHEMA=42;
-// AIR-675 / ADR 0217 decision 7: the sixth writer, `lid_tmdb_attach`, exists only from schema 50 (migration 0050 rebuilds both control tables' writer CHECK; 0042 is never edited). Below 50 the control row cannot exist, so it
+// AIR-675 / ADR 0217 decision 7: the sixth writer, `lid_tmdb_attach`, exists only from schema 51 (migration 0051 rebuilds both control tables' writer CHECK; 0042 is never edited). Below 50 the control row cannot exist, so it
 // reads as `off`, and `changeWriter` refuses it before a statement.
 export const ATTACH_WRITER='lid_tmdb_attach';
-export const ATTACH_WRITER_SCHEMA=50;
+export const ATTACH_WRITER_SCHEMA=51;
 export const WRITERS=Object.freeze(['discovery_decision','discovery_owner','claim_alias_bridge','tmdb_retirement_decision','tmdb_retirement_application',ATTACH_WRITER]);
 export const WRITER_STATES=Object.freeze(['off','pending','on']);
 export const CHANGE_KINDS=Object.freeze(['activate','drain_complete','deactivate','break']);
@@ -69,10 +69,10 @@ export async function attachWriterSchemaReady(env){
  }catch{return false;}
 }
 
-// AIR-675: the in-batch condition that the attach writer is `on` at the generation the caller read, at schema 50 or later ({sql, params}). Kept here so only this module names the control tables.
+// AIR-675: the in-batch condition that the attach writer is `on` at the generation the caller read, at schema 51 or later ({sql, params}). Kept here so only this module names the control tables.
 export function attachWriterOnCondition(generation){
  if(!Number.isSafeInteger(generation)||generation<1)throw invalid('generation');
- return {sql:'(SELECT version FROM schema_contract WHERE id=1)>=50 AND EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state=\'on\' AND generation=?)',params:[ATTACH_WRITER,generation]};
+ return {sql:'(SELECT version FROM schema_contract WHERE id=1)>=51 AND EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state=\'on\' AND generation=?)',params:[ATTACH_WRITER,generation]};
 }
 
 // The control row of a writer. An absent row, and a schema without the control tables, is `off` at generation 0 (ADR 0215 decision 4).
