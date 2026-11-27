@@ -104,6 +104,25 @@ const keys=result=>result.issues.map(item=>item.key);
   const recovered=ev(queue,{},{open});
   assert.deepEqual(keys(recovered),[],label);assert.equal(recovered.facts.recovery,reason,label);assert.equal(P.discoveryRecovery(recovered.facts).reason,reason,label);
  }
+ // AIR-687: an open incident with an owed queue is judged by the last chunk that really moved the queue, not by a fresh saved checkpoint. A series of zero-work error or collision checkpoints
+ // (fresh checkpoint and chunk times, a gate in the future) neither refreshes the clock nor recovers the incident; genuine persisted work does. A legacy record without the fields keeps the old clocks (above).
+ {
+  const zeroWork={checkpointAt:at(now-MIN),lastChunkAt:at(now-MIN),allowedAt:at(now+30*60*MIN/60),usefulProgressAt:at(now-5*H),usefulProgressSince:at(now-6*H)};
+  for(const [label,queue] of [['saved error checkpoints',{...q(zeroWork),state:'failed',reason:'discovery_fence'}],['saved collision backoff checkpoints',q({...zeroWork,reason:'backoff'})],['no useful work since tracking began',q({...zeroWork,usefulProgressAt:null,usefulProgressSince:at(now-5*H)})]]){
+   const held=ev(queue,{},{open});
+   assert.deepEqual(keys(held),['discovery_stalled'],label+': the incident stays open');assert.equal(held.state,'degraded',label);assert.equal(held.facts.recovery,null,label);
+   const fresh=ev(queue);
+   assert.deepEqual(keys(fresh),['discovery_stalled'],label+': and is raised without an earlier incident');
+  }
+  // Real persisted work (cheap pass, replay or candidate) recorded by the Workflow ends it; so does a series that has only just started tracking.
+  const worked=ev(q({...zeroWork,usefulProgressAt:at(now-10*MIN),usefulProgressSince:at(now-6*H)}),{},{open});
+  assert.deepEqual(keys(worked),[]);assert.equal(worked.facts.recovery,'within_policy');
+  const justStarted=ev(q({...zeroWork,usefulProgressAt:null,usefulProgressSince:at(now-10*MIN)}),{},{open});
+  assert.deepEqual(keys(justStarted),[]);assert.equal(justStarted.facts.recovery,'within_policy');
+  // A quiet state is unaffected: the proven empty queue and the EPG pause still recover regardless of the useful-work clock.
+  assert.equal(ev({state:'empty',reason:'drained',owed:false,eligible:false,usefulProgressSince:at(now-9*H)},{},{open}).facts.recovery,'queue_empty');
+  assert.equal(ev({state:'paused',reason:'epg_priority',owed:true,eligible:false,usefulProgressSince:at(now-9*H)},{},{open}).facts.recovery,'epg_priority');
+ }
  // Re-review: owed work without any usable time of this generation is unconfirmed, never healthy and never a recovery `within_policy`.
  const untimed=q({allowedAt:null,checkpointAt:null,lastChunkAt:null});
  const untimedFresh=ev(untimed);

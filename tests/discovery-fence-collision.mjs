@@ -42,9 +42,9 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
  sql(file,`INSERT INTO published_epg_member (programme_run_id, kind, ordinal, film_id) VALUES ('${RUN}','programme',0,'member-1')`);
  sql(file,`INSERT INTO published_epg_document (programme_run_id, kind, ordinal, payload_json) VALUES ('${RUN}','programme',0,'${JSON.stringify({runId:RUN,films:[{id:'member-1',tmdbId:'101',shows:[]}]})}')`);
  sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
- const stored={...decision,evidenceKey:sql(file,`SELECT evidence_key FROM discovery_observation WHERE observation_key='${item.key}'`)[0].evidence_key};
+ if(decision){const stored={...decision,evidenceKey:sql(file,`SELECT evidence_key FROM discovery_observation WHERE observation_key='${item.key}'`)[0].evidence_key};
  const wrote=await Authority.writeDecisionDelta(setup,{[item.key]:{previous:null,next:stored}},{lease:taken.lease});
- assert.deepEqual(wrote.written,[item.key],JSON.stringify(wrote));
+ assert.deepEqual(wrote.written,[item.key],JSON.stringify(wrote));}
  if(catalog){const seeded=await Authority.upsertAdmissions(setup,{[catalog.id]:catalog},{lease:taken.lease});assert.deepEqual(seeded.written,[catalog.id],JSON.stringify(seeded));}
  await Authority.releaseLease(setup,taken.lease);
  const hook={fn:null};
@@ -55,7 +55,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
   fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);if(parsed.pathname.includes('/movie/'))clock.offset+=advance.ms;if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?movie:{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   nextCatchUpAt:()=>new Date(Math.floor(Date.now()/3600000+1)*3600000).toISOString(),DiscoveryAuthority:authority,pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:report.films};if(key==='epg/published-generation.json')return published.phase===null?null:{phase:published.phase??'published',programmeRunId:published.run};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
-  saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
+  saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)await target.BUCKET.put(key,JSON.stringify(value));}});
  for(const name of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(name,'utf8'),context);
  const report={films:catalog?[]:[{id:'member-1',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:cachedRuntime,canonicalIdentity:'tmdb:101',shows:[]}]};
  const chunk=async()=>{
@@ -76,6 +76,7 @@ const rowsOf=file=>sql(file,"SELECT channel_id, start_ms, end_ms, basis FROM pub
 const movieCalls=fetched=>fetched.filter(pathname=>pathname.includes('/movie/')).length;
 
 
+const OTHER='run-other';
 const fenceError=()=>Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
 // A. One collision (generation bumped by a concurrent writer, same published run): the chunk retries and finishes; no programme_changed.
 {
@@ -138,31 +139,84 @@ const statusBatch=statements=>statements.some(item=>/UPDATE discovery_status/i.t
 const bumpOnStatus=(w,times,extra=null)=>{w.hook.left=times;w.hook.fn=(statements,file)=>{if(w.hook.left>0&&statusBatch(statements)){w.hook.left--;sql(file,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");return extra?.(file);}};};
 const recordOf=async w=>(await Authority.readContinuation(w.env)).record;
 const hourBoundary=()=>Math.floor(Date.now()/3600000+1)*3600000;
+const loadWorkflow=w=>{vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8').replace(/export \{[^}]+\};/g,'').replace(/^export /gm,''),w.context);return w.context;};
+const count=(file,table)=>sql(file,`SELECT COUNT(*) AS n FROM ${table}`)[0].n;
 {
+ // A real actionable candidate (no decision yet). The first status batch (the cheap-pass checkpoint) is refused before any candidate work: nothing is persisted. The recovery chunk really settles the candidate
+ // and durably assigns its slots, with before/after rows and no duplicates, and the Workflow checkpoint and the queue/monitor reading are the real ones.
  published.run=RUN;
- const w=await world({durations:[90,96],decision:verified({anchor:[90]})});
+ const w=await world({durations:[90,96],decision:null});
+ const wf=loadWorkflow(w);
+ assert.deepEqual([count(w.file,'discovery_decision'),count(w.file,'published_epg_show')],[0,0],'before');
  bumpOnStatus(w,1);
- const first=await w.advance();
- assert.equal(first.stage,'partial',JSON.stringify(first).slice(0,400));
- assert.equal(first.generationCollision,true);
+ const meter={statements:0,batches:0},tally={total:0};
+ const settle=async(outcome,chunks)=>wf.settleWorkflowIfOwner(w.env,'inst-0',record=>wf.workflowProgressPatch(record,{outcome,pinned:RUN,series:0,chunks,meter,tally,chunkKey:'inst-0:'+chunks,ownVersion:{}}));
+ const chunk1=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(chunk1.progress,true,'the collision checkpoint was saved by this hop');
+ assert.equal(chunk1.usefulProgress,false,'but no queue work was done');
+ assert.deepEqual([count(w.file,'discovery_decision'),count(w.file,'published_epg_show')],[0,0],'the refused batch persisted no work');
  const record=await recordOf(w);
  assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');assert.equal(record.fenceCollisions,1);
  const wait=Date.parse(record.retryAt)-Date.now();
  assert.ok(wait>0&&wait<=31000,'a 30 s retry, not the hour boundary: '+wait);
- assert.ok(hourBoundary()-Date.now()<=3600000);
- // The typed collision stays observable, bounded: no raw SQL, no error text.
- const summary=w.context.chunkSummary(first);
- assert.equal(summary.generationCollision,true);assert.equal(summary.fenceCollisions,1);assert.equal(summary.failureKind,'fence');assert.equal(summary.failedAt,null,'the refused write was outside a named phase, so no phase is claimed');
- assert.equal(JSON.stringify(summary).includes('CHECK constraint'),false);
- // After the deferral the same real chunk runs with no competing write and finishes; the counter is cleared and the stored status is a normal one.
+ assert.equal(chunk1.summary.generationCollision,true);assert.equal(chunk1.summary.fenceCollisions,1);assert.equal(chunk1.summary.failureKind,'fence');
+ assert.equal(JSON.stringify(chunk1.summary).includes('CHECK constraint'),false,'bounded: no raw SQL');
+ assert.equal((await settle(chunk1,1)).saved,true);
+ let state=(await wf.readWorkflowState(w.env)).record;
+ assert.equal(state.lastUsefulProgressAt,null);assert.equal(typeof state.usefulProgressTrackedSince,'string');assert.equal(state.lastProgress.usefulProgress,false);
+ // The Workflow plan wakes at the retry, not at the hour.
+ const plan=wf.workflowPlan({published:RUN,pinned:RUN,record,lease:null,now:Date.now(),chunks:1,last:null,uncertainWrites:0,used:0});
+ assert.equal(plan.action,'wait');assert.ok(plan.until-Date.now()<=31000,'wake: '+(plan.until-Date.now()));
+ // After the deferral the same real chunk runs with no competing write.
  clock.offset+=31000;
- const second=await w.advance();
- assert.notEqual(second.stage,'error',JSON.stringify(second).slice(0,300));
- assert.equal(second.generationCollision,undefined);
+ const chunk2=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(chunk2.usefulProgress,true,JSON.stringify(chunk2.summary));
+ assert.deepEqual([count(w.file,'discovery_decision'),count(w.file,'published_epg_show')],[1,2],'after: the candidate is settled and its slots assigned');
+ assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT channel_id,start_ms FROM published_epg_show GROUP BY channel_id,start_ms)")[0].n,2,'no duplicate slot');
+ assert.equal(decisionOf(w.file).status,'verified');
  const after=await recordOf(w);
  assert.equal(after.fenceCollisions,undefined);assert.notEqual(after.stage,'error');
- assert.equal(decisionOf(w.file).status,'verified','the decision of the interrupted chunk is intact and not duplicated');
- assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM discovery_decision")[0].n,1);
+ await settle(chunk2,2);
+ state=(await wf.readWorkflowState(w.env)).record;
+ assert.equal(typeof state.lastUsefulProgressAt,'string');assert.equal(state.lastProgress.usefulProgress,true);
+ // The same-generation clock survives a recovery or successor start; another programme run starts its own.
+ assert.deepEqual([state.lastUsefulProgressAt,state.usefulProgressTrackedSince],[wf.workflowProgressPatch(state,{outcome:{summary:{},usefulProgress:false},pinned:RUN,series:0,chunks:3,meter,tally,chunkKey:'k',ownVersion:{}}).lastUsefulProgressAt,state.usefulProgressTrackedSince]);
+ const other=wf.workflowProgressPatch(state,{outcome:{summary:{},usefulProgress:false},pinned:OTHER,series:0,chunks:1,meter,tally,chunkKey:'k',ownVersion:{}});
+ assert.equal(other.lastUsefulProgressAt,null,'not carried into a new programme');assert.notEqual(other.usefulProgressTrackedSince,state.usefulProgressTrackedSince);
+ // The shared queue classification carries the clock of the same programme run only, and the Monitor judges by it.
+ const evidence=(workflow,at=Date.now())=>({observedAt:new Date(at).toISOString(),published:RUN,authority:{state:'open'},unavailable:[],records:{continuation:after,status:null,workflow,lease:null},pause:null});
+ const queueNow=wf.discoveryQueueState(evidence(state));
+ assert.equal(queueNow.usefulProgressAt,state.lastUsefulProgressAt);assert.equal(queueNow.usefulProgressSince,state.usefulProgressTrackedSince);
+ const foreign=wf.discoveryQueueState(evidence({...state,programmeRunId:OTHER}));
+ assert.deepEqual([foreign.usefulProgressAt,foreign.usefulProgressSince],[null,null],'another programme run is not read');
+ clock.offset=0;
+}
+const P=await import('../src/domain/monitor-policy.js');
+{
+ // The incident mechanism through the real chain: a long series of saved zero-work collision/error checkpoints with an owed queue must not clear an open incident; genuine persisted work does.
+ published.run=RUN;
+ const w=await world({durations:[90,96],decision:null});
+ const wf=loadWorkflow(w);
+ const meter={statements:0,batches:0},tally={total:0};
+ bumpOnStatus(w,1);
+ const collided=await wf.runWorkflowChunk(w.env,meter);
+ const hour=3600000,now=Date.now();
+ const stored={schemaVersion:1,programmeRunId:RUN,series:0,instanceId:'inst-0',phase:'running',usefulProgressTrackedSince:new Date(now-5*hour).toISOString(),lastUsefulProgressAt:new Date(now-5*hour).toISOString()};
+ await wf.writeWorkflowState(w.env,stored,null);
+ const readQueue=async at=>{const wfState=(await wf.readWorkflowState(w.env)).record;return wf.discoveryQueueState({observedAt:new Date(at).toISOString(),published:RUN,authority:{state:'open'},unavailable:[],records:{continuation:(await recordOf(w)),status:(await Authority.routeRead(w.env,'epg/discovery-status.json')).value,workflow:wfState,lease:null},pause:null},at);};
+ const queue=await readQueue(now);
+ assert.equal(queue.owed,true);assert.equal(collided.usefulProgress,false);
+ const open={key:'discovery_stalled',firstSeenAt:new Date(now-4*hour).toISOString(),metrics:{},metricsAt:new Date(now-hour).toISOString()};
+ const judged=P.evaluateDiscovery({executor:'workflow',continuation:await recordOf(w),queue,health:null,publishedRunId:RUN,readout:null},now,{open});
+ assert.deepEqual(judged.issues.map(item=>item.key),['discovery_stalled'],'a fresh saved zero-work checkpoint does not recover the incident');assert.equal(judged.facts.recovery,null);
+ // Genuine work: the recovery chunk settles the candidate; the Workflow records it; the incident recovers.
+ clock.offset+=31000;
+ const worked=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(worked.usefulProgress,true);
+ await wf.settleWorkflowIfOwner(w.env,'inst-0',record=>wf.workflowProgressPatch(record,{outcome:worked,pinned:RUN,series:0,chunks:2,meter,tally,chunkKey:'inst-0:2',ownVersion:{}}));
+ const queue2=await readQueue(Date.now());
+ const recovered=P.evaluateDiscovery({executor:'workflow',continuation:await recordOf(w),queue:queue2,health:null,publishedRunId:RUN,readout:null},Date.now(),{open});
+ assert.deepEqual(recovered.issues.map(item=>item.key),[]);assert.equal(recovered.facts.recovery,'queue_empty','the candidate was really settled and the queue is proven empty (the within_policy disposition is covered in tests/monitor-policy.mjs)');
  clock.offset=0;
 }
 // G. Consecutive retries are bounded by the series cap: the seventh refusal returns to the fail-closed error record.
@@ -191,37 +245,30 @@ for(const [label,arrange] of [
  let out=null,thrown=null;try{out=await w.advance();}catch(e){thrown=e;}
  assert.notEqual(out?.generationCollision,true,label+': '+JSON.stringify(out)?.slice(0,300));
  assert.notEqual((await recordOf(w).catch(()=>null))?.reason,'backoff',label+': no retry checkpoint');
- void thrown;
+ if(label==='authority held'){assert.equal(thrown?.code,'discovery_unavailable',label+': the held authority refuses the checkpoint itself');}
+ else{assert.equal(out?.stage,'error',label);assert.equal(out?.error,'discovery_fence',label);const stored=await recordOf(w);assert.equal(stored.stage,'error',label+': a persisted fail-closed checkpoint');assert.equal(stored.reason,'discovery_fence',label);}
 }
-{
- // A fence refusal with no batch CHECK cause (the direct evidence/invariant throw) is never a collision.
- published.run=RUN;
- const wrapped={...Authority,writeContinuation:async(env,record,etag,...rest)=>{if(record?.stage==='running')return Authority.writeContinuation(env,record,etag,...rest);throw fenceError();}};
- const w=await world({durations:[90,96],decision:verified({anchor:[90]}),authority:wrapped});
- await assert.rejects(()=>w.advance(),error=>error.code==='discovery_fence');
- assert.notEqual((await recordOf(w)).reason,'backoff','no retry checkpoint was written for a refusal that is not the batch CHECK');
-}
-// I. usefulProgress and the Workflow plan, read from the real summaries: a checkpoint of an error or collision chunk with nothing done is not progress; real checked, cheap-pass, replay and assignment work is.
+// I. The classifier itself, on the real fixture: each condition of the positive proof is necessary.
 {
  published.run=RUN;
  const w=await world({durations:[90,96],decision:verified({anchor:[90]})});
- const wf=w.context;
- vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8').replace(/export \{[^}]+\};/g,'').replace(/^export /gm,''),wf);
- bumpOnStatus(w,1);
- const collided=await w.advance();
- assert.equal(wf.chunkUsefulProgress(collided),false,'a collision retry with nothing checked');
- const plan=wf.workflowPlan({published:RUN,pinned:RUN,record:await recordOf(w),lease:null,now:Date.now(),chunks:0,last:null,uncertainWrites:0,used:0});
- assert.equal(plan.action,'wait');assert.ok(plan.until-Date.now()<=31000,'the plan wakes at the retry, not at the hour: '+(plan.until-Date.now()));
- assert.equal(wf.chunkUsefulProgress({stage:'error',error:'discovery_fence',checked:0}),false);
- assert.equal(wf.chunkUsefulProgress({stage:'partial',checked:0,touched:0,assignment:{assigned:0,replayed:0}}),false);
- assert.equal(wf.chunkUsefulProgress({stage:'partial',checked:3}),true,'checked (the cheap pass is included)');
- assert.equal(wf.chunkUsefulProgress({stage:'partial',checked:0,touched:2}),true);
- assert.equal(wf.chunkUsefulProgress({stage:'partial',checked:0,assignment:{assigned:4,replayed:0}}),true,'replay-only chunk');
- assert.equal(wf.chunkUsefulProgress({stage:'partial',checked:0,assignment:{assigned:0,replayed:2}}),true);
- assert.equal(wf.chunkUsefulProgress({stage:'partial',generationCollision:true,checked:2,touched:1}),true,'real work inside an AIR-534 collision result is kept');
- clock.offset+=31000;
- const done=await w.advance();
- assert.equal(wf.chunkUsefulProgress(done),done.checked>0||done.assignment?.assigned>0||done.assignment?.replayed>0||done.touched>0,'the real recovery chunk is judged on its real summary: '+JSON.stringify({checked:done.checked,assignment:done.assignment?.assigned}));
- clock.offset=0;
+ const lease=(await Authority.acquireLease(w.env,{programmeRunId:RUN})).lease;
+ const generation=Number((await Authority.readAuthority(w.env)).generation);
+ const refusal=extra=>Object.assign(new Error('discovery_fence'),{code:'discovery_fence',cause:new Error('Runtime error: CHECK constraint failed: ok = 1 (19)'),fenceGeneration:generation-1,...extra});
+ const check=(error,run=RUN,held=lease)=>w.context.retryableFenceCollision(w.env,error,run,held);
+ assert.equal(await check(refusal()),true,'a moved counter on the published run with a live lease is a collision');
+ assert.equal(await check(refusal({fenceGeneration:generation})),false,'the counter has not moved past the generation the fence expected: another reason of the same fence');
+ assert.equal(await check(refusal({fenceGeneration:undefined})),false,'a CHECK of a batch that carries no generation fence');
+ assert.equal(await check(Object.assign(new Error('discovery_fence'),{code:'discovery_fence',fenceGeneration:generation-1})),false,'no cause: a direct evidence/invariant refusal');
+ assert.equal(await check(refusal({cause:new Error('UNIQUE constraint failed: x')})),false,'not a CHECK');
+ assert.equal(await check(refusal({code:'discovery_conflict'})),false,'another typed code');
+ assert.equal(await check(refusal(),RUN,null),false,'no lease');
+ assert.equal(await check(refusal(),'run-other'),false,'another run than the published one');
+ sql(w.file,"UPDATE discovery_transfer SET state='loading'");
+ assert.equal(await check(refusal()),false,'a loading authority');
+ sql(w.file,"UPDATE discovery_transfer SET state='idle'");
+ assert.equal(await check(refusal()),true,'restored');
+ sql(w.file,"UPDATE discovery_authority SET programme_run_id='run-other'");
+ assert.equal(await check(refusal()),false,'the authority moved to another run');
 }
 console.log('discovery fence collision ok');

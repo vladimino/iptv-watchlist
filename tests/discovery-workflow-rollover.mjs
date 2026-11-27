@@ -74,7 +74,7 @@ function seed({phase='waiting',waitingUntil=new Date(Date.now()+3600000).toISOSt
  authority={ready:true,held:false,tables:true,mode:'d1',cutover:'open',version:23,generation:5,programmeRunId:GENERATION,publishedProgrammeRunId:GENERATION,transfer:'idle'};
  published=GENERATION;
  gates={window:{present:true,state:'idle',active:false,expiresAt:null},priority:{present:true,paused:false,reason:'published',nextCatchUpAt:null}};
- set(STATE,{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:OLD,phase,updatedAt:new Date().toISOString(),waitingUntil,reason:'unknown_remaining',chunksThisInstance:4,lastProgress:null,recovery:null,...(versionId?{versionId}:{}),report:{since:'2026-11-17T10:00:00.000Z',chunks:3,checked:30,added:2,reused:1,screenedOut:0,touched:4,tmdbCalls:9,remaining:41,cheapRemaining:0,error:null,queueGeneration:GENERATION,seen:[OLD+':3'],lastClosedHour:'20261117T09'},outbox:[{id:'discovery-hour-a30f67e93a11-20261117T09',type:'discovery',kind:'hour'}]});
+ set(STATE,{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:OLD,phase,updatedAt:new Date().toISOString(),waitingUntil,reason:'unknown_remaining',chunksThisInstance:4,lastProgress:null,lastUsefulProgressAt:'2026-11-17T09:30:00.000Z',usefulProgressTrackedSince:'2026-11-17T08:00:00.000Z',recovery:null,...(versionId?{versionId}:{}),report:{since:'2026-11-17T10:00:00.000Z',chunks:3,checked:30,added:2,reused:1,screenedOut:0,touched:4,tmdbCalls:9,remaining:41,cheapRemaining:0,error:null,queueGeneration:GENERATION,seen:[OLD+':3'],lastClosedHour:'20261117T09'},outbox:[{id:'discovery-hour-a30f67e93a11-20261117T09',type:'discovery',kind:'hour'}]});
  set(CONT,{stage,reason:'chunk_budget',at:new Date().toISOString(),hopId:'hop-77',remainingChunks:0,nextCatchUpAt:waitingUntil,retryAt:null,programmeRunId:GENERATION});
  set(STATUS,{programmeRunId:GENERATION,remaining:41,cheapRemaining:0,replayAfter:'slot|2026-11-17|ch-9'});
  liveness.set(OLD,'waiting');
@@ -171,6 +171,8 @@ assert.equal(state.instanceId,NEXT);assert.equal(state.series,1);assert.equal(st
 assert.equal(state.versionId,null);assert.equal(state.createdVersionId,VERSION_NEW);
 assert.equal(state.report.chunks,3);assert.equal(state.report.tmdbCalls,9);assert.deepEqual(state.report.seen,[OLD+':3']);assert.equal(state.outbox.length,1);
 assert.equal(state.rollover.requestId,'owner-go-0001');assert.equal(state.rollover.fromInstanceId,OLD);assert.equal(state.rollover.toInstanceId,NEXT);assert.equal(state.rollover.checkpoint.hopId,'hop-77');
+// AIR-687: the useful-work clock of the same generation survives the swap to the successor (it is not reset to a fresh idle clock).
+assert.equal(state.lastUsefulProgressAt,'2026-11-17T09:30:00.000Z');assert.equal(state.usefulProgressTrackedSince,'2026-11-17T08:00:00.000Z');
 assert.deepEqual(records.get(CONT),continuationBefore,'the continuation is untouched');assert.equal(etags.get(CONT),continuationEtag);
 assert.deepEqual(records.get(STATUS),statusBefore,'replayAfter and the status are untouched');
 assert.deepEqual(reply.body.receipt.from,{instanceId:OLD,series:0,versionId:null});assert.deepEqual(reply.body.receipt.to,{instanceId:NEXT,series:1});

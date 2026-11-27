@@ -392,17 +392,19 @@ async function publishedGenerationMatches(env,seenRunId){
  const generation=await publishedPointer(env);
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
 }
-// AIR-687: positive proof that a thrown discovery_fence was only a CAS collision on discovery_authority.generation. The refusal must come from the D1 batch fence itself (a CHECK failure with a cause; the direct
-// evidence/invariant throws carry none), the published pointer must positively name this run as `published` (a missing or non-published pointer is NOT a match), the authority must be ready, not held, not loading and
+// AIR-687: positive proof that a thrown discovery_fence was only a CAS collision on discovery_authority.generation. The refusal must come from a D1 batch carrying the generation fence (a CHECK failure with a cause and the
+// generation that fence expected; the direct evidence/invariant throws and any other CHECK carry none) and the authority counter must have moved past that generation, the published pointer must positively name this run as `published` (a missing or non-published pointer is NOT a match), the authority must be ready, not held, not loading and
 // bound to this run, and the hop's own lease must still renew (the batch fence also checks the lease id/expiry). Anything else stays the fail-closed error.
 async function retryableFenceCollision(env,error,programmeRunId,lease){
  if(error?.code!=='discovery_fence'||!programmeRunId||!lease)return false;
- if(!/CHECK constraint failed/i.test(String(error?.cause?.message||'')))return false;
+ if(!/CHECK constraint failed/i.test(String(error?.cause?.message||''))||!Number.isInteger(error.fenceGeneration))return false;
  const generation=await publishedPointer(env);
  if(generation?.phase!=='published'||generation.programmeRunId!==programmeRunId)return false;
  if(typeof DiscoveryAuthority==='undefined')return false;
  const gate=await DiscoveryAuthority.readAuthority(env);
  if(!gate.ready||gate.held||gate.transfer==='loading'||(gate.programmeRunId??null)!==programmeRunId||(gate.publishedProgrammeRunId??programmeRunId)!==programmeRunId)return false;
+ // The batch's own fence statement expected `fenceGeneration`; only a counter that has moved past it is a competing writer. An unchanged counter means the CHECK failed for another reason of the same fence.
+ if(!(Number(gate.generation)>error.fenceGeneration))return false;
  return await renewDiscoveryLease(env,lease)===true;
 }
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
@@ -2144,7 +2146,7 @@ function discoveryQueueState(evidence,now=Date.now()){
   continuationProgrammeRunId:c&&typeof c.programmeRunId==='string'?c.programmeRunId:null,hopId:same&&typeof c.hopId==='string'&&c.hopId?c.hopId:null,
   stage:c&&typeof c.stage==='string'?c.stage:null,continuationReason:c&&typeof c.reason==='string'?c.reason:null,
   remainingChunks:same?discoveryQueueCount(c.remainingChunks):null,remaining:reading?.remaining??null,cheapRemaining:reading?.cheapRemaining??null,deferred:reading?.deferred??null,waitingRetry:reading?.waitingRetry??null,
-  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
+  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,usefulProgressAt:workflow?discoveryQueueTime(workflow.lastUsefulProgressAt)||null:null,usefulProgressSince:workflow?discoveryQueueTime(workflow.usefulProgressTrackedSince)||null:null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
  const out=(state,reason,extra={})=>({...base,state,reason,...extra});
  if(e.authority?.state==='unavailable')return out('unknown','authority_unavailable');
  if(unavailable.some(name=>['authority','status','continuation','workflow','generation'].includes(name)))return out('unknown','records_unreadable');

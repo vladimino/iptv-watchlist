@@ -129,10 +129,15 @@ export function evaluateDiscovery(facts, now, previous = null) {
   let state = queue.state === 'paused' ? 'waiting' : 'healthy', stall = null, unknownSince = null;
   if (backlog) {
     const allowedAt = time(queue.allowedAt) ?? 0;
-    const lastProgress = Math.max(lastChunk ?? 0, checkpoint ?? 0);
+    // AIR-687: a record that tracks useful work (`usefulProgressSince`) is judged by the last chunk with real queue movement, or by the start of tracking when there was none yet. A fresh error, collision or
+    // backoff checkpoint, and a future gate, are not progress and neither refresh this clock nor end an open incident. A legacy record without the fields keeps the checkpoint and chunk clocks.
+    const usefulSince = time(queue.usefulProgressSince), usefulAt = time(queue.usefulProgressAt);
+    const tracked = usefulSince !== null;
+    const lastProgress = tracked ? (usefulAt ?? usefulSince) : Math.max(lastChunk ?? 0, checkpoint ?? 0);
     const overdue = allowedAt && allowedAt <= now ? now - allowedAt : 0;
     const idle = lastProgress ? now - lastProgress : null;
-    if (allowedAt && allowedAt > now) state = 'waiting';
+    if (tracked && idle !== null && idle >= THRESHOLDS.discoveryDegradedMs) stall = {key: 'discovery_stalled', stalledMs: Math.max(overdue, idle), allowedAt: allowedAt ? iso(allowedAt) : null};
+    else if (allowedAt && allowedAt > now) state = 'waiting';
     else if (overdue < THRESHOLDS.discoveryWaitingMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = overdue > 0 ? 'waiting' : 'healthy';
     else if (overdue < THRESHOLDS.discoveryDegradedMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = 'delayed';
     else stall = {key: 'discovery_stalled', stalledMs: Math.max(overdue, idle ?? 0), allowedAt: allowedAt ? iso(allowedAt) : null};
