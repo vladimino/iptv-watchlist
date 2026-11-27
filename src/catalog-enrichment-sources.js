@@ -68,8 +68,9 @@ function comparableOf(json){
  if(!t.translations.every(plainObject))return null;
  const english=t.translations.find(entry=>entry.iso_639_1==='en'&&entry.iso_3166_1==='US');
  const overview=typeof english?.data?.overview==='string'&&english.data.overview.trim()?english.data.overview.trim():null;
- const genres=Array.isArray(json.genres)?json.genres.map(genre=>genre?.id).filter(value=>value!=null).map(String):[];
- return {synopsis:overview,genres};
+ // the genre ids are verified coverage only as a list whose every entry has an id: a MISSING or malformed list is unverified (null), while a present empty list is a valid empty set
+ if(!Array.isArray(json.genres)||!json.genres.every(hasId))return null;
+ return {synopsis:overview,genres:json.genres.map(genre=>String(genre.id))};
 }
 export function parseTmdb(json,id){
  if(!plainObject(json)||String(json.id)!==String(id))return null;

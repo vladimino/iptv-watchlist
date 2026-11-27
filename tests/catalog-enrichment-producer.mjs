@@ -45,7 +45,7 @@ const extractYear=text=>/\((\d{4})\)/.exec(String(text))?.[1]?Number(/\((\d{4})\
 const parseFilm=html=>{const ld=/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html);if(!ld)throw new Error('Film metadata missing');const meta=JSON.parse(ld[1]);const person=(list,role)=>(list||[]).map(item=>{const slug=/\/(?:actor|director)\/([a-z0-9-]+)\//.exec(item.url||'')?.[1];return {id:role+'/'+(slug||item.name),original:item.name,name:item.name};});return {creditsComplete:true,original:meta.name,aliases:[meta.name],tmdbId:/data-tmdb-id="(\d+)"/.exec(html)?.[1]||null,year:meta.year??null,runtime:meta.runtime??null,synopsis:meta.description??null,poster:meta.image??null,genres:meta.genre||[],directors:person(meta.director,'director'),actors:person(meta.actor,'actor')};};
 const tools={parseFilm,attr,extractYear};
 const lbPage=({tmdb=['603'],actors=[{name:'Neo',url:'/actor/neo/'},{name:'Trinity',url:'/actor/trinity/'}],year=1999,runtime=136,synopsis='lb synopsis'}={})=>`<html><head><link rel="shortlink" href="https://boxd.it/abc"><link rel="canonical" href="https://letterboxd.com/film/the-matrix/"><meta property="og:title" content="The Matrix (1999)"><script type="application/ld+json">${JSON.stringify({name:'The Matrix',year,runtime,description:synopsis,image:'https://img/lb.jpg',genre:['Sci-Fi'],director:[{name:'Lana',url:'/director/lana/'}],actor:actors})}</script></head><body>${tmdb.map(id=>`<div data-tmdb-id="${id}" data-tmdb-type="movie"></div>`).join('')}</body></html>`;
-const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'tm synopsis',poster_path:'/p.jpg',genres:[{name:'Action'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
+const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'tm synopsis',poster_path:'/p.jpg',genres:[{id:28,name:'Action'}],credits:{cast:[{id:11,name:'T Neo',order:0}],crew:[{id:12,name:'T Lana',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
 function upstream({lb='page',tm=movie(),wd=[]}={}){
  const calls=[];
  const impl=async url=>{
@@ -413,7 +413,7 @@ function file0(w){return w.file;}
  await done(w,live);
  const after=sv(w.file);
  assert.equal(after['core:tmdb:0'].status,'complete');assert.equal(after['credits:tmdb:0'].status,'complete');assert.equal(after['localization:tmdb:0'].status,'complete');
- const observerRu=await D.tmdbPartVersions(movie({overview:'ru overview',poster_path:'/ru.jpg',genres:[{name:'Боевик'}]}),603);
+ const observerRu=await D.tmdbPartVersions(movie({overview:'ru overview',poster_path:'/ru.jpg',genres:[{id:28,name:'Боевик'}]}),603);
  assert.equal(after['core:tmdb:0'].v,observerRu.core,'core: the producer stored exactly the version an observer computes, whatever the request language');
  assert.equal(after['localization:tmdb:0'].v,observerRu.localization,'localization');
  assert.equal(after['credits:tmdb:0'].v,observerRu.credits,'credits: persisted on completion of the expected set');
@@ -422,7 +422,7 @@ function file0(w){return w.file;}
 
  // 2. an identical COMPLETE response of ANOTHER request language, from an enriched Film that has no prior observer row: nothing is written at all (no pending row, no wake, no plan epoch change), and nothing is refetched
  const epoch0=planEpoch(w);wakes.length=0;
- assert.deepEqual(await observe(w,movie({overview:'ru overview',poster_path:'/ru.jpg',genres:[{name:'Боевик'}]})),{state:'unchanged',parts:[]},'the applied state already says the same thing');
+ assert.deepEqual(await observe(w,movie({overview:'ru overview',poster_path:'/ru.jpg',genres:[{id:28,name:'Боевик'}]})),{state:'unchanged',parts:[]},'the applied state already says the same thing');
  assert.deepEqual(pending(w),[],'no signal row');assert.deepEqual(wakes,[],'no wake');assert.equal(planEpoch(w),epoch0,'no plan epoch change');
  assert.deepEqual(await consumeAll(w),[],'nothing to consume');
  const idle=await step(w,live,at(70));
@@ -496,6 +496,12 @@ function file0(w){return w.file;}
  assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{name:'D',job:'Director'}]}}),603)).credits,null,'a director without an id');
  assert.equal((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[null]}}),603)).credits,null,'a crew entry that is not an object');
  assert.ok((await D.tmdbPartVersions(movie({credits:{cast:[{id:11,name:'A',order:0}],crew:[{job:'Editor'}]}}),603)).credits,'a crew entry of another job carries no credit and is not judged');
+ // genre ids: a missing or malformed list is unverified coverage (no core version), a present empty list is a valid empty set
+ assert.equal((await D.tmdbPartVersions(movie({genres:undefined}),603)).core,null,'a missing genre list');
+ assert.equal((await D.tmdbPartVersions(movie({genres:[{id:28},{name:'no id'}]}),603)).core,null,'a malformed genre entry');
+ const emptyGenres=await D.tmdbPartVersions(movie({genres:[]}),603);
+ assert.ok(/^[0-9a-f]{64}$/.test(emptyGenres.core),'a valid empty genre list is verified coverage');
+ assert.notEqual(emptyGenres.core,(await D.tmdbPartVersions(movie({genres:[{id:28,name:'A'}]}),603)).core);
  assert.deepEqual((await D.emitSourceChanged(w.env,{tmdbId:'603',movie:malformed,at:at(71)})).parts,['core','localization'].filter(part=>part==='core'||false),'only the verified sections of a response with a malformed credit entry are signalled');
  assert.equal(up.calls.length,calls);
 }
