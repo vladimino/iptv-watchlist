@@ -350,7 +350,7 @@ const IDENTITY_STOP = /^producer_identity_/;
 // does not store the baseline, so `now` would renew the window on every read of the same unchanged row: in `readOnly` a movement is dated by the run row's
 // own `updated_at` (never later than `now`), the first-tick grace does not exist (no stored clock: the streak starts at the publication), and nothing is
 // ever dated by the read itself.
-export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false} = {}) {
+export function canonicalProducerClock(previous, run, publishedAt, now, {readOnly = false, current = false} = {}) {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const stamp = value => Number.isFinite(Date.parse(value || '')) ? Date.parse(value) : null;
   const live = stamp(prior.liveSince) ?? (readOnly ? null : now);
@@ -363,7 +363,10 @@ export function canonicalProducerClock(previous, run, publishedAt, now, {readOnl
   const movedAt = readOnly ? (rowAt !== null ? Math.min(rowAt, now) : null) : now;
   const progress = moved ? (movedAt ?? stamp(prior.progressAt)) : (seeded !== null ? Math.min(seeded, now) : stamp(prior.progressAt));
   const published = stamp(publishedAt) ?? (readOnly ? null : now);
-  const streak = moved ? null : (stamp(prior.noProgressSince) ?? (Math.max(published ?? 0, live ?? 0) || null));
+  // AIR-692: a generation PROVEN current (passed, source = applied = published, zero eligible units included) closes its streak. The idle time that follows
+  // is normal, not missing progress, so the next publication starts its window at its OWN publication instead of inheriting the previous day's streak.
+  // A generation that rolls over while unfinished never reaches this branch, so its streak is kept.
+  const streak = moved || current ? null : (stamp(prior.noProgressSince) ?? (Math.max(published ?? 0, live ?? 0) || null));
   const since = moved ? progress : (Math.max(progress ?? 0, streak ?? 0) || null);
   const at = value => value === null || value === undefined ? null : new Date(value).toISOString();
   return {liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
@@ -388,8 +391,9 @@ export function canonicalProducerFacts({held = false, read = null, previous = nu
   if (held) return {held: true, readable: true, clock: null};
   const extra = readOnly ? {clockState: clockStateOf(previous, previousReadable, now)} : {};
   if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now, {readOnly}), ...extra};
-  const clock = canonicalProducerClock(previous, read.run, read.publishedAt, now, {readOnly});
   const {run, chain} = read;
+  const current = !!run && run.pass_state === 'passed' && !!read.label && run.source_generation === read.label && run.applied_generation === read.label;
+  const clock = canonicalProducerClock(previous, run, read.publishedAt, now, {readOnly, current});
   const total = run ? knownCount(run.unit_count) : null;
   const parts = run ? [run.n_applied, run.n_noop, run.n_kept].map(knownCount) : [];
   const done = run && parts.every(value => value !== null) ? parts.reduce((sum, value) => sum + value, 0) : null;

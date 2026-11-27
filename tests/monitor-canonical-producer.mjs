@@ -209,4 +209,33 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
  assert.equal(world.reads,before,'GET /api/monitor/status reads only the stored document');
  assert.deepEqual([...new Set(bucket.writes().map(item=>item.key))].filter(key=>key!=='monitor/state.json'),[]);
 }
+// 10. AIR-692: the normal idle after a proven pass is not "no progress". Facts of 25-26.11: generation passed (also with ZERO units), 22 h of idle, a new EPG
+// publication, the hourly tick sees the new generation before its chain exists, then the normal start and pass: no alert and no recovery, on several daily cycles.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ let now=T0;
+ for(let day=0;day<4;day++){
+  const gen=10+day,label='run-p:'+gen,zero=day===2;
+  world.generation=gen;world.publishedAt=at(now);world.chain=null;world.run=null;
+  await M.run(env,{now:now+58*MIN});                       // tick 18:00: published, chain and run still absent
+  world.chain=chain({owner_state:'complete'});
+  world.run=run({run_key:'epg:run-p:'+gen,pass_state:'passed',source_generation:label,applied_generation:label,n_applied:zero?0:3,n_noop:zero?4004:0,updated_at:at(now+90*MIN)});
+  await M.run(env,{now:now+2*H});                          // finished between ticks, seen by the next one
+  now+=24*H;
+  await M.run(env,{now:now-2*H+MIN});
+  const s=await producer(M,env,now-2*H+MIN);
+  assert.equal(s.facts.status,'current','day '+day);
+ }
+ assert.deepEqual(posts(calls).filter(item=>item.body.stream==='canonical_producer').map(item=>item.body.key+':'+item.body.kind),[],'no false alert and no recovery across the daily cycles');
+}
+// 10b. A new generation after a proven pass that never starts still alerts after the existing 2 h window, and an unfinished one keeps its old streak.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'complete'});world.run=run({pass_state:'passed',source_generation:'run-p:10',applied_generation:'run-p:10'});
+ await M.run(env,{now:T0});
+ world.generation=11;world.publishedAt=at(T0+20*H);world.chain=null;world.run=null;
+ for(const h of [20,21,22,23])await M.run(env,{now:T0+h*H+MIN});
+ assert.equal((await producer(M,env,T0+23*H+MIN)).facts.status,'stalled');
+ assert.equal(posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert').length,1);
+}
 console.log('monitor canonical_producer stream: ok');
