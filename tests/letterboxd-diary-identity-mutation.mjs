@@ -68,9 +68,9 @@ const MUTANTS = [
   ['the intake is not removed from the backlog by the reservation', "backlogRemove:fromBacklog?[lid]:[]", "backlogRemove:[]"],
   // Third review of PR #1009: the stale seed is guarded by the row token; every effect is under a reservation.
   ['the reservation drops the row-token guard', ",extra:item.guard?[item.guard]:[]});", ",extra:[]});"],
-  ['the final write drops the row-token guard', "extra:guardsOf(lids),", ""],
+  ['the final write drops the row-token guard', "extra:[...guardsOf(lids),", "extra:["],
   // Fourth review of PR #1009: the guard covers the backlog write too; one stale id never rolls back another; the reservation bounds every effect.
-  ['the final write guards only the entries, not the backlog write', "extra:guardsOf(lids),", "extra:guardsOf(Object.keys(inSet)),"],
+  ['the final write guards only the entries, not the backlog write', "extra:[...guardsOf(lids),", "extra:[...guardsOf(Object.keys(inSet)),"],
   ['a refused batch is not isolated per id', "if(error&&error.code==='write_contention'&&idsOf.length>1){", "if(false){"],
   // Fifth review of PR #1009: the effects commit through their reservation; a local effect never starts late.
   ['the trusted-bridge link commits without its reservation guard', "LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:bridge.tmdb})", "LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb})"],

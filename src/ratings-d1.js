@@ -155,14 +155,14 @@ async function requireOpen(env){
 
 async function readParts(db,key){
  const rows=await many(db,'SELECT part, body, etag FROM ratings_document WHERE key=? ORDER BY part',[key]);
- if(!rows.length)return {value:null,etag:null,text:null};
+ if(!rows.length)return {value:null,etag:null,text:null,parts:0};
  const etag=rows[0].etag;
  if(rows.some((row,index)=>Number(row.part)!==index||row.etag!==etag))throw failed('ratings_domain_unavailable');
  const text=rows.map(row=>row.body).join('');
  if(await digest(text)!==etag)throw failed('ratings_domain_unavailable');
  let value;
  try{value=JSON.parse(text);}catch(error){throw failed('ratings_domain_unavailable',error);}
- return {value,etag,text};
+ return {value,etag,text,parts:rows.length};
 }
 
 export async function readOwned(env,key,{admission=false}={}){
@@ -174,6 +174,17 @@ export async function readOwned(env,key,{admission=false}={}){
  if(!authority.ready)return {owned:false};
  const document=await readParts(db,key);
  return {owned:true,value:document.value,etag:document.etag};
+}
+
+// AIR-673 / ADR 0217 decision 5b: a POSITIVE observation of an owned document, with the exact fence of the parts read (`{key, parts, etag}`; zero parts for a proven absent document). Read only. {owned:false} outside the `d1` domain.
+export async function observeOwned(env,key,{admission=false}={}){
+ if(!ownsKey(key,admission))return {owned:false};
+ const db=database(env);
+ const authority=await readRatingsAuthority(db,env);
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
+ if(!authority.ready)return {owned:false};
+ const document=await readParts(db,key);
+ return {owned:true,value:document.value,fence:{key,parts:document.parts,etag:document.etag}};
 }
 
 export async function routeRead(env,key){
@@ -335,12 +346,12 @@ async function viewWrites(db,records){
  return statements;
 }
 
-export async function projectView(env,records){
+export async function projectView(env,records,{extra=[]}={}){
  const gate=await requireOpen(env,'d1');
  if(!gate.open)return {owned:false,changed:0};
  const statements=await viewWrites(gate.db,records);
  if(!statements.length)return {owned:true,changed:0};
- const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
+ const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...(extra||[]),...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
  await fenced(gate.db,batch);
  return {owned:true,changed:statements.length};
 }

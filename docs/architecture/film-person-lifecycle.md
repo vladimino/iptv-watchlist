@@ -296,7 +296,7 @@ flowchart TD
   film -.->|"later steps, not delivered here"| later["Domain settlement of the entry points<br/>owner re-check and attach"]
 ```
 
-The solid arrows are what this step delivers (dormant). The dashed arrow is later work of ADR 0217 (settlement of the three entry points, readers, merge, the owner re-check and attach). A minting id records only how a Film was created; it is not a current claim.
+The solid arrows are what this step delivers (dormant). The dashed arrow is later work of ADR 0217. Step 4 ([AIR-673](https://trello.com/c/cH19lSHs), dormant, text only: the diagram above is unchanged) adds the Watchlist and Diary settlement of a lid-only Film, the M1 prediction exclusion at queue rebuild, manifest and `submit`, and the separate `predictions.eligibility` field; the rated-candidate settlement, merge, the owner re-check and attach remain later work. A minting id records only how a Film was created; it is not a current claim.
 
 ### Claim bridge evidence: the canonical path ([ADR 0215](../adr/0215-identity-evidence-full-model.md) decision 5, choice 0215-8b = C; card E2b [AIR-618](https://trello.com/c/4RqJUcyf); dormant)
 
