@@ -961,4 +961,69 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
   assert.deepEqual([field(x.file,'synopsis').source,...lang(field(x.file,'synopsis'))],['unattributed','ru','explicit'],'a verified language stays bound to the value');
  }
 }
+// ---- 14. review of 24f8e922: NULL-safe history, equal-value merge keeps verified Russian, history of a released bound value ----
+{
+ const B='film:tmdb:604';
+ const lang=row=>row&&[row.language,row.language_basis];
+ const pair=async()=>{const w=fresh();await seed(w.env);await seed(w.env,{id:B,tmdb:'604',lid:null});setMode(w.file,'enforce');return w;};
+ const mergeIn=async w=>({from:B,to:ID,expected:{from:await revisionOf(w.env,B),to:await revisionOf(w.env,ID)},at:T3,evidence:{verified:true}});
+ const values={synopsis:['Русский текст','Other English'],poster:['/ru.jpg','/other-en.jpg']};
+ // a writer-produced history row never carries an assumed English without its Letterboxd source
+ {
+  const w=fresh();await seed(w.env);setMode(w.file,'enforce');
+  await declare(w.env,{synopsis:'Assumed'},{languages:{synopsis:ASSUMED_EN}});
+  await owner(w.env,[{action:'lock',field:'synopsis'}]);
+  const h=history(w.file)[0];assert.deepEqual([h.old_language_basis,h.old_source,h.new_language_basis,h.new_source],['assumed','letterboxd','assumed','letterboxd']);
+ }
+ // an equal-value automatic merge keeps the verified Russian side in BOTH directions, whatever the confidence or the release state of the Russian row, and a later different English value is still refused
+ for(const [name,[ru,other]] of Object.entries(values)){
+  for(const russian of ['survivor','retired']){
+   for(const state of ['unconfirmed fallback','released']){
+    for(const english of [EN,{},...(name==='synopsis'&&russian==='retired'?[ASSUMED_EN]:[])]){
+     const w=await pair();
+     const ruId=russian==='survivor'?ID:B,enId=russian==='survivor'?B:ID;
+     if(state==='unconfirmed fallback')await declare(w.env,{[name]:ru},{id:ruId,source:'tmdb',agree:false,languages:{[name]:RU}});
+     else{await declare(w.env,{[name]:ru},{id:ruId,source:'tmdb',languages:{[name]:RU}});await owner(w.env,[{action:'lock',field:name}],{id:ruId});await owner(w.env,[{action:'release',field:name}],{id:ruId,at:T1});}
+     await declare(w.env,{[name]:ru},{id:enId,source:english.languageBasis==='assumed'?'letterboxd':'tmdb',at:T1,observedAt:T1,languages:{[name]:english}});
+     const russianRow=field(w.file,name,ruId);
+     const label=[name,russian+' Russian',state,english.language||'untagged'].join(' / ');
+     await mergeFilms(w.env,await mergeIn(w));
+     const row=field(w.file,name);
+     assert.deepEqual([row.source,row.tier,row.agreement,...lang(row)],[russianRow.source,russianRow.tier,russianRow.agreement,'ru','explicit'],label+': the Russian row survives the merge with its own confidence');
+     const diff=await declare(w.env,{[name]:other},{at:T3,observedAt:T3,languages:{[name]:name==='synopsis'?ASSUMED_EN:EN}});
+     assert.deepEqual(diff.skipped.map(item=>item.reason),['language_kept'],label+': a different English value cannot follow');
+     assert.equal(meta(w.file)[name],ru);
+    }
+   }
+  }
+ }
+ // two rows with the same language (or none) still merge by rank
+ {
+  const w=await pair();
+  await declare(w.env,{synopsis:'Same'},{source:'tmdb',languages:{synopsis:EN}});await declare(w.env,{synopsis:'Same'},{id:B,source:'tmdb',observedAt:T1,at:T1,languages:{synopsis:EN}});
+  await mergeFilms(w.env,await mergeIn(w));assert.equal(field(w.file,'synopsis').observed_at,T1,'equal languages: the fresher row wins as before');
+ }
+ // the history of a released but still bound value keeps its verified language (rank unknown, no anchors or confidence manufactured)
+ {
+  const w=fresh();await seed(w.env);setMode(w.file,'enforce');
+  await declare(w.env,{synopsis:'Русский'},{source:'tmdb',languages:{synopsis:RU}});
+  await owner(w.env,[{action:'lock',field:'synopsis'}]);await owner(w.env,[{action:'release',field:'synopsis'}],{at:T1});
+  await owner(w.env,[{action:'lock',field:'synopsis'}],{at:T2});
+  const relock=history(w.file).filter(item=>item.reason==='owner_lock').at(-1);
+  assert.deepEqual([relock.old_tier,relock.old_source,relock.old_anchor_digest,relock.old_language,relock.old_language_basis],[null,null,null,'ru','explicit'],'re-lock: the old side keeps the verified language and nothing else');
+  assert.deepEqual([relock.new_language,relock.new_language_basis,relock.new_source],['ru','explicit','unattributed']);
+  const r=fresh();await seed(r.env);setMode(r.file,'enforce');
+  await declare(r.env,{synopsis:'Русский один'},{source:'tmdb',languages:{synopsis:RU}});
+  await owner(r.env,[{action:'lock',field:'synopsis'}]);await owner(r.env,[{action:'release',field:'synopsis'}],{at:T1});
+  await declare(r.env,{synopsis:'Русский два'},{source:'tmdb',at:T2,observedAt:T2,languages:{synopsis:RU}});
+  const replaced=history(r.file).find(item=>item.reason==='replaced');
+  assert.deepEqual([replaced.old_language,replaced.old_language_basis,replaced.old_tier,replaced.new_language],['ru','explicit',null,'ru'],'eligible replacement: the released value keeps its language in history');
+  const a=fresh();await seed(a.env);setMode(a.file,'enforce');
+  await declare(a.env,{synopsis:'Assumed'},{languages:{synopsis:ASSUMED_EN}});
+  await owner(a.env,[{action:'lock',field:'synopsis'}]);await owner(a.env,[{action:'release',field:'synopsis'}],{at:T1});
+  await owner(a.env,[{action:'lock',field:'synopsis'}],{at:T2});
+  const assumed=history(a.file).filter(item=>item.reason==='owner_lock').at(-1);
+  assert.deepEqual([assumed.old_language,assumed.old_language_basis],[null,null],'an assumed basis is not carried without its Letterboxd lineage');
+ }
+}
 console.log('film metadata provenance (AIR-631): the sync SHA-256 and the writer digest, schema absent and off byte-identical, binding, invalidation and declaration, anchor and mode races, the comparator with convergence over every permutation, locks, triggers and owner actions, modes, clear rules and the field-wise merge, and the statement bounds: ok');

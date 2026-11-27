@@ -126,10 +126,12 @@ const HISTORY_SQL='INSERT INTO film_metadata_history (film_id,field,reason,old_v
 export const FIELD_UPSERT='INSERT INTO film_metadata_field (film_id,field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,language,language_basis,observed_at,checked_at,value_digest,write_key,written_revision,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,field) DO UPDATE SET tier=excluded.tier,source=excluded.source,origin=excluded.origin,anchor_scheme=excluded.anchor_scheme,anchor_value=excluded.anchor_value,anchor_digest=excluded.anchor_digest,agreement=excluded.agreement,language=excluded.language,language_basis=excluded.language_basis,observed_at=excluded.observed_at,checked_at=excluded.checked_at,value_digest=excluded.value_digest,write_key=excluded.write_key,written_revision=excluded.written_revision,updated_at=excluded.updated_at';
 export const historyStatement=(filmId,field,reason,old,next,writeKey,at,mergedFrom=null)=>[HISTORY_SQL,[filmId,field,reason,old?.valueText??null,old?.tier??null,old?.source??null,old?.anchorScheme??null,old?.anchorValue??null,old?.anchorDigest??null,old?.agreement??null,old?.language??null,old?.languageBasis??null,old?.observedAt??null,next?.valueDigest??null,next?.tier??null,next?.source??null,next?.language??null,next?.languageBasis??null,next?.anchorDigest??null,writeKey,at,mergedFrom]];
 // The old value and its semantic columns for a history row; the columns are null when the old value was `unknown` (no bound row).
-function oldOf(value,stand){
+// A released value still bound to its row ranks `unknown` (its columns stay NULL: no anchors, no confidence is manufactured) but keeps the VERIFIED language bound to it (ADR 0224); an assumed basis exists only under Letterboxd lineage, so it is not carried without the row.
+function oldOf(value,stand,raw=null){
  if(value===null)return null;
  const row=stand.row&&stand.bound?stand.row:null;
- return {valueText:valueText(value),tier:row?.tier??null,source:row?.source??null,anchorScheme:row?.anchor_scheme??null,anchorValue:row?.anchor_value??null,anchorDigest:row?.anchor_digest??null,agreement:row?.agreement??null,language:row?.language??null,languageBasis:row?.language_basis??null,observedAt:row?.observed_at??null};
+ const verified=!row&&raw&&raw.language_basis==='explicit'&&raw.value_digest===valueDigest(value)?raw:null;
+ return {valueText:valueText(value),tier:row?.tier??null,source:row?.source??null,anchorScheme:row?.anchor_scheme??null,anchorValue:row?.anchor_value??null,anchorDigest:row?.anchor_digest??null,agreement:row?.agreement??null,language:row?.language??verified?.language??null,languageBasis:row?.language_basis??verified?.language_basis??null,observedAt:row?.observed_at??null};
 }
 const fieldRow=(filmId,field,row,value,writeKey,revision,at)=>[FIELD_UPSERT,[filmId,field,row.tier,row.source,row.origin,row.anchorScheme??null,row.anchorValue??null,row.anchorDigest??null,row.agreement??null,row.language??null,row.languageBasis??null,row.observedAt,row.checkedAt??at,valueDigest(value),writeKey,revision,at]];
 
@@ -172,7 +174,7 @@ export function planMetadataProvenance(snapshot,input,at){
  for(const field of FIELDS){
   const stored=storedValue(row,field),stand=standing(prov.fields[field],stored,digest,dimLocked);
   if(stand.mismatch){out.counts.provenance_mismatch++;}
-  const old=oldOf(stored,stand);
+  const old=oldOf(stored,stand,prov.fields[field]);
   // the language bound to the stored value: any row that still describes it (a released one included: release changes confidence, not the language)
   const boundRaw=prov.fields[field]&&stored!==null&&prov.fields[field].value_digest===valueDigest(stored)?prov.fields[field]:null;
   const sLang=boundRaw?.language??null,sBasis=boundRaw?.language_basis??null;
@@ -308,7 +310,7 @@ export function planMetadataClear(snapshot,input,at){
  if(!owner&&prov.mode==='hold')throw failed('film_metadata_hold');
  const pre=[],post=[],counts=emptyCounts();
  if(owner)pre.push(['INSERT OR IGNORE INTO film_metadata_owner_release (film_id) VALUES (?)',[id]]);
- for(const item of rows){if(item.value===null)continue;pre.push(historyStatement(id,item.field,'cleared',oldOf(item.value,item.stand),null,writeKey,atIso));counts.history++;}
+ for(const item of rows){if(item.value===null)continue;pre.push(historyStatement(id,item.field,'cleared',oldOf(item.value,item.stand,item.raw),null,writeKey,atIso));counts.history++;}
  // the row's own delete (the caller's statement) fires the invalidation trigger for non-owner rows; this removes whatever remains, owner rows included under the release row
  post.push(['DELETE FROM film_metadata_field WHERE film_id=?',[id]]);
  // an owner clear that removed pins is an actual protection release: wake the core part (the delete under the release row cannot tell it from a move, so the writer says it)
@@ -381,10 +383,13 @@ export async function reconcileMetadata(db,from,to,resolve,at){
   if(toValue===null){takeRetired();continue;}
   if(same(fromValue,toValue)){
    // equal values: the pin is preserved by default; with two pins the survivor's is kept
-   const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest,fromStand.row?.language,fromStand.row?.language_basis),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest,toStand.row?.language,toStand.row?.language_basis);
+   const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest,effective(fromProv?.fields[field],fromStand)?.language,effective(fromProv?.fields[field],fromStand)?.language_basis),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest,effective(toProv?.fields[field],toStand)?.language,effective(toProv?.fields[field],toStand)?.language_basis);
    const rowsEqual=semantic(retiredRow())===semantic(effective(toProv?.fields[field],toStand));
    if(rowsEqual)continue;
-   const retiredWins=toPinned?false:fromPinned?true:compare(fromRank,toRank)>0;
+   // ADR 0224: the verified Russian bound to the identical value is never given up by an automatic equal-value merge (the Russian side's row is kept with its own actual confidence, a released row included); owner pins keep their priority above
+   const fromLanguage=effective(fromProv?.fields[field],fromStand)?.language??null,toLanguage=effective(toProv?.fields[field],toStand)?.language??null;
+   const russianSide=LANGUAGE_FIELDS.includes(field)&&(fromLanguage==='ru')!==(toLanguage==='ru');
+   const retiredWins=toPinned?false:fromPinned?true:russianSide?fromLanguage==='ru':compare(fromRank,toRank)>0;
    if(retiredWins){if(effective(toProv?.fields[field],toStand))discard(to,toProv,toDim,field,toValue,toStand);const row=retiredRow();if(row)out.items.push(moved(field,row));else out.items.push(['DELETE FROM film_metadata_field WHERE film_id=? AND field=?',[to,field]]);}
    else if(retiredRow())discard(from,fromProv,fromDim,field,fromValue,fromStand);
    continue;

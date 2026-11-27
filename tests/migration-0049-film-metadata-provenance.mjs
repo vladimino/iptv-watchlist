@@ -73,9 +73,12 @@ assert.equal(rows(db,"SELECT COUNT(*) AS n FROM film_metadata").length,1);
  exec(file,FIELD('film:b','poster',{source:'tmdb',anchor_scheme:'tmdb',language:'ru',language_basis:'explicit'}));
  fails(file,"UPDATE film_metadata_field SET language='de' WHERE film_id='film:b' AND field='synopsis'",/CHECK|constraint/i);
  fails(file,`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,old_language) VALUES ('film:a','year','replaced','wl1','${T}','de')`,/CHECK/i);
+ // an assumed English without its Letterboxd source is refused on both sides (a NULL source must not satisfy the predicate)
+ for(const [why,cols,vals] of [['assumed English with no old source','old_language,old_language_basis',"'en','assumed'"],['assumed English with no new source','new_language,new_language_basis',"'en','assumed'"],['assumed English with a NULL old source and a new source','old_language,old_language_basis,new_language,new_language_basis,new_source',"'en','assumed','en','explicit','tmdb'"]])
+  fails(file,`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,${cols}) VALUES ('film:a','synopsis','replaced','n-${why.length}','${T}',${vals})`,/CHECK/i);
  for(const [why,cols,vals] of [['assumed Russian on the old side','old_language,old_language_basis,old_source',"'ru','assumed','letterboxd'"],['assumed Russian on the new side','new_language,new_language_basis,new_source',"'ru','assumed','letterboxd'"],['unpaired new language','new_language',"'ru'"]])
   fails(file,`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,${cols}) VALUES ('film:a','synopsis','replaced','x-${why.length}','${T}',${vals})`,/CHECK/i);
- exec(file,`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,old_language,old_language_basis,new_language,new_language_basis) VALUES ('film:a','synopsis','replaced','wl2','${T}','en','assumed','ru','explicit')`);
+ exec(file,`INSERT INTO film_metadata_history (film_id,field,reason,write_key,at,old_language,old_language_basis,old_source,new_language,new_language_basis,new_source) VALUES ('film:a','synopsis','replaced','wl2','${T}','en','assumed','letterboxd','ru','explicit','tmdb')`);
  exec(file,FIELD('film:a','runtime',{tier:'owner',source:'owner',origin:'owner_route',agreement:null,anchor_scheme:null,anchor_value:null}));
  exec(file,FIELD('film:a','synopsis',{tier:'owner',source:'unattributed',origin:'owner_route',agreement:null,anchor_scheme:null,anchor_value:null,anchor_digest:null}));
  exec(file,FIELD('film:a','poster',{tier:'released',source:'unattributed',origin:'owner_route',agreement:null,anchor_scheme:null,anchor_value:null,anchor_digest:null}));

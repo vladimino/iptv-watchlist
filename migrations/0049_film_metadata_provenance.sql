@@ -120,8 +120,8 @@ CREATE TABLE film_metadata_history (
  CHECK ((old_language IS NULL) = (old_language_basis IS NULL)),
  CHECK ((new_language IS NULL) = (new_language_basis IS NULL)),
  CHECK ((old_language IS NULL AND new_language IS NULL) OR field IN ('synopsis', 'poster')),
- CHECK (old_language_basis IS NULL OR old_language_basis <> 'assumed' OR (field = 'synopsis' AND old_source = 'letterboxd' AND old_language = 'en')),
- CHECK (new_language_basis IS NULL OR new_language_basis <> 'assumed' OR (field = 'synopsis' AND new_source = 'letterboxd' AND new_language = 'en')),
+ CHECK (old_language_basis IS NULL OR old_language_basis <> 'assumed' OR (field = 'synopsis' AND old_source IS 'letterboxd' AND old_language IS 'en')),
+ CHECK (new_language_basis IS NULL OR new_language_basis <> 'assumed' OR (field = 'synopsis' AND new_source IS 'letterboxd' AND new_language IS 'en')),
  UNIQUE (film_id, field, write_key)
 ) STRICT;
 CREATE TRIGGER film_metadata_history_no_update BEFORE UPDATE ON film_metadata_history
