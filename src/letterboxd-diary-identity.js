@@ -315,13 +315,13 @@ const LetterboxdDiaryIdentity=(()=>{
     stored.films[item.lid]=value;base.set(item.lid,JSON.stringify(value));return true;
    }catch{counts.persistFailed=1;return false;}
   };
-  const settleLidOnlyPage=async(item,prior,proofResult)=>{
+  const settleLidOnlyPage=async(item,prior,proofResult,finalize)=>{
    const lid=item.lid,proof=proofResult.proof;
    if(late()||!guarded(lid)){defer(item,prior);return;}
    if(!(await intendLidOnly(item,proof.proofDigest))){release(item);counts.deferred++;return;}
    let admitted;
    try{
-    admitted=await LetterboxdAdmissionD1.admitVerifiedLidOnly(guarded(lid),{lid,route,...(lidIntentOf(prior)===proof.proofDigest?{intent:{proofDigest:proof.proofDigest}}:{}),reacquire:async()=>{try{return {ok:true,proof,links:await LetterboxdFacts.linksObservation(env,lid)};}catch{return {ok:false,reason:'source_unavailable'};}},now:()=>iso(clock())});
+    admitted=await LetterboxdAdmissionD1.admitVerifiedLidOnly(guarded(lid),{lid,route,finalize,...(lidIntentOf(prior)===proof.proofDigest?{intent:{proofDigest:proof.proofDigest}}:{}),reacquire:async()=>{try{return {ok:true,proof,links:await LetterboxdFacts.linksObservation(env,lid)};}catch{return {ok:false,reason:'source_unavailable'};}},now:()=>iso(clock())});
    }catch(error){record(item,error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||'deferred');return;}
    if((admitted.outcome==='admitted_lid_only'||admitted.outcome==='present_lid_only')&&typeof admitted.id==='string'){
     counts.verified++;settled.set(lid,'lid_only');clear.push(lid);
@@ -332,7 +332,9 @@ const LetterboxdDiaryIdentity=(()=>{
     return;
    }
    if(admitted.outcome==='wait'){defer(item,prior);return;}
-   record(item,admitted.outcome==='conflict'?'admission_conflict':admitted.outcome==='held'||admitted.outcome==='redirect'?'admission_held':'deferred');
+   // A mismatch or a conflict is written through the SAME fenced finalization as the TMDB path (the history guard rides in that batch); an explicit `source_changed` is never collapsed into an uncharged deferral.
+   if(admitted.outcome==='source_changed'||admitted.outcome==='conflict'){if(admitted.finalized)return;record(item,admitted.outcome==='conflict'?'admission_conflict':'source_changed');return;}
+   record(item,admitted.outcome==='held'||admitted.outcome==='redirect'?'admission_held':'deferred');
   };
   const resolveAtD1=async(item,prior)=>{
    const lid=item.lid,intended=intentOf(prior),lidIntent=lidIntentOf(prior);
@@ -413,7 +415,7 @@ const LetterboxdDiaryIdentity=(()=>{
     case 'other_code':case 'conflict':case 'source_changed':return;
     case 'wait':defer(item,prior);outcomes.set(lid,{checked:false,class:'not_now',reason:'in_flight',retryAt:out.dueAt??null,attempts:Number(stored.films[lid]?.attempts)||0,streak:Number(stored.films[lid]?.streak)||0,terminal:false});return;
     case 'source_unavailable':
-     if(out.reason==='lid_only_page'&&lidProof){await settleLidOnlyPage(item,prior,lidProof);return;}
+     if(out.reason==='lid_only_page'&&lidProof){await settleLidOnlyPage(item,prior,lidProof,finalize);return;}
      if(out.reason==='deferred'){defer(item,prior);return;}if(out.charged&&out.finalized)return;record(item,out.reason||'check_failed');return;
     case 'held':case 'redirect':record(item,'admission_held');return;
     default:
@@ -491,7 +493,7 @@ const LetterboxdDiaryIdentity=(()=>{
    let bridge=null;
    try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){defer(item,prior);continue;}bridge=null;}
    // At `d1` an unresolved intent (or an evidence obligation) of this id is settled by the coordinator, never replaced or bypassed by a bridge shortcut that performed no check.
-   if(bridge?.state==='ok'&&bridge.tmdb&&!(admissionAtD1&&(intentOf(prior)!==null||prior?.pendingEvidence))){
+   if(bridge?.state==='ok'&&bridge.tmdb&&!(admissionAtD1&&(intentOf(prior)!==null||lidIntentOf(prior)!==null||prior?.pendingEvidence))){
     item.bridged=true;
     if(late()){defer(item,prior);continue;}
     if(!(await take(item,stored.films[lid]||null)))continue;

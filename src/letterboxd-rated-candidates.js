@@ -318,7 +318,7 @@ const LetterboxdRatedCandidates = (() => {
     const saved = await casDoc(env, key, null, current => {
       const row = current.candidates[code];
       if (!row || row.state === 'verified' || row.state === 'removed') return null;
-      if (claim && !sameClaim(row, claim.tmdb, claim.filmPath)) return null;
+      if (claim && !(claim.lidOnly ? sameLidIntent(row, claim.filmPath, claim.proofDigest, claim.item) : sameClaim(row, claim.tmdb, claim.filmPath))) return null;
       current.candidates[code] = {...row, state: 'needs_review', reason: payload.reason, reasons: payload.reasons, reasonKind: payload.reasonKind, intendedTmdb: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
@@ -496,18 +496,24 @@ const LetterboxdRatedCandidates = (() => {
   // movie; the coordinator's `lid_only` kind admits the Film `film:lb:<lid>` and the candidate becomes `verified` with `tmdb: null`, its watched/rating facts written under the lid's own fact key `lb-<lid>` and NO TMDB alias.
   // The durable intent is the row itself: `admitting` with `kind: 'lid_only'`, `intendedTmdb: null` and the page path (`filmPath`), claimed by an exact compare-and-swap from `pending`. A row that already holds a
   // DIFFERENT intent (another path, or a TMDB intent) is a changed source: reviewed behind the history guard. The existing TMDB path is untouched.
-  async function writeLidRating(env, code, item, generatedAt, sha, extra = []) {
+  async function writeLidRating(env, code, row, generatedAt, sha, extra = []) {
     // Every effect carries the settlement assertions (`extra`: the current ownership and the candidate document the attempt read) IN ITS OWN D1 batch, and the lid-only contract holds at the effect: the link and the
-    // record land on exactly `lb-<lid>`, with no movie alias, id or redirect. An effect whose guard is false commits nothing; effects that already committed (valid then) are kept, never rolled back.
+    // record land on exactly `lb-<lid>`, with no movie alias, id or redirect. The facts are derived from `row`, the SAME snapshot the document fence was taken from. An effect whose guard is false commits nothing;
+    // effects that already committed (valid then) are kept, never rolled back.
     const factKey = await LetterboxdFacts.linkLidOnly(env, code, {extra});
+    // The positive observation of the links document AFTER our own link: a movie alias onto the same key before the record or projection batch changes its version and fails those batches (the same fence, no new mechanism).
+    const links = await LetterboxdFacts.linksObservation(env, code);
+    if (links.tmdbAlias) throw Object.assign(new Error('alias_conflict'), {code: 'alias_conflict'});
+    const effectExtra = [...extra, LetterboxdAdmissionD1.lidOnlyDocumentFence(links.fence)];
     const watched = await LetterboxdFacts.observation({factKey, fact: 'watched', value: true, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
-    const rating = await LetterboxdFacts.observation({factKey, fact: 'rating', value: item.rating, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
-    const result = await LetterboxdFacts.recordObservations(env, factKey, {letterboxd: String(code)}, [{fact: 'watched', observation: watched}, {fact: 'rating', observation: rating}], {extra, lidOnly: true});
-    await LetterboxdFacts.projectRecords(env, [result.record], {extra});
+    const rating = await LetterboxdFacts.observation({factKey, fact: 'rating', value: row.rating, observedAt: generatedAt, source: 'letterboxd_export', sourceRef: sha});
+    const result = await LetterboxdFacts.recordObservations(env, factKey, {letterboxd: String(code)}, [{fact: 'watched', observation: watched}, {fact: 'rating', observation: rating}], {extra: effectExtra, lidOnly: true});
+    await LetterboxdFacts.projectRecords(env, [result.record], {extra: effectExtra});
     const outcomes = Object.fromEntries(result.outcomes.map(entry => [entry.fact, entry.outcome]));
     return {factKey, outcomes};
   }
-  const sameLidIntent = (row, filmPath, proofDigest) => !!(row && row.state === 'admitting' && row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath && row.proofDigest === proofDigest);
+  // `item` (the row this attempt read) makes the intent EXACT: the rating and the observation time are the observation the attempt writes; a replacement that keeps the path and the digest but changes either is another row.
+  const sameLidIntent = (row, filmPath, proofDigest, item) => !!(row && row.state === 'admitting' && row.kind === 'lid_only' && row.intendedTmdb === null && row.filmPath === filmPath && row.proofDigest === proofDigest && (!item || (row.rating === item.rating && row.observedAt === item.observedAt)));
   async function commitLidOnly(env, sha, code, item, proof, generatedAt, recover = {}) {
     const key = CANDIDATES(sha);
     const filmPath = proof.proof.canonicalPath, proofDigest = proof.proof.proofDigest;
@@ -516,9 +522,11 @@ const LetterboxdRatedCandidates = (() => {
       const row = current.candidates[code];
       if (!row) {outcome = 'missing'; return null;}
       if (row.state === 'removed' || row.state === 'needs_review') {outcome = row.state; return null;}
-      if (row.state === 'verified') {outcome = row.kind === 'lid_only' && row.tmdb == null && row.filmPath === filmPath && row.proofDigest === proofDigest ? 'already' : 'verified_conflict'; return null;}
-      if (row.state === 'admitting') {outcome = sameLidIntent(row, filmPath, proofDigest) ? 'held' : 'intent_conflict'; return null;}
+      if (row.state === 'verified') {outcome = row.kind === 'lid_only' && row.tmdb == null && row.filmPath === filmPath && row.proofDigest === proofDigest && row.rating === item.rating && row.observedAt === item.observedAt ? 'already' : 'verified_conflict'; return null;}
+      if (row.state === 'admitting') {outcome = sameLidIntent(row, filmPath, proofDigest, item) ? 'held' : 'intent_conflict'; return null;}
       if (row.state !== 'pending') {outcome = 'claim_changed'; return null;}
+      // Only the row this attempt READ is claimed: a pending row replaced meanwhile (another rating or observation) is not adopted.
+      if (row.rating !== item.rating || row.observedAt !== item.observedAt) {outcome = 'claim_changed'; return null;}
       current.candidates[code] = {...row, state: 'admitting', kind: 'lid_only', intendedTmdb: null, filmPath, proofDigest, enrichment: 'pending', reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       outcome = 'claimed';
@@ -526,7 +534,7 @@ const LetterboxdRatedCandidates = (() => {
     });
     if (outcome === 'intent_conflict') return reviewBehindGuard(env, key, code, 'source_changed', recover.guard || null);
     if (outcome !== 'claimed' && outcome !== 'held' && outcome !== 'already') return refusedClaim(code, outcome);
-    const heldNow = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (outcome === 'already' ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest ? {ok: true} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest) ? {ok: true} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
+    const heldNow = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (outcome === 'already' ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest && row.rating === item.rating && row.observedAt === item.observedAt ? {ok: true} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest, item) ? {ok: true} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
     const held = await heldNow();
     if (!held.ok) return refusedClaim(code, held.reason);
     // The coordinator: the page proof is the one this step just made; the links observation is read FRESH here and fenced inside the canonical batch, so a link written in between fails the batch whole.
@@ -572,45 +580,50 @@ const LetterboxdRatedCandidates = (() => {
   // ownership of the lid by the resolved Film and, for this attempt's own proof row, its own applied receipt. A refused batch writes nothing and leaves the row `admitting`.
   async function settleLidOnly(env, sha, code, item, {filmPath, proofDigest, filmId, requestId, replay, already, fetched, generatedAt, guard}) {
     const key = CANDIDATES(sha);
-    const current = async () => {const opened = await readDoc(env, key); const row = opened.value && opened.value.candidates && opened.value.candidates[code]; return opened.value === undefined ? {ok: false, reason: 'storage_unavailable'} : (already ? (row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest ? {ok: true, row} : {ok: false, reason: 'claim_changed'}) : sameLidIntent(row, filmPath, proofDigest) ? {ok: true, row} : {ok: false, reason: !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed'});};
-    const before = await current();
-    if (!before.ok) return refusedClaim(code, before.reason);
-    // The assertions every effect and the terminal write carry, built BEFORE the first effect: complete current ownership (replay of the attempt's own receipt, or an independently proved present Film) and the exact
-    // version of the candidate document this settlement read (the row content).
+    // The row this attempt may settle, EXACT: kind, no movie, page path, proof digest and the observation it writes (rating and time). `already` is a verified row of the same exact intent.
+    const matches = row => already ? !!(row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest && row.rating === item.rating && row.observedAt === item.observedAt) : sameLidIntent(row, filmPath, proofDigest, item);
+    const whyNot = row => !row ? 'claim_missing' : row.state === 'needs_review' ? 'needs_review' : row.state === 'removed' ? 'removed' : 'claim_changed';
+    // The assertions every effect and the terminal write carry, built BEFORE the first effect: complete current ownership (replay of the attempt's own receipt, or an independently proved present Film).
     const owned = await LetterboxdAdmissionD1.lidOnlySettlementGuard({lid: code, filmId, proofDigest, requestId, replay: replay === true});
-    let documentFence = null;
-    if (typeof RatingsD1 !== 'undefined') {
+    if (typeof RatingsD1 === 'undefined') return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'deferred', phase: 'identity'};
+    let rating = null;
+    // At most three snapshots: a change of ANOTHER candidate (the document version moved) is retried, but only while THIS row still matches exactly.
+    for (let attempt = 0; attempt < 3 && !rating; attempt++) {
+      // ONE authoritative snapshot: the candidate value and the version fence of the same read. The facts are derived from this row and the fence authenticates exactly this version.
       const observed = await RatingsD1.observeOwned(env, key, {admission: true});
-      if (!observed.owned) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'deferred', phase: 'identity'};
-      documentFence = LetterboxdAdmissionD1.lidOnlyDocumentFence(observed.fence);
-    }
-    const guards = documentFence ? [owned, documentFence] : [owned];
-    let rating;
-    try {
-      rating = await writeLidRating(env, code, item, generatedAt, sha, guards);
-    } catch (error) {
-      if (error && error.code === 'alias_conflict') {
-        const review = await markReview(env, key, code, 'ratings_tmdb_link', null, undefined, {guard});
-        return {pending: true, fetched, verified: false, code, state: review.refused ? 'admitting' : 'needs_review', reason: review.refused ? 'in_flight' : review.reason, phase: 'identity', writes: review.changed === true};
+      if (!observed.owned || observed.value === undefined) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'deferred', phase: 'identity'};
+      const row = observed.value && observed.value.candidates && observed.value.candidates[code];
+      if (!matches(row)) return refusedClaim(code, whyNot(row));
+      const guards = [owned, LetterboxdAdmissionD1.lidOnlyDocumentFence(observed.fence)];
+      try {
+        rating = await writeLidRating(env, code, row, generatedAt, sha, guards);
+      } catch (error) {
+        if (error && error.code === 'alias_conflict') {
+          // Reviewed only while the EXACT row this attempt owns still stands; a replaced row is never reviewed by a stale attempt.
+          const review = await markReview(env, key, code, 'ratings_tmdb_link', {lidOnly: true, filmPath, proofDigest, item}, undefined, {guard});
+          if (!review.changed && !review.refused) return refusedClaim(code, 'claim_changed');
+          return {pending: true, fetched, verified: false, code, state: review.refused ? 'admitting' : 'needs_review', reason: review.refused ? 'in_flight' : review.reason, phase: 'identity', writes: review.changed === true};
+        }
+        // A guard that is false (the ownership changed, the candidate document moved, or a movie alias appeared) refuses the effect's own batch: nothing new commits. The loop re-reads and retries only while this exact row stands.
+        if (error && (error.code === 'write_contention' || error.code === 'ratings_domain_fence' || error.code === 'atomic_unavailable')) continue;
+        throw error;
       }
-      // A guard that is false (the ownership changed, or the candidate row was replaced or removed since it was read) refuses the effect's own batch: nothing new commits, the row keeps its durable intent.
-      if (error && (error.code === 'write_contention' || error.code === 'ratings_domain_fence' || error.code === 'atomic_unavailable')) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'ownership_changed', phase: 'identity'};
-      throw error;
     }
+    if (!rating) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'ownership_changed', phase: 'identity'};
+    // The terminal write is itself the compare-and-swap of the candidate document (its own version check), and its apply accepts ONLY the exact row this attempt owns; only the ownership assertion rides with it.
     const saved = await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
       const row = current.candidates[code];
-      if (!(already ? row && row.state === 'verified' && row.kind === 'lid_only' && row.filmPath === filmPath && row.proofDigest === proofDigest : sameLidIntent(row, filmPath, proofDigest))) return null;
+      if (!matches(row)) return null;
       if (row.state === 'verified') return null;
       // Enrichment is retired at `d1` and a lid-only Film is outside its scope (ADR 0211, ADR 0217 decision 9): nothing is left to enrich.
       current.candidates[code] = {...row, state: 'verified', kind: 'lid_only', tmdb: null, filmPath, proofDigest, filmId, enrichment: 'done', intendedTmdb: null, reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
-    // The terminal write is itself the compare-and-swap of the candidate document (its own version check), so only the ownership assertion rides with it; the document fence guards the EFFECTS before it.
     }, {extra: [owned]});
     if (saved.refused === true) return {pending: true, fetched, verified: false, code, state: 'admitting', reason: 'ownership_changed', phase: 'identity'};
     const after = await readDoc(env, key);
     const row = after.value && after.value.candidates && after.value.candidates[code];
-    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath || row.proofDigest !== proofDigest) return refusedClaim(code, 'claim_changed');
+    if (!row || row.state !== 'verified' || row.kind !== 'lid_only' || row.filmPath !== filmPath || row.proofDigest !== proofDigest || row.rating !== item.rating || row.observedAt !== item.observedAt) return refusedClaim(code, 'claim_changed');
     return {pending: true, fetched, verified: true, code, tmdb: null, lidOnly: true, rating: rating.outcomes, filmId, phase: 'identity'};
   }
   // The recovery of an applied lid-only attempt: no page, no proof and no coordinator call. The coordinator's reconcile (`present_lid_only`, `fromReceipt`) named the resolved Film; the row's own exact intent (path and proof digest)
