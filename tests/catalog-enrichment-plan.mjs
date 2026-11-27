@@ -234,12 +234,17 @@ function CORE_ALL(waiting,reason){return P.CORE_FIELDS.every(field=>waiting[fiel
 // ---- AIR-684: the source version projection shared by the producer and every observer (ADR 0219 decision 2) ----
 {
  const fields={year:1999,runtime:136,synopsis:'a',poster:'https://img/a.jpg',url:'https://www.themoviedb.org/movie/603',genres:['Action']};
- const core=await P.coreVersion('tmdb','603',fields);
+ const comparable={synopsis:'english overview',genres:['28','878']};
+ const core=await P.coreVersion('tmdb','603',fields,comparable);
  assert.match(core,/^[0-9a-f]{64}$/);
- assert.equal(await P.coreVersion('tmdb','603',{...fields,synopsis:'другое',poster:'https://img/b.jpg',genres:['Боевик']}),core,'a localized synopsis, poster or genre name is not a change of the core version');
- assert.notEqual(await P.coreVersion('tmdb','603',{...fields,runtime:137}),core);
- assert.notEqual(await P.coreVersion('tmdb','604',fields),core,'the anchor is part of the identity');
- assert.notEqual(await P.coreVersion('letterboxd','603',fields),core,'and so is the source');
+ assert.equal(await P.coreVersion('tmdb','603',{...fields,synopsis:'другое',poster:'https://img/b.jpg',genres:['Боевик']},comparable),core,'a TMDB response of another request language: its own overview, poster path and genre NAMES are not what is compared');
+ assert.notEqual(await P.coreVersion('tmdb','603',{...fields,runtime:137},comparable),core);
+ assert.notEqual(await P.coreVersion('tmdb','603',fields,{...comparable,synopsis:'a changed english overview'}),core,'the English overview is covered');
+ assert.notEqual(await P.coreVersion('tmdb','603',fields,{...comparable,genres:['28']}),core,'the genre ids are covered');
+ assert.equal(await P.coreVersion('tmdb','603',fields,null),null,'an unverified comparable projection (unreadable translations) has no version');
+ assert.notEqual(await P.coreVersion('tmdb','604',fields,comparable),core,'the anchor is part of the identity');
+ const lb=await P.coreVersion('letterboxd','abc',fields);
+ for(const change of [{year:2000},{runtime:100},{synopsis:'b'},{poster:'https://img/b.jpg'},{url:'https://letterboxd.com/film/x/'},{genres:['Drama']}])assert.notEqual(await P.coreVersion('letterboxd','abc',{...fields,...change}),lb,'a Letterboxd version covers every approved field: '+Object.keys(change));
  const items=[{role:'director',key:'12',name:'D'},{role:'actor',key:'11',name:'A'}];
  const credits=await P.creditsVersion('tmdb','603',{status:'ok',items});
  assert.match(credits,/^[0-9a-f]{64}$/);

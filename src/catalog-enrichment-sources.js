@@ -46,20 +46,39 @@ async function textOf(response){
 
 // ---- TMDB ----
 const isoYear=value=>{const match=/^(\d{4})/.exec(String(value||''));return match?Number(match[1]):null;};
+const plainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+const hasId=item=>plainObject(item)&&(typeof item.id==='number'||(typeof item.id==='string'&&item.id!==''));
+// A credits section is READABLE only when every entry of a supported role is a well-formed object with an id: a cast entry, and a crew entry whose job is `Director`. A malformed supported entry is never filtered out of a "complete"
+// set; it makes the whole section unreadable (a repairable failure). A crew entry of another job carries no credit and is not judged.
+function readCredits(credits){
+ if(!plainObject(credits)||!Array.isArray(credits.cast)||!Array.isArray(credits.crew))return {status:'unreadable',items:[]};
+ if(!credits.cast.every(hasId))return {status:'unreadable',items:[]};
+ if(!credits.crew.every(plainObject)||!credits.crew.filter(item=>item.job==='Director').every(hasId))return {status:'unreadable',items:[]};
+ const cast=[...credits.cast].sort((a,b)=>(a.order??1e9)-(b.order??1e9)).map(item=>({role:'actor',key:String(item.id),name:item.name??null}));
+ const directors=credits.crew.filter(item=>item.job==='Director').map(item=>({role:'director',key:String(item.id),name:item.name??null}));
+ return {status:'ok',items:[...directors,...cast]};
+}
+// What a request language cannot change, from the SAME response: the genre IDS (the names are localized) and the English (en-US) overview of the translations list (the producer's own fetch is made without a language and answers in
+// English; a Discovery detail is requested in `ru-RU`, so its own `overview` is Russian). The poster path has no such representation in this response (it depends on the request language) and is NOT part of the comparable version.
+// null when the translations section is unreadable: the comparable core is then unverified, never a guess.
+function comparableOf(json){
+ const t=json.translations;
+ // the same judgement of the section as the Russian title selection: a missing or malformed translations section (or a Russian entry without data) is unverified for BOTH
+ if(selectRussianTitle(t).status==='unreadable')return null;
+ if(!t.translations.every(plainObject))return null;
+ const english=t.translations.find(entry=>entry.iso_639_1==='en'&&entry.iso_3166_1==='US');
+ const overview=typeof english?.data?.overview==='string'&&english.data.overview.trim()?english.data.overview.trim():null;
+ const genres=Array.isArray(json.genres)?json.genres.map(genre=>genre?.id).filter(value=>value!=null).map(String):[];
+ return {synopsis:overview,genres};
+}
 export function parseTmdb(json,id){
- if(!json||typeof json!=='object'||Array.isArray(json)||String(json.id)!==String(id))return null;
- const credits=json.credits;
- let creditAnswer={status:'unreadable',items:[]};
- if(credits&&typeof credits==='object'&&Array.isArray(credits.cast)&&Array.isArray(credits.crew)){
-  const cast=[...credits.cast].filter(item=>item&&item.id!=null).sort((a,b)=>(a.order??1e9)-(b.order??1e9)).map(item=>({role:'actor',key:String(item.id),name:item.name??null}));
-  const directors=credits.crew.filter(item=>item&&item.job==='Director'&&item.id!=null).map(item=>({role:'director',key:String(item.id),name:item.name??null}));
-  creditAnswer={status:'ok',items:[...directors,...cast]};
- }
+ if(!plainObject(json)||String(json.id)!==String(id))return null;
  return {
   fields:{year:isoYear(json.release_date),runtime:Number.isInteger(json.runtime)&&json.runtime>0?json.runtime:null,synopsis:typeof json.overview==='string'&&json.overview.trim()?json.overview.trim():null,
    poster:typeof json.poster_path==='string'&&json.poster_path.startsWith('/')?POSTER_BASE+json.poster_path:null,url:'https://www.themoviedb.org/movie/'+id,
    genres:Array.isArray(json.genres)?json.genres.map(genre=>genre?.name).filter(Boolean):[]},
-  credits:creditAnswer,
+  comparable:comparableOf(json),
+  credits:readCredits(json.credits),
   title:selectRussianTitle(json.translations),
  };
 }

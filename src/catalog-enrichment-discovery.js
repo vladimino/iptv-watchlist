@@ -23,11 +23,19 @@ export async function tmdbPartVersions(movie,tmdbId){
  const parsed=parseTmdb(movie,String(tmdbId));
  if(!parsed)return null;
  const anchor=String(tmdbId);
- return {core:await coreVersion('tmdb',anchor,parsed.fields),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
+ return {core:await coreVersion('tmdb',anchor,parsed.fields,parsed.comparable),credits:await creditsVersion('tmdb',anchor,parsed.credits),localization:await localizationVersion('tmdb',anchor,parsed.title)};
 }
 // One statement per verified part, each followed by `SELECT changes()` so the caller reads the rows THIS batch changed (never a count over the catalog). A part is written only for a Film that holds a Discovery membership at the
-// time of the write and still holds the trusted, non-conflicting, non-redirected claim; with a `lease`, only while the Discovery lease of this revalidation is still held. The upsert re-arms an existing row only when the digest
-// differs, so an observation identical to the stored one changes nothing. The producer decides, from its own stored `source_version` and part status, whether a signal needs a fetch: equal and complete is dropped without one.
+// time of the write and still holds the trusted, non-conflicting, non-redirected claim; with a `lease`, only while the Discovery lease of this revalidation is still held. And only when the producer's APPLIED state does not already
+// say the same thing: the applicable part is complete at exactly this version (for credits: every ACTIVE chunk row of the tmdb source, superseded slots excluded, complete at this version). An enriched Film observed again with an
+// equal complete response therefore writes nothing at all (no pending row, no wake, no epoch change); a changed, a first-observed-but-different and an equal-but-incomplete part are written. The upsert still re-arms an existing
+// row only when its digest differs.
+const DONE="('complete','complete_with_gaps')";
+const APPLIED={
+ core:`EXISTS (SELECT 1 FROM catalog_enrichment_state a WHERE a.film_id=e.film_id AND a.part='core' AND a.source='tmdb' AND a.slot=0 AND a.status IN ${DONE} AND a.source_version=?)`,
+ localization:`EXISTS (SELECT 1 FROM catalog_enrichment_state a WHERE a.film_id=e.film_id AND a.part='localization' AND a.source='tmdb' AND a.slot=0 AND a.status IN ${DONE} AND a.source_version=?)`,
+ credits:`(EXISTS (SELECT 1 FROM catalog_enrichment_state a WHERE a.film_id=e.film_id AND a.part='credits' AND a.source='tmdb' AND a.status IN ${DONE}) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_state b WHERE b.film_id=e.film_id AND b.part='credits' AND b.source='tmdb' AND b.status<>'not_applicable' AND NOT (b.status IN ${DONE} AND b.source_version=?)))`,
+};
 export function sourceChangedStatements({tmdbId,versions,at,lease=null}){
  if(!TMDB_ID.test(String(tmdbId))||!versions||!ISO.test(String(at)))throw failed('film_person_invalid');
  const held=lease?' AND EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?)':'';
@@ -36,7 +44,7 @@ export function sourceChangedStatements({tmdbId,versions,at,lease=null}){
   const digest=versions[part];
   if(digest==null)continue;
   if(!/^[0-9a-f]{64}$/.test(String(digest)))throw failed('film_person_invalid');
-  out.push([`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) SELECT 'source_changed',e.film_id,'tmdb',?,1,0,'pending',?,'discovery_revalidation',?,0 FROM film_external_id e JOIN catalog_enrichment_member m ON m.film_id=e.film_id AND m.scope='discovery' WHERE e.scheme='tmdb' AND e.value=? AND e.trusted=1 AND e.conflicting=0 AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id)${held} ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest`,[part,digest,at,String(tmdbId),...(lease?[lease.id,Date.parse(at)]:[])]]);
+  out.push([`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) SELECT 'source_changed',e.film_id,'tmdb',?,1,0,'pending',?,'discovery_revalidation',?,0 FROM film_external_id e JOIN catalog_enrichment_member m ON m.film_id=e.film_id AND m.scope='discovery' WHERE e.scheme='tmdb' AND e.value=? AND e.trusted=1 AND e.conflicting=0 AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id)${held} AND NOT ${APPLIED[part]} ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest`,[part,digest,at,String(tmdbId),...(lease?[lease.id,Date.parse(at)]:[]),digest]]);
   out.push(['SELECT changes() AS n',[]]);
  }
  return out;

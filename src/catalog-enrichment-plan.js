@@ -225,9 +225,17 @@ export function selectRussianTitle(translations){
 // ONE pure projection of what a verified response says about a part, used by BOTH the producer (it stores the result as the part's `source_version` when the part is complete) and every observer of the same source
 // (the Discovery revalidation), so the two cannot disagree about what a part is. A part whose section is not VERIFIED (an unreadable or unsupported section, a failed response) has no version (null): it is never
 // signalled, never compared and never read as "no data". `anchor` is the identity the response was fetched for.
-// core: only the fields a request language cannot change (year, runtime, url). The synopsis, the genre names and the poster path depend on the request language (the Discovery detail is requested in `ru-RU`, the producer's
-// fetch is not), so a localized text is NOT a change; the producer still writes every approved field. A real change of those fields is reached by the producer's own events (anchor, owner refresh), not by this signal.
-export const coreVersion=(source,anchor,fields)=>digestOf({source,anchor,part:'core',fields:{year:fields?.year??null,runtime:fields?.runtime??null,url:fields?.url??null}});
+// core: the producer's own source and the approved field set. A Letterboxd answer hashes every approved field (year, runtime, synopsis, poster, url, genres). A TMDB answer hashes the COMPARABLE projection of its response
+// (`parseTmdb(...).comparable`): year, runtime, url, the English overview of the translations list and the genre ids, none of which depends on the request language (the producer fetches without a language, a Discovery detail is
+// `ru-RU`). The TMDB poster path depends on the request language and has no comparable representation in the response, so it is the one approved field a TMDB version does not cover. A TMDB answer whose comparable projection is
+// unverified (an unreadable translations section) has NO version.
+export function coreVersion(source,anchor,fields,comparable=null){
+ if(source==='tmdb'){
+  if(!comparable)return null;
+  return digestOf({source,anchor,part:'core',fields:{year:fields?.year??null,runtime:fields?.runtime??null,url:fields?.url??null,synopsis:comparable.synopsis??null,genres:comparable.genres??[]}});
+ }
+ return digestOf({source,anchor,part:'core',fields:{year:fields?.year??null,runtime:fields?.runtime??null,synopsis:fields?.synopsis??null,poster:fields?.poster??null,url:fields?.url??null,genres:fields?.genres??[]}});
+}
 // localization: the selected typed title, or its verified absence. Ambiguous, unreadable and unsupported coverage has none.
 export const localizationVersion=(source,anchor,title)=>title?.status==='value'?digestOf({source,anchor,title:title.value}):title?.status==='absent'?digestOf({source,anchor,title:null,status:'absent'}):null;
 // credits: the ordered provider credits of a readable section (a present, empty list is a valid empty set).

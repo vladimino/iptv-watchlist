@@ -118,7 +118,7 @@ const catalog=(...ids)=>Object.fromEntries(ids.map(id=>['tmdb_'+id,film(id)]));
 }
 
 // ---- C. the source_changed emitter: unit level (the parity with the producer's persisted state and the real revalidation path are proved in tests/catalog-enrichment-producer.mjs and tests/discovery-revalidation.mjs) ----
-const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'ru synopsis',poster_path:'/p.jpg',genres:[{name:'Боевик'}],credits:{cast:[{id:11,name:'A',order:0},{id:13,name:'B',order:1}],crew:[{id:12,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}}]},...over});
+const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'ru synopsis',poster_path:'/p.jpg',genres:[{id:28,name:'Боевик'}],credits:{cast:[{id:11,name:'A',order:0},{id:13,name:'B',order:1}],crew:[{id:12,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица',overview:'ru synopsis'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'english synopsis'}}]},...over});
 {
  const versions=await D.tmdbPartVersions(movie(),603);
  assert.ok(['core','credits','localization'].every(part=>/^[0-9a-f]{64}$/.test(versions[part])));
@@ -126,11 +126,15 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
  assert.equal(await D.tmdbPartVersions(movie(),'abc'),null);
  // the same pure projection as the producer: each part IS what Plan computes from the parsed response
  const parsed=parseTmdb(movie(),'603');
- assert.equal(versions.core,await Plan.coreVersion('tmdb','603',parsed.fields));
+ assert.equal(versions.core,await Plan.coreVersion('tmdb','603',parsed.fields,parsed.comparable));
  assert.equal(versions.credits,await Plan.creditsVersion('tmdb','603',parsed.credits));
  assert.equal(versions.localization,await Plan.localizationVersion('tmdb','603',parsed.title));
- // the request language does not move any part: a localized synopsis, genre or poster is not a change
- assert.deepEqual(await D.tmdbPartVersions(movie({overview:'en synopsis',poster_path:'/q.jpg',genres:[{name:'Action'}]}),603),versions);
+ // the request language does not move any part: the response's own overview, poster path and genre NAMES are not what is compared
+ assert.deepEqual(await D.tmdbPartVersions(movie({overview:'en synopsis',poster_path:'/q.jpg',genres:[{id:28,name:'Action'}]}),603),versions);
+ // what IS covered: the English overview of the translations and the genre ids
+ assert.notEqual((await D.tmdbPartVersions(movie({translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Матрица'}},{iso_639_1:'en',iso_3166_1:'US',data:{title:'The Matrix',overview:'a revised english synopsis'}}]}}),603)).core,versions.core,'a changed English overview');
+ assert.notEqual((await D.tmdbPartVersions(movie({genres:[{id:28,name:'Боевик'},{id:878,name:'Фантастика'}]}),603)).core,versions.core,'a changed genre id set');
+ assert.equal((await D.tmdbPartVersions(movie({translations:undefined}),603)).core,null,'an unreadable translations section leaves the comparable core unverified');
  // real changes do
  assert.notEqual((await D.tmdbPartVersions(movie({runtime:137}),603)).core,versions.core);
  assert.notEqual((await D.tmdbPartVersions(movie({release_date:'2000-01-01'}),603)).core,versions.core);
