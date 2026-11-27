@@ -372,4 +372,31 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
   assert.equal(picked.live.length,1,'the Film stays live when its facts are unknown');
  }
 }
+
+// ---- the upstream request budget: every request sent is counted at the fetch boundary and the drain hands over at its request budget ----
+{
+ const w=world(6);
+ const up=upstream();
+ const tight={...D.BUDGET,requests:6,requestsHandoverAt:4};
+ const first=await run(w,up,{budget:tight});
+ assert.equal(first.stop,'handover','the request budget hands the run over');
+ assert.equal(first.counts.requests,up.calls.length,'the count is the number of requests actually sent, not a derived figure');
+ assert.ok(first.counts.requests>=4&&first.counts.requests<=8,'it stopped near its budget: '+first.counts.requests);
+ let guard=0,last=first;
+ while(last.stop==='handover'&&guard++<30)last=await run(w,up,{budget:tight});
+ assert.equal(last.stop,'idle');assert.equal(metaCount(w.file),6,'successive runs finish everything under the request budget');
+}
+
+// ---- the inbox is budgeted: signals the budget cannot cover stay pending for the successor ----
+{
+ const w=world(8);
+ const tiny={...D.BUDGET,statements:260,handoverAt:24,reserve:60,stepEstimate:40,unitEstimate:30};
+ const first=await run(w,upstream(),{budget:tiny});
+ const pending=rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n;
+ assert.ok(first.counts.signals<8&&pending===8-first.counts.signals,'the run consumed only the signals its budget covered: consumed '+first.counts.signals+', pending '+pending);
+ let guard=0;
+ while(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n>0&&guard++<20)await run(w,upstream(),{budget:tiny});
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0,'the successors consumed the rest of the inbox, each within its own budget');
+ assert.equal((await run(w,upstream())).stop,'idle');assert.equal(metaCount(w.file),8,'and a normal budget then drains the Films');
+}
 console.log('catalog enrichment drain: ok');

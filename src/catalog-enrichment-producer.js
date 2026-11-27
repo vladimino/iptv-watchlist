@@ -15,10 +15,18 @@ const CORE_FIELDS=Plan.CORE_FIELDS;
 const db=env=>{const handle=database(env);if(!handle)throw failed('film_person_unavailable');return handle;};
 const parse=text=>{if(text==null)return null;try{return JSON.parse(text);}catch{return null;}};
 const json=value=>value==null?null:JSON.stringify(value);
-const guardSql=ctx=>{const lease=Plan.leaseGuard(ctx.leaseId,ctx.now),control=Plan.controlGuard(ctx.generation);return {sql:`${lease.sql} AND ${control.sql}`,params:[...lease.params,...control.params]};};
+// The guard of every state-row effect: the lease and the control generation, and (once the context names the Film) the RESOLVED IDENTITY (the Film exists and is not redirected) and, after the anchor check, the Film's PLAN EPOCH
+// the plan was read at. A row publication or state update of a plan that an anchor change, a merge or a re-arm has since superseded therefore applies nothing, exactly as its canonical units do.
+const guardSql=ctx=>{
+ const lease=Plan.leaseGuard(ctx.leaseId,ctx.now),control=Plan.controlGuard(ctx.generation);
+ let sql=`${lease.sql} AND ${control.sql}`;const params=[...lease.params,...control.params];
+ if(ctx.filmId){sql+=' AND EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)';params.push(ctx.filmId,ctx.filmId);}
+ if(ctx.filmId&&Number.isInteger(ctx.planEpoch)){sql+=" AND EXISTS (SELECT 1 FROM catalog_enrichment_state pf WHERE pf.film_id=? AND pf.part='film' AND pf.source='*' AND pf.slot=0 AND pf.plan_epoch=?)";params.push(ctx.filmId,ctx.planEpoch);}
+ return {sql,params};
+};
 const sha=value=>Plan.digestOf(value);
 // The refusals of a batch whose guards no longer hold (a stale plan) or whose authority fence moved: retryable by a replan, never a failure of the Film and never a crash of the run.
-export const STALE_CODES=new Set(['film_person_precondition','film_person_fence','film_person_revision_conflict','operation_key_moved','operation_key_in_flight','localization_inputs_moved']);
+export const STALE_CODES=new Set(['film_person_precondition','film_person_fence','film_person_revision_conflict','operation_key_moved','operation_key_in_flight','localization_inputs_moved','film_person_redirect']);
 async function runUnit(env,spec){
  try{return await runUnitRaw(env,spec);}
  catch(error){
@@ -79,7 +87,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const mayWrite=async()=>{if(!canStart())return 'budget';if(budget&&typeof budget.writesHeld==='function'&&await budget.writesHeld())return 'held';return null;};
  const control=await readControl(env);
  if(control.state!=='active'||control.generation!==generation)return {state:'not_active'};
- const ctx={leaseId,generation,now};
+ const ctx={leaseId,generation,now,filmId};
  const context=await readContext(env,filmId);
  if(!context)return {state:'absent'};
  if(context.redirected)return {state:'redirected'};
@@ -114,6 +122,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  }
  // the anchors are unchanged: the pending anchor-check marker of an admission or an anchor signal is settled
  if(filmRow.reason==='check_anchors'){filmRow={...filmRow,reason:null,retryAt:null,transportStreak:0};await putRow(env,ctx,filmRow,{expectEpoch:filmRow.planEpoch});}
+ // from here on every state-row effect is fenced by the plan epoch this plan was read at
+ ctx.planEpoch=filmRow.planEpoch;
  if(filmRow.status==='identity_disagreement')return {state:'blocked',reason:'identity_disagreement'};
  // the rows of the applicable sources; a missing one is created due, a removed source becomes not_applicable (its earlier writes remain)
  const need=[];

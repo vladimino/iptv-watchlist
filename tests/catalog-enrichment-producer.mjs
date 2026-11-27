@@ -339,4 +339,38 @@ function file0(w){return w.file;}
  assert.equal(rows(z.file,'SELECT COUNT(*) AS n FROM film_person_credit')[0].n,231,'231 credits stored for one Film: no 200-credit storage cap');
  assert.deepEqual(plan(z.file).map(row=>row.slot),[0,1,2,3,4],'five chunks of at most 50');
 }
+
+// ---- the state-row effects are fenced by the resolved identity and the plan epoch the plan was read at ----
+{
+ // an anchor change (the plan epoch of the Film moves) while the fetch is in flight: the stale plan writes no part row and applies no canonical unit
+ const w=await world();
+ await step(w,upstream({}));                       // the anchor check opens the plan
+ const before=JSON.stringify(rows(w.file,'SELECT part,source,slot,status,refresh_epoch,plan_epoch FROM catalog_enrichment_state ORDER BY 1,2,3'));
+ const appliedBefore=rows(w.file,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE state='applied'")[0].n;
+ const up=upstream({});
+ const moving=async url=>{if(String(url).startsWith('https://api.themoviedb.org/'))sqlite(w.file,`UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1 WHERE film_id='${FILM}' AND part='film'`);return up(url);};
+ moving.calls=up.calls;
+ const out=await step(w,moving,at(12));
+ const after=rows(w.file,'SELECT part,source,slot,status,refresh_epoch,plan_epoch FROM catalog_enrichment_state ORDER BY 1,2,3');
+ assert.equal(meta(w.file),null,'the stale plan wrote no metadata');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE state='applied'")[0].n,appliedBefore,'and no canonical unit was applied (every unit answered stale; its reservation is abandoned)');
+ assert.ok(out.report.units.length>=1&&out.report.units.every(unit=>unit.state==='stale'),'every unit is stale, none failed the Film');
+ const partRows=after.filter(row=>row.part!=='film');
+ assert.ok(partRows.length>0&&partRows.every(row=>row.status==='due'&&row.refresh_epoch===0),'the part rows created before the move stay due and untouched: nothing was settled by the stale plan: '+JSON.stringify(partRows.map(row=>row.status)));
+ void before;
+}
+// a merged Film: the retired Film receives no state row at all
+{
+ const w=await world();
+ await step(w,upstream({}));
+ const up=upstream({});
+ const merging=async url=>{if(String(url).startsWith('https://api.themoviedb.org/'))sqlite(w.file,"INSERT OR IGNORE INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:survivor',2,NULL,'S','"+at(1)+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('"+FILM+"','film:survivor','"+at(1)+"')");return up(url);};
+ merging.calls=up.calls;
+ const snapshot=JSON.stringify(rows(w.file,'SELECT part,source,slot,status,refresh_epoch FROM catalog_enrichment_state ORDER BY 1,2,3'));
+ await step(w,merging,at(12));
+ const settled=rows(w.file,"SELECT part,status FROM catalog_enrichment_state WHERE part<>'film' AND status NOT IN ('due')");
+ assert.deepEqual(settled,[],'a Film that was merged during the plan has no part row settled by that plan');
+ void snapshot;
+ assert.equal(meta(w.file),null);
+}
 console.log('catalog enrichment producer: ok');

@@ -12,7 +12,9 @@ import {processFilm,CODE_VERSION} from './catalog-enrichment-producer.js';
 
 // Engineering-owned defaults (ADR 0219 decision 6), one module, reported in each run's outbox entry. The statement budget is the ADR 0094 guard, not a provider limit; a handover happens at HANDOVER_AT, half the documented
 // 10,000; a step starts only when the remaining budget covers its own work plus the finalize-and-successor reserve.
-export const BUDGET=Object.freeze({statements:6000,handoverAt:5000,reserve:1000,window:50,stepEstimate:150,unitEstimate:60});
+// `requests` is the UPSTREAM subrequest budget of one drain (every fetch the sources actually send, redirect hops included): a Worker invocation has a fixed subrequest ceiling, and the drain hands over at `requestsHandoverAt`, which
+// leaves headroom for the D1 and orchestration calls of the same invocation. It is a conservative engineering placeholder, not a product limit: a Film that needs more resumes from its persisted state in the next run.
+export const BUDGET=Object.freeze({statements:6000,handoverAt:5000,reserve:1000,window:50,stepEstimate:150,unitEstimate:60,requests:400,requestsHandoverAt:350});
 
 async function repairGuard(handle,leaseId,generation,now){
  const lease=`EXISTS (SELECT 1 FROM projection_run WHERE projection='catalog_enrichment' AND lease_id=? AND lease_until>?) AND EXISTS (SELECT 1 FROM catalog_enrichment_control WHERE id=1 AND state='active' AND generation=?)`;
@@ -181,13 +183,16 @@ export async function earliestWake(env,{now}){
 }
 
 // One run. opts: {runId, clock:()=>iso, tools, fetchImpl, coordinator, budget, shouldYield?:async()=>boolean, maxFilms?}. -> {stop, wakeAt?, counts}
-export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),tools,fetchImpl,coordinator=null,budget=BUDGET,shouldYield=null,maxFilms=Infinity}){
+export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),tools,fetchImpl:rawFetch,coordinator=null,budget=BUDGET,shouldYield=null,maxFilms=Infinity}){
+ // every request the sources actually send, a redirect hop included, is counted at the fetch boundary (a cooldown skip sends none)
+ const sent={n:0};
+ const fetchImpl=rawFetch?(...args)=>{sent.n++;return rawFetch(...args);}:rawFetch;
  const {env,counter}=countingEnv(rawEnv);
  // The background share is measured in COMMITTED units across runs (a handover must not reset it): the recent runs' outbox entries are the baseline.
  let baseLive=0,baseBackground=0;
  try{for(const row of await many(database(rawEnv),'SELECT counts_json FROM catalog_enrichment_tick ORDER BY started_at DESC LIMIT 20')){try{const c=JSON.parse(row.counts_json);baseLive+=Number(c.committedLive)||0;baseBackground+=Number(c.committedBackground)||0;}catch{/* a malformed entry counts as nothing */}}}catch{/* no outbox: no baseline */}
  const counts={films:0,signals:0,units:0,committedLive:0,committedBackground:0,statements:0,failedStatements:0,requests:0,transport:0,failed:0,disagreements:0,steps:0,errors:0,yields:0,deferred:0,bySource:{}};
- const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed}});
+ const finish=(stop,extra={})=>({stop,...extra,counts:{...counts,statements:counter.statements,failedStatements:counter.failed,requests:sent.n}});
  const control=await readControl(env);
  if(control.state!=='active')return finish(control.state==='paused'?'paused':'not_active');
  const generation=control.generation;
@@ -216,7 +221,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
  async function loop(){
   for(;;){
    // a step starts only when the remaining budget covers its own work plus the reserve (no whole-Film-fit rule: a Film spans as many steps and runs as it needs)
-   if(counter.statements+budget.stepEstimate+budget.reserve>budget.statements||counter.statements>=budget.handoverAt)return finish('handover');
+   if(counter.statements+budget.stepEstimate+budget.reserve>budget.statements||counter.statements>=budget.handoverAt||(budget.requestsHandoverAt&&sent.n>=budget.requestsHandoverAt))return finish('handover');
    const fresh=await readControl(env);
    if(fresh.state==='paused')return finish('paused');
    if(fresh.state!=='active')return finish('not_active');
@@ -226,6 +231,8 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
    // the inbox first: runnable signals are consumed exactly once, each by one guarded batch; one failing signal never blocks the others
    let consumed=0;
    for(const signal of await runnableSignals(env,{now:clock(),limit:50})){
+    // the inbox is budgeted like every other statement: what the budget cannot cover stays pending for the successor (it is durable and re-armed by nothing)
+    if(counter.statements+budget.reserve>=budget.statements||counter.statements>=budget.handoverAt)break;
     const outcome=await consumeSignal(env,{signal,generation,leaseId,now:clock()});
     if(outcome.consumed){consumed++;counts.signals++;}
    }
@@ -242,7 +249,7 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
    let step;
    // the unit-group gate: before EVERY group of units of a Film the producer asks whether the remaining budget covers it plus the finalize-and-successor reserve (no whole-Film-fit rule: a Film resumes from its persisted state)
    let held=null;
-   const gate={canStart:()=>counter.statements+(budget.unitEstimate||60)+budget.reserve<=budget.statements&&counter.statements<budget.handoverAt,
+   const gate={canStart:()=>counter.statements+(budget.unitEstimate||60)+budget.reserve<=budget.statements&&counter.statements<budget.handoverAt&&(!budget.requestsHandoverAt||sent.n<budget.requestsHandoverAt),
     // the narrow yield, asked at the WRITE boundary (see processFilm): an injected predicate for offline runs, the publication's own state otherwise
     writesHeld:async()=>{const hold=shouldYield?await shouldYield():await epgPublicationWindow(env,Date.parse(clock()));if(hold){held=hold;return true;}return false;}};
    try{step=await processFilm(env,{filmId:pick.filmId,leaseId,generation,now:clock(),tools,fetchImpl,coordinator,budget:gate});}
@@ -265,7 +272,6 @@ export async function drain(rawEnv,{runId,clock=()=>new Date().toISOString(),too
     for(const source of step.report.fetched||[]){const entry=(counts.bySource[source]||={requests:0,transport:0,failed:0,cooldownSkips:0});const skipped=step.report.transport.some(item=>item.source===source&&item.cooldown);if(skipped)entry.cooldownSkips++;else entry.requests++;}
     for(const item of step.report.transport){const entry=(counts.bySource[item.source]||={requests:0,transport:0,failed:0,cooldownSkips:0});entry.transport++;}
     for(const item of step.report.failed){const entry=(counts.bySource[item.source]||={requests:0,transport:0,failed:0,cooldownSkips:0});entry.failed++;}
-    counts.requests=Object.values(counts.bySource).reduce((sum,entry)=>sum+entry.requests,0);
    }
    if(['idle','blocked','not_admitted','absent','redirected'].includes(step.state)||(step.state==='done'&&!step.report.units.length))skip.add(pick.filmId);
    if(step.state==='partial'&&held){
