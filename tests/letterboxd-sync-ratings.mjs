@@ -60,7 +60,10 @@ const ports=p=>({diary:ratingsSlotPhase({ratings:p.api,fenceGuard:guard,phase:'d
  p=errored('failed');out=await ports(p).diary.run(ctx());assert.equal(out.outcome,'error');out=await ports(p).removal.run(ctx());assert.equal(out.outcome,'error');
  for(const reason of ['lease_lost','unknown','run_mismatch','not_running','storage_unsupported']){
   p=pipeline({runId:'r',state:'running',phase:'diary',slotKey:'2026-11-21T1030',checkpoint:{}});p.state.reply={reason};
-  out=await ports(p).diary.run(ctx());assert.deepEqual([out.done,out.outcome,out.reason],[true,'error',reason]);
+  out=await ports(p).diary.run(ctx());
+  // AIR-694: a lost lease or an unrecognised run is an interruption; a misconfigured storage stays an error.
+  assert.deepEqual([out.done,out.outcome,out.reason],[true,reason==='storage_unsupported'?'error':'interrupted',reason]);
+  if(reason==='lease_lost')assert.equal(out.phase,'diary');
  }
  p=pipeline({runId:'r',state:'running',phase:'diary',slotKey:'2026-11-21T1030',checkpoint:{}});p.state.reply={reason:'busy',nextCatchUpAt:'2026-11-21T10:55:00.000Z'};
  out=await ports(p).diary.run(ctx());assert.equal(out.wakeAt,T('2026-11-21T10:55:00Z'));

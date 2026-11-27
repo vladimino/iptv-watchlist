@@ -700,4 +700,15 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
   }
  }finally{Date.now=realNow;}
 }
+// AIR-694: an interrupted Ratings phase without the pipeline contract freezes an honest «unknown» contract (no zero counters); a pipeline contract is never overwritten.
+{
+ const slot={key:'2026-11-27T2230',runId:'r1'},closedAt='2026-11-27T21:34:54.019Z',wl={outcome:'no_change',at:closedAt};
+ const lost=Sync.slotEventPayloads(slot,{ratings:{outcome:'interrupted',reason:'lease_lost',phase:'diary',counts:{diaryPages:0,removalChecked:0}},watchlist:wl,closedAt}).ratings.payload;
+ assert.deepEqual([lost.outcome,lost.reason,lost.state,lost.cause,lost.interruptedPhase,lost.diary,lost.removal],['interrupted','lease_lost','unknown','interrupted','diary',null,null]);
+ const real={state:'error',cause:'failed',diary:{pages:1,rows:2,added:0,updated:0,written:0,unchanged:2,skipped:0,conflicts:0},removal:{pending:0,checked:0,rated:0,resolved:0}};
+ const kept=Sync.slotEventPayloads(slot,{ratings:{outcome:'interrupted',event:real},watchlist:wl,closedAt}).ratings.payload;
+ assert.deepEqual([kept.state,kept.cause,kept.diary.rows],['error','failed',2],'the pipeline contract wins');
+ const fin=Sync.slotEventPayloads(slot,{ratings:{outcome:'finished',event:{state:'finished',cause:null}},watchlist:wl,closedAt}).ratings.payload;
+ assert.equal(fin.state,'finished');
+}
 console.log('letterboxd-sync ok');

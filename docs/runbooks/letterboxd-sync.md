@@ -104,6 +104,10 @@ The standalone root `watchlist.json` is delivery, not state, and it is written b
 
 The operation-by-operation activation plan (preflight, holdpoints B to F with their pins, receipts, stop conditions and rollback, and the configuration-only activation deployment) is [the activation runbook](letterboxd-activation.md). It is prepared, not authorized.
 
+## Interrupted Ratings event (AIR-694)
+
+A slot whose Ratings phase lost its lease closes with Ratings `interrupted` (slot status `interrupted`) and a `ratings` Event with badge «Прервано» and no counters. This is not a failed sync and needs no retry, lease reset or manual run: the next slot starts a new run, and facts already written stay. Read-only checks: `ratings_sync_status` (run `cause`, `interruptedPhase`, checkpoint) and the Events screen filter «Прервано». RCA and evidence: [AIR-694](../evidence/letterboxd/air-694-ratings-interrupted-event-2026-11-27.md).
+
 ## Recovery: forward only
 
 There is no rollback to a legacy writer. The Ratings Cloudflare executor (the Workflow, its class and the binding) is retired and the external ratings entry points no longer exist: the MCP tools `ratings_sync_start` and `ratings_sync_step` are unknown tools, `POST /api/letterboxd/ratings/start` and `/step` answer 404, the hourly tick does not call the Ratings executor, and the owner route `POST /api/letterboxd/ratings/executor` refuses to enter `cloudflare` (`legacy_executor_retired`). A Letterboxd mode `external` therefore closes the only ratings writer and nothing takes over; it is not a recovery target. After a failure of the Letterboxd Sync, recover forward with the controls above:

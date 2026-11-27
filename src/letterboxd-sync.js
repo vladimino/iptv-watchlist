@@ -145,7 +145,7 @@ const eventFilmOf = film => {
 };
 const filmsOf = list => (Array.isArray(list) ? list : []).map(eventFilmOf).filter(Boolean).slice(0, FILM_CAP);
 // The `ratings` Event keeps its AIR-361 contract: the groups the pipeline built (state, cause, coverage, diary, removal, details) are frozen as they are, only bounded in size (the details go first).
-const RATINGS_CONTRACT = ['runId', 'trigger', 'state', 'cause', 'coverage', 'diary', 'removal', 'details'];
+const RATINGS_CONTRACT = ['runId', 'trigger', 'state', 'cause', 'interruptedPhase', 'coverage', 'diary', 'removal', 'details'];
 const PAYLOAD_CHARS = 18000;
 function fitPayload(payload) {
   if (JSON.stringify(payload).length <= PAYLOAD_CHARS) return payload;
@@ -159,6 +159,9 @@ export function slotEventPayloads(slot, {ratings, watchlist, closedAt}) {
   const rOutcome = ratings?.outcome || 'error', wOutcome = watchlist?.outcome || 'error';
   const contract = {};
   if (ratings?.event && typeof ratings.event === 'object') for (const key of RATINGS_CONTRACT) if (ratings.event[key] !== undefined) contract[key] = ratings.event[key];
+  // AIR-694: an interrupted Ratings phase that never produced the pipeline's contract (lease lost, run no longer recognised) is frozen with an honest «unknown» contract: state, cause and the known phase,
+  // and NO diary/removal groups, so no zero counter stands in for an unknown one. A contract the pipeline did build is never overwritten.
+  if (rOutcome === 'interrupted' && contract.state === undefined) Object.assign(contract, {state: 'unknown', cause: 'interrupted', diary: null, removal: null, ...(['diary', 'removal'].includes(ratings?.phase) ? {interruptedPhase: ratings.phase} : {})});
   const added = filmsOf(watchlist?.added), removed = filmsOf(watchlist?.removed);
   const addedCount = watchlist?.addedCount ?? (watchlist?.added?.length ?? 0), removedCount = watchlist?.removedCount ?? (watchlist?.removed?.length ?? 0);
   return {

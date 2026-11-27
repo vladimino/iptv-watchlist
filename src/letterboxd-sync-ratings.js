@@ -49,7 +49,9 @@ export function ratingsSlotPhase({ratings, fenceGuard, phase}) {
       }
       const reply = await ratings.step(env, {runId}, {now, clock: ctx.clock || (() => Date.now())});
       if (reply.reason === 'busy') { const until = Date.parse(reply.nextCatchUpAt || ''); return {done: false, wakeAt: Number.isFinite(until) ? until : now + BUSY_WAIT_MS}; }
-      if (['lease_lost', 'unknown', 'run_mismatch', 'not_running', 'storage_unsupported'].includes(reply.reason)) return {done: true, outcome: 'error', at: at(), reason: String(reply.reason).slice(0, 60)};
+      // AIR-694: a lost lease or a run the pipeline no longer recognises is an INTERRUPTION of the run (outcome unknown), not a confirmed error; the phase and the stored checkpoint stay known facts.
+      if (['lease_lost', 'unknown', 'run_mismatch', 'not_running'].includes(reply.reason)) return {done: true, outcome: 'interrupted', at: at(), reason: String(reply.reason).slice(0, 60), phase, counts: countsOf(own || inherited)};
+      if (reply.reason === 'storage_unsupported') return {done: true, outcome: 'error', at: at(), reason: 'storage_unsupported'};
       return {done: false, wakeAt: now + SLEEP_FLOOR_MS};
     }
   };
