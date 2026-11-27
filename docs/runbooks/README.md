@@ -20,6 +20,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Prediction incident response: RCA, controlled diagnostic experiments and staged recovery](prediction-incident-response.md)
 - [Prediction auxiliary state in D1: checkpoint and outbox recovery, offline import and the AIR-554 handoff (D1 authority since 24 Nov 2026)](prediction-aux-state-cutover.md)
 - [Film redirect target index, migration 0043: prerequisites, window, readback and forward-only rollback (prepared, not applied; applied together with the other approved pending migrations, needs its own owner GO)](film-redirect-target-index-0043-apply.md)
+- [Lid-only admission row, migration 0048: prerequisites, window, readback and forward-only rollback (prepared, not applied; applied together with the other approved pending migrations, needs its own owner GO)](film-lid-admission-0048-apply.md)
 - [TMDB retirement ledger movie index, migration 0040: prerequisites, window, readback and forward-only rollback (prepared, not applied; needs its own owner GO)](retirement-movie-index-0040-apply.md)
 - [Canonical Producer outcome outbox, migration 0038: operator, preflight, quiet window and readback (**applied to production 24 Nov 2026 13:33 UTC**, schema 37 to 38)](producer-outcome-0038-apply.md)
 - [Watchlist membership projection, migration 0037: operator, quiet window, readback and the read-only baseline preflight (prepared, not applied; needs 0036 and its own owner GO)](watchlist-membership-0037-apply.md)

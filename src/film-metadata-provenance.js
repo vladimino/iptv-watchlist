@@ -1,5 +1,5 @@
 // AIR-631 (card PV1; ADR 0214, Accepted). The per-field provenance of film_metadata: the stored-row reader, the value binding, the ONE comparator (decisions 3, 5 and 7), the owner actions (decision 9) and the history rows.
-// DORMANT, like the film writers module, which is its only caller: schema absent (migration 0048 not applied) or control mode `off` leaves today's statements untouched. Nothing here reads R2, scores a Film or writes identity;
+// DORMANT, like the film writers module, which is its only caller: schema absent (migration 0049 not applied) or control mode `off` leaves today's statements untouched. Nothing here reads R2, scores a Film or writes identity;
 // it never runs a statement itself. planMetadataProvenance is PURE over the snapshot readFilmSnapshot took, so it stays synchronous (the SHA-256 below is synchronous for that reason; tests/film-metadata-provenance.mjs proves it equals crypto).
 import {computeAnchors,anchorSetGuard,canonicalJson} from './catalog-enrichment-plan.js';
 import {failed,many,one} from './film-person-authority.js';

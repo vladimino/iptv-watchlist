@@ -99,7 +99,7 @@ export async function readFilmSnapshot(env,id){
    one(db,'SELECT 1 AS present FROM watchlist_film WHERE film_id=?',[filmId]),
    many(db,"SELECT value FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND trusted=1 AND conflicting=0",[filmId]),
    many(db,"SELECT source,value,source_version,provenance_json,request_id,observed_at FROM film_localization_source WHERE film_id=?",[filmId]).catch(error=>{if(/no such table/i.test(String(error?.message||error)))return [];throw error;}),
-   // ADR 0214 (AIR-631): null while migration 0048 is absent (today's behaviour); a present control row at `off` reads only the mode; an unreadable control or field table fails the write closed.
+   // ADR 0214 (AIR-631): null while migration 0049 is absent (today's behaviour); a present control row at `off` reads only the mode; an unreadable control or field table fails the write closed.
    readProvenance(db,filmId),
   ]);
   return {provenance,id:filmId,film,redirect:redirect?redirect.to_film_id:null,revision:Number(revision?.revision??0),dimensions:Object.fromEntries(dimensions.map(row=>[row.dimension,row])),metadata,sync,member:!!member,trustedTmdb:tmdb.map(row=>String(row.value)),sources};

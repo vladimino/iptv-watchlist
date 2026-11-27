@@ -1,5 +1,5 @@
-// AIR-631: migration 0048, per-field provenance of film_metadata (ADR 0214 decisions 2, 9 and 11). Offline only: scratch sqlite databases built from the real chain; nothing is applied anywhere. Synthetic ids only.
-//  - the chain 47 -> 48 and its refusals (a wrong predecessor, a second apply), created empty, the control row at `off`;
+// AIR-631: migration 0049, per-field provenance of film_metadata (ADR 0214 decisions 2, 9 and 11). Offline only: scratch sqlite databases built from the real chain; nothing is applied anywhere. Synthetic ids only.
+//  - the chain 48 -> 49 and its refusals (a wrong predecessor, a second apply), created empty, the control row at `off`;
 //  - every DDL constraint of `film_metadata_field`, `film_metadata_history` and `film_metadata_owner_command` (the shapes of ADR 0214 decision 2 and 9);
 //  - the control row only moves along the three legal transitions, raises `revision` by one, is never deleted and has no second row;
 //  - invalidation, locks and immutability on raw statements, in the order SQLite fires them (the writer behaviour is tests/film-metadata-provenance.mjs).
@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import {migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
-const M48=fs.readFileSync('migrations/0048_film_metadata_provenance.sql','utf8');
+const M49=fs.readFileSync('migrations/0049_film_metadata_provenance.sql','utf8');
 const run=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<28});
 const exec=(file,text)=>{const result=run(file,text);if(result.status!==0)throw new Error(result.stderr);return String(result.stdout);};
 const rows=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=String(result.stdout).trim();return out?JSON.parse(out):[];};
@@ -28,21 +28,21 @@ const FIELD=(id,name,over={})=>{
 };
 
 // ---- 1. the chain and the refusals ----
-const v47=migrated(47);
-assert.equal(version(v47),47);
-assert.equal(rows(v47,"SELECT name FROM sqlite_master WHERE name LIKE 'film_metadata_field%' OR name LIKE 'film_metadata_history%' OR name LIKE 'film_metadata_owner_%' OR name LIKE 'film_metadata_provenance_%'").length,0,'version 47 has none of the objects');
+const v48=migrated(48);
+assert.equal(version(v48),48);
+assert.equal(rows(v48,"SELECT name FROM sqlite_master WHERE name LIKE 'film_metadata_field%' OR name LIKE 'film_metadata_history%' OR name LIKE 'film_metadata_owner_%' OR name LIKE 'film_metadata_provenance_%'").length,0,'version 47 has none of the objects');
 {
- const v46=migrated(46),before=dump(v46);
- assert.notEqual(run(v46,M48).status,0,'on version 46 the file aborts');
- assert.deepEqual(dump(v46),before,'and the whole state is unchanged');
+ const v47=migrated(47),before=dump(v47);
+ assert.notEqual(run(v47,M49).status,0,'on version 47 the file aborts');
+ assert.deepEqual(dump(v47),before,'and the whole state is unchanged');
 }
 const db=migrated();
-assert.equal(version(db),48);
+assert.equal(version(db),49);
 {
  const again=copyOf(db,'again'),before=dump(again);
- assert.notEqual(run(again,M48).status,0,'a second apply is refused');
+ assert.notEqual(run(again,M49).status,0,'a second apply is refused');
  assert.deepEqual(dump(again),before,'and changes nothing');
- fails(copyOf(db,'down'),'UPDATE schema_contract SET version=47 WHERE id=1');
+ fails(copyOf(db,'down'),'UPDATE schema_contract SET version=48 WHERE id=1');
 }
 for(const table of ['film_metadata_field','film_metadata_history','film_metadata_owner_command','film_metadata_owner_release'])assert.equal(rows(db,'SELECT COUNT(*) AS n FROM '+table)[0].n,0,table+' is created empty');
 assert.deepEqual(rows(db,'SELECT id,mode,revision FROM film_metadata_provenance_control'),[{id:1,mode:'off',revision:1}],'the control row is inserted at off');
@@ -159,4 +159,4 @@ assert.equal(rows(db,"SELECT COUNT(*) AS n FROM film_metadata").length,1);
  exec(file,"INSERT INTO film_metadata_owner_release (film_id) VALUES ('film:a');UPDATE film_metadata_field SET tier='owner',agreement=NULL WHERE field='runtime';UPDATE film_metadata_field SET tier='released' WHERE field='runtime';DELETE FROM film_metadata_owner_release;");
  assert.deepEqual(keys().map(item=>item.version),[2],'a second release re-arms the same coalesced row');
 }
-console.log('migration 0048: ok');
+console.log('migration 0049: ok');

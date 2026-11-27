@@ -1,4 +1,4 @@
--- Schema v48: per-field provenance of film_metadata (AIR-631, card PV1; ADR 0214 decisions 2, 9 and 11, Accepted). ADDITIVE and DORMANT. Five new STRICT tables and the triggers below; no existing table, column or row changes, and nothing is backfilled.
+-- Schema v49: per-field provenance of film_metadata (AIR-631, card PV1; ADR 0214 decisions 2, 9 and 11, Accepted). ADDITIVE and DORMANT. Five new STRICT tables and the triggers below; no existing table, column or row changes, and nothing is backfilled.
 --  1. `film_metadata_provenance_control`: the one durable control row (id = 1), inserted at mode `off`. The mode moves only off -> enforce, enforce -> hold and hold -> enforce, each raising `revision`; it never returns to `off`.
 --  2. `film_metadata_field`: one typed provenance row per Film and field (year, runtime, synopsis, poster, url, genres), bound to the stored value by `value_digest`. No JSON, no foreign key, the primary key is the only index.
 --  3. `film_metadata_history`: append-only; one row per replaced, cleared or discarded value and per owner action.
@@ -12,14 +12,15 @@
 --  - PROTECTION RELEASED (guarded, inbox only): an owner pin that becomes unprotected, or is deleted under a release row, writes the coalesced `protection_released` signal of part `core` into `enrichment_signal` (ADR 0219 decision 8). The release row is a transient
 --    authorization, not a protection state, so it signals nothing; C1 never writes a pin, so C1 never wakes itself.
 -- DORMANT: the file is in the repository and is NOT applied to any database by a deploy. Applying it is card PVM, a separate production GO. At mode `off` the writer writes no provenance, the lock triggers do nothing, and the invalidation triggers delete nothing (no row exists).
--- It follows a complete version 47 (the Catalog Enrichment schema, whose inbox the signal triggers write) and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file.
--- If another change takes number 48 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern beyond the 64-hex digest checks and a short name prefix in the refusal guard (D1 limits pattern length, see 0021; tests/migration-pattern-limit.mjs scans this file).
+-- It follows a complete version 48 (which follows the Catalog Enrichment schema of 47, whose inbox the signal triggers write; written as 0048 and renumbered to 0049 at merge because AIR-672's 0048 landed first) and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file.
+-- If another change takes number 49 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern beyond the 64-hex digest checks and a short name prefix in the refusal guard (D1 limits pattern length, see 0021; tests/migration-pattern-limit.mjs scans this file).
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 0, 0, 'refused'
 WHERE NOT (
  (SELECT COUNT(*) FROM schema_contract) = 1
- AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 47)
+ AND EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 48)
+ AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_lid_admission')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'enrichment_signal')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'catalog_enrichment_control')
  AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'film_metadata')
@@ -37,7 +38,7 @@ CREATE TABLE film_metadata_provenance_control (
  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 80)
 ) STRICT;
 INSERT INTO film_metadata_provenance_control (id, mode, revision, updated_at, updated_by)
-VALUES (1, 'off', 1, '2026-11-27T00:00:00.000Z', 'migration:0048');
+VALUES (1, 'off', 1, '2026-11-27T00:00:00.000Z', 'migration:0049');
 CREATE TRIGGER film_metadata_provenance_no_delete BEFORE DELETE ON film_metadata_provenance_control
 BEGIN
  SELECT RAISE(ABORT, 'film_metadata_provenance_no_delete');
@@ -232,6 +233,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 48,
-    note = 'Schema v48: per-field provenance of film_metadata (control row at off, field, history, owner command and release tables, invalidation, lock and immutability triggers) (dormant). Version 48 follows a complete version 47.'
-WHERE id = 1 AND version = 47;
+SET version = 49,
+    note = 'Schema v49: per-field provenance of film_metadata (control row at off, field, history, owner command and release tables, invalidation, lock and immutability triggers) (dormant). Version 49 follows a complete version 48.'
+WHERE id = 1 AND version = 48;

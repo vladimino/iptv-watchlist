@@ -381,7 +381,7 @@ async function publishedPointer(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null};
 }
-const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000;
+const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000,DISCOVERY_FENCE_COLLISION_SERIES_LIMIT=6;
 // The authority gate still names this run and is ready: a fence refusal then was a generation-counter collision, not a switch of the published run.
 async function authorityStillOwnsRun(env,runId){
  if(typeof DiscoveryAuthority==='undefined')return true;
@@ -391,6 +391,21 @@ async function authorityStillOwnsRun(env,runId){
 async function publishedGenerationMatches(env,seenRunId){
  const generation=await publishedPointer(env);
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
+}
+// AIR-687: positive proof that a thrown discovery_fence was only a CAS collision on discovery_authority.generation. The refusal must come from a D1 batch carrying the generation fence (a CHECK failure with a cause and the
+// generation that fence expected; the direct evidence/invariant throws and any other CHECK carry none) and the authority counter must have moved past that generation, the published pointer must positively name this run as `published` (a missing or non-published pointer is NOT a match), the authority must be ready, not held, not loading and
+// bound to this run, and the hop's own lease must still renew (the batch fence also checks the lease id/expiry). Anything else stays the fail-closed error.
+async function retryableFenceCollision(env,error,programmeRunId,lease){
+ if(error?.code!=='discovery_fence'||!programmeRunId||!lease)return false;
+ if(!/CHECK constraint failed/i.test(String(error?.cause?.message||''))||!Number.isInteger(error.fenceGeneration))return false;
+ const generation=await publishedPointer(env);
+ if(generation?.phase!=='published'||generation.programmeRunId!==programmeRunId)return false;
+ if(typeof DiscoveryAuthority==='undefined')return false;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ if(!gate.ready||gate.held||gate.transfer==='loading'||(gate.programmeRunId??null)!==programmeRunId||(gate.publishedProgrammeRunId??programmeRunId)!==programmeRunId)return false;
+ // The batch's own fence statement expected `fenceGeneration`; only a counter that has moved past it is a competing writer. An unchanged counter means the CHECK failed for another reason of the same fence.
+ if(!(Number(gate.generation)>error.fenceGeneration))return false;
+ return await renewDiscoveryLease(env,lease)===true;
 }
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}
@@ -1595,7 +1610,7 @@ function diagnosticTimings(timings){
 }
 function chunkSummary(result){
  const failure=discoveryFailureFields(result.error==null||result.error===''?null:typeof result.error==='object'?result.error:{message:String(result.error),code:result.errorCode||result.code,failedAt:result.failedAt,failureKind:result.failureKind,failureConstraint:result.failureConstraint},result.timings);
- return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),cheapRemaining:diagnosticCount(result.cheapRemaining),deferred:diagnosticCount(result.deferred),waitingRetry:diagnosticCount(result.waitingRetry),added:diagnosticCount(result.added),reused:diagnosticCount(result.reused),screenedOut:diagnosticCount(result.screenedOut),touched:diagnosticCount(result.touched),tmdbCalls:diagnosticCount(result.tmdbCalls),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:failure.error,failedAt:failure.failedAt,failureKind:failure.failureKind,failureConstraint:failure.failureConstraint};
+ return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),cheapRemaining:diagnosticCount(result.cheapRemaining),deferred:diagnosticCount(result.deferred),waitingRetry:diagnosticCount(result.waitingRetry),added:diagnosticCount(result.added),reused:diagnosticCount(result.reused),screenedOut:diagnosticCount(result.screenedOut),touched:diagnosticCount(result.touched),tmdbCalls:diagnosticCount(result.tmdbCalls),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:failure.error,failedAt:failure.failedAt,failureKind:failure.failureKind,failureConstraint:failure.failureConstraint,...(result.generationCollision?{generationCollision:true,fenceCollisions:diagnosticCount(result.fenceCollisions),failedAt:diagnosticFailedAt({failedAt:result.failedAt},result.timings),failureKind:'fence'}:{})};
 }
 // One structured line per phase for Workers Logs; never throws.
 function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
@@ -1767,7 +1782,7 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
   const typed=TYPED_DISCOVERY_CODES.has(failure.error);
   return {stage:'error',reason:typed?failure.error:String(result.error||'discovery_failed'),at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null,failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null};
  }
- if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
+ if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null,...(result.fenceCollisions?{fenceCollisions:result.fenceCollisions,fenceFailedAt:diagnosticFailedAt({failedAt:result.failedAt})}:{})};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
  if(result.remaining===0&&!(result.cheapRemaining>0)&&!(result.deferred>0)&&!(result.waitingRetry>0)&&!result.legacyPending&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
@@ -1993,7 +2008,15 @@ async function advanceDiscovery(env,body={}){
   else{
    const failure=discoveryFailureFields(e,e?.timings);
    const typed=TYPED_DISCOVERY_CODES.has(failure.error);
-   result={stage:'error',error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
+   // AIR-687: a fence refusal thrown outside `guarded` (status, checkpoint or assignment write) is the same CAS collision on discovery_authority.generation as AIR-534 only when `retryableFenceCollision` proves it positively
+   // (the batch fence, the published run, the authority and the hop's own lease). Then it is a short retry (`retryAt` about 30 s), not an `error` record that waits for the next hour boundary where the hourly cron collides again.
+   // The consecutive-collision cap is an engineering bound, not a product limit: 6 x 30 s is three minutes, far beyond the seconds an hourly reporting write holds the counter, and a persistent non-race refusal then
+   // returns to the pre-existing fail-closed `error` record and its recovery contract. A real switch, a lost lease, a held authority or an unknown cause never reach the retry.
+   let collision=null;
+   if(typed&&failure.error==='discovery_fence'&&(Number(current?.fenceCollisions)||0)<DISCOVERY_FENCE_COLLISION_SERIES_LIMIT){
+    try{if(await retryableFenceCollision(env,e,programmeRunId,acquired))collision={count:(Number(current?.fenceCollisions)||0)+1,failedAt:failure.failedAt};}catch{collision=null;}
+   }
+   result=collision?{stage:'partial',generationCollision:true,fenceCollisions:collision.count,failedAt:collision.failedAt??null,failureKind:'fence',checked:0,remaining:null,error:null,retryAt:new Date(Date.now()+DISCOVERY_FENCE_COLLISION_DEFER_MS).toISOString(),programmeRunId}:{stage:'error',error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
   }
  }
  trace.chunk=chunkSummary(result);
@@ -2123,7 +2146,7 @@ function discoveryQueueState(evidence,now=Date.now()){
   continuationProgrammeRunId:c&&typeof c.programmeRunId==='string'?c.programmeRunId:null,hopId:same&&typeof c.hopId==='string'&&c.hopId?c.hopId:null,
   stage:c&&typeof c.stage==='string'?c.stage:null,continuationReason:c&&typeof c.reason==='string'?c.reason:null,
   remainingChunks:same?discoveryQueueCount(c.remainingChunks):null,remaining:reading?.remaining??null,cheapRemaining:reading?.cheapRemaining??null,deferred:reading?.deferred??null,waitingRetry:reading?.waitingRetry??null,
-  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
+  gateAt,checkpointAt:same?discoveryQueueTime(c.at):null,lastChunkAt:reading?.finishedAt??null,fenceCollisions:same?discoveryQueueCount(c.fenceCollisions):null,usefulProgressAt:workflow?discoveryQueueTime(workflow.lastUsefulProgressAt)||null:null,usefulProgressSince:workflow?discoveryQueueTime(workflow.usefulProgressTrackedSince)||null:null,observedAt:discoveryQueueTime(e.observedAt)||new Date(now).toISOString(),pause};
  const out=(state,reason,extra={})=>({...base,state,reason,...extra});
  if(e.authority?.state==='unavailable')return out('unknown','authority_unavailable');
  if(unavailable.some(name=>['authority','status','continuation','workflow','generation'].includes(name)))return out('unknown','records_unreadable');
@@ -2256,7 +2279,7 @@ async function discoveryExecutorReadout(env,continuation,options={}){
  const recoveryOverdueMs=recoveryOverdue?now-Date.parse(facts.recoveryDue):null;
  const recoveryState=recoveryOverdue?'overdue':facts.recoveryWaiting?'waiting':'none';
  const degraded=recoveryOverdue||stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
- return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:queue.eligible===true,degraded,recoveryOverdue,recoveryOverdueMs,recoveryState,recoveryIncident:recoveryOverdue&&recoveryOverdueMs>300000,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
+ return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,lastUsefulProgressAt:stored?.lastUsefulProgressAt||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:queue.eligible===true,degraded,recoveryOverdue,recoveryOverdueMs,recoveryState,recoveryIncident:recoveryOverdue&&recoveryOverdueMs>300000,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);

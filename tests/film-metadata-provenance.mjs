@@ -35,7 +35,7 @@ const templates={};
 function template(stage){
  if(templates[stage])return templates[stage];
  const file=path.join(root,'tpl-'+stage+'.sqlite');
- const upTo=stage==='v47'?chain.findIndex(name=>name.startsWith('0048_')):chain.length;
+ const upTo=stage==='v48'?chain.findIndex(name=>name.startsWith('0049_')):chain.length;
  assert.equal(sqlite(file,chain.slice(0,upTo).map(sql).join('\n')).status,0);
  assert.equal(sqlite(file,VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
  assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
@@ -100,7 +100,7 @@ for(const text of ['','a','abc','x'.repeat(55),'x'.repeat(56),'x'.repeat(63),'x'
 
 // ---- 2. schema absent and mode `off` ----
 {
- const absent=fresh('v47'),off=fresh();
+ const absent=fresh('v48'),off=fresh();
  await seed(absent.env);await seed(off.env);
  assert.equal((await readFilmSnapshot(absent.env,ID)).provenance,null,'schema absent reads null');
  const input={id:ID,at:T,requestId:'r',expectedRevision:1,film:{contractVersion:1},metadata:{updatedAt:T,year:1999,runtime:136,synopsis:'S',poster:'/p',url:'https://e.test/m',genres:['a'],declared:{year:{source:'letterboxd',anchor:{scheme:'letterboxd',value:'lid603'},observedAt:T,agreedAnchorDigest:null}}}};
