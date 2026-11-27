@@ -35,7 +35,7 @@ function world(films=6,{active=true}={}){
  return {file,env:{DB:d1Standin(file)},ids};
 }
 const res=(status,body='',headers={})=>({status,ok:status>=200&&status<300,headers:{get:name=>headers[String(name).toLowerCase()]??null},text:async()=>body,body:null});
-const movie=(id,cast=1)=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{name:'G'}],credits:{cast:Array.from({length:cast},(_,i)=>({id:id*1000+i,name:'A'+i,order:i})),crew:[{id:id*10+1,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'+id}}]}});
+const movie=(id,cast=1)=>({id,release_date:'1999-03-30',runtime:100,overview:'s'+id,poster_path:'/p.jpg',genres:[{id:18,name:'G'}],credits:{cast:Array.from({length:cast},(_,i)=>({id:id*1000+i,name:'A'+i,order:i})),crew:[{id:id*10+1,name:'D',job:'Director'}]},translations:{translations:[{iso_639_1:'ru',iso_3166_1:'RU',data:{title:'Т'+id,overview:''}}]},images:{posters:[]}});
 function upstream({tmdb='ok',onCall=null,cast=1}={}){
  const calls=[];
  const impl=async url=>{
@@ -514,4 +514,103 @@ const ticks=file=>rows(file,'SELECT tick_id,state,counts_json FROM catalog_enric
   assert.equal((await run(w2,upstream())).stop,'idle');assert.equal(metaCount(w2.file),2,'the owner-gated held cutover has no publisher: it holds nothing');
  }
 }
+// ---- AIR-684: the Discovery scope end to end with the REAL writers (upsertAdmissions, replaceCatalog) on the migrated schema and the actual drainer: admission, a delayed anchor, an existing Film, the retained membership,
+// complete credits and the typed Russian title, overlap with rated, a disabled and re-enabled scope, a superseded admission, a guarded consume, no self-wake, mixed progress and the measured cost. Synthetic ids only.
+{
+ const Authority=await import('../src/discovery-authority.js');
+ const w=world(0);
+ const RUN='run-684-drain';
+ const LEASE={id:'lease-684',expiresAt:Date.now()+3600000};
+ sqlite(w.file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1;DROP TABLE IF EXISTS discovery_epg_priority;");
+ sqlite(w.file,`UPDATE discovery_lease SET lease_id='${LEASE.id}', expires_at=${LEASE.expiresAt}, programme_run_id=NULL WHERE id=1`);
+ const denv={DB:d1Standin(w.file),BUCKET:{async get(){return null;},async put(){},async head(){return null;},list:async()=>({objects:[]}),delete:async()=>{}},discoveryLease:LEASE};
+ await Authority.ingestLedger(denv,{programmeRunId:RUN,handoff:true,lease:LEASE,items:(async function*(){yield {key:'o|2001',title:'O',normalizedTitle:'o',year:2001,durations:[100],shows:[{channelId:'c',channel:'C',start:Date.now()+3600000,end:Date.now()+3700000}],seenInLatestSnapshot:true,lastAiring:Date.now()+3600000};})()});
+ sqlite(w.file,`INSERT OR IGNORE INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('discovery',1,1,1,'${T}')`);
+ const film=n=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${n}',2,NULL,'K${n}','${T}');INSERT INTO film_external_id VALUES ('film:tmdb:${n}','tmdb','${n}',1,0,NULL);`;
+ const adm=n=>({id:'tmdb_'+n,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,title:'Film '+n});
+ const sig=()=>rows(w.file,"SELECT subject,state FROM enrichment_signal WHERE kind='admitted' AND source='discovery' ORDER BY subject").map(r=>r.subject+'='+r.state);
+ const tmdbCalls=up=>up.calls.filter(url=>url.startsWith('https://api.themoviedb.org/')).length;
+ const metrics={};
+
+ // the producer's drain: an EXISTING Film (701) and a DELAYED anchor (702: the Film does not exist yet)
+ sqlite(w.file,film(701));
+ await Authority.upsertAdmissions(denv,{tmdb_701:adm(701),tmdb_702:adm(702),tmdb_tv_703:{id:'tmdb_tv_703',tmdbId:'703',canonicalIdentity:'tmdb_tv:703',title:'Show',mediaType:'tv'}},{lease:LEASE});
+ assert.deepEqual(sig(),['tmdb:701=pending','tmdb:702=pending'],'a genuinely new movie is stream; a TV row is not');
+ const up=upstream({cast:75});
+ const t0=Date.now();
+ const first=await run(w,up);
+ metrics.firstRun={stop:first.stop,films:first.counts.films,signals:first.counts.signals,statements:first.counts.statements,units:first.counts.units,tmdbRequests:tmdbCalls(up),ms:Date.now()-t0};
+ assert.equal(first.stop,'idle','an unresolved admission neither keeps the run spinning nor blocks the resolved one');
+ assert.deepEqual(rows(w.file,"SELECT scope FROM catalog_enrichment_member WHERE film_id='film:tmdb:701'"),[{scope:'discovery'}],'the existing Film joined the retained discovery scope');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM film_person_credit WHERE film_id='film:tmdb:701'")[0].n,76,'complete credits: 75 actors and a director, in two chunks of the common producer, with no storage cap');
+ assert.equal(rows(w.file,"SELECT COUNT(DISTINCT slot) AS n FROM catalog_enrichment_state WHERE film_id='film:tmdb:701' AND part='credits'")[0].n,2);
+ assert.deepEqual(rows(w.file,"SELECT source,value FROM film_localization_source WHERE film_id='film:tmdb:701' AND source='tmdb'"),[{source:'tmdb',value:'Т701'}],'the typed Russian title of the producer\'s own TMDB response');
+ assert.deepEqual(sig().filter(item=>item.startsWith('tmdb:702')),['tmdb:702=pending'],'the delayed admission stays pending (unresolved), it is not lost');
+ const before=tmdbCalls(up);
+ const idle=await run(w,up);
+ assert.equal(idle.stop,'idle');assert.equal(tmdbCalls(up),before,'nothing resolved: no request, no spin');
+ // the claim event resolves it at once
+ sqlite(w.file,film(702));
+ const second=await run(w,up);
+ metrics.delayedAnchor={stop:second.stop,films:second.counts.films,tmdbRequests:tmdbCalls(up)-before};
+ assert.deepEqual(rows(w.file,"SELECT scope FROM catalog_enrichment_member WHERE film_id='film:tmdb:702'"),[{scope:'discovery'}],'a delayed canonical admission resolves on the claim event');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM film_metadata WHERE film_id IN ('film:tmdb:701','film:tmdb:702')")[0].n,2);
+ // no self-wake: the producer's own writes created no pending inbox row of any kind
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending' AND NOT (kind='admitted' AND source='discovery')")[0].n,0,'zero inbox changes from the producer\'s own complete write cycle');
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE state='pending'")[0].n,0);
+
+ // overlap with rated: a Film that is also a rated member has ONE state set and is enriched once
+ sqlite(w.file,film(710)+`INSERT OR IGNORE INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,1,1,'${T}');`);
+ await Authority.upsertAdmissions(denv,{tmdb_710:adm(710)},{lease:LEASE});
+ sqlite(w.file,"INSERT INTO enrichment_signal (kind,subject,source,part,version,state,armed_at) VALUES ('admitted','tmdb:710','rated','',1,'pending','"+T+"')");
+ const overlapCalls=tmdbCalls(up);
+ await run(w,up);
+ assert.deepEqual(rows(w.file,"SELECT scope FROM catalog_enrichment_member WHERE film_id='film:tmdb:710' ORDER BY scope").map(r=>r.scope),['discovery','rated']);
+ assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE film_id='film:tmdb:710' AND part='core' AND source='tmdb'")[0].n,1,'one state set for overlapping scopes');
+ assert.equal(tmdbCalls(up)-overlapCalls,1,'one TMDB response carries core, credits and translations: one request for the overlapping Film');
+
+ // a disabled scope keeps recording and holds; re-enabling catches up with nothing redefined as history
+ sqlite(w.file,"UPDATE catalog_enrichment_scope SET enabled=0, revision=revision+1 WHERE scope='discovery'");
+ sqlite(w.file,film(720));
+ await Authority.upsertAdmissions(denv,{tmdb_720:adm(720)},{lease:LEASE});
+ assert.ok(sig().includes('tmdb:720=pending'),'the emitter keeps recording while the scope is disabled (its gate is `activated`)');
+ const heldCalls=tmdbCalls(up);
+ await run(w,up);
+ assert.equal(tmdbCalls(up),heldCalls,'a disabled scope is held: no request');
+ assert.deepEqual(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_member WHERE film_id='film:tmdb:720'")[0].n,0);
+ sqlite(w.file,"UPDATE catalog_enrichment_scope SET enabled=1, revision=revision+1 WHERE scope='discovery'");
+ await run(w,up);
+ assert.deepEqual(rows(w.file,"SELECT scope FROM catalog_enrichment_member WHERE film_id='film:tmdb:720'"),[{scope:'discovery'}],'re-enabled: the held signal is consumed and the work caught up');
+
+ // a superseded admission keeps its retained eligibility: a later verified change still reopens the Film's part
+ sqlite(w.file,"UPDATE discovery_admission SET state='superseded' WHERE film_id='tmdb_701'");
+ sqlite(w.file,`INSERT INTO enrichment_signal (kind,subject,source,part,version,state,cause_digest,armed_at) VALUES ('source_changed','film:tmdb:701','tmdb','credits',1,'pending','${'c'.repeat(64)}','${T}')`);
+ const superseded=await run(w,upstream({cast:75}));
+ assert.ok(superseded.counts.signals>=1,'a retained member of a superseded admission is still processed');
+
+ // a guarded consume: the control generation moved before the effect applies nothing and keeps the newest version pending
+ sqlite(w.file,film(730));
+ await Authority.upsertAdmissions(denv,{tmdb_730:adm(730)},{lease:LEASE});
+ const lease=await S.acquireLease(w.env,{leaseId:'lease-guard-aaaaaaaa',now:T});
+ const [signal]=(await S.runnableSignals(w.env,{now:new Date(Date.parse(T)+60000).toISOString()})).filter(item=>item.subject==='tmdb:730');
+ const generation=rows(w.file,'SELECT generation FROM catalog_enrichment_control')[0].generation;
+ const refused=await S.consumeSignal(w.env,{signal,generation:generation-1,leaseId:lease.leaseId,now:new Date(Date.parse(T)+60000).toISOString()});
+ assert.equal(refused.consumed,false);assert.equal(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_member WHERE film_id='film:tmdb:730'")[0].n,0,'a guarded-out effect records nothing');
+ assert.equal(rows(w.file,"SELECT acked_version FROM enrichment_signal WHERE subject='tmdb:730' AND source='discovery'")[0].acked_version,0,'and never an acknowledgement');
+ await S.releaseLease(w.env,{leaseId:lease.leaseId,now:new Date(Date.parse(T)+61000).toISOString()});
+
+ // the transfer path with the actual writer: a resolver publication admits a genuinely new Film once, an import admits none, and the producer drains exactly the former
+ sqlite(w.file,film(740)+film(741));
+ await Authority.replaceCatalog(denv,{tmdb_740:adm(740)},{lease:LEASE,admission:{origin:'resolver',programmeRunId:RUN}});
+ await Authority.replaceCatalog(denv,{tmdb_740:adm(740),tmdb_741:adm(741)},{lease:LEASE});
+ assert.ok(sig().includes('tmdb:740=pending')&&!sig().some(item=>item.startsWith('tmdb:741')),'resolver publication: stream; import: nothing');
+ await run(w,up);
+ assert.deepEqual(rows(w.file,"SELECT film_id FROM catalog_enrichment_member WHERE film_id IN ('film:tmdb:740','film:tmdb:741')"),[{film_id:'film:tmdb:740'}]);
+
+ // per-scope counts and the measured cost of the Discovery path (reported, no quota)
+ metrics.members=Object.fromEntries(rows(w.file,'SELECT scope,COUNT(*) AS n FROM catalog_enrichment_member GROUP BY scope').map(r=>[r.scope,r.n]));
+ metrics.perFilm={tmdbRequestsPerFilm:1,statementsPerFirstRun:first.counts.statements,unitsPerFirstRun:first.counts.units};
+ console.log('AIR-684 discovery path measurements '+JSON.stringify(metrics));
+}
+
 console.log('catalog enrichment drain: ok');

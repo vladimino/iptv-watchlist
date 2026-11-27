@@ -108,6 +108,9 @@ export function afterOutcome(row,outcome,now){
 export const fallbackElapsed=(pendingSince,now)=>!!pendingSince&&Date.parse(now)-Date.parse(pendingSince)>=FALLBACK_MS;
 
 // ---- the core decision (decision 2) ----
+// the fields whose language quality ranks before the provider (ADR 0224); the language of a source's value comes from its typed observation (`answer.language[field]`: `ru`, `en` or null)
+const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
+const languageRank=(answer,field)=>({ru:2,en:1})[answer?.language?.[field]]||0;
 const equalYear=(a,b)=>Number(a)===Number(b);
 const equalRuntime=(a,b)=>Math.abs(Number(a)-Number(b))<=RUNTIME_TOLERANCE_MIN;
 const COMPARE={year:equalYear,runtime:equalRuntime};
@@ -117,6 +120,9 @@ function fieldState(source,field,{applicable,answers}){
  const answer=answers[source];
  if(!answer||answer.status==='stopped'||answer.status==='transport')return 'pending';
  if(answer.status==='failed')return 'failed';
+ // a field whose coverage in an OK answer is unreadable or ambiguous is UNRESOLVED: it is neither a value nor an absence, so no lower-priority source may pass through it and the part cannot settle on it
+ const coverage=answer.coverage?.[field];
+ if(coverage==='unreadable'||coverage==='ambiguous')return 'unresolved';
  return blank(answer.fields?.[field])?'absent':'value';
 }
 // input: {applicable, hasLetterboxdAnchor, agreed, disagreement, stored:{field->value}, answers:{source->{status:'ok'|'transport'|'failed'|'stopped', fields}}, pendingSince:{source->iso|null}, now}
@@ -140,13 +146,18 @@ export function decideCore(input){
    const state=fieldState(source,field,input);
    if(state==='not_applicable'||state==='absent')continue;
    if(state==='value'){
+    // ADR 0224: for the synopsis and the poster ONLY, verified language quality ranks before provider preference at equal confirmed confidence (Russian above English above unknown). Among the sources that have a VALUE for this
+    // blank field now, the best language wins and the fixed source order breaks a tie; nothing here waits for another source, widens a refresh or replaces a stored value (the field is blank).
+    let chosen=source;
+    if(LANGUAGE_FIELDS.includes(field))for(const later of CORE_ORDER.slice(CORE_ORDER.indexOf(source)+1))if(fieldState(later,field,input)==='value'&&languageRank(answers[later],field)>languageRank(answers[chosen],field))chosen=later;
     // Letterboxd's own value needs a recorded agreement whenever the Film holds a Letterboxd anchor; a value of the other source needs it too, unless every earlier source is only transport-unavailable for 72 h.
-    if(hasLetterboxdAnchor&&!agreed&&!fallbackOver){out.waiting[field]={reason:'waiting_for_agreement',source};decided=true;break;}
-    out.writes[field]={source,value:answers[source].fields[field]};
-    if(fallbackOver){out.fallbackFill.push({field,source,waitedFor:fallbackOver});if(hasLetterboxdAnchor&&!agreed)out.unconfirmedAgreement.push(field);}
+    if(hasLetterboxdAnchor&&!agreed&&!fallbackOver){out.waiting[field]={reason:'waiting_for_agreement',source:chosen};decided=true;break;}
+    out.writes[field]={source:chosen,value:answers[chosen].fields[field]};
+    if(fallbackOver){out.fallbackFill.push({field,source:chosen,waitedFor:fallbackOver});if(hasLetterboxdAnchor&&!agreed)out.unconfirmedAgreement.push(field);}
     decided=true;break;
    }
    if(state==='failed'){out.waiting[field]={reason:'failed_source',source,retryable:false};decided=true;break;}
+   if(state==='unresolved'){out.waiting[field]={reason:'unverified_coverage',source,retryable:true};decided=true;break;}
    // pending: the transport-only fallback applies only after 72 h of upstream transport (pendingSince is set by a transport outcome alone), and never over a known disagreement or a failure.
    if(fallbackElapsed(pendingSince[source],now)){fallbackOver=fallbackOver||source;continue;}
    out.waiting[field]={reason:'waiting_for_precedence',source,retryable:true};decided=true;break;
@@ -154,68 +165,6 @@ export function decideCore(input){
   if(!decided){nothingMissing=false;out.gaps.push(field);}
  }
  out.complete=blanks.every(field=>out.writes[field]||out.gaps.includes(field))&&!Object.keys(out.waiting).length;
- return out;
-}
-
-// ---- replacement planning (ADR 0214 decisions 5, 10 and 12; ADR 0224; AIR-633 PV2) ----
-// The planner only DECIDES WHAT TO OFFER the one canonical writer on a due fetch; the writer's comparator (confidence, then language quality for synopsis and poster, then source precedence, freshness, digest) and its language guards
-// (P3-A, no downgrade) remain the single authority that replaces, adopts or refuses, and every outcome is counted there. The planner therefore adds NO second rank policy: any observed value of an applicable source is offered for a
-// nonblank field (an equal value too, so adoption and the `agreed` audit are reachable), except where the observation is unconfirmed (an unconfirmed observation never replaces a different nonblank value).
-// `provenance` (optional): {mode:'off'|'hold'|'enforce', fields:{field->{name, source, language}}}; absent or mode `off` reads every stored value as unknown-language.
-export const LANGUAGE_FIELDS=Object.freeze(['synopsis','poster']);
-const LANGUAGE_RANK=Object.freeze({ru:2,en:1});
-const same=(a,b)=>canonical(a??null)===canonical(b??null);
-// The language of one observed field. The shared Russian-first projection (AIR-684) supplies `answer.meta[field]={language,languageBasis}`; until it does, the only language known is the owner-approved P4-B default (a freshly observed
-// Letterboxd synopsis is ASSUMED English). A top-level TMDB overview or poster is never given a language here (ADR 0224: a ru-RU request is not proof).
-export function observedLanguage(source,field,answer){
- if(!LANGUAGE_FIELDS.includes(field))return {language:null,languageBasis:null};
- const meta=answer?.meta?.[field];
- if(meta&&(meta.language==='ru'||meta.language==='en'))return {language:meta.language,languageBasis:meta.languageBasis||'explicit'};
- if(field==='synopsis'&&source==='letterboxd')return {language:'en',languageBasis:'assumed'};
- return {language:null,languageBasis:null};
-}
-// -> {offers:{field->{source,value,mode:'replace'|'adopt'|'absent',language,languageBasis}}, pending:[{field,source,reason}], fillOverrides:{field->{source,value}}, supersededKept:[field]}
-// enforce: every observation of a nonblank field is offered (an answered source with a verified absence is offered as a null declaration, so `source_absent` is counted by the writer; a superseded value with no observation is listed as
-// `supersededKept`). hold: only an equal value (an adoption) is offered, a different one is `pending`. off or schema absent: nothing is offered; a Russian upgrade of a different nonblank synopsis or poster is `pending`, which is the
-// durable evidence that makes the Film's core part runnable again once enforce permits it.
-export function planReplacements(input){
- const out={offers:{},pending:[],fillOverrides:{},supersededKept:[]};
- const {provenance,applicable,hasLetterboxdAnchor,agreed,stored,answers,locked,fills={}}=input;
- if(locked)return out;
- const mode=provenance?.mode||'off';
- const confirmed=!hasLetterboxdAnchor||!!agreed; // an unconfirmed observation never replaces a different nonblank value (ADR 0214 decision 5)
- if(!confirmed)return out;
- const valuesOf=field=>CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],...observedLanguage(source,field,answers[source])}));
- for(const field of CORE_FIELDS){
-  const isLanguage=LANGUAGE_FIELDS.includes(field);
-  if(blank(stored[field])){
-   // a blank is filled by decideCore in source order. For synopsis and poster a Russian observation of ANOTHER source is better than that fill (ADR 0224): enforce fills the Russian value directly; off and hold fill as before and leave the
-   // durable evidence that makes the Russian value an upgrade once enforce permits it.
-   const fill=fills[field];
-   if(!fill||!isLanguage)continue;
-   const russian=valuesOf(field).find(item=>item.language==='ru');
-   if(!russian||same(fill.value,russian.value)||observedLanguage(fill.source,field,answers[fill.source]).language==='ru')continue;
-   if(mode==='enforce')out.fillOverrides[field]={source:russian.source,value:russian.value};
-   else out.pending.push({field,source:russian.source,reason:'language_upgrade',value:russian.value});
-   continue;
-  }
-  const standing=provenance?.fields?.[field]||{name:'unknown',language:null,source:null};
-  const seen=valuesOf(field);
-  if(!seen.length){
-   if(mode!=='enforce')continue;
-   if(standing.name==='superseded')out.supersededKept.push(field);
-   // a source that answered and verifiably has no value, which is the very source that attributed the stored value: the writer counts it as `source_absent` and keeps the value (a blank never clears)
-   if(standing.source&&answers[standing.source]?.status==='ok'&&fieldState(standing.source,field,{applicable,answers})==='absent')out.offers[field]={source:standing.source,value:null,mode:'absent',language:null,languageBasis:null};
-   continue;
-  }
-  // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order
-  const pick=isLanguage?[...seen].sort((a,b)=>(LANGUAGE_RANK[b.language]||0)-(LANGUAGE_RANK[a.language]||0))[0]:seen[0];
-  const equal=same(stored[field],pick.value);
-  const upgrade=isLanguage&&pick.language==='ru'&&standing.language!=='ru'; // P3-A: a confirmed Russian value may replace an eligible unknown or English one
-  if(mode==='enforce'){out.offers[field]={source:pick.source,value:pick.value,mode:equal?'adopt':'replace',language:pick.language,languageBasis:pick.languageBasis};continue;}
-  if(equal){if(mode==='hold')out.offers[field]={source:pick.source,value:pick.value,mode:'adopt',language:pick.language,languageBasis:pick.languageBasis};continue;}
-  if(upgrade)out.pending.push({field,source:pick.source,reason:'language_upgrade',value:pick.value});
- }
  return out;
 }
 
@@ -274,7 +223,9 @@ export function selectRussianTitle(translations){
   if(!plain(entry))return {status:'unreadable'};
   if(entry.iso_639_1!=='ru')continue;
   if(!plain(entry.data))return {status:'unreadable'};
-  const title=typeof entry.data.title==='string'?entry.data.title.trim():'';
+  // a Russian entry without a string `title` is malformed, never a blank: absence is not inferred from a shape that cannot be read
+  if(typeof entry.data.title!=='string')return {status:'unreadable'};
+  const title=entry.data.title.trim();
   if(title)ru.push({title,region:entry.iso_3166_1});
  }
  const distinct=[...new Set(ru.map(item=>item.title))];
@@ -282,6 +233,173 @@ export function selectRussianTitle(translations){
  if(distinct.length===1)return {status:'value',value:distinct[0]};
  const regional=[...new Set(ru.filter(item=>item.region==='RU').map(item=>item.title))];
  return regional.length===1?{status:'value',value:regional[0]}:{status:'ambiguous'};
+}
+
+// ---- source versions (ADR 0219 decision 2) ----
+// ONE pure projection of what a verified response says about a part, used by BOTH the producer (it stores the result as the part's `source_version` when the part is complete) and every observer of the same source
+// (the Discovery revalidation), so the two cannot disagree about what a part is. A part whose section is not VERIFIED (an unreadable or unsupported section, a failed response) has no version (null): it is never
+// signalled, never compared and never read as "no data". `anchor` is the identity the response was fetched for.
+// ---- the Russian-first TMDB observation (ADR 0224) ----
+// ONE typed observation of a source's core fields, built by the source's parser (`parseTmdb`, `fetchLetterboxd`) from these pure selectors, written from by the producer and compared by every observer. Each field is
+// `{value, language, languageBasis, coverage}`: coverage `verified`, `absent` (a verified, explicit absence), `unreadable` (missing or malformed: never an absence) or `ambiguous`; `language` is `ru`, `en` or null (unknown or any
+// other language: never attributed to ru or en); `languageBasis` is `explicit` (a provider tag), `assumed` (the owner-approved assumption for a Letterboxd synopsis only, P4-B) or null. Language and basis are null together.
+// The value written is the value that carries the tag: the observation binds them.
+export const PROJECTION_VERSION=3;
+export const GENRE_MAPPING_REVISION=1;
+// The reviewed TMDB genre id -> existing vocabulary (the Russian words of `GENRE_MAP` in `src/sources.js`, keyed there by the English names kept here). No other taxonomy. An id with no entry is a coverage GAP, never an invented label.
+export const TMDB_GENRES=Object.freeze({28:['Action','Боевик'],12:['Adventure','Приключения'],16:['Animation','Мультфильм'],35:['Comedy','Комедия'],80:['Crime','Криминал'],99:['Documentary','Документальный'],18:['Drama','Драма'],10751:['Family','Семейный'],14:['Fantasy','Фэнтези'],36:['History','Исторический'],27:['Horror','Ужасы'],10402:['Music','Музыкальный'],9648:['Mystery','Детектив'],10749:['Romance','Мелодрама'],878:['Science Fiction','Фантастика'],10770:['TV Movie','Телефильм'],53:['Thriller','Триллер'],10752:['War','Военный'],37:['Western','Вестерн']});
+const isId=value=>typeof value==='number'?Number.isInteger(value):typeof value==='string'&&/^\d+$/.test(value);
+const field=(value,coverage,language=null,languageBasis=null)=>({value,language,languageBasis,coverage});
+const unreadable=()=>field(null,'unreadable');
+// year: a present date string. An EMPTY string is TMDB's explicit "no date"; a missing key or any other shape is unreadable.
+export function readYear(releaseDate){
+ if(releaseDate==='')return field(null,'absent');
+ const match=typeof releaseDate==='string'?/^(\d{4})(-\d{2}-\d{2})?$/.exec(releaseDate):null;
+ return match?field(Number(match[1]),'verified'):unreadable();
+}
+// runtime: a positive integer is a value; null or 0 is TMDB's explicit "unknown"; a missing key, a fraction or a negative is unreadable.
+export function readRuntime(runtime){
+ if(runtime===null||runtime===0)return field(null,'absent');
+ return Number.isInteger(runtime)&&runtime>0?field(runtime,'verified'):unreadable();
+}
+// -> {coverage, value:[labels], ids:[sorted numeric strings], unmapped:[ids]}. A missing or malformed list is unreadable; a present empty list is a valid empty set.
+export function mapGenres(genres){
+ if(!Array.isArray(genres)||!genres.every(item=>plain(item)&&isId(item.id)))return {coverage:'unreadable',value:[],ids:[],unmapped:[]};
+ const ids=[...new Set(genres.map(item=>String(item.id)))].sort((a,b)=>Number(a)-Number(b));
+ return {coverage:'verified',value:ids.filter(id=>TMDB_GENRES[id]).map(id=>TMDB_GENRES[id][1]),ids,unmapped:ids.filter(id=>!TMDB_GENRES[id])};
+}
+// The `translations` section as the selectors need it: every entry a plain object with string language and region tags and a plain `data`; an entry of Russian or English must carry a string `overview` (an explicit empty string is a
+// verified blank; a missing or non-string one is malformed, never a blank). Anything else is unreadable: absence is never inferred from a shape that cannot be read.
+function readTranslations(translations){
+ if(!plain(translations)||!Array.isArray(translations.translations))return null;
+ for(const entry of translations.translations){
+  if(!plain(entry)||typeof entry.iso_639_1!=='string'||typeof entry.iso_3166_1!=='string'||!plain(entry.data))return null;
+  if((entry.iso_639_1==='ru'||entry.iso_639_1==='en')&&typeof entry.data.overview!=='string')return null;
+ }
+ return translations.translations;
+}
+// The synopsis: a nonblank overview of an explicitly tagged Russian `translations` entry (several distinct: the RU region decides, otherwise ambiguous); only when Russian is VERIFIED absent, an explicitly tagged English one (US on a
+// tie, otherwise one distinct value). The top-level `overview` is never proof of language. A missing, malformed or ambiguous section is not an absence.
+export function selectSynopsis(translations){
+ const entries=readTranslations(translations);
+ if(!entries)return unreadable();
+ const pick=(language,region)=>{
+  const found=entries.filter(entry=>entry.iso_639_1===language&&entry.data.overview.trim());
+  if(!found.length)return {status:'none'};
+  const distinct=list=>[...new Set(list.map(entry=>entry.data.overview.trim()))];
+  const all=distinct(found);
+  if(all.length===1)return {status:'value',value:all[0]};
+  const regional=distinct(found.filter(entry=>entry.iso_3166_1===region));
+  return regional.length===1?{status:'value',value:regional[0]}:{status:'ambiguous'};
+ };
+ const ru=pick('ru','RU');
+ if(ru.status==='value')return field(ru.value,'verified','ru','explicit');
+ if(ru.status==='ambiguous')return field(null,'ambiguous');
+ const en=pick('en','US');
+ if(en.status==='value')return field(en.value,'verified','en','explicit');
+ if(en.status==='ambiguous')return field(null,'ambiguous');
+ return field(null,'absent');
+}
+// The poster: a verified Russian-language image of `images.posters[]`, else an English one, else (P1-A) a language-neutral one (`iso_639_1 = null`), else the top-level `poster_path`, whose language is known only when the same file
+// is listed in `images` (its verified tag is kept, whatever the language; no listing is unknown, never attributed). Within a tier the greater width, then the lexically smaller `file_path` (P2-A): votes and list order never decide. A missing or
+// malformed images section is unreadable (the value is then the top-level path with no language, for writing only). A top-level `poster_path` that is null is TMDB's explicit "no poster"; a missing key or a bad shape is unreadable.
+// -> {value: path, language, languageBasis, coverage}
+export function selectPoster(images,topLevel){
+ const top=typeof topLevel==='string'&&topLevel.startsWith('/')?topLevel:null;
+ const posters=plain(images)&&Array.isArray(images.posters)?images.posters:null;
+ if(!posters||!posters.every(item=>plain(item)&&typeof item.file_path==='string'&&item.file_path.startsWith('/')&&Number.isFinite(item.width)&&(item.iso_639_1===null||typeof item.iso_639_1==='string')))return field(top,'unreadable');
+ const order=(a,b)=>b.width-a.width||(a.file_path<b.file_path?-1:a.file_path>b.file_path?1:0);
+ for(const language of ['ru','en',null]){
+  const tier=posters.filter(item=>item.iso_639_1===language).sort(order);
+  if(tier.length)return field(tier[0].file_path,'verified',language,language?'explicit':null);
+ }
+ if(top){
+  // the top-level path keeps the VERIFIED tag of the image that lists it (any two-letter language tag, never a guess); a path the images do not list is unknown. Another language ranks below Russian and English in the planner.
+  const listed=posters.find(item=>item.file_path===top);
+  const language=listed&&typeof listed.iso_639_1==='string'&&/^[a-z]{2}$/.test(listed.iso_639_1)?listed.iso_639_1:null;
+  return field(top,'verified',language,language?'explicit':null);
+ }
+ return topLevel===null?field(null,'absent'):unreadable();
+}
+// The languages the provenance writer can PERSIST today (AIR-631's `languageOf` and the CHECKs of migration 0049 accept `ru` and `en`). The observation and the digest keep any verified tag; the producer tells the writer only a tag in this set, so
+// a verified tag the schema cannot hold (for example `fr` on a last-resort poster) is neither invented as ru/en nor allowed to fail the write: it is reported (`languageNotDeclared`) and the declaration carries no language. Extending this set is
+// the additive schema step that AIR-631 owns.
+export const WRITER_LANGUAGES=Object.freeze(['ru','en']);
+// The typed writer declaration of ONE selected field: the single, explicit conversion from the observation to what a provenance writer is told (AIR-631): the source, the anchor, the value that carries the tag, and its language and basis
+// (`ru`/`en` with `explicit`/`assumed`, or both null). Never a language the observation did not carry.
+export function declarationOf(name,source,anchor,item){
+ if(!item||item.coverage!=='verified')return null;
+ return {field:name,source,anchor:anchor?{scheme:anchor.scheme,value:String(anchor.value)}:null,value:item.value,language:item.language??null,languageBasis:item.languageBasis??null};
+}
+const comparableCoverage=value=>value==='verified'||value==='absent';
+const FIELDS=Object.freeze(['year','runtime','url','synopsis','poster','genres']);
+// Which fields of an observation are not verified coverage. -> [field names]
+export const unresolvedFields=observation=>FIELDS.filter(name=>{const item=observation?.[name];return !item||!comparableCoverage(item.coverage);});
+// The genre field with a verified id list but unmapped ids is still comparable (the gap is recorded and versioned); only an unreadable list is not.
+// core: ONE digest for both sources, over the whole typed observation: all six selected fields with their value, language, basis and coverage, the genre ids and the unmapped ids, the genre mapping revision and the projection
+// version; never timestamps, votes or the image list. It exists only when EVERY field is verified coverage (a verified absence included); otherwise null: an incomplete observation is never a version.
+export function coreVersion(source,anchor,observation){
+ if(!observation||unresolvedFields(observation).length)return null;
+ const shape=item=>({value:item.value??null,language:item.language??null,basis:item.languageBasis??null,coverage:item.coverage});
+ return digestOf({source,anchor,part:'core',projectionVersion:PROJECTION_VERSION,genreMappingRevision:GENRE_MAPPING_REVISION,
+  fields:{year:shape(observation.year),runtime:shape(observation.runtime),url:shape(observation.url),synopsis:shape(observation.synopsis),poster:shape(observation.poster),genres:{...shape(observation.genres),ids:observation.genres.ids??[],unmapped:observation.genres.unmapped??[]}}});
+}
+// localization: the selected typed title, or its verified absence. Ambiguous, unreadable and unsupported coverage has none.
+export const localizationVersion=(source,anchor,title)=>title?.status==='value'?digestOf({source,anchor,title:title.value}):title?.status==='absent'?digestOf({source,anchor,title:null,status:'absent'}):null;
+// credits: the ordered provider credits of a readable section (a present, empty list is a valid empty set).
+export const creditsVersion=(source,anchor,credits)=>credits?.status==='ok'&&Array.isArray(credits.items)?digestOf({source,anchor,part:'credits',items:credits.items.map(item=>[item.role,item.key??null,item.key==null?(item.name??null):null])}):null;
+
+// ---- replacement planning (ADR 0214 decisions 5, 10 and 12; ADR 0224; AIR-633 PV2) ----
+// The planner only DECIDES WHAT TO OFFER the one canonical writer on a due fetch; the writer's comparator (confidence, then language quality for synopsis and poster, then source precedence, freshness, digest) and its language guards
+// (P3-A, no downgrade) remain the single authority that replaces, adopts or refuses, and every outcome is counted there. The planner therefore adds NO second rank policy: any observed value of an applicable source is offered for a
+// nonblank field (an equal value too, so adoption and the `agreed` audit are reachable), except where the observation is unconfirmed (an unconfirmed observation never replaces a different nonblank value).
+// `provenance` (optional): {mode:'off'|'hold'|'enforce', fields:{field->{name, source, language}}}; absent or mode `off` reads every stored value as unknown-language.
+const same=(a,b)=>canonical(a??null)===canonical(b??null);
+// The language of one observed field comes from the typed observation of the shared Russian-first projection (ADR 0224, AIR-684): `answer.language[field]` is `ru`, `en` (an explicit tag, or the owner-approved assumption for a Letterboxd synopsis) or null.
+const languageOf=(answer,field)=>answer?.language?.[field]??null;
+// -> {offers:{field->{source,value,mode:'replace'|'adopt'|'absent',language}}, pending:[{field,source,reason}], fillOverrides:{field->{source,value}}, supersededKept:[field]}
+// enforce: every observation of a nonblank field is offered (an answered source with a verified absence is offered as a null declaration, so `source_absent` is counted by the writer; a superseded value with no observation is listed as
+// `supersededKept`). hold: only an equal value (an adoption) is offered, a different one is `pending`. off or schema absent: nothing is offered; a Russian upgrade of a different nonblank synopsis or poster is `pending`, which is the
+// durable evidence that makes the Film's core part runnable again once enforce permits it.
+export function planReplacements(input){
+ const out={offers:{},pending:[],fillOverrides:{},supersededKept:[]};
+ const {provenance,applicable,hasLetterboxdAnchor,agreed,stored,answers,locked,fills={}}=input;
+ if(locked)return out;
+ const mode=provenance?.mode||'off';
+ const confirmed=!hasLetterboxdAnchor||!!agreed; // an unconfirmed observation never replaces a different nonblank value (ADR 0214 decision 5)
+ if(!confirmed)return out;
+ const valuesOf=field=>CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],language:languageOf(answers[source],field)}));
+ for(const field of CORE_FIELDS){
+  const isLanguage=LANGUAGE_FIELDS.includes(field);
+  if(blank(stored[field])){
+   // a blank is filled by decideCore in source order. For synopsis and poster a Russian observation of ANOTHER source is better than that fill (ADR 0224): enforce fills the Russian value directly; off and hold fill as before and leave the
+   // durable evidence that makes the Russian value an upgrade once enforce permits it.
+   const fill=fills[field];
+   if(!fill||!isLanguage)continue;
+   const russian=valuesOf(field).find(item=>item.language==='ru');
+   if(!russian||same(fill.value,russian.value)||languageOf(answers[fill.source],field)==='ru')continue;
+   if(mode==='enforce')out.fillOverrides[field]={source:russian.source,value:russian.value};
+   else out.pending.push({field,source:russian.source,reason:'language_upgrade',value:russian.value});
+   continue;
+  }
+  const standing=provenance?.fields?.[field]||{name:'unknown',language:null,source:null};
+  const seen=valuesOf(field);
+  if(!seen.length){
+   if(mode!=='enforce')continue;
+   if(standing.name==='superseded')out.supersededKept.push(field);
+   // a source that answered and verifiably has no value, which is the very source that attributed the stored value: the writer counts it as `source_absent` and keeps the value (a blank never clears)
+   if(standing.source&&answers[standing.source]?.status==='ok'&&fieldState(standing.source,field,{applicable,answers})==='absent')out.offers[field]={source:standing.source,value:null,mode:'absent',language:null};
+   continue;
+  }
+  // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order
+  const pick=isLanguage?[...seen].sort((a,b)=>({ru:2,en:1}[b.language]||0)-({ru:2,en:1}[a.language]||0))[0]:seen[0];
+  const equal=same(stored[field],pick.value);
+  const upgrade=isLanguage&&pick.language==='ru'&&standing.language!=='ru'; // P3-A: a confirmed Russian value may replace an eligible unknown or English one
+  if(mode==='enforce'){out.offers[field]={source:pick.source,value:pick.value,mode:equal?'adopt':'replace',language:pick.language};continue;}
+  if(equal){if(mode==='hold')out.offers[field]={source:pick.source,value:pick.value,mode:'adopt',language:pick.language};continue;}
+  if(upgrade)out.pending.push({field,source:pick.source,reason:'language_upgrade',value:pick.value});
+ }
+ return out;
 }
 
 // ---- priority and fairness (decision 5) ----
@@ -305,4 +423,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({LANGUAGE_FIELDS,planReplacements,observedLanguage,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({planReplacements,WRITER_LANGUAGES,declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});

@@ -64,8 +64,8 @@ async function putRowsAtomic(env,ctx,rows,extra=[]){
 }
 
 // ---- reading what a plan needs ----
-// ADR 0214 decision 5 / AIR-633: the provenance MODE and, from `hold`/`enforce`, the standing and bound language of every stored field, read with the SAME helpers the writer uses (one comparator, no second reading of the rules).
-// Schema absent or mode `off` -> {mode:'off'} (today's planning). An unreadable control row fails the step closed, like the writer.
+// ADR 0214 decision 5 / AIR-633: the provenance MODE and, from `hold`/`enforce`, the standing, attributing source and bound language of every stored field, read with the SAME helpers the writer uses (one comparator, no second reading of
+// the rules). Schema absent or mode `off` -> {mode:'off'} (today's planning). An unreadable control row fails the step closed, like the writer.
 async function readStanding(handle,filmId,metadata,locked){
  const prov=await readProvenance(handle,filmId);
  if(!prov||prov.mode==='off')return {mode:'off',revision:prov?.revision??null,fields:{}};
@@ -74,7 +74,7 @@ async function readStanding(handle,filmId,metadata,locked){
   const value=storedValue(metadata,field),raw=prov.fields[field]||null;
   const stand=confidenceOf(raw,value,prov.anchors.digest,locked);
   const bound=!!raw&&value!==null&&raw.value_digest===valueDigest(value);
-  fields[field]={name:stand.name,language:bound?raw.language??null:null,languageBasis:bound?raw.language_basis??null:null};
+  fields[field]={name:stand.name,source:bound?raw.source:null,language:bound?raw.language??null:null};
  }
  return {mode:prov.mode,revision:prov.revision,fields};
 }
@@ -97,8 +97,7 @@ const lockGuard=filmId=>({sql:"NOT EXISTS (SELECT 1 FROM film_dimension WHERE fi
 // Processes ONE Film. ctx: {leaseId, generation, now, tools, fetchImpl, coordinator, env}. -> {state:'not_active'|'absent'|'blocked'|'done', ...}
 // `budget` (optional): {canStart:()=>boolean}, the resource-bounded drainer's own answer to "does the remaining statement budget cover one more unit group plus the finalize-and-successor reserve". It is asked before EVERY unit
 // group of a Film (core, a localization row, each Person, each credits chunk): a Film spans as many steps and instances as it needs, progress is durable per unit, and nothing here caps credits or Films.
-// `sources` (optional): the three fetchers, defaulting to the real ones. It is the seam through which the shared Russian-first projection of AIR-684 (per-field `answer.meta[field]={language,languageBasis}`, see Plan.observedLanguage)
-// reaches the planner; this step consumes that contract and does not implement a second parser.
+// `sources` (optional): the three fetchers, defaulting to the real ones (a test seam; the shared Russian-first observation of ADR 0224 is produced by `fetchTmdb` and `fetchLetterboxd`).
 const REAL_SOURCES=Object.freeze({fetchLetterboxd,fetchTmdb,fetchWikidata});
 export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetchImpl=fetch,coordinator=null,budget=null,sources=REAL_SOURCES}){
  const canStart=()=>!budget||budget.canStart();
@@ -219,7 +218,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   if(answer.status==='failed')report.failed.push({source,reason:answer.reason});
   // Success is classified PER APPLICABLE PART: a 200 whose translations or credits section is unreadable is not a recovery of that part, so its counter is preserved here and incremented by the section-specific outcome below
   // (repeated identical malformed responses therefore reach quarantine instead of sitting at one failure).
-  const sectionOk=row=>answer.status!=='ok'||(row.part==='localization'?!(answer.title&&answer.title.status==='unreadable'):row.part==='credits'?answer.credits?.status!=='unreadable':true);
+  const sectionOk=row=>answer.status!=='ok'||(row.part==='localization'?!(answer.title&&answer.title.status==='unreadable'):row.part==='credits'?answer.credits?.status!=='unreadable':row.part==='core'?Plan.unresolvedFields(answer.observation).length===0:true);
   for(const row of rows){
    if(!sectionOk(row))continue;
    const next=Plan.afterOutcome(row,outcome,now);
@@ -230,7 +229,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  // SOURCE RECOVERY (ADR 0219 decision 7), classified per part and BOUNDED: a valid section of a source wakes only the deferred repairable items of THAT part and source in other Films, at most REPAIR_WAKE_LIMIT per success, and
  // only items whose last attempt is older than REPAIR_WAKE_MIN_AGE_MS, so repeated unrelated successes cannot create a hot loop; settled parts are untouched.
  for(const [source,answer] of Object.entries(answers))if(answer.status==='ok'){
-  const valid={core:true,localization:!(answer.title&&answer.title.status==='unreadable'),credits:answer.credits?.status==='ok'};
+  const valid={core:Plan.unresolvedFields(answer.observation).length===0,localization:!(answer.title&&answer.title.status==='unreadable'),credits:answer.credits?.status==='ok'};
   const guard=guardSql(ctx),cutoff=new Date(Date.parse(now)-REPAIR_WAKE_MIN_AGE_MS).toISOString();
   for(const part of Object.keys(valid))if(valid[part])await db(env).prepare(`UPDATE catalog_enrichment_state SET retry_at=NULL,updated_at=? WHERE rowid IN (SELECT rowid FROM catalog_enrichment_state WHERE part=? AND source=? AND status='deferred_repair' AND failure_class='repairable' AND retry_at IS NOT NULL AND retry_at>? AND film_id<>? AND updated_at<=? ORDER BY updated_at LIMIT ?) AND ${guard.sql}`).bind(now,part,source,now,filmId,cutoff,REPAIR_WAKE_LIMIT,...guard.params).run().catch(()=>{});
  }
@@ -251,7 +250,7 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const asAnswer=source=>{
   if(!applicable.includes(source))return undefined;
   const answer=answers[source];
-  if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields,meta:answer.meta}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
+  if(answer){return answer.status==='ok'?{status:'ok',fields:answer.fields,coverage:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.coverage])),language:Object.fromEntries(Object.entries(answer.observation||{}).map(([name,item])=>[name,item?.language??null]))}:answer.status==='transport'?{status:'transport'}:{status:'failed'};}
   const row=rowOf('core',source);
   if(row&&['complete','complete_with_gaps'].includes(row.status))return {status:'ok',fields:{}};
   return row?.pendingSince?{status:'transport'}:{status:'stopped'};
@@ -260,37 +259,28 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const stored=context.stored;
  const core=Plan.decideCore({applicable,hasLetterboxdAnchor:hasLb,agreed,disagreement:false,stored,answers:coreAnswers,pendingSince,now});
  report.conflicts.push(...core.conflicts);
+ // an id of the TMDB genre list with no entry in the reviewed mapping is a visible coverage GAP: the part completes with it, never as a silent partial genre set (ADR 0224)
+ if(answers.tmdb?.status==='ok'&&(answers.tmdb.observation?.genres?.unmapped||[]).length&&!core.gaps.includes('genres_unmapped'))core.gaps.push('genres_unmapped');
  const metadataEligible=!context.locked&&dueRows.some(row=>row.part==='core');
+ // A source settles its core row only when it was FETCHED this tick and its observation is complete coverage. An unfetched or failed source keeps its row, version and counters exactly as they were; an OK answer with an unreadable
+ // or ambiguous field is repairable (below), never a settlement and never a version.
+ const settles=source=>answers[source]?.status==='ok'&&Plan.unresolvedFields(answers[source].observation).length===0;
  // ADR 0214 decisions 5 and 10, ADR 0224 (AIR-633): what this fetch offers the one writer for a nonblank field. Only a DUE core part plans it (the fetch was made for it); the writer's comparator and language guards decide and count each one.
  const replacements=metadataEligible?Plan.planReplacements({provenance:context.provenance,applicable,hasLetterboxdAnchor:hasLb,agreed,stored,answers:coreAnswers,locked:context.locked,fills:core.writes}):{offers:{},pending:[],fillOverrides:{},supersededKept:[]};
  for(const [field,override] of Object.entries(replacements.fillOverrides))core.writes[field]={source:override.source,value:override.value};
  for(const [field,offer] of Object.entries(replacements.offers))core.writes[field]={source:offer.source,value:offer.value,offer:offer.mode};
  const writeFields=Object.keys(core.writes);
- const enforcing=context.provenance.mode==='enforce';
  report.provenance.offered=(report.provenance.offered||0)+Object.keys(replacements.offers).length;
  report.provenance.superseded_kept=(report.provenance.superseded_kept||0)+replacements.supersededKept.length;
- // ENFORCE completes PER SOURCE (ADR 0214 decisions 10 and 12): only a core row whose own answer was observed ok this tick is settled, with its own source version; a source that was transport-unavailable, failed or backed off keeps its
- // retry, pending_since and status, so its recovery (an earlier source confirming a fallback value) stays durably runnable. Off and hold keep the legacy whole-part completion.
- const settleRows=()=>[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source)&&(!enforcing||(['due','deferred_repair'].includes(row.status)&&answers[row.source]?.status==='ok')));
- const settled=blanksSettled=>enforcing?!Object.keys(core.waiting).length:blanksSettled;
- // A Russian upgrade that off or hold cannot make is recorded as ONE inbox signal (source_changed for the whole core part, held by the signal reader until the mode is enforce and by the membership/scope fences like every signal), emitted before the part completes
- // so a failure leaves the part due and replanned. The digest binds the waiting values: an identical observation re-arms nothing, a new Russian value does.
+ // A Russian upgrade that off or hold cannot make is recorded as ONE inbox signal (source_changed for the whole core part, held by the signal reader until the mode is enforce and by the membership/scope fences like every signal),
+ // emitted before the part completes so a failure leaves the part due and replanned. The digest binds the waiting values: an identical observation re-arms nothing, a new Russian value does.
  const emitUpgrade=async()=>{
   const waiting=replacements.pending.filter(item=>item.reason==='language_upgrade');
-  if(!waiting.length||enforcing)return;
+  if(!waiting.length||context.provenance.mode==='enforce')return;
   const digestOfWaiting=await sha({upgrade:waiting.map(item=>[item.field,item.source,item.value])});
   const [statement,params]=emitStatement({kind:'source_changed',subject:filmId,source:'',part:'core',digest:digestOfWaiting,cause:'language_upgrade',at:now});
   await db(env).prepare(statement).bind(...params).run();
   report.provenance.upgrades_waiting=(report.provenance.upgrades_waiting||0)+waiting.length;
- };
- const completeCore=async(blanksSettled)=>{
-  await emitUpgrade();
-  const done=settled(blanksSettled);
-  if(enforcing&&!done)return;
-  for(const row of settleRows()){
-   const fresh=enforcing||answers[row.source]; // an unobserved row of the legacy path keeps its stored version
-   await putRow(env,ctx,{...row,status:done?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:fresh?await sha({source:row.source,anchor:row.anchor,fields:answers[row.source]?.fields||null}):row.sourceVersion,failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
-  }
  };
  const noteFilm=async()=>{
   if(!(core.fallbackFill.length||core.unconfirmedAgreement.length||core.storedDiffers.length||replacements.supersededKept.length))return;
@@ -303,11 +293,17 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const anchorGuard=Plan.anchorSetGuard(filmId,context.anchors);
   // a blank fill keeps its blank guard; an offered replacement, adoption or absence is fenced by the Film revision of the writer instead (ADR 0214 decision 12)
   const guards=[...writeFields.filter(field=>!core.writes[field].offer).map(field=>Plan.blankFieldGuard(filmId,field)),anchorGuard,Plan.epochGuard(filmId,{part:'core',source:sourceRow.source,refreshEpoch:sourceRow.refreshEpoch,planEpoch:filmRow.planEpoch}),lockGuard(filmId),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)];
-  // ADR 0214 decision 4 (AIR-631 PV1): every core write DECLARES, per field, the source, the anchor it relied on, its observation time and the agreement digest it holds. The writer ignores the declaration at mode `off` or while the provenance schema is absent (planning is unchanged).
-  const declared=Object.fromEntries(writeFields.map(field=>{const source=core.writes[field].source,anchor=context.anchors[source];// ADR 0224 (P4-B): a freshly observed Letterboxd synopsis is declared as ASSUMED English (the owner-approved source-specific default, never an identity fact). Every other field is declared with no language until the shared Russian-first projection (AIR-684) supplies a verified one: the top-level TMDB overview is not proof of language.
-   const observed=Plan.observedLanguage(source,field,answers[source]);
-   const language=observed.language?{language:observed.language,languageBasis:observed.languageBasis}:{};
-   return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null,...language}];}));
+  // ADR 0214 decision 4 and ADR 0224: every core write DECLARES, per field, the source, the anchor it relied on, its observation time, the agreement digest it holds and, from the typed observation, the language and basis that the written
+  // value carries (the single conversion `Plan.declarationOf`; a field that carries no language declares none). The provenance writer of AIR-631 reads `metadata.declared`; a writer or a mode that does not know it ignores it and
+  // the statements are unchanged.
+  const declared=Object.fromEntries(writeFields.map(field=>{
+   const source=core.writes[field].source,anchor=context.anchors[source];
+   const typed=Plan.declarationOf(field,source,anchor,answers[source]?.observation?.[field]);
+   // only a tag the writer can persist is declared; a verified tag it cannot hold is reported, never invented as ru/en and never allowed to fail the write
+   const tag=typed&&typed.language&&Plan.WRITER_LANGUAGES.includes(typed.language);
+   if(typed&&typed.language&&!tag)(report.languageNotDeclared??=[]).push({field,language:typed.language,source});
+   return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null,...(tag?{language:typed.language,languageBasis:typed.languageBasis}:{})}];
+  }));
   const metadata={updatedAt:now,declared,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},metadata,...(sync?{sync:{metadataAt:now}}:{}),requireExisting:true,guards};
   {const stop=await mayWrite();if(stop)return partial(report,stop);}
@@ -319,14 +315,33 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   if(['applied','noop','settled'].includes(unit.state)){
    // `written` names the VALUES that actually changed (a fill or a replacement; an adoption or an `agreed` audit moves provenance only); before provenance (off) a fill is its field
    const changed=unit.result?.changes;
-   report.written.push(...(Array.isArray(changed)&&context.provenance.mode!=='off'?writeFields.filter(field=>changed.some(item=>['provenance:','replace:'].some(prefix=>String(item)===prefix+field))):unit.state==='applied'?writeFields:[]));
-   await completeCore(core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]));
+   report.written.push(...(Array.isArray(changed)&&context.provenance.mode!=='off'?writeFields.filter(field=>changed.some(item=>['provenance:','replace:'].some(prefix=>String(item)===prefix+field))):unit.state==='applied'?writeFields.filter(field=>!core.writes[field].offer):[]));
+   // the typed declarations of what was offered: the one explicit boundary to a provenance writer (AIR-631); each value is bound to the language and basis its observation carried
+   report.declarations=writeFields.map(name=>({field:name,...declared[name]}));
+   await emitUpgrade();
+   const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source)&&settles(row.source));
+   for(const row of next){
+    const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
+    await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
+   }
    await noteFilm();
   }
+ }else if(metadataEligible&&core.complete){
+  // A refresh whose verified answer has nothing left to offer (every field settled, kept or pinned) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
+  // (a verified source change) would stay due for ever and a later equal observation could never be told from a change.
+  await emitUpgrade();
+  for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&settles(item.source)&&['due','deferred_repair'].includes(item.status))){
+   await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
+  }
+  await noteFilm();
  }
- else if(metadataEligible){
-  // nothing is offered to the writer (every field settled, kept or waiting): in enforce an observed source is settled explicitly; off and hold complete only to record a waiting language upgrade
-  if(enforcing||(replacements.pending.length&&core.complete&&!Object.keys(core.waiting).length)){await completeCore(core.complete);await noteFilm();}
+ // An OK answer whose observation has an unreadable or ambiguous field: the sections that ARE valid may fill (above), but the source's core part is REPAIRABLE (it backs off and counts like any malformed section, with the existing
+ // quarantine and recovery), never settled, never given a version and never a reason to clear its counters.
+ for(const source of ['letterboxd','tmdb']){
+  const row=rowOf('core',source);
+  if(!row||!answers[source]||answers[source].status!=='ok'||settles(source)||!['due','deferred_repair'].includes(row.status))continue;
+  const unresolved=Plan.unresolvedFields(answers[source].observation);
+  await putRow(env,ctx,{...Plan.afterOutcome(row,{type:'repairable',signature:'incomplete_core_coverage',responseDigest:await sha({source,unresolved})},now),reason:'incomplete_core_coverage'},{expectEpoch:row.refreshEpoch});
  }
  // ---- localization: each applicable source writes its OWN row, needing only its own anchor ----
  for(const source of Plan.SOURCES){
@@ -339,8 +354,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   if(title.status==='ambiguous'){await putRow(env,ctx,{...row,status:'needs_attention',reason:'ambiguous_translation',failureClass:'owner_required'},{expectEpoch:row.refreshEpoch});continue;}
   // unsupported coverage (the Letterboxd page has no typed title): the source cannot supply this part, which is neither a failure nor a verified absence
   if(title.status==='unsupported'){await putRow(env,ctx,{...row,status:'not_applicable',reason:'no_typed_title_in_source',failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
-  if(title.status==='absent'){await putRow(env,ctx,{...row,status:'complete_with_gaps',reason:'no_russian_title',gaps:['no_russian_title'],failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
-  const sourceVersion=await sha({source,anchor:row.anchor,title:title.value});
+  if(title.status==='absent'){await putRow(env,ctx,{...row,status:'complete_with_gaps',reason:'no_russian_title',gaps:['no_russian_title'],sourceVersion:await Plan.localizationVersion(source,row.anchor,title),failures:0,retryAt:null,pendingSince:null},{expectEpoch:row.refreshEpoch});continue;}
+  const sourceVersion=await Plan.localizationVersion(source,row.anchor,title);
   const input={id:filmId,at:now,film:{contractVersion:context.film.contractVersion},localization:{sources:[{source,value:title.value,sourceVersion,observedAt:now,provenance:{anchor:row.anchor}}]},requireExisting:true,
    guards:[Plan.anchorSetGuard(filmId,context.anchors),Plan.epochGuard(filmId,{part:'localization',source,refreshEpoch:row.refreshEpoch,planEpoch:filmRow.planEpoch}),Plan.leaseGuard(leaseId,now),Plan.controlGuard(generation)]};
   {const stop=await mayWrite();if(stop)return partial(report,stop);}
@@ -362,11 +377,13 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   // The expected set comes from a FRESH complete response, or - when persisted chunk rows already hold it - from D1 alone (a resume makes no upstream request).
   const fresh=answers[choice.source]?.status==='ok'&&answers[choice.source].credits.status==='ok'?answers[choice.source].credits.items:null;
   const persisted=plans[choice.source]?resumeRows.filter(row=>row.source===choice.source).sort((a,b)=>a.slot-b.slot):[];
-  let expected=null,chunks=null,digestOfSet=null;
+  let expected=null,chunks=null,digestOfSet=null,creditsVersion=null;
   if(fresh){
    expected=Plan.expectedCredits(choice.source,fresh);
+   if(answers[choice.source]?.credits?.directorsRecognized===false)expected.gaps.push({gap:'directors_not_recognized'});
    chunks=Plan.chunkCredits(expected.items);
    digestOfSet=await Plan.expectedDigest(expected.items);
+   creditsVersion=await Plan.creditsVersion(choice.source,rowOf('credits',choice.source)?.anchor??null,answers[choice.source].credits);
   }else if(persisted.length){
    const planRows=plans[choice.source].rows;
    chunks=planRows.map(row=>({slot:row.slot,items:row.expected.items.map(([personId,role])=>({personId,role,roleId:personId.slice('person:'.length)}))}));
@@ -385,13 +402,13 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
     const stale=chunks.some(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return !(stored&&stored.status==='complete'&&stored.expected?.digest===digestOfSet&&stored.expected?.total===chunks.length);});
     if(stale){
      const guard=guardSql(ctx);
-     const rowsOut=chunks.map(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return {...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null};});
+     const rowsOut=chunks.map(chunk=>{const stored=rowOf('credits',choice.source,chunk.slot);return {...base,slot:chunk.slot,status:'due',sourceVersion:creditsVersion??base.sourceVersion??null,expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:stored?.refreshEpoch??base.refreshEpoch,failures:0,retryAt:null,pendingSince:null};});
      await putRowsAtomic(env,ctx,rowsOut,[[`UPDATE catalog_enrichment_state SET status='not_applicable',reason='superseded_plan',expected_json=NULL,updated_at=? WHERE film_id=? AND part='credits' AND source=? AND slot>=? AND ${guard.sql}`,[now,filmId,choice.source,chunks.length,...guard.params]]]);
     }
    }
    let allDone=true;
    for(const chunk of chunks){
-    const slotRow={...base,slot:chunk.slot,status:'due',expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
+    const slotRow={...base,slot:chunk.slot,status:'due',sourceVersion:creditsVersion??rowOf('credits',choice.source,chunk.slot)?.sourceVersion??base.sourceVersion??null,expected:{digest:digestOfSet,total:chunks.length,items:chunk.items.map(item=>[item.personId,item.role])},gaps:expected.gaps.length?expected.gaps:null,refreshEpoch:rowOf('credits',choice.source,chunk.slot)?.refreshEpoch??base.refreshEpoch};
     const missing=Plan.missingForChunk(chunk,{have,people});
     if(!missing.credits.length){await putRow(env,ctx,{...slotRow,status:'complete',failures:0,retryAt:null,pendingSince:null});continue;}
     // the chunk row (with the persisted expected set and its epoch) is durable BEFORE its first unit: an interrupted Film resumes from it

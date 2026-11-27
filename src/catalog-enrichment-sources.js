@@ -8,7 +8,7 @@
 // - the page tools (`parseFilm`, `attr`, `extractYear`) are injected: they live in the Worker's scoped source module and cannot be imported.
 import {allowedHop,isFilmPage,isChallenge,pageEvidence} from './letterboxd-identity.js';
 import {UpstreamCooldownSkip} from './upstream-cooldown.js';
-import {selectRussianTitle} from './catalog-enrichment-plan.js';
+import {selectRussianTitle,selectSynopsis,selectPoster,mapGenres,readYear,readRuntime} from './catalog-enrichment-plan.js';
 
 export const TIMEOUT_MS=Object.freeze({tmdb:12000,letterboxd:15000,wikidata:15000});
 export const POSTER_BASE='https://image.tmdb.org/t/p/w500';
@@ -45,28 +45,47 @@ async function textOf(response){
 }
 
 // ---- TMDB ----
+// ONE detail request shape for the producer's own fetch and every observer (the Discovery revalidation adds its existing `alternative_titles` to the same call): Russian first, with the tagged translations and image lists in it.
+export const TMDB_DETAIL_QUERY='language=ru-RU&append_to_response=credits,translations,images&include_image_language=ru,en,null';
 const isoYear=value=>{const match=/^(\d{4})/.exec(String(value||''));return match?Number(match[1]):null;};
+const plainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+const hasId=item=>plainObject(item)&&(typeof item.id==='number'||(typeof item.id==='string'&&item.id!==''));
+// The director job as TMDB names it. A localized request (`ru-RU`) may return the role in Russian; the recognized strings are an explicit, tested set. A response that lists crew but names no recognized director is NOT a verified
+// "no director": `directorsRecognized` is false and the producer records a visible gap instead of a silently partial set. (Recorded `ru-RU` responses and an `en-US` reference show the job strings are not localized; tests/fixtures/tmdb-recorded.)
+const DIRECTOR_JOBS=new Set(['director','режиссер','режиссёр']);
+const isDirector=item=>typeof item?.job==='string'&&DIRECTOR_JOBS.has(item.job.trim().toLowerCase());
+// A credits section is READABLE only when every supported-role entry (each cast entry, each director) is a well-formed object with an id: a malformed supported entry makes the whole section unreadable (a repairable failure),
+// never a "complete" set with the entry filtered out. A crew entry of another job carries no credit and is not judged.
+function readCredits(credits){
+ if(!plainObject(credits)||!Array.isArray(credits.cast)||!Array.isArray(credits.crew))return {status:'unreadable',items:[]};
+ if(!credits.cast.every(hasId))return {status:'unreadable',items:[]};
+ if(!credits.crew.every(plainObject)||!credits.crew.filter(isDirector).every(hasId))return {status:'unreadable',items:[]};
+ const cast=[...credits.cast].sort((a,b)=>(a.order??1e9)-(b.order??1e9)).map(item=>({role:'actor',key:String(item.id),name:item.name??null}));
+ const directors=credits.crew.filter(isDirector).map(item=>({role:'director',key:String(item.id),name:item.name??null}));
+ // A crew list that names NO recognized director cannot be told from a localized job string this parser does not know: it is not a verified set, whatever the cast says (recorded `ru-RU` responses show the strings are not localized). It is unreadable, so it is repaired and backed off like any malformed section, never completed as a silently partial credit set.
+ if(credits.crew.length>0&&directors.length===0)return {status:'unreadable',items:[],reason:'directors_not_recognized'};
+ return {status:'ok',items:[...directors,...cast]};
+}
+// The ONE parser of the Russian-first observation (ADR 0224). `observation` is the typed contract (`{value, language, languageBasis, coverage}` per field, see the planner); `fields` are the same values, flat, for the producer's
+// writers. A request language changes none of the selection rules: the Russian translation or poster is taken from the tagged lists. A field that cannot be read is `unreadable`, never a verified absence.
 export function parseTmdb(json,id){
- if(!json||typeof json!=='object'||Array.isArray(json)||String(json.id)!==String(id))return null;
- const credits=json.credits;
- let creditAnswer={status:'unreadable',items:[]};
- if(credits&&typeof credits==='object'&&Array.isArray(credits.cast)&&Array.isArray(credits.crew)){
-  const cast=[...credits.cast].filter(item=>item&&item.id!=null).sort((a,b)=>(a.order??1e9)-(b.order??1e9)).map(item=>({role:'actor',key:String(item.id),name:item.name??null}));
-  const directors=credits.crew.filter(item=>item&&item.job==='Director'&&item.id!=null).map(item=>({role:'director',key:String(item.id),name:item.name??null}));
-  creditAnswer={status:'ok',items:[...directors,...cast]};
- }
+ if(!plainObject(json)||String(json.id)!==String(id))return null;
+ const observation={
+  year:readYear(json.release_date),runtime:readRuntime(json.runtime),url:{value:'https://www.themoviedb.org/movie/'+id,language:null,languageBasis:null,coverage:'verified'},
+  synopsis:selectSynopsis(json.translations),poster:selectPoster(json.images,json.poster_path),genres:mapGenres(json.genres),
+ };
+ const posterUrl=observation.poster.value?POSTER_BASE+observation.poster.value:null;
  return {
-  fields:{year:isoYear(json.release_date),runtime:Number.isInteger(json.runtime)&&json.runtime>0?json.runtime:null,synopsis:typeof json.overview==='string'&&json.overview.trim()?json.overview.trim():null,
-   poster:typeof json.poster_path==='string'&&json.poster_path.startsWith('/')?POSTER_BASE+json.poster_path:null,url:'https://www.themoviedb.org/movie/'+id,
-   genres:Array.isArray(json.genres)?json.genres.map(genre=>genre?.name).filter(Boolean):[]},
-  credits:creditAnswer,
+  fields:{year:observation.year.value,runtime:observation.runtime.value,synopsis:observation.synopsis.value,poster:posterUrl,url:observation.url.value,genres:observation.genres.value},
+  observation:{...observation,poster:{...observation.poster,value:posterUrl}},
+  credits:readCredits(json.credits),
   title:selectRussianTitle(json.translations),
  };
 }
 export async function fetchTmdb(env,{id,coordinator=null,fetchImpl=fetch,timeoutMs=TIMEOUT_MS.tmdb}){
  if(!/^[1-9]\d{0,11}$/.test(String(id)))return failedAnswer('invalid_anchor');
  const token=typeof env?.TMDB_API_READ_ACCESS_TOKEN==='string'?env.TMDB_API_READ_ACCESS_TOKEN:'';
- const url='https://api.themoviedb.org/3/movie/'+id+'?append_to_response=credits,translations';
+ const url='https://api.themoviedb.org/3/movie/'+id+'?'+TMDB_DETAIL_QUERY;
  const sent=await send({coordinator,fetchImpl,url,init:{headers:{accept:'application/json',...(token?{authorization:'Bearer '+token}:{})}},timeoutMs});
  if(sent.answer)return sent.answer;
  const {response}=sent;
@@ -112,6 +131,18 @@ export function agreement({lid,evidence,tmdbAnchor}){
  }
  return {agreed:reasons.length===0,reasons};
 }
+// The Letterboxd page as the same typed observation: every field of a parsed page is verified coverage (a blank is an explicit absence of what the page shows), and the synopsis carries the owner-approved assumption of English (ADR 0224 P4-B:
+// an assumption, not a verified tag, and only for this field of this source). No language is attributed to any other field.
+const lbField=(value,coverage,language=null,languageBasis=null)=>({value,language,languageBasis,coverage});
+function lbObservation(fields){
+ const present=value=>value!==null&&value!==undefined&&value!==''&&!(Array.isArray(value)&&!value.length);
+ const synopsis=present(fields.synopsis);
+ return {
+  year:lbField(fields.year??null,fields.year==null?'absent':'verified'),runtime:lbField(fields.runtime??null,fields.runtime==null?'absent':'verified'),url:lbField(fields.url,'verified'),
+  synopsis:synopsis?lbField(fields.synopsis,'verified','en','assumed'):lbField(null,'absent'),poster:present(fields.poster)?lbField(fields.poster,'verified'):lbField(null,'absent'),
+  genres:{value:fields.genres||[],ids:[],unmapped:[],coverage:'verified',language:null,languageBasis:null},
+ };
+}
 export async function fetchLetterboxd(env,{lid,tmdbAnchor=null,coordinator=null,fetchImpl=fetch,tools,timeoutMs=TIMEOUT_MS.letterboxd}){
  if(!LID.test(String(lid||''))||!tools||typeof tools.parseFilm!=='function')return failedAnswer('invalid_anchor');
  const start='https://boxd.it/'+lid;
@@ -154,9 +185,10 @@ export async function fetchLetterboxd(env,{lid,tmdbAnchor=null,coordinator=null,
   const nameOnly=!slug||slug===item.name||slug===item.original;
   return {role,key:nameOnly?null:slug,name:name(item)||item?.original||null,nameOnly};
  });
+ const lbFields={year:Number.isInteger(film.year)?film.year:(evidence.years[0]?Number(evidence.years[0]):null),runtime:Number.isInteger(film.runtime)&&film.runtime>0?film.runtime:null,synopsis:film.synopsis||null,poster:film.poster||null,url:landing.href,genres:Array.isArray(film.genres)?film.genres:[]};
  return {
   status:'ok',httpStatus:response.status,agreed:true,hints,
-  fields:{year:Number.isInteger(film.year)?film.year:(evidence.years[0]?Number(evidence.years[0]):null),runtime:Number.isInteger(film.runtime)&&film.runtime>0?film.runtime:null,synopsis:film.synopsis||null,poster:film.poster||null,url:landing.href,genres:Array.isArray(film.genres)?film.genres:[]},
+  fields:lbFields,observation:lbObservation(lbFields),
   // an absent or malformed credits section is unreadable, never a complete empty set (a parser that does not report `creditsComplete: true` is read as incomplete)
   credits:{status:film.creditsComplete!==true?'unreadable':'ok',items:film.creditsComplete!==true?[]:[...person('director',film.directors),...person('actor',film.actors)]},
   // The film page exposes the film's own name and an UNTYPED list of alternative titles: no title carries a language. Absence of a typed Russian title cannot be verified from it, so this is UNSUPPORTED coverage, never a

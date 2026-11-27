@@ -226,6 +226,19 @@ const lease=async(env,id='lease-aaaaaaaa',now=T)=>{const r=await S.acquireLease(
  sql(file,"UPDATE enrichment_signal SET version=2,state='pending',cause_digest='"+'2'.repeat(64)+"' WHERE kind='source_changed'");
  await S.consumeSignal(env,{signal:{...bySig.source_changed,version:2,digest:'2'.repeat(64)},generation,leaseId:id,now:at(3)});
  assert.deepEqual(state()['core:tmdb'].slice(0,2),['due',8],'a changed digest reopens it once');
+ // AIR-684: an equal, complete observation changes NOTHING: not even the Film's plan epoch; a superseded slot and the other credit source are never reopened
+ const planEpoch=()=>Number(rows(file,"SELECT plan_epoch FROM catalog_enrichment_state WHERE film_id='film:a' AND part='film'")[0].plan_epoch);
+ sql(file,"UPDATE catalog_enrichment_state SET status='complete',source_version='"+'1'.repeat(64)+"' WHERE part='core' AND source='tmdb';INSERT INTO enrichment_signal (kind,subject,source,part,version,state,cause_digest,armed_at) VALUES ('source_changed','film:a','tmdb','core',3,'pending','"+'1'.repeat(64)+"','"+T+"') ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=3,state='pending',cause_digest=excluded.cause_digest");
+ const epochBefore=planEpoch(),coreBefore=state()['core:tmdb'];
+ await S.consumeSignal(env,{signal:{...bySig.source_changed,version:3,digest:'1'.repeat(64)},generation,leaseId:id,now:at(3)});
+ assert.equal(planEpoch(),epochBefore,'no plan epoch raise when every relevant version is equal and complete');
+ assert.deepEqual(state()['core:tmdb'],coreBefore,'and no part row changes');
+ assert.equal(rows(file,"SELECT state FROM enrichment_signal WHERE kind='source_changed' AND part='core'")[0].state,'consumed','the signal is acknowledged');
+ sql(file,"INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at) VALUES ('film:a','credits','letterboxd',0,'not_applicable','other_credit_source','"+T+"','"+T+"'),('film:a','credits','tmdb',9,'not_applicable','superseded_plan','"+T+"','"+T+"');INSERT INTO enrichment_signal (kind,subject,source,part,version,state,cause_digest,armed_at) VALUES ('source_changed','film:a','tmdb','credits',1,'pending','"+'5'.repeat(64)+"','"+T+"')");
+ const credit=(await S.runnableSignals(env,{now:at(6)})).find(item=>item.kind==='source_changed'&&item.part==='credits');
+ await S.consumeSignal(env,{signal:credit,generation,leaseId:id,now:at(6)});
+ assert.deepEqual(rows(file,"SELECT source,slot,status FROM catalog_enrichment_state WHERE part='credits' AND status='not_applicable' ORDER BY source,slot").map(r=>r.source+':'+r.slot),['letterboxd:0','tmdb:9'],'a superseded slot and the other credit source are not resurrected by a source change');
+ assert.equal(rows(file,"SELECT status FROM catalog_enrichment_state WHERE film_id='film:a' AND part='credits' AND source='tmdb' AND slot=0")[0].status,'due','the active credits row stays reopenable');
  // an anchor change lifts an identity disagreement and reopens the non-complete rows, never a complete one
  sql(file,"UPDATE catalog_enrichment_state SET status='identity_disagreement' WHERE part='film';UPDATE catalog_enrichment_state SET status='complete',refresh_epoch=3 WHERE part='localization'");
  await S.consumeSignal(env,{signal:bySig.anchor_changed,generation,leaseId:id,now:at(4)});
