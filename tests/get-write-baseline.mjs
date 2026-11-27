@@ -11,6 +11,7 @@ export const PREFIX_ROUTES={
  '/api/admin/health':['/api/admin/health'],
  '/api/admin/limbo':['/api/admin/limbo','/api/admin/limbo?cause=backoff&subsystem=prediction&kind=film&age=14&limit=5'],
  '/api/admin/identity-work/owner-action':['/api/admin/identity-work/owner-action'],
+ '/api/admin/letterboxd/lid-recheck':['/api/admin/letterboxd/lid-recheck'], // AIR-675: POST-only owner re-check; a GET answers 405 and does nothing
  '/api/admin/identity-work':['/api/admin/identity-work','/api/admin/identity-work?type=letterboxd_rated_candidate&limit=5'],
  '/api/admin/channels/':['/api/admin/channels','/api/admin/channels?q=sport&queue=unclassified&limit=5'],
  '/api/admin/settings':['/api/admin/settings'],

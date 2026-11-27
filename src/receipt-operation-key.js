@@ -205,7 +205,7 @@ export async function runOperationKey(env,{origin,operationKey,now,policy=RETRY_
    const requestId=request.requestId??await keyedRequestIdOf({origin:scope.origin,operation:request.operation,operationKey:scope.operationKey,ordinal:state.ordinal,source:request.source??request.digest});
    try{
     const outcome=await reserveOperationKey(env,{requestId,operation:request.operation,origin:scope.origin,target:request.target,expectedRevision:request.expectedRevision,digest:request.digest,
-     operationKey:scope.operationKey,fingerprint:state.fingerprint,now:clock,policy:request.policy||policy},decision.write);
+     operationKey:scope.operationKey,fingerprint:state.fingerprint,now:clock,policy:request.policy||policy,...(request.reserveExtra?{reserveExtra:request.reserveExtra}:{})},decision.write);
     return {status:'reserved',requestId,outcome,fingerprint:state.fingerprint,replans};
    }catch(error){
     if(LOST.has(errorClassOf(error))){replans++;continue;}

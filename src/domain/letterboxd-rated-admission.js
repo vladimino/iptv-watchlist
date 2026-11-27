@@ -195,6 +195,9 @@ function norm(value) {
   return String(value ?? '').normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 
+// AIR-675 / ADR 0217 decision 8b: the normalization the agreement check compares in, exported so the attach root hashes the TMDB document fields in exactly that form (no new normalization rule).
+export const agreementNorm = norm;
+
 // Independent of the Letterboxd page: the TMDB movie document must be that movie id, not a TV id, and must agree on title and year.
 export function movieDetailAgrees(detail, tmdbId, title, year) {
   if (!detail || typeof detail !== 'object') return {ok: false, reason: 'detail_missing'};

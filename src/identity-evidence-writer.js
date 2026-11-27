@@ -20,7 +20,11 @@ import {fenced} from './canonical-mutations.js';
 import {evidenceKeyOf,normalizeEvidence,KNOWN_ALIAS_SCOPES} from './identity-evidence.js';
 
 export const WRITER_SCHEMA=42;
-export const WRITERS=Object.freeze(['discovery_decision','discovery_owner','claim_alias_bridge','tmdb_retirement_decision','tmdb_retirement_application']);
+// AIR-675 / ADR 0217 decision 7: the sixth writer, `lid_tmdb_attach`, exists only from schema 52 (migration 0052 rebuilds both control tables' writer CHECK; 0042 is never edited). Below 50 the control row cannot exist, so it
+// reads as `off`, and `changeWriter` refuses it before a statement.
+export const ATTACH_WRITER='lid_tmdb_attach';
+export const ATTACH_WRITER_SCHEMA=52;
+export const WRITERS=Object.freeze(['discovery_decision','discovery_owner','claim_alias_bridge','tmdb_retirement_decision','tmdb_retirement_application',ATTACH_WRITER]);
 export const WRITER_STATES=Object.freeze(['off','pending','on']);
 export const CHANGE_KINDS=Object.freeze(['activate','drain_complete','deactivate','break']);
 // The domain-path writers of this record: the Discovery decision and owner writers. The claim bridge is canonical-path (E2b) and the retirement writers are parked (E2d).
@@ -55,6 +59,20 @@ export async function identityEvidenceControlStatus(env){
  if(tables===2&&ledger&&version>=WRITER_SCHEMA)return 'ready';
  if(tables===0&&Number.isFinite(version)&&version<WRITER_SCHEMA)return 'absent';
  throw failed('film_person_unavailable',new Error('identity_evidence_control_inconsistent_at_schema_'+row?.version));
+}
+
+// True only when the control tables are `ready` AND the schema is at 50 or later (the sixth writer's CHECK exists). Anything else, including an unreadable schema, is false: the attach never reads a damaged schema as ready.
+export async function attachWriterSchemaReady(env){
+ try{
+  if(await identityEvidenceControlStatus(env)!=='ready')return false;
+  return Number((await one(database(env),'SELECT version FROM schema_contract WHERE id=1'))?.version)>=ATTACH_WRITER_SCHEMA;
+ }catch{return false;}
+}
+
+// AIR-675: the in-batch condition that the attach writer is `on` at the generation the caller read, at schema 52 or later ({sql, params}). Kept here so only this module names the control tables.
+export function attachWriterOnCondition(generation){
+ if(!Number.isSafeInteger(generation)||generation<1)throw invalid('generation');
+ return {sql:'(SELECT version FROM schema_contract WHERE id=1)>=52 AND EXISTS (SELECT 1 FROM identity_evidence_writer WHERE writer=? AND state=\'on\' AND generation=?)',params:[ATTACH_WRITER,generation]};
 }
 
 // The control row of a writer. An absent row, and a schema without the control tables, is `off` at generation 0 (ADR 0215 decision 4).
@@ -212,6 +230,7 @@ export async function changeWriter(env,input={}){
   if(Date.parse(breakFrom)>Date.parse(now))throw invalid('break_from');
  }else if(input.breakFrom!==undefined&&input.breakFrom!==null)throw invalid('break_from');
  if(await identityEvidenceControlStatus(env)!=='ready')throw failed('identity_evidence_writer_unavailable');
+ if(writer===ATTACH_WRITER&&!await attachWriterSchemaReady(env))throw failed('identity_evidence_writer_unavailable');
  const db=database(env);
  if(typeof db.batch!=='function')throw failed('film_person_unavailable');
  const current=await readWriter(env,writer);

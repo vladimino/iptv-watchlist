@@ -209,6 +209,64 @@ function recordRatingChange(record,incoming,effective){
   },{extra});
   return factKey;
  }
+ // AIR-675 / ADR 0217 decision 8c: the Ratings alias of ONE attached pair, by the EXISTING document compare-and-swap (`casJSON` over `links.json`: the exact part count and `etag` of the version it read, the Ratings authority and its fences).
+//  - The pair joins the LID's own fact key (`index['letterboxd:<lid>']`, or `lb-<lid>` when the lid is not linked yet): that key gains the movie alias, and **no key is renamed or created from the movie** (`factKeyFor({letterboxd, tmdb})` would
+//    make `tmdb-<n>`, which is not this handoff). A movie already mapped to ANOTHER fact key, or a lid key that already holds another movie id, is a PROVED `alias_conflict`: nothing is linked.
+//  - The write is ALWAYS made, also when the alias is already there (a lost response) and when the outcome is a conflict or a blocked correction: the document is rewritten unchanged, so the caller's guarded statements (`statementsFor(state)`:
+//    the markers, the ownership predicates, the intent update) commit in the SAME D1 batch as an exact-version compare-and-swap, and a document that moved, a marker that moved or a lost intent revision refuses the whole batch.
+//  - `extra` must already hold ONE guard statement when passed: a store that cannot batch (the R2 stand-in) then refuses the write whole (`atomic_unavailable`) instead of linking without the guards. The array is refilled on every attempt.
+//  - `blocked: true` (the caller proved that the ownership of either claim no longer holds) writes no alias and settles only through the caller's statements. No conflict note is written here: the intent records the outcome.
+ async function linkAttachedPair(env,{lid,tmdb,extra,statementsFor,blocked=false}){
+  if(!LID.test(String(lid||''))||!TMDB.test(String(tmdb||'')))throw new FactsError('invalid_identity','An attached pair needs a Letterboxd id and a TMDB id');
+  if(!Array.isArray(extra)||!extra.length||typeof statementsFor!=='function')throw new FactsError('atomic_unavailable','The attached pair link needs its guard statements');
+  const prefix=extra.length,aliasLid='letterboxd:'+lid,aliasMovie='tmdb:'+tmdb,result={};
+  await casJSON(env,FACTS_KEYS.links,{},index=>{
+   extra.length=prefix;
+   let state;
+   if(blocked)state='link_blocked';
+   else{
+    const lidKey=index[aliasLid]||'lb-'+lid,movieKey=index[aliasMovie]??null;
+    // The existing same-scheme predicate of `linkFilm`: a record holds ONE Letterboxd id and ONE TMDB id, so another alias of either scheme already pointing at the selected key is a conflict (never a merge), and that record stays untouched.
+    const otherAlias=Object.entries(index).some(([alias,key])=>key===lidKey&&((alias.startsWith('tmdb:')&&alias!==aliasMovie)||(alias.startsWith('letterboxd:')&&alias!==aliasLid)));
+    if((movieKey!==null&&movieKey!==lidKey)||otherAlias)state='alias_conflict';
+    else{state='linked';result.factKey=lidKey;result.changed=index[aliasLid]!==lidKey||index[aliasMovie]!==lidKey;index[aliasLid]=lidKey;index[aliasMovie]=lidKey;}
+   }
+   result.state=state;
+   extra.push(...statementsFor(state));
+   return index;
+  },{extra});
+  return result;
+ }
+ // AIR-675 / ADR 0217 decision 8c: the second half of a Diary-first link (`bridgeDiaryFilm`): the fact RECORD of the lid's key gains the movie id in its `links`, and the ratings view rows of BOTH aliases follow, so the actual consumers
+ // (`diaryLinks`, the view index) read the pair, with its history, through either alias. It is an identity EFFECT, so it is fenced like the link itself:
+ //  - ONE positive observation of the links document (`RatingsD1.observeOwned`: exact parts and `etag`) and of BOTH alias mappings (`letterboxd:<lid>` and `tmdb:<n>` must name the same key), never two separate reads;
+ //  - `guardsFor(fence)` (the caller's) returns the statements that ride in the SAME Ratings batch as the record write and as the projection: the markers, the complete ownership predicates, the exact settled intent and the document fence of THAT
+ //    observation. A moved document, a moved marker, a proved correction or a closed or not-authoritative Ratings domain refuses the batch whole (the legacy store is never written: without `extra` the R2 stand-in refuses too);
+ //  - the record is the lid's OWN key and is never followed: a moved record, another movie id or another Letterboxd id on it is a conflict, nothing is relabelled;
+ //  - the record write projects both view rows in its own batch (`viewWrites`); a record that already carries the movie is NOT trusted as complete: the actual view rows are compared with what projecting the record would write, and a missing or different one is repaired by the existing idempotent
+ //    projection under the SAME guards (an interrupted record-to-view boundary).
+ // It writes no alias, no fact value and no key. `pendingOnly: true` writes only when the record or the view is not complete. -> {state:'projected'|'complete'|'absent'|'conflict'}.
+ async function completeAttachedLink(env,{lid,tmdb,guardsFor,pendingOnly=false}){
+  if(!LID.test(String(lid||''))||!TMDB.test(String(tmdb||'')))throw new FactsError('invalid_identity','An attached pair needs a Letterboxd id and a TMDB id');
+  if(typeof guardsFor!=='function'||typeof RatingsD1==='undefined')throw new FactsError('atomic_unavailable','The attached pair completion needs its guards');
+  const observed=await RatingsD1.observeOwned(env,FACTS_KEYS.links);
+  if(!observed.owned)throw new FactsError('atomic_unavailable','The Ratings document domain is not authoritative');
+  const factKey=observed.value?.['letterboxd:'+lid]||null;
+  if(!factKey||observed.value?.['tmdb:'+tmdb]!==factKey)return {state:'absent'};
+  const guards=guardsFor(observed.fence);
+  if(!Array.isArray(guards)||!guards.length)throw new FactsError('atomic_unavailable','The attached pair completion needs its guards');
+  const {value:current}=await readJSON(env,recordKey(factKey));
+  if(current&&(current.redirectTo||current.migrating))return {state:'conflict'};
+  const carries=!!current&&String(current.links?.tmdb)===String(tmdb)&&current.links?.letterboxd===lid;
+  const viewOk=carries&&await RatingsD1.viewComplete(env,[current]);
+  if(pendingOnly&&carries&&viewOk)return {state:'complete',factKey};
+  try{
+   // ONE record write: the record carries the movie id (changed) or is rewritten unchanged when only its view is incomplete (`rewrite`); either way the view rows are derived from the record value the compare-and-swap just proved, in the same batch.
+   const {record}=await recordObservations(env,factKey,{letterboxd:lid,tmdb:String(tmdb)},[],{extra:guards,attach:{lid,tmdb:String(tmdb)},rewrite:carries&&!viewOk});
+   if(String(record?.links?.tmdb)!==String(tmdb)||record?.links?.letterboxd!==lid)return {state:'conflict'};
+   return {state:'projected',factKey};
+  }catch(error){if(error.code==='alias_conflict')return {state:'conflict'};throw error;}
+ }
  // AIR-673 / ADR 0217 decisions 5b and 9: the positive observation of the link document a lid-only admission is fenced on, and the lid's own fact key. `tmdbAlias` is the movie id the lid's record already carries (null for none): a
  // lid with a movie alias is NEVER admitted lid-only. Read only; a Ratings document domain that is not authoritative is a typed refusal, never an absence.
  async function linksObservation(env,lid){
@@ -284,14 +342,14 @@ function recordRatingChange(record,incoming,effective){
   return (back.inferredPairs||[]).some(entry=>namesPair(entry,links))||statesPair(back,links);
  }
  // Writes observations into one record. A redirected record is followed once; a fenced one sends the write to its target.
- async function recordObservations(env,factKey,links,observations,{floors={},identity=null,extra=[],lidOnly=false}={}){
+ async function recordObservations(env,factKey,links,observations,{floors={},identity=null,extra=[],lidOnly=false,attach=null,rewrite=false}={}){
   let key=factKey;
   for(let hop=0;hop<2;hop++){
    const {value}=await readJSON(env,recordKey(key));
    const next=value?.redirectTo||value?.migrating?.to;
    if(!next)break;
-   // AIR-673: a lid-only write lands on exactly the lid's own record; a record that moved is a conflict, never followed.
-   if(lidOnly)throw new FactsError('alias_conflict','The lid-only record was redirected');
+   // AIR-673: a lid-only write lands on exactly the lid's own record; a record that moved is a conflict, never followed. AIR-675: so does the completion of an attached pair (`attach`).
+   if(lidOnly||attach)throw new FactsError('alias_conflict','The lid-only record was redirected');
    if(hop===1)throw new FactsError('redirect_chain','Record redirect chain is longer than one hop');
    key=next;
   }
@@ -299,6 +357,8 @@ function recordRatingChange(record,incoming,effective){
   const {value:record}=await casJSON(env,recordKey(key),emptyRecord(key,links),current=>{
    if(current.redirectTo||current.migrating)throw new FactsError('write_contention','Record started a migration during write');
    if(lidOnly&&current.links?.tmdb!=null)throw new FactsError('alias_conflict','The lid-only record already carries a movie id');
+   // AIR-675: the completion of an attached pair puts THIS movie id on the lid's own record; a record that holds another movie id or another Letterboxd id is a conflict, never relabelled.
+   if(attach&&((current.links?.tmdb!=null&&String(current.links.tmdb)!==String(attach.tmdb))||(current.links?.letterboxd!=null&&current.links.letterboxd!==attach.lid)))throw new FactsError('alias_conflict','The record already carries another identity');
    outcomes.length=0;let changed=false;
    // An inferred identity (AIR-388, ADR 0104) is recorded on the record that first receives the Letterboxd id: a fresh record, or an
    // existing one that had no Letterboxd id. A record that already holds facts and a Letterboxd id keeps whatever it had, so a
@@ -311,7 +371,9 @@ function recordRatingChange(record,incoming,effective){
    for(const [k,v] of Object.entries(links||{}))if(v!=null&&current.links[k]==null){current.links[k]=String(v);changed=true;}
    if(identity&&!current.identity&&(untouched||letterboxdMissing)){current.identity={kind:identity.kind,basis:identity.basis,sourceRef:identity.sourceRef};changed=true;}
    for(const {fact,observation:incoming} of observations){const result=applyObservation(current,fact,incoming,{floor:floors[fact]||null});outcomes.push({fact,...result});if(result.outcome==='new'||result.outcome==='replaces')changed=true;}
-   return changed?current:null;
+   // AIR-675: `rewrite` writes the record UNCHANGED (the same document, its exact `etag` compare-and-swap) so that its ratings view rows are derived from THIS record value in the SAME batch (`viewWrites` of the casOwned write): a repair of the view
+   // that cannot lose a newer ordinary update of the record between a read and a separate projection.
+   return changed||rewrite?current:null;
   },{extra});
   return {factKey:key,record,outcomes};
  }
@@ -1059,5 +1121,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,linksObservation,linkLidOnly,recordOwnerWatchedMark};
+ return {linkAttachedPair,completeAttachedLink,validValue,FACTS_KEYS,DIARY_IDENTITY_KEY,reservationGuard,DIARY_IDENTITY_CAP,DIARY_BACKLOG_CAP,readDiaryIdentityVersioned,readDiaryBacklog,ownerAction,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,linksObservation,linkLidOnly,recordOwnerWatchedMark};
 })();

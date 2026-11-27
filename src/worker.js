@@ -2844,6 +2844,7 @@ async function routeRequest(request,env,execution){
   if(url.pathname==='/api/admin/limbo')return await adminLimboRoute(request,env,url);
   if(url.pathname==='/api/admin/identity-work')return await adminIdentityWorkRoute(request,env,url);
   if(url.pathname==='/api/admin/identity-work/owner-action')return await adminIdentityOwnerActionRoute(request,env,url); // AIR-599: owner requeue/dismiss of the shared Letterboxd check
+  if(url.pathname==='/api/admin/letterboxd/lid-recheck')return await adminLidRecheckRoute(request,env,url); // AIR-675: owner re-check and TMDB attach of a lid-only Film (dormant: refuses before any effect until the writer is on)
   if(url.pathname==='/api/admin/settings')return await adminSettingsRoute(request,env,url); // AIR-605: the effective state of the Catalog Enrichment Producer (a pure read)
   if(url.pathname==='/api/admin/settings/catalog-enrichment')return await adminSettingsRoute(request,env,url); // AIR-605: its owner control (pause, resume, retry), POST only
   if(url.pathname==='/api/admin/posters')return await adminPostersRoute(request,env,url);

@@ -129,7 +129,11 @@ const LetterboxdDiaryIdentity=(()=>{
   if(found.stop||found.review)return answer(found);
   const verdict=verify({lid,slug,page,detail:found.detail},letterboxdPageTools());
   if(verdict.state!=='verified')return {state:'pending',reason:verdict.reason};
-  return {state:'verified',verdict,pageDigest:await pageCheckDigest({lid,slug},verdict)};
+  // AIR-675 / ADR 0217 decision 8b: the ONE common normalized root of the checked page (`LetterboxdAttachRoot.attachRoot`: no route name, the normalized final page URL, the TMDB document fields the agreement compared). It is the causal root
+  // of this check's EVIDENCE rows. The legacy `pageDigest` below is kept unchanged as the admission receipt's `evidenceSha256` (replay compatibility) and as route provenance on the evidence row (`sourceRef`); no historical receipt is rewritten.
+  const pageDigest=await pageCheckDigest({lid,slug},verdict);
+  const common=typeof LetterboxdAttachRoot==='undefined'?null:await LetterboxdAttachRoot.attachRoot({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,finalUrl:String(page.landing?.href??page.landing),detail:found.detail});
+  return {state:'verified',verdict,pageDigest,commonRoot:common?common.root:null};
  }
  // The page-check digest (ADR 0213 decision 2): the identity of the checked page content, the same for the Diary and the Watchlist caller checking the same page. It is the admission receipt's `evidenceSha256` and, handed over with
  // the link (AIR-618, ADR 0215 choice 0215-8b = C), the causal root of the claim's bridge evidence row. Only a check this very step performed has one: the bridge, repair and claim-retry paths below hand over none.
@@ -338,7 +342,7 @@ const LetterboxdDiaryIdentity=(()=>{
   };
   const resolveAtD1=async(item,prior)=>{
    const lid=item.lid,intended=intentOf(prior),lidIntent=lidIntentOf(prior);
-   let verdict=null,checkedDigest=null,lidProof=null;
+   let verdict=null,checkedDigest=null,checkedRoot=null,lidProof=null;
    // AIR-673: a persisted LID-only intent is recovered through the SAME coordinator before any source request: a lost response (the admission applied, the entry survived) settles from the intent's own applied receipt with
    // no fetch; a live attempt waits (the entry, the intent, is kept); anything else falls through to the ordinary check, whose result is compared to the intent before it changes anything.
    if(lidIntent&&!intended){
@@ -366,13 +370,13 @@ const LetterboxdDiaryIdentity=(()=>{
     }
     if(outcome.state==='verified'&&lidIntent)return {ok:false,reason:'source_changed',charged:true};
     if(outcome.state!=='verified'){const kind=classify(outcome.reason);return {ok:false,reason:outcome.reason,charged:kind==='gone'||kind==='definite'};}
-    verdict=outcome.verdict;checkedDigest=outcome.pageDigest||null;
+    verdict=outcome.verdict;checkedDigest=outcome.pageDigest||null;checkedRoot=outcome.commonRoot||null;
     if(WRITE_RESERVE_MS>remaining())return {ok:false,reason:'deferred'};
     // The durable intent is written before the first effect, but never over a DIFFERENT one: the coordinator answers `source_changed` for that.
     if(intended===null||intended===String(verdict.tmdb)){if(!(await intend(item,verdict.tmdb)))return {ok:false,reason:'deferred'};}
     const evidenceSha256=await pageCheckDigest(item,verdict);
     return {ok:true,receipt:{tmdb:verdict.tmdb,archiveSha256:evidenceSha256,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath},
-     evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:evidenceSha256,sourceRef:'diary:'+lid,observedAt:iso(clock())}};
+     evidence:{subject:{kind:'letterboxd_lid',value:lid},relation:'same_work',object:{kind:'tmdb_movie',value:verdict.tmdb},polarity:'asserts',route,method:'page_check',sourceRoot:outcome.commonRoot||evidenceSha256,sourceRef:'diary:'+lid+':legacy:'+evidenceSha256,...(outcome.commonRoot?{legacySourceRoot:evidenceSha256,legacyAlternates:[{route:'ratings_diary',sourceRoot:evidenceSha256},{route:'watchlist_admission',sourceRoot:evidenceSha256}]}:{}),observedAt:iso(clock())}};
    };
    const finalize=async(result,guard)=>{
     record(item,result.outcome==='source_unavailable'?String(result.reason||'check_failed'):D1_TERMINAL[result.outcome]||'admission_failed');
@@ -400,7 +404,7 @@ const LetterboxdDiaryIdentity=(()=>{
     case 'admitted':case 'present':{
      if(!tmdb){record(item,'deferred');return;}
      const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb}).catch(()=>({state:'error'}));
-     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,tmdb,verdict?checkedDigest:null);labels.set(lid,verdict?label(verdict):{title:null,year:null,tmdb});return;}
+     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,tmdb,verdict?(out.evidenceRoot||checkedRoot||checkedDigest):null);labels.set(lid,verdict?label(verdict):{title:null,year:null,tmdb});return;}
      record(item,linked.state==='conflict'?'link_conflict':'link_failed',linked.state==='conflict'?{}:{tmdb});
      return;
     }
@@ -534,7 +538,7 @@ const LetterboxdDiaryIdentity=(()=>{
     }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':ADMISSION_NOT_NOW[error?.code]||error?.code||(error?.message==='receipt_missing'?'receipt_missing':'admission_failed')};}
     if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(guarded(lid),{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
-     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,outcome.verdict.tmdb,outcome.pageDigest);labels.set(lid,label(outcome.verdict));continue;}
+     if(linked.state==='linked'){counts.verified++;settled.set(lid,'verified');handoff(lid,outcome.verdict.tmdb,outcome.commonRoot||outcome.pageDigest);labels.set(lid,label(outcome.verdict));continue;}
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }

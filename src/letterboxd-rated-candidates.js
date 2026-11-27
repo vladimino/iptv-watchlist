@@ -398,11 +398,19 @@ const LetterboxdRatedCandidates = (() => {
   // AIR-602 / ADR 0207 decisions 2 and 3, at the marker mode `d1`: the admission of this verified code goes through the D1 coordinator (one key `admission:lid:<code>`, keep-first, the evidence row of THIS archive's
   // page check in the same batch), not the R2 entry. The typed outcome is mapped onto the legacy refusal vocabulary of this step: a settled pair is `ok`; another code on the Film is `duplicate_tmdb`; a code held by
   // another Film is `historical_alias_conflict` (both `needs_review`); everything non-terminal (an identity held or redirected, a live attempt, a failed or deferred attempt) keeps the row `admitting` and is retried.
-  async function admitRatedAtD1(env, film, code, sha, evidence, {intended = null} = {}) {
-    const root = await digestHex({code, path: film.filmPath || null, tmdb: film.tmdb, title: film.title, year: film.year, source: 'letterboxd_rated_archive_page'});
+  async function admitRatedAtD1(env, film, code, sha, evidence, {intended = null, commonRoot = null} = {}) {
+    // AIR-675 / ADR 0217 decision 8b: the evidence root of a check this step really made (page and TMDB document in hand) is the ONE common normalized root; the legacy digest stays as route provenance (`sourceRef`) and the
+    // receipt digest (`sha`) is unchanged. A call that made no check (a recovery from the durable intent) has no page and no document, so it keeps the legacy root and never fabricates a common one.
+    const legacy = await digestHex({code, path: film.filmPath || null, tmdb: film.tmdb, title: film.title, year: film.year, source: 'letterboxd_rated_archive_page'});
+    const root = commonRoot || legacy;
+    // The Diary and Watchlist steps' LEGACY root of the SAME page is computable from what this step holds (code, film path, movie id, title, year): a prior legacy evidence row of those routes is matched by its own key, and this check then joins
+    // that root (one source, one root). The Diary legacy digest is `sha256(JSON{lid,slug,path,tmdb,title,year,source:'letterboxd_diary_page'})`, in that key order.
+    const slug = String(film.filmPath || '').replace(/^\/film\/|\/$/g, '');
+    const diaryLegacy = commonRoot && slug ? await digestHex({lid: code, slug, path: film.filmPath, tmdb: film.tmdb, title: film.title, year: film.year, source: 'letterboxd_diary_page'}) : null;
+    const alternates = diaryLegacy ? ['ratings_diary', 'watchlist_admission'].map(route => ({subject: {kind: 'letterboxd_lid', value: code}, route, sourceRoot: diaryLegacy, sourceScope: null})) : [];
     const at = new Date().toISOString();
     const out = await LetterboxdAdmissionD1.admitVerifiedFilm(env, {kind: 'lid', lid: code, intent: intended ? {tmdb: intended} : null, receipt: {tmdb: film.tmdb, archiveSha256: sha, title: film.title, year: film.year, filmPath: film.filmPath || null},
-      evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12), sourceScope: sha, observedAt: at},
+      evidence: {subject: {kind: 'letterboxd_short_code', value: code}, relation: 'same_work', object: {kind: 'tmdb_movie', value: film.tmdb}, polarity: 'asserts', route: 'letterboxd_rated_archive', method: 'page_check', sourceRoot: root, sourceRef: 'archive-step:' + sha.slice(0, 12) + ':legacy:' + legacy, sourceScope: sha, ...(commonRoot ? {legacySourceRoot: legacy, legacyAlternates: alternates} : {}), observedAt: at},
       // ADR 0222: the terminal review is the row's own D1 document write, committed in ONE batch with the history assertion of this attempt (`guard.statement`); a refused batch writes nothing and the attempt replans.
       finalize: async (result, guard) => {
         const reason = result.outcome === 'other_code' ? 'duplicate_tmdb' : result.outcome === 'conflict' ? 'historical_alias_conflict' : 'source_changed';
@@ -447,8 +455,10 @@ const LetterboxdRatedCandidates = (() => {
       return current;
     });
     if (outcome === 'already') {
-      if (atD1) await admitRatedAtD1(env, film, code, sha, evidence);
-      else {
+      // A fetchless replay of a row completed concurrently (`recover.settled`) made no check and records no page check, exactly as the normal branch below; at `d1` the R2 entry is never written.
+      if (atD1) {
+        if (!recover.settled) await admitRatedAtD1(env, film, code, sha, evidence, {commonRoot: recover.commonRoot || null});
+      } else {
         const stored = await writeAdmission(env, film);
         if (stored.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, stored.film);
       }
@@ -462,7 +472,7 @@ const LetterboxdRatedCandidates = (() => {
     let admitted;
     // A row finished from its applied attempt (`recover.settled`) made no check: it records no evidence and needs no admission.
     if (atD1 && recover.settled) admitted = {ok: true};
-    else if (atD1) admitted = await admitRatedAtD1(env, film, code, sha, evidence, {intended: recover.intended || null});
+    else if (atD1) admitted = await admitRatedAtD1(env, film, code, sha, evidence, {intended: recover.intended || null, commonRoot: recover.commonRoot || null});
     else {
       admitted = await writeAdmission(env, film);
       if (admitted.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, admitted.film);
@@ -1008,7 +1018,9 @@ const LetterboxdRatedCandidates = (() => {
       const reason = item.historicalTmdb && item.historicalTmdb !== String(decision.tmdbId) ? 'historical_alias_conflict' : agree.reason;
       return terminal(reason, true);
     }
-    const committed = await commitVerified(env, sha, code, item, decision.tmdbId, evidence, doc.generatedAt, atD1, {guard: recoverGuard, intended: recovering ? String(item.intendedTmdb) : null, intendedPath: recovering ? item.filmPath : null});
+    // The common root of THIS check: the page's own landing, the movie id it named and the TMDB document that agreed (all in hand here). `null` when an input cannot make one.
+    const common = typeof LetterboxdAttachRoot === 'undefined' || !detail.detail ? null : await LetterboxdAttachRoot.attachRoot({lid: code, slug: String(evidence.path || '').replace(/^\/film\/|\/$/g, ''), path: evidence.path, tmdb: String(decision.tmdbId), title: evidence.title || item.name, year: (evidence.years && evidence.years[0]) || item.year, finalUrl: String(page.landing?.href ?? page.landing), detail: detail.detail});
+    const committed = await commitVerified(env, sha, code, item, decision.tmdbId, evidence, doc.generatedAt, atD1, {guard: recoverGuard, intended: recovering ? String(item.intendedTmdb) : null, intendedPath: recovering ? item.filmPath : null, commonRoot: common ? common.root : null});
     return withWrites(committed, committed.verified === true || committed.state === 'needs_review' || clearedStop, committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
   }
 
