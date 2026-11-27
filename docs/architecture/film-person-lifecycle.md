@@ -283,6 +283,7 @@ flowchart TD
   page["H1 page check:<br/>complete page, positively absent TMDB relation"] -->|"tmdb_none"| batch
   key --> batch["lid_only canonical batch<br/>marker d1, revision, absences, links.json etag"]
   batch -->|"one fenced batch writes"| film["Film film:lb:LID<br/>trusted letterboxd claim<br/>film_lid_admission proof row<br/>applied receipt"]
+  inferred["Inferred import, new admission:<br/>reserve first, then mark and link<br/>inside the owned attempt (each batch asserts it)"] -->|"canonical batch settles the same receipt"| key
   tmdb["TMDB-proved or inferred path<br/>meets film_lid_admission"] -->|"never attaches or duplicates"| refused["present_lid_only, needs_review or conflict"]
   film -.->|"later steps, not delivered here"| later["Domain settlement of the entry points<br/>owner re-check and attach"]
 ```

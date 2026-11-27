@@ -23,7 +23,7 @@
 import {database,failed,many,one} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 import {RETRY_POLICY,digestOf} from './canonical-receipts.js';
-import {historyGuard,reconcileOperationKey,runOperationKey} from './receipt-operation-key.js';
+import {historyGuard,ownedAttemptCondition,reconcileOperationKey,runOperationKey} from './receipt-operation-key.js';
 import {admitLidOnlyFilm,admitRatedFilm,hasLidAdmissionTable,lidOnlyFilmId,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN,admissionDigestD1} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,readAdmissionAuthority} from './letterboxd-admission-authority.js';
@@ -180,8 +180,16 @@ export async function admitVerifiedFilm(env,input={}){
    request:{operation:FILM_ADMISSION_OPERATION,target,expectedRevision:plan.revision,digest,source:digest},
    write:{
     atomic:true,
-    run:ctx2=>admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
-     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence:a.evidence}),
+    run:async ctx2=>{
+     // AIR-672 / ADR 0217 decision 5b: the caller's pre-canonical effects (the inferred import's mark and link) run INSIDE this owned execution, after the reservation. `statement` is the assertion of the exact currently
+     // owned pending attempt, for the caller to add to each of its own batches (Ratings `admissionGuards`); an expired or abandoned attempt can therefore never land a late effect.
+     if(typeof input.beforeCanonical==='function'){
+      const owned=ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey,requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock()});
+      await input.beforeCanonical({requestId:ctx2.requestId,attempt:ctx2.attempt,operationKey,statement:[fenced.assertSql(owned.sql),owned.params]});
+     }
+     return admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
+      receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence:a.evidence});
+    },
     // The receipt's own readback (a reconcile of an unresolved attempt): the pair is committed when the admission row exists for it.
     readback:async()=>{const snap=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});return {digest:snap.outcome==='present'?digest:null,revision:snap.revision??await revisionOf(db,plan.id)};},
     revalidate:async()=>{const snap=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});return snap.outcome==='admit'?'proceed':snap.outcome==='present'?'superseded':'stale';},
