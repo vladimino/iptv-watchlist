@@ -240,7 +240,9 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
   const after=JSON.parse(state(file));
   assert.deepEqual(after.filter(row=>row.part==='core').map(row=>[row.status,row.refresh_epoch]),[['due',8],['due',5]],'both targets reset');
   assert.equal(after.find(row=>row.part==='film').plan_epoch,4,'the Film epoch rose exactly once');
-  assert.equal(rows(file,"SELECT json_extract(film_json,'$.ownerRetry') AS r FROM catalog_enrichment_state WHERE part='film'")[0].r,'req-0000cas4','the Film row records the request that committed');
+  const marker=rows(file,"SELECT json_extract(film_json,'$.ownerRetry') AS r FROM catalog_enrichment_state WHERE part='film'")[0].r;
+  assert.match(marker,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,'the Film row records a unique server-side attempt token');
+  assert.notEqual(marker,'req-0000cas4','and never the client request id, which may be reused');
   // the answer names only this request's rows
   assert.deepEqual(out.body.retried.map(row=>row.source).sort(),['letterboxd','tmdb']);
  }
@@ -307,12 +309,28 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
   assert.equal(out.body.outcome,'unknown','a lost answer with overwritten evidence proves neither commit nor rollback: '+JSON.stringify(out.body));
   assert.equal(out.status,503);
  }
- // 4. the answer is lost and the rows are exactly as the owner saw them: confirmed not stored
+ // 4. the answer is lost and nothing shows a commit: unknown, never rejected (an ambiguous write can still settle later) and never applied
  {
   const file=build(2);
   const env=withDb(file,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async()=>{throw new Error('network connection lost');};return target[prop];}}));
   const out=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000cmt3',filmId:'film:a',expectedRows:slots(2)}});
-  assert.deepEqual([out.status,out.body.outcome],[503,'rejected'],'every selected row is as the owner saw it: the retry was not stored');
+  assert.deepEqual([out.status,out.body.outcome],[503,'unknown'],'rows as the owner saw them do not prove the write will never settle');
+  assert.equal(stateOf(file).filter(row=>row.part==='credits'&&row.status==='deferred_repair').length,2,'and nothing was written');
+ }
+ // 4b. a REUSED request id never proves a commit: a first retry succeeds with id X, a second retry of different rows with the same X loses its answer before executing; the first request's marker must not be taken for the second's
+ {
+  const file=build(2);
+  sql(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,refresh_epoch,failures,due_since,updated_at) VALUES ('film:a','core','tmdb',0,'needs_attention','x',4,6,'${T}','${T}');`);
+  const first=await call(withDb(file,null),WRITE,{payload:{action:'retry',requestId:'req-0000same',filmId:'film:a',part:'core',expectedRows:[{part:'core',source:'tmdb',slot:0,status:'needs_attention',updatedAt:T}]}});
+  assert.deepEqual([first.status,first.body.outcome],[200,'applied']);
+  const filmToken=rows(file,"SELECT json_extract(film_json,'$.ownerRetry') AS r,updated_at FROM catalog_enrichment_state WHERE part='film'")[0];
+  const filmAfterFirst=rows(file,"SELECT updated_at FROM catalog_enrichment_state WHERE part='film'")[0].updated_at;
+  const env=withDb(file,base=>new Proxy(base,{get(target,prop){if(prop==='batch')return async()=>{throw new Error('network connection lost');};return target[prop];}}));
+  const second=await call(env,WRITE,{payload:{action:'retry',requestId:'req-0000same',filmId:'film:a',part:'credits',expectedRows:[{...slots(1)[0]}].map(row=>({...row}))}});
+  assert.notEqual(second.body.outcome,'applied','a reused request id is never proof: '+JSON.stringify(second.body.outcome));
+  assert.equal(second.body.outcome,'unknown');
+  assert.equal(stateOf(file).filter(row=>row.part==='credits'&&row.status==='deferred_repair').length,2,'the credit rows were never written');
+  void filmToken;void filmAfterFirst;
  }
  // 5. the answer is lost but this request's own marker is there (nothing moved afterwards): applied
  {
