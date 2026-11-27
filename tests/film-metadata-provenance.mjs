@@ -35,7 +35,7 @@ const templates={};
 function template(stage){
  if(templates[stage])return templates[stage];
  const file=path.join(root,'tpl-'+stage+'.sqlite');
- const upTo=stage==='v48'?chain.findIndex(name=>name.startsWith('0049_')):chain.length;
+ const upTo=stage==='v48'?chain.findIndex(name=>name.startsWith('0049_')):stage==='v52'?chain.findIndex(name=>name.startsWith('0053_')):chain.length;
  assert.equal(sqlite(file,chain.slice(0,upTo).map(sql).join('\n')).status,0);
  assert.equal(sqlite(file,VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
  assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
@@ -326,7 +326,7 @@ const batchSize=env=>{const seen={size:0};return {seen,env:{DB:{...env.DB,prepar
 }
 
 // ---- 6. owner actions, locks and triggers ----
-const historyAction=(row,field)=>({id:row.id,field,oldValueText:row.old_value_text,oldSource:row.old_source,oldAnchorScheme:row.old_anchor_scheme,oldAnchorValue:row.old_anchor_value,oldAnchorDigest:row.old_anchor_digest,oldObservedAt:row.old_observed_at});
+const historyAction=(row,field)=>({id:row.id,field,oldValueText:row.old_value_text,oldSource:row.old_source,oldAnchorScheme:row.old_anchor_scheme,oldAnchorValue:row.old_anchor_value,oldAnchorDigest:row.old_anchor_digest,oldLanguage:row.old_language,oldLanguageBasis:row.old_language_basis,oldObservedAt:row.old_observed_at});
 const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal WHERE kind='protection_released'");
 {
  const {file,env}=fresh();await seed(env);setMode(file,'enforce');
@@ -792,7 +792,7 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  // validation of the declared language
  {
   const w=await world();
-  for(const [why,field,item,source] of [['a language on a field that has none','year',{language:'ru',languageBasis:'explicit'},'letterboxd'],['assumed on a TMDB synopsis','synopsis',ASSUMED_EN,'tmdb'],['assumed on a poster','poster',ASSUMED_EN,'letterboxd'],['a language without a basis','synopsis',{language:'ru'},'letterboxd'],['a basis without a language','synopsis',{languageBasis:'explicit'},'letterboxd'],['an unsupported language','synopsis',{language:'de',languageBasis:'explicit'},'letterboxd']])
+  for(const [why,field,item,source] of [['a language on a field that has none','year',{language:'ru',languageBasis:'explicit'},'letterboxd'],['assumed on a TMDB synopsis','synopsis',ASSUMED_EN,'tmdb'],['assumed on a poster','poster',ASSUMED_EN,'letterboxd'],['a language without a basis','synopsis',{language:'ru'},'letterboxd'],['a basis without a language','synopsis',{languageBasis:'explicit'},'letterboxd'],['an upper-case tag','synopsis',{language:'DE',languageBasis:'explicit'},'letterboxd'],['a three-letter tag','synopsis',{language:'deu',languageBasis:'explicit'},'letterboxd'],['a regional tag','poster',{language:'pt-BR',languageBasis:'explicit'},'tmdb'],['assumed non-English','synopsis',{language:'de',languageBasis:'assumed'},'letterboxd']])
    await assert.rejects(declare(w.env,{[field]:field==='year'?1999:'x'},{source,languages:{[field]:item}}),error=>error.code==='film_person_invalid',why);
  }
  // hold fills and adopts only: a Russian observation does not replace English there, and the same text is adopted with its language; enforce replaces afterwards
@@ -1024,6 +1024,106 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
   await owner(a.env,[{action:'lock',field:'synopsis'}],{at:T2});
   const assumed=history(a.file).filter(item=>item.reason==='owner_lock').at(-1);
   assert.deepEqual([assumed.old_language,assumed.old_language_basis],[null,null],'an assumed basis is not carried without its Letterboxd lineage');
+ }
+}
+// ---- 15. AIR-693: a verified other-language tag is persisted (schema 53), bound to its value and ordered below ru/en ----
+{
+ const FR={language:'fr',languageBasis:'explicit'};
+ const lang=row=>row&&[row.language,row.language_basis];
+ const world=async(stage='open')=>{const w=fresh(stage);await seed(w.env);setMode(w.file,'enforce');return w;};
+ // a verified fr tag is persisted with the field row and, when the value is replaced, with its history; fr and unknown are different rows
+ {
+  const w=await world();
+  await declare(w.env,{poster:'/fr.jpg'},{source:'tmdb',languages:{poster:FR}});
+  assert.deepEqual(lang(field(w.file,'poster')),['fr','explicit'],'the verified tag is persisted, never turned into null');
+  const u=await world();
+  await declare(u.env,{poster:'/fr.jpg'},{source:'tmdb'});
+  assert.deepEqual(lang(field(u.file,'poster')),[null,null],'the identical path without a tag stays unknown');
+  // English replaces it (en ranks above fr), and the history keeps the old verified tag
+  await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',at:T1,observedAt:T1,languages:{poster:EN}});
+  assert.equal(meta(w.file).poster,'/en.jpg');
+  assert.deepEqual([history(w.file)[0].old_language,history(w.file)[0].old_language_basis,history(w.file)[0].new_language],['fr','explicit','en'],'the history carries the old tag');
+  // Russian is never downgraded to fr
+  const k=await world();
+  await declare(k.env,{synopsis:'Русский'},{source:'tmdb',languages:{synopsis:RU}});
+  const kept=await declare(k.env,{synopsis:'Français'},{source:'tmdb',at:T1,observedAt:T1,languages:{synopsis:FR}});
+  assert.deepEqual(kept.skipped.map(item=>item.reason),['language_kept']);assert.equal(meta(k.file).synopsis,'Русский');
+  // fr replaces nothing English: English stays against a later French observation
+  const e=await world();
+  await declare(e.env,{synopsis:'English'},{source:'tmdb',languages:{synopsis:EN}});
+  await declare(e.env,{synopsis:'Français'},{source:'tmdb',at:T1,observedAt:T1,languages:{synopsis:FR}});
+  assert.equal(meta(e.file).synopsis,'English','English outranks another language');
+  // owner lock keeps the verified tag; release keeps it; set clears the lineage; revert restores it
+  await owner(w.env,[{action:'lock',field:'poster'}],{at:T2});
+  assert.deepEqual([field(w.file,'poster').tier,...lang(field(w.file,'poster'))],['owner','en','explicit']);
+  const f=await world();
+  await declare(f.env,{poster:'/fr.jpg'},{source:'tmdb',languages:{poster:FR}});
+  await owner(f.env,[{action:'lock',field:'poster'}],{at:T2});
+  assert.deepEqual([field(f.file,'poster').tier,...lang(field(f.file,'poster'))],['owner','fr','explicit'],'the lock carries the verified other language');
+  await owner(f.env,[{action:'release',field:'poster'}],{at:T3});
+  assert.deepEqual([field(f.file,'poster').tier,...lang(field(f.file,'poster'))],['released','fr','explicit'],'the release keeps it');
+  const rel=history(f.file).find(item=>item.reason==='owner_release');
+  assert.deepEqual([rel.new_language,rel.new_language_basis],['fr','explicit']);
+ }
+ // P1-A: a poster that is neither ru nor en never replaces an existing usable poster, however fresh (review of 8ec1c5e2)
+ {
+  const w=await world();
+  await declare(w.env,{poster:'/fr.jpg'},{source:'tmdb',languages:{poster:FR}});
+  const other=await declare(w.env,{poster:'/fr2.jpg'},{source:'tmdb',at:T1,observedAt:T1,languages:{poster:FR}});
+  assert.deepEqual(other.skipped.map(item=>item.reason),['language_kept'],'fr does not replace fr');
+  const neutral=await declare(w.env,{poster:'/neutral.jpg'},{source:'tmdb',at:T2,observedAt:T2});
+  assert.deepEqual(neutral.skipped.map(item=>item.reason),['language_kept'],'a neutral or unknown poster does not replace fr');
+  assert.equal(meta(w.file).poster,'/fr.jpg');assert.deepEqual(lang(field(w.file,'poster')),['fr','explicit']);
+  assert.equal(history(w.file).length,0,'nothing was replaced');
+  // after an anchor change the stored row is superseded; the fallback still does not replace the usable poster
+  exec(w.file,"UPDATE film_metadata_field SET anchor_digest='"+'b'.repeat(64)+"' WHERE field='poster'");
+  assert.equal((await readFilmSnapshot(w.env,ID)).provenance.fields.poster.anchor_digest,'b'.repeat(64));
+  const after=await declare(w.env,{poster:'/fallback.jpg'},{source:'tmdb',at:T2,observedAt:T2});
+  assert.deepEqual(after.skipped.map(item=>item.reason),['language_kept'],'a confirmed fallback does not replace a superseded usable poster');
+  // a verified English or Russian poster still upgrades it
+  const en=await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',at:T3,observedAt:T3,languages:{poster:EN}});
+  assert.equal(meta(w.file).poster,'/en.jpg',JSON.stringify(en.skipped));
+ }
+ {
+  // an existing English poster is kept against a fresher neutral fallback; the same value is still adopted and a blank is still filled
+  const w=await world();
+  await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',languages:{poster:EN}});
+  const n=await declare(w.env,{poster:'/neutral.jpg'},{source:'tmdb',at:T1,observedAt:T1});
+  assert.deepEqual(n.skipped.map(item=>item.reason),['language_kept']);assert.equal(meta(w.file).poster,'/en.jpg');
+  const same=await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',at:T2,observedAt:T2,languages:{poster:EN}});
+  assert.equal(same.skipped.length,0);
+  const ru=await declare(w.env,{poster:'/ru.jpg'},{source:'tmdb',at:T3,observedAt:T3,languages:{poster:RU}});
+  assert.equal(meta(w.file).poster,'/ru.jpg',JSON.stringify(ru.skipped));
+ }
+ // a revert restores the language of the history row it names
+ {
+  const w=await world();
+  await declare(w.env,{poster:'/fr.jpg'},{source:'tmdb',languages:{poster:FR}});
+  await declare(w.env,{poster:'/en.jpg'},{source:'tmdb',at:T1,observedAt:T1,languages:{poster:EN}});
+  const replaced=history(w.file).find(item=>item.reason==='replaced');
+  assert.equal(replaced.old_language,'fr');
+  await owner(w.env,[{action:'revert',field:'poster',history:historyAction(replaced,'poster')}],{at:T3});
+  assert.equal(meta(w.file).poster,'/fr.jpg');
+  assert.deepEqual([field(w.file,'poster').tier,...lang(field(w.file,'poster'))],['owner','fr','explicit'],'the revert keeps the language and the basis of the old value');
+ }
+ // a merge keeps the field row (and its tag) of the surviving value
+ {
+  const B='film:tmdb:604';
+  const w=fresh();await seed(w.env);await seed(w.env,{id:B,tmdb:'604',lid:null});setMode(w.file,'enforce');
+  await declare(w.env,{poster:'/fr.jpg'},{source:'tmdb',id:B,languages:{poster:FR}});
+  const done=await mergeFilms(w.env,{from:B,to:ID,expected:{from:await revisionOf(w.env,B),to:await revisionOf(w.env,ID)},at:T3,evidence:{verified:true}});
+  assert.equal(done.merged,true);
+  assert.deepEqual(lang(field(w.file,'poster')),['fr','explicit'],'the merge moves the verified tag with its value');
+ }
+ // the schema gate: at 52 a verified other-language tag is stored as UNKNOWN (the batch does not fail); ru and en are unchanged; a malformed tag is still refused
+ {
+  const w=await world('v52');
+  await declare(w.env,{poster:'/fr.jpg'},{source:'tmdb',languages:{poster:FR}});
+  assert.equal(meta(w.file).poster,'/fr.jpg');
+  assert.deepEqual(lang(field(w.file,'poster')),[null,null],'schema 52 holds no such tag: unknown, exactly as before');
+  await declare(w.env,{synopsis:'Русский'},{source:'tmdb',languages:{synopsis:RU}});
+  assert.deepEqual(lang(field(w.file,'synopsis')),['ru','explicit']);
+  await assert.rejects(declare(w.env,{poster:'/x.jpg'},{source:'tmdb',at:T2,languages:{poster:{language:'FR',languageBasis:'explicit'}}}),error=>error.code==='film_person_invalid');
  }
 }
 console.log('film metadata provenance (AIR-631): the sync SHA-256 and the writer digest, schema absent and off byte-identical, binding, invalidation and declaration, anchor and mode races, the comparator with convergence over every permutation, locks, triggers and owner actions, modes, clear rules and the field-wise merge, and the statement bounds: ok');

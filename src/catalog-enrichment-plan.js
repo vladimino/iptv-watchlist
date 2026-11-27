@@ -321,12 +321,8 @@ export function selectPoster(images,topLevel){
  }
  return topLevel===null?field(null,'absent'):unreadable();
 }
-// The languages the provenance writer can PERSIST today (AIR-631's `languageOf` and the CHECKs of migration 0049 accept `ru` and `en`). The observation and the digest keep any verified tag; the producer tells the writer only a tag in this set, so
-// a verified tag the schema cannot hold (for example `fr` on a last-resort poster) is neither invented as ru/en nor allowed to fail the write: it is reported (`languageNotDeclared`) and the declaration carries no language. Extending this set is
-// the additive schema step that AIR-631 owns.
-export const WRITER_LANGUAGES=Object.freeze(['ru','en']);
 // The typed writer declaration of ONE selected field: the single, explicit conversion from the observation to what a provenance writer is told (AIR-631): the source, the anchor, the value that carries the tag, and its language and basis
-// (`ru`/`en` with `explicit`/`assumed`, or both null). Never a language the observation did not carry.
+// (a normalized two-letter tag with `explicit`, the assumed English of a Letterboxd synopsis, or both null). Never a language the observation did not carry.
 export function declarationOf(name,source,anchor,item){
  if(!item||item.coverage!=='verified')return null;
  return {field:name,source,anchor:anchor?{scheme:anchor.scheme,value:String(anchor.value)}:null,value:item.value,language:item.language??null,languageBasis:item.languageBasis??null};
@@ -438,4 +434,4 @@ export function examineWindow(rows,now,k=50){
 }
 
 // One namespace for the modules that use the planner as a whole (the Worker bundle strips named imports, so the producer takes `Plan` from the scope).
-export const Plan=Object.freeze({planReplacements,WRITER_LANGUAGES,declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});
+export const Plan=Object.freeze({planReplacements,declarationOf,unresolvedFields,coreVersion,localizationVersion,creditsVersion,SOURCES,CORE_FIELDS,blank,computeAnchors,anchorDigest,applicableSources,anchorSetGuard,epochGuard,leaseGuard,controlGuard,blankFieldGuard,afterOutcome,fallbackElapsed,decideCore,creditSource,expectedCredits,chunkCredits,expectedDigest,missingForChunk,creditsComplete,digestOf,transportDelayMs,repairDelayMs,classifyFailure});

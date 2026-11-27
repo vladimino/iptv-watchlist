@@ -469,6 +469,9 @@ export const FILES={
  "migration-0050-discovery-enrichment.mjs": {
   "suite": "core"
  },
+ "migration-0053-provenance-other-language.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-bootstrap.mjs": {
   "suite": "core"
  },

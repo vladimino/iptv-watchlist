@@ -338,9 +338,8 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
   const declared=Object.fromEntries(writeFields.map(field=>{
    const source=core.writes[field].source,anchor=context.anchors[source];
    const typed=Plan.declarationOf(field,source,anchor,answers[source]?.observation?.[field]);
-   // only a tag the writer can persist is declared; a verified tag it cannot hold is reported, never invented as ru/en and never allowed to fail the write
-   const tag=typed&&typed.language&&Plan.WRITER_LANGUAGES.includes(typed.language);
-   if(typed&&typed.language&&!tag)(report.languageNotDeclared??=[]).push({field,language:typed.language,source});
+   // the typed observation's verified tag is declared as it is (any normalized two-letter tag, ADR 0224 P1-A); the provenance writer persists it where the schema holds it (migration 0053) and otherwise stores it as unknown
+   const tag=!!(typed&&typed.language);
    return [field,{source,anchor:{scheme:source,value:anchor?.value??''},observedAt:now,agreedAnchorDigest:agreed?digest:null,...(tag?{language:typed.language,languageBasis:typed.languageBasis}:{})}];
   }));
   const metadata={updatedAt:now,declared,...Object.fromEntries(writeFields.map(field=>[field,core.writes[field].value]))};
