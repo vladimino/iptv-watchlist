@@ -22,7 +22,7 @@ Metadata records follow the D1 cache, which is served only while its schema v6 m
 
 Errors: `405` for any method but GET, `503` when the Worker has no `DB` binding, `404` for an unknown route, person or film.
 
-**Proposed, not live:** [ADR 0223](../../adr/0223-retire-unused-d1-catalog-http-views.md) (Proposed) would retire `persons`, `persons/<role>/<key>`, `persons/review` and `films/<id>` with a typed `410`, keep the identity route and `d1PersonReview`, and narrow `status`. Until that ADR is Accepted and delivered, every route in the table above behaves as documented.
+**Accepted, not yet delivered:** [ADR 0223](../../adr/0223-retire-unused-d1-catalog-http-views.md) (Accepted) will retire `persons`, `persons/<role>/<key>`, `persons/review` and `films/<id>` with a typed `410`, keep the identity route and `d1PersonReview`, and narrow `status`. Until that retirement is delivered, every route in the table above behaves as documented.
 
 ## Limits
 

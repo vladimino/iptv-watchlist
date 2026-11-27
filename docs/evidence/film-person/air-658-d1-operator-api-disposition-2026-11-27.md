@@ -1,7 +1,7 @@
 # D1 operator API disposition: endpoint and consumer matrix
 
 **Captured:** 27 Nov 2026, offline. Source: `main` `81a57b9b0c37d5f861b296789161a3f376855d0f` (repository files and an offline harness only). No production read, no production write, no live request.
-**Trello:** [AIR-658](https://trello.com/c/HoCuCbeL), owner direction and Controller handoff in the [card comment of 27 Nov 2026](https://trello.com/c/HoCuCbeL#comment-6b093ea38b3462537322973a). **Decision record:** [ADR 0223](../../adr/0223-retire-unused-d1-catalog-http-views.md) (Proposed).
+**Trello:** [AIR-658](https://trello.com/c/HoCuCbeL), owner direction and Controller handoff in the [card comment of 27 Nov 2026](https://trello.com/c/HoCuCbeL#comment-6b093ea38b3462537322973a). **Decision record:** [ADR 0223](../../adr/0223-retire-unused-d1-catalog-http-views.md), Accepted on 27 Nov 2026 after this report (dated historical evidence; the runtime was unchanged at the pinned SHA).
 **Verdict:** the matrix below is the basis of the proposed disposition. It is a proposal, not a shipped runtime. Nothing here changes a route.
 
 ## Scope and method

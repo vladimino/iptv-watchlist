@@ -1,11 +1,11 @@
 # ADR 0223: Retire the unused `/api/d1/*` catalog views with a typed 410 and narrow the D1 status contract
 
-**Status:** Proposed  
-**Original decision date:** not decided. Owner concept direction recorded 2026-11-27 ([card comment](https://trello.com/c/HoCuCbeL#comment-6b093ea38b3462537322973a)); this is direction only, not an ADR disposition.  
+**Status:** Accepted  
+**Original decision date:** 2026-11-27 ([Product Owner disposition recorded by the Delivery Controller](https://github.com/vladimino/iptv-watchlist/pull/1036#issuecomment-7214650030); option A). The earlier [owner concept direction](https://trello.com/c/HoCuCbeL#comment-6b093ea38b3462537322973a) of the same day is superseded by this final decision.  
 **Recorded at:** 2026-11-27, from `main` `81a57b9b`.  
-**Approval source:** not documented (the ADR-specific owner disposition is still to be recorded by the Controller on the PR).  
+**Approval source:** [Product Owner disposition of 27 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/1036#issuecomment-7214650030), recorded by the Delivery Controller from the owner's chat statement «Утверждаю ADR 0223, вариант A. Переводи в Accepted.»: option A, retire the unused HTTP views and narrow `status`, as reviewed at `072ccbc8` in the [technical PASS review](https://github.com/vladimino/iptv-watchlist/pull/1036#pullrequestreview-6085957627). This is an architecture acceptance only: it grants no implementation of the successor cards and no production operation.  
 **Related work:** [AIR-658](https://trello.com/c/HoCuCbeL); successors [AIR-689](https://trello.com/c/miSF1gBD) and [AIR-690](https://trello.com/c/RxGq4S9r); evidence [D1 operator API disposition](../evidence/film-person/air-658-d1-operator-api-disposition-2026-11-27.md).  
-**Supersedes:** only the clause of [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md) decision 11 that says `GET /api/d1/films/<id>` "Stays an operator view". Choice F2 of ADR 0216 was rejected there and stays rejected. Reciprocal supersession metadata in ADR 0216 and its registry row is added at the final owner disposition, with the historical accepted text and status preserved.  
+**Supersedes:** only the clause of [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md) decision 11 that says `GET /api/d1/films/<id>` "Stays an operator view". Choice F2 of ADR 0216 was rejected there and stays rejected. The reciprocal metadata is recorded in ADR 0216 and its registry row; ADR 0216 keeps its Accepted status and original provenance.  
 **Superseded by:** None
 
 ## Context
