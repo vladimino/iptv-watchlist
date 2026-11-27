@@ -222,16 +222,23 @@ const P=await import('../src/domain/monitor-policy.js');
  assert.deepEqual(recovered.issues.map(item=>item.key),[]);assert.equal(recovered.facts.recovery,'queue_empty','the candidate was really settled and the queue is proven empty (the within_policy disposition is covered in tests/monitor-policy.mjs)');
  clock.offset=0;
 }
-// G. Consecutive retries are bounded by the series cap: the seventh refusal returns to the fail-closed error record.
+// G. Consecutive refusals back off: six short waits, then the Workflow recovery ladder (1 min, 5 min, 15 min, 1 h), never an immediate hour, never a hot loop; the safe re-evaluation continues while the state confirms the run.
 {
  published.run=RUN;
  const w=await world({durations:[90,96],decision:verified({anchor:[90]})});
  bumpOnStatus(w,1000);
- for(let attempt=1;attempt<=6;attempt++){const out=await w.advance();assert.equal(out.generationCollision,true,'attempt '+attempt+': '+JSON.stringify(out).slice(0,200));assert.equal((await recordOf(w)).fenceCollisions,attempt);clock.offset+=31000;}
- const last=await w.advance();
- assert.equal(last.stage,'error',JSON.stringify(last).slice(0,300));
- const record=await recordOf(w);
- assert.equal(record.stage,'error');assert.equal(record.reason,'discovery_fence');assert.equal(record.failureKind,'fence');
+ const waits=[];
+ for(let attempt=1;attempt<=11;attempt++){
+  const out=await w.advance();
+  assert.equal(out.fenceRevalidation,true,'attempt '+attempt+': '+JSON.stringify(out).slice(0,200));
+  const record=await recordOf(w);
+  assert.equal(record.fenceCollisions,attempt);assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');
+  const delay=Date.parse(record.retryAt)-Date.now()-clock.offset;
+  waits.push(Math.round(delay/1000));
+  clock.offset+=delay+1000;
+ }
+ const expected=[30,30,30,30,30,30,60,300,900,3600,3600];
+ waits.forEach((seconds,index)=>assert.ok(Math.abs(seconds-expected[index])<=2,'wait '+(index+1)+' is '+seconds+' s, expected '+expected[index]+' s: '+waits.join(',')));
  clock.offset=0;
 }
 // H. Genuine refusals are not retried: a replaced/expired lease, a non-published pointer, a held authority and a refusal that is not the batch CHECK (no cause: unknown outcome / evidence).
@@ -251,27 +258,93 @@ for(const [label,arrange] of [
  if(label==='authority held'){assert.equal(thrown?.code,'discovery_unavailable',label+': the held authority refuses the checkpoint itself');}
  else{assert.equal(out?.stage,'error',label);assert.equal(out?.error,'discovery_fence',label);const stored=await recordOf(w);assert.equal(stored.stage,'error',label+': a persisted fail-closed checkpoint');assert.equal(stored.reason,'discovery_fence',label);}
 }
-// I. The classifier itself, on the real fixture: each condition of the positive proof is necessary.
+// I. The assessment itself, on the real fixture: the decision follows the authoritative state read back after the refusal, not the completeness of the error's own classification.
 {
  published.run=RUN;
  const w=await world({durations:[90,96],decision:verified({anchor:[90]})});
  const lease=(await Authority.acquireLease(w.env,{programmeRunId:RUN})).lease;
  const generation=Number((await Authority.readAuthority(w.env)).generation);
  const refusal=extra=>Object.assign(new Error('discovery_fence'),{code:'discovery_fence',cause:new Error('Runtime error: CHECK constraint failed: ok = 1 (19)'),fenceGeneration:generation-1,...extra});
- const check=(error,run=RUN,held=lease)=>w.context.retryableFenceCollision(w.env,error,run,held);
- assert.equal(await check(refusal()),true,'a moved counter on the published run with a live lease is a collision');
- assert.equal(await check(refusal({fenceGeneration:generation})),false,'the counter has not moved past the generation the fence expected: another reason of the same fence');
- assert.equal(await check(refusal({fenceGeneration:undefined})),false,'a CHECK of a batch that carries no generation fence');
- assert.equal(await check(Object.assign(new Error('discovery_fence'),{code:'discovery_fence',fenceGeneration:generation-1})),false,'no cause: a direct evidence/invariant refusal');
- assert.equal(await check(refusal({cause:new Error('UNIQUE constraint failed: x')})),false,'not a CHECK');
- assert.equal(await check(refusal({code:'discovery_conflict'})),false,'another typed code');
- assert.equal(await check(refusal(),RUN,null),false,'no lease');
- assert.equal(await check(refusal(),'run-other'),false,'another run than the published one');
+ const bare=()=>Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
+ const assess=(error,run=RUN,held=lease)=>w.context.assessFenceRefusal(w.env,error,run,held);
+ const view=async(error,run,held)=>{const out=await assess(error,run,held);return [out.safe,out.cause,out.basis];};
+ // Whatever the refusal looks like, confirmed state is safe to re-evaluate; the cause only labels it.
+ assert.deepEqual(await view(refusal()),[true,'generation_moved','state_confirmed']);
+ assert.deepEqual(await view(refusal({fenceGeneration:generation})),[true,'batch_fence','state_confirmed'],'the counter has not moved past what the fence expected: still safe, labelled');
+ assert.deepEqual(await view(refusal({fenceGeneration:undefined})),[true,'batch_check','state_confirmed'],'a CHECK without the generation');
+ assert.deepEqual(await view(bare()),[true,'read_or_direct','state_confirmed'],'no cause at all (a read-side compare, a direct refusal, a partial diagnostic)');
+ // Contradicting state is not.
+ assert.deepEqual(await view(bare(),RUN,null),[true,'read_or_direct','state_confirmed'],'no lease to check is not a contradiction here (the caller always passes its hop lease)');
+ assert.deepEqual(await view(bare(),'run-other'),[false,'read_or_direct','pointer_not_published'],'the pointer names another run');
  sql(w.file,"UPDATE discovery_transfer SET state='loading'");
- assert.equal(await check(refusal()),false,'a loading authority');
+ assert.deepEqual(await view(refusal()),[false,'generation_moved','authority_loading']);
  sql(w.file,"UPDATE discovery_transfer SET state='idle'");
- assert.equal(await check(refusal()),true,'restored');
+ sql(w.file,"UPDATE discovery_lease SET lease_id='other-hop' WHERE id=1");
+ assert.deepEqual(await view(bare()),[false,'read_or_direct','lease_lost'],'the hop lease is gone');
+ sql(w.file,"UPDATE discovery_lease SET lease_id='"+lease.id+"' WHERE id=1");
+ await setPointer(w.env,'candidate');
+ assert.deepEqual(await view(bare()),[false,'read_or_direct','pointer_not_published']);
+ await setPointer(w.env,null);
+ assert.deepEqual(await view(bare()),[false,'read_or_direct','pointer_not_published'],'a missing pointer is not a match');
+ await setPointer(w.env,'published');
+ // Temporarily incomplete readback: still re-evaluated later (nothing is written now), with its own basis.
+ const throwing={...w.env,BUCKET:{get:async()=>{throw new Error('R2 unavailable');}}};
+ assert.deepEqual(await w.context.assessFenceRefusal(throwing,bare(),RUN,lease).then(out=>[out.safe,out.basis]),[true,'state_unreadable']);
  sql(w.file,"UPDATE discovery_authority SET programme_run_id='run-other'");
- assert.equal(await check(refusal()),false,'the authority moved to another run');
+ assert.deepEqual(await view(bare()),[false,'read_or_direct','other_programme'],'the authority moved to another run');
+}
+// K. AIR-687, the evening of 27 Nov 2026 end to end on the real fixture: a productive chunk, then a single `discovery_fence` at the hour boundary that carries NO cause (a read-side generation compare while the hourly writer bumps the
+// counter), so no classifier can recognise it; the old code answered `error`, `retryAt: null` and an hour of waiting. The state confirms the run, so the series re-evaluates after a short wait and the next real chunk does durable work
+// before the hour boundary, with no hourly Cron involved.
+{
+ published.run=RUN;
+ let fileRef=null,left=0;
+ const wrapped={...Authority,selectActionableObservations:async(...args)=>{if(left>0){left--;sql(fileRef,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");throw fenceError();}return Authority.selectActionableObservations(...args);}};
+ const w=await world({durations:[90,96],decision:null,fillers:400,authority:wrapped});fileRef=w.file;
+ const wf=loadWorkflow(w);
+ const meter={statements:0,batches:0};
+ const decisions=()=>count(w.file,'discovery_decision');
+ const chunkA=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(chunkA.usefulProgress,true,'the productive chunk');
+ const afterA=decisions();assert.ok(afterA>0);
+ left=1;
+ const chunkB=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(chunkB.usefulProgress,false);assert.equal(chunkB.progress,true,'the refusal checkpoint was saved by this hop');
+ assert.equal(chunkB.summary.fenceRevalidation,true);assert.equal(chunkB.summary.fenceCause,'read_or_direct');assert.equal(chunkB.summary.fenceBasis,'state_confirmed');assert.equal(chunkB.summary.failureKind,'fence');
+ assert.equal(decisions(),afterA,'the refused chunk persisted nothing');
+ const record=await recordOf(w);
+ assert.equal(record.stage,'paused');assert.equal(record.reason,'backoff');assert.equal(record.fenceCollisions,1);assert.equal(record.fenceCause,'read_or_direct');assert.equal(record.fenceBasis,'state_confirmed');
+ const wait=Date.parse(record.retryAt)-Date.now();
+ assert.ok(wait>0&&wait<=31000,'the next action is a short re-evaluation, not the hour boundary: '+wait);
+ const plan=wf.workflowPlan({published:RUN,pinned:RUN,record,lease:null,now:Date.now(),chunks:2,last:null,uncertainWrites:0,used:0});
+ assert.equal(plan.action,'wait');assert.ok(plan.until-Date.now()<=31000,'the Workflow wakes at the retry: '+(plan.until-Date.now()));
+ // The obstruction is gone: the real chunk resumes the queue before the next hour, with durable decisions and no duplicates.
+ clock.offset+=31000;
+ const chunkC=await wf.runWorkflowChunk(w.env,meter);
+ assert.equal(chunkC.usefulProgress,true,JSON.stringify(chunkC.summary));
+ assert.ok(decisions()>afterA,'durable decisions after the recovery: '+afterA+' -> '+decisions());
+ assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM (SELECT observation_key FROM discovery_decision GROUP BY observation_key)")[0].n,decisions(),'no duplicate decision');
+ assert.ok(Date.now()+clock.offset<hourBoundary()+31000&&(Date.now()+clock.offset)-Date.now()<60000,'within seconds of the refusal, independent of the hourly cron');
+ assert.equal((await recordOf(w)).fenceCollisions,undefined,'the counter is cleared by the first useful chunk');
+ clock.offset=0;
+}
+// L. Busy without a deadline of its own: for the Workflow executor it waits for the blocking fact (the live lease's expiry, else one short recheck); an external caller keeps the hourly contract.
+{
+ published.run=RUN;
+ for(const [label,arrange] of [
+  ['lease race',(w,state)=>{state.wrapped.readLease=async(...args)=>{if(state.reads++===0)return {handled:true,lease:null};return Authority.readLease(...args);};state.wrapped.acquireLease=async()=>({lease:null,busy:null});sql(w.file,"UPDATE discovery_lease SET lease_id='other-hop', expires_at="+(Date.now()+40000)+" WHERE id=1");}],
+  ['record moved by another hop',(w,state)=>{state.wrapped.readContinuation=async(...args)=>{const real=await Authority.readContinuation(...args);return state.reads++===0?real:{...real,etag:'moved-'+state.reads};};}],
+ ]){
+  for(const caller of ['internal','http']){
+   const state={reads:0,wrapped:{...Authority}};
+   const w=await world({durations:[90,96],decision:verified({anchor:[90]}),authority:state.wrapped});
+   state.reads=0;arrange(w,state);
+   const out=await w.context.advanceDiscovery(w.env,caller==='internal'?{caller,chunkBudgetMs:60000}:{});
+   assert.equal(out.stage,'busy',label+' '+caller+': '+JSON.stringify(out).slice(0,200));
+   const until=Date.parse(out.discovery.nextCatchUpAt),span=until-Date.now();
+   if(caller==='internal')assert.ok(span>0&&span<=41000,label+': waits for the blocking fact, not the hour: '+span);
+   else assert.equal(new Date(until).toISOString(),new Date(hourBoundary()).toISOString(),label+': the external contract stays hourly');
+  }
+ }
 }
 console.log('discovery fence collision ok');
