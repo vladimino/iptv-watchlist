@@ -38,7 +38,7 @@ const tWriter=path.join(root,'tWriter.sqlite');fs.copyFileSync(tIntent,tWriter);
  const before=objects(stale);
  refused(stale,read(INTENT));
  assert.equal(objects(stale),before,'a refused file creates nothing');
- assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),47);
+ assert.equal(one(stale,'SELECT version FROM schema_contract WHERE id=1'),48);
  const noWriter=copy(tPre);ok(noWriter,'DROP TRIGGER identity_evidence_writer_update;DROP TRIGGER identity_evidence_writer_insert;DROP TRIGGER identity_evidence_writer_change_apply;DROP TABLE identity_evidence_writer');
  refused(noWriter,read(INTENT));
  const taken=copy(tPre);ok(taken,'CREATE TABLE lid_recheck_intent_x (a INTEGER)');
