@@ -1204,6 +1204,44 @@ const file=fresh('d1'),env=world(file);
  assert.equal(rowOf('lq12').state,'needs_review',JSON.stringify([out12,out12b]));assert.equal(rowOf('lq12').reason,'ratings_tmdb_link');
  assert.equal(hasRecord('lq12'),false);
 
+ // R13. An INTERRUPTED PRESENT settlement (the exact R4 shape): another route proved the Film (digest Y), this candidate's own check produced X and its intent X is persisted; the first attempt dies at the link batch.
+ // The unchanged source is run again: the fresh check still matches X and the Film is independently present, so it settles on current ownership ALONE (no receipt of its own, none invented), not `source_changed`.
+ fresh2();
+ const otherY=await admitElsewhere('lq13','lid-only-1999','Other Title');
+ setDocD1(file,KEY,doc('lq13'));addPage('lq13','lid-only-1999','Lid Only');
+ const receipts13=receipts(file,'admission:lid:lq13').length;
+ let crashed13=0;
+ const dying={DB:d1Standin(file,{onBatch:statements=>{const texts=statements.map(item=>item.text);if(!crashed13&&texts.some(t=>/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t)&&/letterboxd\/facts\/links\.json/.test(t))){crashed13++;throw new Error('D1_ERROR: process lost');}}}),BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'fixture-token'};
+ await stepWith(dying).catch(()=>null);
+ assert.equal(crashed13,1,'the first attempt died at the link batch');
+ assert.equal(rowOf('lq13').state,'admitting');assert.notEqual(rowOf('lq13').proofDigest,otherY.proof.proof.proofDigest,'the candidate holds its OWN intent X, the Film holds proof Y');
+ assert.equal(hasLink('lq13'),false);
+ calls.length=0;
+ const again13=await stepWith(world(file));
+ assert.equal(again13.verified,true,JSON.stringify(again13));
+ assert.equal(rowOf('lq13').state,'verified');assert.equal(rowOf('lq13').filmId,'film:lb:lq13');
+ assert.equal(receipts(file,'admission:lid:lq13').length,receipts13,'no receipt of its own was created or invented');
+ assert.equal(lidRows('lq13')[0].proof_digest,otherY.proof.proof.proofDigest,'the proof row stays the other route\'s');
+
+ // R14. The terminal disposition carries the EXACT candidate: a row replaced right before the terminal write of a coordinator conflict is neither reviewed nor reported reviewed by the stale attempt.
+ fresh2();setDocD1(file,KEY,doc('lq14'));addPage('lq14','lid-only-1999');
+ sqlite(file,"INSERT OR IGNORE INTO film (id,contract_version,updated_at) VALUES ('film:other-owner-lq',1,'"+STAMP+"');INSERT OR IGNORE INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:other-owner-lq',1,'"+STAMP+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:other-owner-lq','letterboxd','lq14',0,0)");
+ let seen14=0,fired14=false;
+ const out14=await stepWith(hooked({onBatch:texts=>{if(texts.some(t=>/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t)&&/rated-candidates\.json/.test(t))){seen14++;if(seen14===2&&!fired14){fired14=true;const d=getDocD1(file,KEY);d.candidates.lq14={...d.candidates.lq14,rating:1.5};setDocD1(file,KEY,d);}}}}));
+ assert.equal(fired14,true,'the replacement landed right before the terminal write');
+ assert.notEqual(rowOf('lq14').state,'needs_review',JSON.stringify(out14));
+ assert.equal(rowOf('lq14').rating,1.5,'the replaced row is left as it is');
+
+ // R15. The post-link observation must show that the LID maps to the key just linked: a remap of `letterboxd:<lid>` between the link and the observation is refused before the record batch.
+ fresh2();setDocD1(file,KEY,doc('lq15'));addPage('lq15','lid-only-1999');
+ let linked15=false,fired15=false;
+ const out15=await stepWith(hooked({
+  onBatch:texts=>{if(texts.some(t=>/^\s*(INSERT INTO|DELETE FROM) ratings_document/.test(t)&&/letterboxd\/facts\/links\.json/.test(t)&&!/film_lid_admission/.test(t)))linked15=true;},
+  onQuery:text=>{if(linked15&&!fired15&&/FROM ratings_document/.test(text)&&text.includes('letterboxd/facts/links.json')){fired15=true;setDocD1(file,'letterboxd/facts/links.json',{...linksDoc(),'letterboxd:lq15':'tmdb-900777'});}}}));
+ assert.equal(fired15,true,'the remap landed between the link and its observation');
+ assert.notEqual(out15.verified,true,JSON.stringify(out15));
+ assert.deepEqual([hasRecord('lq15'),viewRows('lq15')],[false,0],'no record or projection while the lid maps to another key');
+
  // R3. A Ratings alias to a MOVIE appears after the admission and before the facts link: reviewed (`ratings_tmdb_link`), never a TMDB-linked record reported as the lid's own.
  fresh2();setDocD1(file,KEY,doc('lq3'));addPage('lq3','lid-only-1999');
  let armed3=false,fired3=false;
@@ -1339,6 +1377,22 @@ const file=fresh('d1'),env=world(file);
  assert.equal(foreign.labels.has('dq10'),false);
  assert.equal((await entry('dq10')).reason,'source_changed');
  assert.equal(JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),receipts(file,'admission:lid:dq10'),lidRows('dq10')]),before10,'no receipt fabricated, nothing written');
+
+ // D2f. The equivalent INTERRUPTED PRESENT in the Diary: the persisted intent X, the Film independently proved by another route (digest Y), the page unchanged (still X). Settled on current ownership alone: entry cleared,
+ // label `lidOnly`, no receipt of its own created or invented, never `source_changed`.
+ reset();
+ await seed(env,'dq11');addPage('dq11','present-lid-1999','Lid Only',1999);
+ const proofX=await vm.runInContext('(async()=>{const html='+JSON.stringify(page('dq11','present-lid-1999','Lid Only',1999))+';const landing=new URL("https://letterboxd.com/film/present-lid-1999/");const evidence=LetterboxdIdentity.pageEvidence(html,landing,letterboxdPageTools());return LetterboxdLidOnlyProof.lidOnlyPageProof({lid:"dq11",redirect:{status:301},fetched:{html,landing},evidence,rules:'+JSON.stringify(RULES)+',checkedAt:"2026-11-27T10:00:00.000Z"});})()',ctx);
+ const proofY=await vm.runInContext('(async()=>{const html='+JSON.stringify(page('dq11','present-lid-1999','Other Title',1999))+';const landing=new URL("https://letterboxd.com/film/present-lid-1999/");const evidence=LetterboxdIdentity.pageEvidence(html,landing,letterboxdPageTools());return LetterboxdLidOnlyProof.lidOnlyPageProof({lid:"dq11",redirect:{status:301},fetched:{html,landing},evidence,rules:'+JSON.stringify(RULES)+',checkedAt:"2026-11-27T10:00:00.000Z"});})()',ctx);
+ assert.notEqual(proofX.proof.proofDigest,proofY.proof.proofDigest);
+ assert.equal((await D1.admitVerifiedLidOnly(env,{lid:'dq11',route:'watchlist_admission',reacquire:async()=>({ok:true,proof:proofY.proof,links:await Facts.linksObservation(env,'dq11')}),now:()=>new Date(NOW).toISOString()})).outcome,'admitted_lid_only');
+ await Facts.updateDiaryIdentity(env,{set:{dq11:{reason:'lid_only_intent',class:'intent',kind:'lid_only',tmdb:null,proofDigest:proofX.proof.proofDigest,slug:'present-lid-1999',attempts:0,streak:0,queuedAt:new Date(NOW).toISOString(),lastAttemptAt:new Date(NOW).toISOString(),nextAttemptAt:new Date(NOW).toISOString(),route:'ratings_diary'}},expect:{dq11:null}});
+ const receipts11=receipts(file,'admission:lid:dq11').length;
+ const present=await diary(env,'dq11','present-lid-1999');
+ assert.deepEqual([present.outcomes.get('dq11').class,present.outcomes.get('dq11').reason],['settled','lid_only'],JSON.stringify([...present.outcomes]));
+ assert.equal(JSON.stringify(present.labels.get('dq11')),JSON.stringify({title:null,year:null,tmdb:null,lidOnly:true}));
+ assert.equal(receipts(file,'admission:lid:dq11').length,receipts11,'no receipt of its own created or invented');
+ assert.equal(await entry('dq11'),null,'the intent is cleared');
 
  // D3. A COMPETING CLAIM of the lid arrives after the coordinator admitted and before the Diary write: the write's ownership assertion refuses it, the entry (intent) stays and NO settled outcome or label is returned.
  reset();

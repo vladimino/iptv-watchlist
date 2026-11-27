@@ -368,8 +368,8 @@ export async function admitVerifiedLidOnly(env,input={}){
  };
  if(typeof input.reacquire!=='function'&&input.settleOnly!==true)await acquire();
  // The caller's DURABLE intent (a recovery: a row or Diary entry that persisted the proof digest of the page it proved). An applied attempt is the caller's own replay only when its content digest names that proof; a Film
- // whose proof row or receipt belongs to ANOTHER digest is never silently reinterpreted as this caller's result (it is `source_changed`, below). Without an intent the caller is a fresh one and an independently
- // verified present Film is a legitimate `present_lid_only`.
+ // whose proof row or receipt belongs to ANOTHER digest is never reinterpreted as this caller's own replay (it settles as an independently proved present Film on ownership alone, or the caller's own check differs from its
+ // intent and the caller finalizes `source_changed`).
  const intentDigest=typeof input.intent?.proofDigest==='string'&&/^[0-9a-f]{64}$/.test(input.intent.proofDigest)?input.intent.proofDigest:null;
  const expectedReceiptDigest=intentDigest?await lidOnlyReceiptDigest({lid,proofDigest:intentDigest}):null;
  // An applied attempt is settled only while the CURRENT durable rows still show a complete lid-only admission of the lid (decision 5b, "complete, non-conflicting ownership"), and, for a caller with an intent, only
@@ -394,14 +394,9 @@ export async function admitVerifiedLidOnly(env,input={}){
   // The durable state first: a replay, a lost response and the TMDB-held lid settle WITHOUT a fetch (case 4, "replay never fetches").
   const plan=await planLidOnlyD1(env,{lid});
   observed=plan;
-  if(plan.outcome==='present_lid_only'){
-   // A caller with a durable intent finds a Film proved by ANOTHER digest: its own intent is mismatched, a changed source (never a silent present result).
-   if(intentDigest!==null){
-    const row=await one(db,'SELECT proof_digest FROM film_lid_admission WHERE lid=?',[lid]);
-    if(row?.proof_digest!==intentDigest)return terminalOf(result('source_changed',{id:plan.id,reason:'source_changed',intended:intentDigest,found:row?.proof_digest??null}));
-   }
-   return {kind:'none',result:result('present_lid_only',{id:plan.id})};
-  }
+  // Present: complete current ownership by a Film proved by SOME route. The caller's own durable intent was compared with its freshly reacquired check BEFORE this call (a changed check is `source_changed` on the caller's
+  // side), so a proof row of another digest is an independently proved Film, never this caller's replay and never a changed source by itself. Only an applied receipt validated against the intent is `ownReplay`.
+  if(plan.outcome==='present_lid_only')return {kind:'none',result:result('present_lid_only',{id:plan.id})};
   if(plan.outcome==='present')return {kind:'none',result:result('present',{id:plan.id})};
   if(plan.outcome==='held'||plan.outcome==='redirect')return {kind:'none',result:result(plan.outcome,{id:plan.id??null,reason:plan.reason??null})};
   if(plan.outcome==='conflict')return terminalOf(result('conflict',{id:plan.id??null,reason:plan.reason}));

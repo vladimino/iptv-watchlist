@@ -361,7 +361,7 @@ const LetterboxdDiaryIdentity=(()=>{
     // The page proved a lid-only Film (H1): this TMDB coordinator call ends here, uncharged and with nothing reserved; the `lid_only` kind of the same common key takes over below.
     if(outcome.state==='lid_only'){
      // Mismatch in either direction is a changed source, never an overwrite of the durable intent: a TMDB intent meeting a lid-only page, or a LID-only intent of ANOTHER proof digest.
-     if(intended!==null||(lidIntent&&lidIntent!==outcome.proof.proofDigest))return {ok:false,reason:'source_changed',charged:true};
+     if(intended!==null||(lidIntent&&lidIntent!==outcome.proof.proof.proofDigest))return {ok:false,reason:'source_changed',charged:true};
      lidProof=outcome.proof;return {ok:false,reason:'lid_only_page',charged:false};
     }
     if(outcome.state==='verified'&&lidIntent)return {ok:false,reason:'source_changed',charged:true};

@@ -219,7 +219,7 @@ function recordRatingChange(record,incoming,effective){
   const factKey=owned.value?.['letterboxd:'+lid]||null,tmdbKey=Object.entries(owned.value||{}).find(([alias,key])=>alias.startsWith('tmdb:')&&key===factKey)?.[0]||null;
   let tmdbAlias=tmdbKey?tmdbKey.slice(5):null;
   if(factKey&&!tmdbAlias){const {value:record}=await readJSON(env,recordKey(factKey));if(record?.links?.tmdb!=null)tmdbAlias=String(record.links.tmdb);}
-  return {fence:owned.fence,tmdbAlias};
+  return {fence:owned.fence,tmdbAlias,factKey};
  }
  // The lid's own fact record `lb-<lid>`, linked by `letterboxd:<lid>` ONLY: no TMDB alias is written or invented (ADR 0217 decision 9, rated and Diary entry points).
  async function linkLidOnly(env,lid,{extra=[]}={}){
