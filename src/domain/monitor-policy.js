@@ -422,8 +422,27 @@ export function evaluateCanonicalProducerReader(facts, now) {
   }
   return verdict;
 }
-export function evaluateCanonicalProducer(facts, now) {
-  if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
+// AIR-692 (review): an OPEN `canonical_producer_no_progress` incident (its alert entry, passed by Monitor.run like the AIR-596/598 incidents) is carried through
+// an observation that cannot prove anything: nothing ready, an unreadable read, or a stop verdict WITHOUT newer durable progress. The diagnostic verdict stays
+// honest (unreadable / waiting / failed), the alert entry, its accounting and outbox stay, and no recovery or fresh alert follows. Affirmative evidence still
+// recovers it: an exact pass (`current`), or proven progress newer than the one the incident recorded.
+const openProducerIssue = (open, now) => {
+  if (!open || open.key !== 'canonical_producer_no_progress') return null;
+  const since = time(open.metrics?.sinceAt) ?? time(open.firstSeenAt);
+  return issue('canonical_producer_no_progress', 'degraded', 'canonical_producer', 'The canonical Producer no-progress incident stays open: ' + (since === null ? 'no' : 'no durable progress since ' + iso(since) + ' and no') + ' proof of progress or completion has been observed',
+    {...(open.critical === true ? {critical: true} : {}), ...(open.metrics ? {metrics: open.metrics, ...(typeof open.metricsAt === 'string' ? {metricsAt: open.metricsAt} : {})} : {})});
+};
+const progressedSince = (open, progressAt) => {
+  const progress = time(progressAt);
+  const base = time(open?.metrics?.progressAt) ?? (open?.metrics ? -Infinity : (time(open?.firstSeenAt) ?? -Infinity));
+  return progress !== null && progress > base;
+};
+export function evaluateCanonicalProducer(facts, now, open = null) {
+  const carried = openProducerIssue(open, now);
+  if (!facts || facts.error || facts.readable === false) {
+    const base = unreadable('canonical_producer', 'canonical Producer');
+    return carried ? {...base, issues: [...base.issues, carried]} : base;
+  }
   const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,
     facts: {status, held: !!facts.held, generation: facts.label ?? null, chain: facts.chain?.ownerState ?? null, run: facts.run?.passState ?? null, progressAt: facts.progressAt ?? null, ...extra,
       // ADR 0208 decision 7: shown, never judged. The verdict above does not read it.
@@ -432,7 +451,7 @@ export function evaluateCanonicalProducer(facts, now) {
     // A deliberate delivery hold: honest and visible, never healthy and never a success. It is not an alert (the owner chose it).
     return out('delayed', 'held_by_delivery', [issue('canonical_producer_held_by_delivery', 'delayed', 'canonical_producer', 'The canonical Producer is held by delivery: no Producer progress is expected until the hold is lifted')]);
   }
-  if (!facts.label) return out('waiting', 'waiting', []);
+  if (!facts.label) return carried ? out('degraded', 'waiting', [carried]) : out('waiting', 'waiting', []);
   const run = facts.run, chain = facts.chain;
   if (run && run.passState === 'passed' && run.sourceGeneration === facts.label && run.appliedGeneration === facts.label) return out('healthy', 'current', []);
   const stoppedBy = chain?.ownerState === 'stopped' ? (chain.stoppedBy || 'unclassified') : run?.passState === 'stopped' ? (run.stoppedBy || 'unclassified') : null;
@@ -440,7 +459,8 @@ export function evaluateCanonicalProducer(facts, now) {
     // A hard stop (an identity code, or a terminal, fail_closed or exhausted class) is critical: it alerts at once and an earlier recoverable stop of the
     // same issue escalates. A recoverable stop is an ordinary degraded issue. Both keep `status` (blocked / failed) and the stop reason as diagnosis.
     const hard = IDENTITY_STOP.test(stoppedBy) || ['terminal', 'fail_closed', 'exhausted'].includes(chain?.recoveryClass || 'fail_closed');
-    return out('degraded', hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), {...(hard ? {critical: true} : {}), ...metrics({stoppedBy: String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60), hard, generation: facts.label ?? null})})], {stoppedBy});
+    const keep = carried && !progressedSince(open, facts.progressAt) ? [carried] : [];
+    return out('degraded', hard ? 'blocked' : 'failed', [...keep, issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), {...(hard ? {critical: true} : {}), ...metrics({stoppedBy: String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60), hard, generation: facts.label ?? null})})], {stoppedBy});
   }
   const since = time(facts.sinceAt), age = since === null ? null : Math.max(0, now - since);
   if (age === null || age > THRESHOLDS.producerNoProgressMs) {
@@ -506,7 +526,7 @@ export function evaluateAll(facts, previous, now, helpers) {
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
     ...(facts.letterboxd === undefined ? [] : [evaluateLetterboxd(facts.letterboxd, now)]),
-    ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now)]),
+    ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now, previous?.canonicalProducer?.open ?? null)]),
     ...(facts.catalogEnrichment === undefined ? [] : [evaluateCatalogEnrichment(facts.catalogEnrichment, now)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);

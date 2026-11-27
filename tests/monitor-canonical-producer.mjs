@@ -297,4 +297,39 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
  world.ready=true;await M.run(env,{now:T0+4*H});
  assert.ok(posts(calls).some(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert'),'an unfinished pass keeps its streak through an unready observation');
 }
+// 13. AIR-692 re-review: an OPEN no-progress incident survives an observation that proves nothing (unready, unreadable, a stop verdict without newer progress):
+// one original alert, no spurious recovery, no fresh alert; only affirmative evidence (real progress or an exact pass) recovers it, once.
+{
+ const kinds=calls=>posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress').map(item=>item.body.kind);
+ for(const mode of ['unready','unreadable','stop']){
+  const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+  world.chain=chain({owner_state:'pending'});world.run=null;
+  for(let hour=0;hour<=3;hour++)await M.run(env,{now:T0+hour*H});
+  assert.deepEqual(kinds(calls),['alert'],mode+': the stall alert is sent and stored');
+  if(mode==='unready')world.ready=false;
+  if(mode==='unreadable')world.unreadable=true;
+  if(mode==='stop'){world.chain=chain({owner_state:'stopped',stopped_by:'producer_transport',recovery_class:'transient'});world.run=run({pass_state:'stopped',stopped_by:'producer_transport',cursor_id:null,updated_at:at(T0)});}
+  await M.run(env,{now:T0+4*H});
+  const during=plain(await M.status(env,T0+4*H));
+  assert.ok(during.openIssues.some(item=>item.key==='canonical_producer_no_progress'),mode+': the incident stays open');
+  assert.deepEqual(kinds(calls),['alert'],mode+': no spurious recovery');
+  world.ready=true;world.unreadable=false;
+  world.chain=chain({owner_state:'pending'});world.run=null;                          // the same unchanged generation is readable again
+  await M.run(env,{now:T0+5*H});
+  assert.deepEqual(kinds(calls),['alert'],mode+': the unchanged generation opens no second alert');
+  world.chain=chain();world.run=run({n_applied:7,cursor_id:'film:tmdb:9',updated_at:at(T0+5*H+30*MIN)});   // real durable progress
+  await M.run(env,{now:T0+6*H});
+  assert.deepEqual(kinds(calls),['alert','recovery'],mode+': one original incident and one justified recovery');
+ }
+}
+{
+ // A stop verdict that carries GENUINE progress honors the proof: the no-progress incident recovers, the stop stays an issue of its own.
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'pending'});world.run=null;
+ for(let hour=0;hour<=3;hour++)await M.run(env,{now:T0+hour*H});
+ world.chain=chain({owner_state:'stopped',stopped_by:'producer_transport',recovery_class:'transient'});
+ world.run=run({pass_state:'stopped',stopped_by:'producer_transport',n_applied:4,cursor_id:'film:tmdb:2',updated_at:at(T0+3*H+30*MIN)});
+ await M.run(env,{now:T0+4*H});
+ assert.ok(posts(calls).some(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='recovery'),'proven progress recovers the stall even with a stop verdict');
+}
 console.log('monitor canonical_producer stream: ok');

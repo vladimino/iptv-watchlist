@@ -226,7 +226,9 @@ const Monitor=(()=>{
    const discoveryKey=['discovery_stalled','discovery_unconfirmed'].find(key=>doc?.alerts?.issues?.[key])||null;
    const openDiscovery=discoveryKey?{key:discoveryKey,...doc.alerts.issues[discoveryKey]}:null;
    const evaluation=policy().evaluateAll(facts,{predictions:{...(doc?.predictions||{}),noProgressOpenSince:openPrediction?.firstSeenAt||null,openMetrics:openPrediction?.metrics||null,openMetricsAt:openPrediction?.metricsAt||null},
-    discovery:{open:openDiscovery,unknownSince:doc?.discovery?.unknownSince||null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
+    discovery:{open:openDiscovery,unknownSince:doc?.discovery?.unknownSince||null},
+    // AIR-692: the open canonical Producer no-progress incident is carried through an unready/unreadable tick or a stop without newer progress (no spurious recovery).
+    canonicalProducer:{open:doc?.alerts?.issues?.canonical_producer_no_progress?{key:'canonical_producer_no_progress',...doc.alerts.issues.canonical_producer_no_progress}:null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
    const plan=policy().planAlerts(evaluation.issues,doc?.alerts||{issues:{}},now);
    // Claim before delivery. The planned messages are committed to `monitor/state.json` (as the plan's alert state and an outbox with stable
    // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both
