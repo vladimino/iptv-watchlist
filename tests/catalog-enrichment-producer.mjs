@@ -1093,4 +1093,66 @@ for(const scenario of ['unknown_observation','verified_ru','absence']){
  assert.ok((filmJson(h.file).storedDiffers||[]).some(item=>item.field==='runtime'),'off and hold keep the planner list of differences');
 }
 
+
+// ---- AIR-633 third review ----
+const fresh=async(w,when,name)=>{w.leaseId=(await S.acquireLease(w.env,{leaseId:'lease-'+name+'-aaaaaaaa',now:when})).leaseId;};
+{
+ // P1-A: a mode change DURING an enforce fetch (enforce -> hold -> enforce) cannot settle the part with a stale policy and cannot lose the deferred upgrade; a consumed signal and a refusal-only no-op included
+ const w=await world();
+ await step(w,upstream({tm:noRuMovie()}),at(10));await step(w,upstream({tm:noRuMovie()}),at(11));
+ reopenCore(w.file);
+ await step(w,upstream({tm:ruMovie()}),at(12)); // off: the Russian value is observed, English stays, ONE deferred signal
+ assert.equal(upgradeSignals(w.file).length,1);
+ setMode(w.file,'enforce',2);
+ assert.equal(await consumeUpgrades(w,at(13)),1,'the deferred signal is consumed in enforce');
+ assert.deepEqual(coreStatus(w.file),['due','due']);
+ const up=upstream({tm:ruMovie()});
+ const racing=async(url,init)=>{if(String(url).startsWith('https://api.themoviedb.org/'))setMode(w.file,'hold',3);return up(url,init);};
+ racing.calls=up.calls;
+ const out=await step(w,racing,at(14)); // the plan was read in enforce; the control moves to hold while the Russian response is in flight
+ assert.equal(meta(w.file).synopsis,'lb synopsis','hold never replaces the English value');
+ assert.deepEqual(coreStatus(w.file),['due','due'],'and the core part is NOT settled with the stale enforce policy: '+out.state);
+ assert.ok(rows(w.file,"SELECT COUNT(*) AS n FROM catalog_enrichment_state WHERE part='core' AND source_version IS NOT NULL AND status='complete'")[0].n===0,'no Russian source version was recorded');
+ await step(w,upstream({tm:ruMovie()}),at(15)); // replanned under hold: the upgrade is pending again and recorded
+ assert.deepEqual(coreStatus(w.file),['complete','complete']);
+ assert.deepEqual(upgradeSignals(w.file).map(r=>r.state),['pending'],'the deferred signal is re-armed under the new mode era');
+ setMode(w.file,'enforce',4);
+ assert.equal(await consumeUpgrades(w,at(16)),1,'back in enforce the upgrade is runnable again, with no new observer signal');
+ await step(w,upstream({tm:ruMovie()}),at(17));
+ assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'and the Russian value is written');
+}
+{
+ // P1-B: verified absences compose across independent source retries; the finding is preserved until genuinely resolved
+ const w=await enforceWorld();
+ const both=()=>upstream({tm:movie()});
+ await step(w,both(),at(10));await step(w,both(),at(11));
+ assert.equal(meta(w.file).runtime,136);
+ sqlite(w.file,"UPDATE film_external_id SET value='604' WHERE film_id='"+FILM+"' AND scheme='tmdb'");
+ assert.equal((await step(w,upstream({lb:lbPage({tmdb:['604'],runtime:null}),tm:'transport'}),at(12))).state,'replan');
+ // Letterboxd agrees under the new identity and verifiably lacks a runtime; TMDB is transport-unavailable
+ await step(w,upstream({lb:lbPage({tmdb:['604'],runtime:null}),tm:'transport'}),at(13));
+ let st=rows(w.file,"SELECT source,status FROM catalog_enrichment_state WHERE part='core' ORDER BY source").map(r=>r.source+':'+r.status);
+ assert.deepEqual(st,['letterboxd:complete','tmdb:due'],'Letterboxd settles independently, TMDB stays due');
+ assert.equal(filmJson(w.file).supersededKept,undefined,'one source pending: nothing is listed yet (the old value is not yet settled as kept)');
+ // TMDB recovers LATER and also verifiably lacks the runtime; Letterboxd is NOT fetched again
+ const later=at(13+3600);await fresh(w,later,'stagger');
+ const up=upstream({tm:movie({id:604,runtime:null})});
+ await step(w,up,later);
+ assert.ok(!up.calls.some(url=>url.includes('letterboxd.com')||url.includes('boxd.it')),'the independently settled Letterboxd source is not fetched again');
+ assert.deepEqual(rows(w.file,"SELECT source,status FROM catalog_enrichment_state WHERE part='core' ORDER BY source").map(r=>r.source+':'+r.status),['letterboxd:complete','tmdb:complete'],'both core rows complete');
+ assert.equal(meta(w.file).runtime,136,'the old runtime stays');
+ assert.deepEqual(filmJson(w.file).supersededKept,['runtime'],'and is listed once both sources settled as verified absences, composed across the retries');
+ // a partial refresh that does not resolve the field never erases the finding
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET status='due',refresh_epoch=refresh_epoch+1,retry_at=NULL WHERE part='core' AND source='tmdb'");
+ const t2=at(13+7200);await fresh(w,t2,'partial');
+ await step(w,upstream({tm:'transport'}),t2);
+ assert.deepEqual(filmJson(w.file).supersededKept,['runtime'],'a pending source does not clear an established finding');
+ // genuine resolution: the new identity confirms a runtime, which replaces the superseded value and clears the list
+ const t3=at(13+3*3600);await fresh(w,t3,'resolve');
+ sqlite(w.file,"UPDATE catalog_enrichment_state SET retry_at=NULL WHERE part='core'");
+ await step(w,upstream({tm:movie({id:604,runtime:120})}),t3);
+ assert.equal(meta(w.file).runtime,120);
+ assert.equal(filmJson(w.file).supersededKept,undefined,'resolved: the list is cleared');
+}
+
 console.log('catalog enrichment producer: ok');
