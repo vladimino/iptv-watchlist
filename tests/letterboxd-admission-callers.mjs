@@ -10,13 +10,14 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {execFileSync} from 'node:child_process';
 import {webcrypto,createHash} from 'node:crypto';
-import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedImports,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import * as WatchlistD1 from '../src/watchlist-d1.js';
 import {admissionStep} from '../src/letterboxd-sync-admission.js';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {lidOnlyProofDigest} from '../src/domain/letterboxd-lid-only-digest.js';
+import {attachRoot} from '../src/domain/letterboxd-attach-root.js';
 
 execFileSync(process.execPath,['build.mjs'],{stdio:'ignore'});
 const bundle=fs.readFileSync('dist/server/index.js','utf8');
@@ -79,6 +80,7 @@ vm.runInContext(bundle.slice(start,end),ctx);
 for(const file of ['src/domain/tmdb-tv-identity.js','src/sources.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace(/^export default/m,'globalThis.x='),ctx);
 vm.runInContext(scoped('src/letterboxd-match.js','LetterboxdMatch')+'\n'+scopedReplacing('src/letterboxd-identity.js','LetterboxdIdentity','const normTitle=LetterboxdMatch.normTitle;\n')+'\n'+scoped('src/domain/letterboxd-rated-admission.js','LetterboxdRatedAdmission')+'\n'+scoped('src/domain/letterboxd-import-registry.js','LetterboxdImportRegistry'),ctx);
 for(const file of ['src/letterboxd-facts.js','src/letterboxd-rated-candidates.js','src/letterboxd-diary-identity.js'])vm.runInContext(fs.readFileSync(file,'utf8'),ctx);
+vm.runInContext(scopedImports('src/domain/letterboxd-attach-root.js','LetterboxdAttachRoot','const {agreementNorm}=LetterboxdRatedAdmission;\nconst {normalizeFilmUrl}=LetterboxdLidOnlyDigest;'),ctx);
 vm.runInContext(scoped('src/letterboxd-admission-documents.js','LetterboxdAdmissionDocuments'),ctx);
 vm.runInContext("globalThis.derivedViewIndex=async env=>RatingsD1.overlayView(env,{});globalThis.viewIndexD1Version=async env=>'d1:r'+(await RatingsD1.readRatingsAuthority(env?.DB??null,env)).generation;",ctx);
 const Facts=vm.runInContext('LetterboxdFacts',ctx),Identity=vm.runInContext('LetterboxdDiaryIdentity',ctx),D1=vm.runInContext('LetterboxdAdmissionD1',ctx),Candidates=vm.runInContext('LetterboxdRatedCandidates',ctx);
@@ -989,4 +991,48 @@ const file=fresh('d1'),env=world(file);
  assert.equal(without.length,N-1);assert.equal(without.includes('800007'),false,'the admission of the excepted code is left out');
 }
 
+
+// ===== G. review of PR #1043 (P1, ADR 0217 decision 8b): ONE common normalized root across the REAL page-check callers =====
+// The Diary, the Watchlist step and the rated-archive step check the SAME page (one fixture, served by one offline site) on three separate databases. Each writes its evidence row; their roots must be the SAME common root (no route name in it), equal to the
+// root the owner re-check computes for that page. The legacy digests stay: the admission receipt digest is the route's own, and the legacy digest rides on the row as route provenance (`source_ref`, never part of the key). No historical receipt is rewritten.
+{
+ const SHA='e'.repeat(64),KEY='letterboxd/imports/'+SHA+'/rated-candidates.json';
+ reset();
+ const LID='Cm1',SLUG='fixture-common-2020';
+ add(LID,SLUG,'900020','Fixture Common',2020);
+ const detail=JSON.parse(movies.get('900020'));
+ const expected=(await attachRoot({lid:LID,slug:SLUG,path:'/film/'+SLUG+'/',tmdb:'900020',title:'Fixture Common',year:2020,finalUrl:'https://letterboxd.com/film/'+SLUG+'/',detail})).root;
+ assert.match(expected,/^[0-9a-f]{64}$/);
+ const legacyDiary=createHash('sha256').update(JSON.stringify({lid:LID,slug:SLUG,path:'/film/'+SLUG+'/',tmdb:'900020',title:'Fixture Common',year:2020,source:'letterboxd_diary_page'})).digest('hex');
+ const evRows=db=>rows(db,"SELECT route,method,source_root,source_ref,source_scope,subject_value FROM film_identity_evidence WHERE subject_value='"+LID+"' ORDER BY seq");
+ // the Diary
+ const diaryDb=fresh('d1'),diaryEnv=world(diaryDb);
+ await seed(diaryEnv,LID);
+ const viaDiary=await Identity.resolve(diaryEnv,[{lid:LID,slug:SLUG}],opts({route:'ratings_diary'}));
+ assert.equal(viaDiary.outcomes.get(LID).class,'settled',JSON.stringify([...viaDiary.outcomes]));
+ // the Watchlist step
+ const wlDb=fresh('d1'),wlEnv=world(wlDb);
+ await seed(wlEnv,LID);
+ const viaWatchlist=await Identity.resolve(wlEnv,[{lid:LID,slug:SLUG}],opts({route:'watchlist_admission'}));
+ assert.equal(viaWatchlist.outcomes.get(LID).class,'settled',JSON.stringify([...viaWatchlist.outcomes]));
+ // the rated archive
+ const arDb=fresh('d1'),arEnv=world(arDb);
+ setDocD1(arDb,KEY,{schemaVersion:1,archiveSha256:SHA,generatedAt:'2026-11-20T10:00:00.000Z',candidates:{[LID]:{code:LID,state:'pending',reason:null,rating:4,observedAt:'2026-11-20T10:00:00.000Z',name:'Fixture Common',year:2020,historicalTmdb:null,tmdb:null,chunk:0,registeredAt:'2026-11-20T10:00:00.000Z',enrichment:null}},checkpoint:{cursor:null,stopped:null}});
+ const viaArchive=await Candidates.identityStep(arEnv,{sha:SHA,fetchImpl});
+ assert.equal(viaArchive.verified,true,JSON.stringify(viaArchive));
+ const [diary]=evRows(diaryDb),[watchlist]=evRows(wlDb),[archive]=evRows(arDb);
+ assert.deepEqual([diary.route,watchlist.route,archive.route],['ratings_diary','watchlist_admission','letterboxd_rated_archive'],'each caller keeps its own route');
+ assert.deepEqual([diary.source_root,watchlist.source_root,archive.source_root],[expected,expected,expected],'the SAME common root from the three real callers on one page');
+ // route provenance: the legacy digest rides on the row (never part of the key); the archive keeps its own legacy encoding
+ assert.equal(diary.source_ref,'diary:'+LID+':legacy:'+legacyDiary);assert.equal(watchlist.source_ref,'diary:'+LID+':legacy:'+legacyDiary);
+ assert.match(archive.source_ref,/^archive-step:[0-9a-f]{12}:legacy:[0-9a-f]{64}$/);assert.notEqual(archive.source_ref.split(':legacy:')[1],expected,'the archive legacy digest is another encoding, kept as provenance only');
+ // the admission receipt keeps the route's own digest: replay compatibility is untouched
+ const archiveRow=rows(diaryDb,"SELECT archive_sha256 FROM film_rated_admission WHERE source_code='"+LID+"'")[0];
+ assert.equal(archiveRow.archive_sha256,legacyDiary,'the Diary admission digest is still its legacy page-check digest');
+ // the evidence KEY follows the root: the same page by the same route twice is one row; a different route is another row (ADR 0213: independence counts DISTINCT ROOTS, and these are one root)
+ assert.equal(new Set([diary.source_root,watchlist.source_root,archive.source_root]).size,1,'three callers, ONE root: no independent corroboration is manufactured');
+ // the claim bridge row (Diary and Watchlist) is rooted in the same common root
+ const bridge=rows(diaryDb,"SELECT source_root FROM film_identity_evidence WHERE method='alias_bridge' AND object_value='"+LID+"'");
+ for(const row of bridge)assert.equal(row.source_root,expected,'the bridge row carries the common root too');
+}
 console.log('Letterboxd admission callers at r2 and d1 (AIR-602) passed.');
