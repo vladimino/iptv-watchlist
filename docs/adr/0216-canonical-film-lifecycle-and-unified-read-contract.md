@@ -6,7 +6,7 @@
 **Approval source:** [Product Owner disposition of 25 Nov 2026](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161412265), recorded verbatim by the Coordinator from the owner's conversation: «Давай принимать уже», accepting the design with the selections A2, B3, C2, D2, E1, F1, G1 ([exact choices](https://github.com/vladimino/iptv-watchlist/pull/991#issuecomment-7161307943)) as reviewed at `8d0715af` in the [final technical review](https://github.com/vladimino/iptv-watchlist/pull/991#pullrequestreview-6056975282). The later wording change `f9dc217e` only states that review's fail-closed coverage obligations in the contract. This is an architecture acceptance only, with no implementation, migration, promotion or production GO.  
 **Related work:** [AIR-628](https://trello.com/c/zwJum962), companion audit [AIR-627](https://trello.com/c/IOERZ9GI). Coordinated with, and not extending, Accepted [ADR 0214](0214-film-metadata-per-field-provenance.md) (per-field metadata provenance, AIR-613) and Accepted [ADR 0215](0215-identity-evidence-full-model.md) (full identity evidence model, AIR-616).  
 **Supersedes:** None. It amends no accepted decision.  
-**Superseded by:** None
+**Superseded by:** None for the ADR as a whole. Only the `GET /api/d1/films/<id>` row of decision 11 ("Stays an operator view") is superseded, by [ADR 0223](0223-retire-unused-d1-catalog-http-views.md); choice F1 is unchanged and F2 remains a rejected alternative. The text below is preserved as the historical decision.
 
 ## Context
 
