@@ -118,6 +118,14 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    const results=await query(renderSql(sql,params)+';');
    return results[0]?.results||[];
   },
+  // A read whose answer MUST carry a result array: a response without one is an error, never an empty table (the window operator's reads; `all` turns it into []).
+  async allStrict(sql,params=[]){
+   if(state.buffer)throw new Error('Read inside the import transaction');
+   stats.reads++;
+   const results=await query(renderSql(sql,params)+';');
+   if(!results[0]||!Array.isArray(results[0].results))throw new D1Error('statement','A read response carried no result rows array');
+   return results[0].results;
+  },
   // A preflight read. Refuses anything that is not a single SELECT, and refuses a response that wrote rows.
   async inspect(sql,params=[]){
    if(state.buffer)throw new Error('Read inside the import transaction');

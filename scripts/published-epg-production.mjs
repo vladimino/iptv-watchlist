@@ -331,6 +331,8 @@ export function trackProductionWrites(adapter, ctx){
   describe:()=>adapter.describe(),
   get:(sql,params)=>adapter.get(sql,params),
   all:(sql,params)=>adapter.all(sql,params),
+  // AIR-603: the window operator's strict read (a response without a result array is an error); absent on adapters that do not have it
+  ...(typeof adapter.allStrict==='function'?{allStrict:(sql,params)=>adapter.allStrict(sql,params)}:{}),
   readBatch:statements=>adapter.readBatch(statements),
   run:(sql,params)=>attempt(()=>adapter.run(sql,params)),
   executeRendered:statements=>attempt(()=>adapter.executeRendered(statements)),
