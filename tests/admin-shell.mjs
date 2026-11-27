@@ -20,7 +20,8 @@ const worker = fs.readFileSync('src/worker.js', 'utf8');
 const build = fs.readFileSync('build.mjs', 'utf8');
 const healthView = fs.readFileSync('src/admin/health-view.js', 'utf8');
 const nameClient = fs.readFileSync('src/admin/person-name-client.js', 'utf8');
-const bundle = bundleAdmin([client, titleClient, nameClient, healthView, page]);
+const metadataClient = fs.readFileSync('src/admin/film-metadata-client.js', 'utf8');
+const bundle = bundleAdmin([client, titleClient, metadataClient, nameClient, healthView, page]);
 
 // Static boundary: the page is owner-only through the existing Access session. The catalogue reads are GET. The one
 // write in this bundle is the confirmed film title. No token, no other API.
@@ -32,9 +33,11 @@ assert.match(html, /<script src="\/admin\.js"><\/script>/);
 assert.doesNotMatch(html, /type="module"|fetch\(|\/api\/|programme\.json/);
 assert.match(client, /const ADMIN_API='\/api\/admin'/);
 assert.match(build, /src\/admin\/film-title-client\.js/);
+assert.match(build, /src\/admin\/film-metadata-client\.js/);
 assert.match(build, /src\/admin\/person-name-client\.js/);
 assert.doesNotMatch(client, /method:\s*['"]POST/, 'the shared read client stays GET');
-assert.equal((bundle.match(/method:\s*'POST'/g) || []).length, 2, 'the catalogue bundle posts the film title and the person name');
+assert.equal((bundle.match(/method:\s*'POST'/g) || []).length, 3, 'the catalogue bundle posts the film title, the film metadata and the person name');
+assert.match(bundle, /X-IPTV-Admin-Action':'film_metadata_owner'/);
 assert.match(bundle, /X-IPTV-Admin-Action':'film_title_review'/);
 assert.match(bundle, /\/name-review/);
 assert.match(bundle, /X-IPTV-Admin-Action':'person_name_review'/);
@@ -73,7 +76,7 @@ assert.match(worker, /request\.method==='GET'\|\|request\.method==='HEAD'\)&&url
 assert.match(build, /assets\['\/admin\/health'\]=assets\['\/admin'\]/);
 assert.match(build, /assets\['\/admin\/limb'\]/);
 assert.doesNotMatch(build, /assets\['\/admin\/limbo'\]/);
-assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/film-title-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/person-name-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
+assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/film-title-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/film-metadata-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/person-name-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
 const limboHtml = fs.readFileSync('public/admin-limbo.html', 'utf8');
 const letterboxdHtml = fs.readFileSync('public/admin-letterboxd.html', 'utf8');
 const postersHtml = fs.readFileSync('public/admin-posters.html', 'utf8');

@@ -294,12 +294,13 @@ function adminDetail(view) {
     : `${aliasBlock}${conflictBlock}${adminFilmTechnical(record)}`;
   const filmTail = kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>` : '';
   const filmJournal = kind === 'film' ? adminTitleJournal(record) : '';
+  const filmMetadata = kind === 'film' ? adminFilmMetadataSection(record) : '';
   const personForm = kind === 'person' ? adminNameForm(record) : '';
   const provenance = kind === 'film'
     ? `<p class="admin-provenance">Происхождение локализации: ${adminEscape(record.localization?.source || record.localization?.provenance?.authority || 'не указано')}. Происхождение идентичности: ${adminEscape(record.identity?.source || 'не указано')}.</p>`
     : `<p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>`;
-  host.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${personForm}`;
-  if (kind === 'film') adminBindTitleReview(host);
+  host.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${filmMetadata}${personForm}`;
+  if (kind === 'film') { adminBindTitleReview(host); adminBindFilmMetadata(host, record.storedId); }
   else {
     const form = host.querySelector('#admin-name-form');
     if (form && adminNamePending && adminNamePending.personId === record.id) adminRestoreNameAttempt(form, adminNamePending.command);
