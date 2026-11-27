@@ -248,6 +248,9 @@ export const FILES={
  "letterboxd-lid-only-proof.mjs": {
   "suite": "core"
  },
+ "letterboxd-real-markup-h1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-lid-only-admission-d1.mjs": {
   "suite": "core"
  },
