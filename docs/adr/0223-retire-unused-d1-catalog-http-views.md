@@ -5,7 +5,7 @@
 **Recorded at:** 2026-11-27, from `main` `81a57b9b`.  
 **Approval source:** not documented (the ADR-specific owner disposition is still to be recorded by the Controller on the PR).  
 **Related work:** [AIR-658](https://trello.com/c/HoCuCbeL); successors [AIR-689](https://trello.com/c/miSF1gBD) and [AIR-690](https://trello.com/c/RxGq4S9r); evidence [D1 operator API disposition](../evidence/film-person/air-658-d1-operator-api-disposition-2026-11-27.md).  
-**Supersedes:** only the clause of [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md) decision 11 that says `GET /api/d1/films/<id>` "Stays an operator view", and the standing of its choice F alternative F2 (see Decision 6). No other clause of ADR 0216 changes.  
+**Supersedes:** only the clause of [ADR 0216](0216-canonical-film-lifecycle-and-unified-read-contract.md) decision 11 that says `GET /api/d1/films/<id>` "Stays an operator view". Choice F2 of ADR 0216 was rejected there and stays rejected. Reciprocal supersession metadata in ADR 0216 and its registry row is added at the final owner disposition, with the historical accepted text and status preserved.  
 **Superseded by:** None
 
 ## Context
@@ -23,11 +23,11 @@
 ## Decision
 
 1. **Retire four HTTP views.** `GET /api/d1/films/<id>`, `GET /api/d1/persons`, `GET /api/d1/persons/<role>/<key>` and `GET /api/d1/persons/review` answer `410` with the typed body `{"error":"gone","reason":"d1_operator_view_retired"}`. There is no redirect, no `Location` and no pointer to the Film aggregate, which is not active.
-2. **The 410 is decided before everything else.** The path is matched without decoding it, before the Film/Person marker read, any D1 read and the owner-review overlay. A retired route reads no storage, answers 410 while the marker is held, missing or moved, and a malformed percent escape answers 410, not 502. An unknown `/api/d1/` path stays 404.
+2. **The 410 is decided for the exact retired paths only, before both authority gates.** After the existing router boundaries (Access, and the method check: only `GET` reaches this decision), the four retired path shapes are matched without decoding the path, before the Film/Person marker gate, any D1 read and the owner-review overlay. A retired route reads no storage, answers 410 while the marker is held, missing or moved, and a malformed percent escape on it answers 410, not 502. This is not a blanket bypass: a retained route, including `identity` and `status`, and an **unknown** `/api/d1/` path keep their present behavior, which for an unknown path is 404 when the existing gates admit the request and 503 when the Film/Person marker gate or the owner-review authority refuses it.
 3. **Method and access semantics are unchanged.** Only `GET` is served; `HEAD` and every other method keep 405. `/api/*` stays behind the existing Cloudflare Access policy.
 4. **Retained.** `GET /api/d1/persons/<role>/<key>/identity` is unchanged. The function `d1PersonReview`, its definition in `src/catalog-d1.js` and the script that loads it stay as they are; only its HTTP route is retired.
 5. **`GET /api/d1/status` is narrowed to its own responsibility** (the Film/Person domain: schema, authority state, Film, Person and credit counts, and the diagnostics a runbook really needs). It stops presenting `actual_rating` and `prediction_current` counts as the ratings and prediction domains, and the retired projector leaves the current contract (kept only as clearly historical context where a runbook needs it). It does not become a global monitoring API, a count of one table is not replaced by a count of another without defining the unit, and an unknown value is never reported as zero. The exact fields and runbook text are decided in the status card, inside this boundary.
-6. **ADR 0216 is superseded only here.** `films/<id>` does not stay an operator view; it is retired. Replacing it in place by the unified Film aggregate (F2) remains a rejected alternative and is not a delivery step: the aggregate route stays additive and any consumer migration is separately accepted.
+6. **Once this ADR is Accepted, only one clause of ADR 0216 is superseded.** `films/<id>` does not stay an operator view; it is retired. Replacing it in place by the unified Film aggregate (F2) remains a rejected alternative and is not a delivery step: the aggregate route stays additive and any consumer migration is separately accepted.
 7. **Not changed:** writers, the legacy tables, any schema or authority, the public Film page and aggregate migrations, and the documentation limits work of the operator-view card.
 
 ## Alternatives considered
@@ -42,11 +42,11 @@
 - Less unreachable code and no misleading legacy fields behind an operator route. A caller outside the repository, if any exists, gets a typed 410 instead of a silent partial answer.
 - The retirement is observable and reversible. The cost is two atomic delivery cards and the update of the maintained references and runbooks with them.
 - The route module still contains `d1PersonReview` for the script; removing the function is a separate decision if the script goes away.
-- The GET audit stays valid: a retired route does no storage IO, so it adds no writing read, and the baseline entry shrinks to the retained samples.
+- The GET audit keeps its coverage. The four 410 tombstones are still HTTP read paths, so the six existing samples of the `/api/d1/` prefix in `tests/get-write-baseline.mjs` stay unchanged; no sample is removed and no new audit infrastructure is added. That a retired path performs no storage read is asserted by a separate test of the route module.
 
 ## Recovery and migration boundary
 
-A code revert restores the routes. It changes no D1 or R2 data, authority marker, Access rule, flag or schedule, and nothing here needs a data operation. This ADR authorizes no production operation and no implementation: [AIR-689](https://trello.com/c/miSF1gBD) and [AIR-690](https://trello.com/c/RxGq4S9r) start only after their prerequisite is complete and with their own review. Their acceptance covers the 410 answers (before the marker gate, including a malformed escape), `405` and `404` unchanged, the retained identity route and `d1PersonReview` script call, the narrowed `status`, the GET audit and the updated maintained documentation.
+A code revert restores the routes. It changes no D1 or R2 data, authority marker, Access rule, flag or schedule, and nothing here needs a data operation. This ADR authorizes no production operation and no implementation: [AIR-689](https://trello.com/c/miSF1gBD) and [AIR-690](https://trello.com/c/RxGq4S9r) start only after their prerequisite is complete and with their own review. Their acceptance covers the 410 answers (before the marker gate, including a malformed escape), `405` and the unknown-path behavior unchanged (no HEAD capability and no 409 are added), the retained identity route and `d1PersonReview` script call, the narrowed `status`, the unchanged GET-audit samples plus the separate zero-storage-read test, and the updated maintained documentation.
 
 ## Evidence
 
