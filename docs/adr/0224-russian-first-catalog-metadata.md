@@ -1,12 +1,16 @@
 # ADR 0224: Russian-first catalog metadata with verified language precedence
 
-**Status:** Proposed
+**Status:** Accepted
+
+**Original decision date:** 2026-11-27.
+
+**Approval source:** [Product Owner final disposition, 2026-11-27](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7221071584): Accepted, Russian-first with English fallback, P1-A / P2-A / P3-A / P4-B. Independent technical PASS of `e98f9d1` is [recorded here](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7220923380); the two non-blocking implementation clarifications are recorded in AIR-684 ([closure](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7220990883)). Architecture acceptance only; no production operation.
 
 **Recorded:** 2026-11-27.
 
-**Owner direction:** [2026-11-27, Russian-first plan approved](https://github.com/vladimino/iptv-watchlist/pull/1038#issuecomment-7218845453). The owner explicitly approved the direction, including English fallback, language-aware provenance, shared acquisition and safe historical refresh. The owner selected [P1-A, P2-A, P3-A and P4-B on 2026-11-27](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7220796034). All policy choices are resolved. Final ADR disposition remains pending independent technical re-review of this consolidated text. [Review of the initial proposal](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7218904226).
+**Owner direction:** [2026-11-27, Russian-first plan approved](https://github.com/vladimino/iptv-watchlist/pull/1038#issuecomment-7218845453). The owner explicitly approved the direction, including English fallback, language-aware provenance, shared acquisition and safe historical refresh. The owner selected [P1-A, P2-A, P3-A and P4-B on 2026-11-27](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7220796034). All policy choices are resolved. Final ADR disposition is recorded above. [Review of the initial proposal](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7218904226).
 
-**Amends on acceptance:** [ADR 0211](0211-catalog-enrichment-producer.md) decision 2 (only field precedence and acquisition for synopsis/poster/genres); [ADR 0214](0214-film-metadata-per-field-provenance.md) decisions 2–5, 7–9 and 11 (language in value-bound provenance, comparator, history/merge/revert and dormant compatibility); [ADR 0219](0219-discovery-film-enrichment-and-refresh.md) decisions 2, 9–11 (shared verified projection and language-quality coverage for admitted cohorts). All other decisions remain binding.
+**Amends:** [ADR 0211](0211-catalog-enrichment-producer.md) decision 2 (only field precedence and acquisition for synopsis/poster/genres); [ADR 0214](0214-film-metadata-per-field-provenance.md) decisions 2–5, 7–9 and 11 (language in value-bound provenance, comparator, history/merge/revert and dormant compatibility); [ADR 0219](0219-discovery-film-enrichment-and-refresh.md) decisions 2, 9–11 (shared verified projection and language-quality coverage for admitted cohorts). All other decisions remain binding.
 
 **Delivery:** [AIR-684](https://trello.com/c/G8hayTH6), [AIR-631](https://trello.com/c/i8td3wu0), [AIR-633](https://trello.com/c/z6MFlDvW). Existing historical plan [AIR-686](https://trello.com/c/ziqmHU3D), future separately authorized HR. No new producer, no activation or production authorization.
 
@@ -44,7 +48,7 @@ Persist the selected value's language and evidence basis in the same typed per-f
 
 ## Owner selections, 2026-11-27
 
-[Recorded owner choices](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7220796034). Final ADR acceptance remains pending independent review of the consolidated text.
+[Recorded owner choices](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7220796034). Final acceptance is recorded in the Approval source above.
 
 | Choice | Selected | Alternative not selected / rationale |
 | --- | --- | --- |
@@ -53,7 +57,7 @@ Persist the selected value's language and evidence basis in the same typed per-f
 | P3 | A: confirmed Russian upgrade of eligible unknown-language values; no replacement by English/unknown solely due to missing lineage | Unrestricted confirmed replacement could erase an unattributed Russian value. |
 | P4 | B: English default for newly observed Letterboxd synopsis, explicitly recorded as assumed | A: treat as unknown, losing existing English source precedence; C: omit untagged descriptions, leaving some films without a synopsis. The owner chose B despite the acknowledged possibility of a wrong language assumption. |
 
-No implementation or production authorization follows until the existing ADR and delivery gates are satisfied.
+The accepted decision governs the existing approved dormant delivery scopes; production operations remain independently gated.
 
 ## Alternatives not selected
 
