@@ -274,7 +274,9 @@ export async function admitLidOnlyFilm(env,input){
  statements.push(["INSERT INTO film_lid_admission (lid,film_id,route,admitted_at,receipt_key,proof_version,final_url,slug,canonical_path,shortlink,type_marker,id_block_outcome,completeness_outcome,title,year,proof_digest,checked_at,redirect_status,page_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
   [lid,id,input.route,at,'admission:lid:'+lid,proof.proofVersion,proof.finalUrl,proof.slug,proof.canonicalPath,proof.shortlink,proof.typeMarker,proof.idBlockOutcome,proof.completenessOutcome,proof.title,proof.year,proof.proofDigest,proof.checkedAt,proof.redirectStatus,proof.pageStatus]]);
  statements.push([fenced.BUMP,['film',id,at]]);
- try{await writeFenced(env,gate,statements,entities,tail);}
+ try{
+  await writeFenced(env,gate,statements,entities,tail);
+ }
  catch(error){
   const message=String(error?.cause?.message||'');
   if(error?.code==='identity_collision'||(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_lid_admission/i.test(message)))throw conflict('lid_admission_present');
