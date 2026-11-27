@@ -257,11 +257,13 @@ function recordRatingChange(record,incoming,effective){
   if(!Array.isArray(guards)||!guards.length)throw new FactsError('atomic_unavailable','The attached pair completion needs its guards');
   const {value:current}=await readJSON(env,recordKey(factKey));
   if(current&&(current.redirectTo||current.migrating))return {state:'conflict'};
-  if(pendingOnly&&current&&String(current.links?.tmdb)===String(tmdb)&&current.links?.letterboxd===lid&&await RatingsD1.viewComplete(env,[current]))return {state:'complete',factKey};
+  const carries=!!current&&String(current.links?.tmdb)===String(tmdb)&&current.links?.letterboxd===lid;
+  const viewOk=carries&&await RatingsD1.viewComplete(env,[current]);
+  if(pendingOnly&&carries&&viewOk)return {state:'complete',factKey};
   try{
-   const {record}=await recordObservations(env,factKey,{letterboxd:lid,tmdb:String(tmdb)},[],{extra:guards,attach:{lid,tmdb:String(tmdb)}});
+   // ONE record write: the record carries the movie id (changed) or is rewritten unchanged when only its view is incomplete (`rewrite`); either way the view rows are derived from the record value the compare-and-swap just proved, in the same batch.
+   const {record}=await recordObservations(env,factKey,{letterboxd:lid,tmdb:String(tmdb)},[],{extra:guards,attach:{lid,tmdb:String(tmdb)},rewrite:carries&&!viewOk});
    if(String(record?.links?.tmdb)!==String(tmdb)||record?.links?.letterboxd!==lid)return {state:'conflict'};
-   if(!await RatingsD1.viewComplete(env,[record]))await projectRecords(env,[record],{extra:guards});
    return {state:'projected',factKey};
   }catch(error){if(error.code==='alias_conflict')return {state:'conflict'};throw error;}
  }
@@ -340,7 +342,7 @@ function recordRatingChange(record,incoming,effective){
   return (back.inferredPairs||[]).some(entry=>namesPair(entry,links))||statesPair(back,links);
  }
  // Writes observations into one record. A redirected record is followed once; a fenced one sends the write to its target.
- async function recordObservations(env,factKey,links,observations,{floors={},identity=null,extra=[],lidOnly=false,attach=null}={}){
+ async function recordObservations(env,factKey,links,observations,{floors={},identity=null,extra=[],lidOnly=false,attach=null,rewrite=false}={}){
   let key=factKey;
   for(let hop=0;hop<2;hop++){
    const {value}=await readJSON(env,recordKey(key));
@@ -369,7 +371,9 @@ function recordRatingChange(record,incoming,effective){
    for(const [k,v] of Object.entries(links||{}))if(v!=null&&current.links[k]==null){current.links[k]=String(v);changed=true;}
    if(identity&&!current.identity&&(untouched||letterboxdMissing)){current.identity={kind:identity.kind,basis:identity.basis,sourceRef:identity.sourceRef};changed=true;}
    for(const {fact,observation:incoming} of observations){const result=applyObservation(current,fact,incoming,{floor:floors[fact]||null});outcomes.push({fact,...result});if(result.outcome==='new'||result.outcome==='replaces')changed=true;}
-   return changed?current:null;
+   // AIR-675: `rewrite` writes the record UNCHANGED (the same document, its exact `etag` compare-and-swap) so that its ratings view rows are derived from THIS record value in the SAME batch (`viewWrites` of the casOwned write): a repair of the view
+   // that cannot lose a newer ordinary update of the record between a read and a separate projection.
+   return changed||rewrite?current:null;
   },{extra});
   return {factKey:key,record,outcomes};
  }
