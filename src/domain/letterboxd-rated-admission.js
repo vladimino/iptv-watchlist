@@ -208,6 +208,98 @@ export function movieDetailAgrees(detail, tmdbId, title, year) {
   return {ok: true};
 }
 
+// ADR 0217 decision 3 (AIR-670), pure and dormant: the typed TMDB state of one check and its outcome. Nothing calls it from a live path; `tmdb_none` (H1, lid-only admission) is a later delivery step and is
+// never produced here, so no state is ever downgraded to it. `retryClass` is the class the EXISTING classifier (`LetterboxdDiaryIdentity.classify`, ADR 0207 decision 4b, AIR-599) gives the `outcome`: `transport`
+// keeps the queue place and charges no attempt, `definite` and `gone` charge one attempt with the review backoff. The outcomes are chosen so that the existing classifier gives exactly this class; a test checks it.
+export const TMDB_STATES = Object.freeze({
+  tmdb_movie: {outcome: null, retryClass: null, admits: true}, // reached only by `tmdbCheckState`, after the page AND an agreeing TMDB document
+  tmdb_disagrees: {outcome: 'detail_mismatch', retryClass: 'definite', admits: false}, // the outcome is the existing `detail_*` reason of movieDetailAgrees
+  tmdb_tv: {outcome: 'tmdb_not_movie', retryClass: 'definite', admits: false},
+  tmdb_missing: {outcome: 'tmdb_contradiction', retryClass: 'definite', admits: false},
+  tmdb_unavailable: {outcome: 'tmdb_unavailable', retryClass: 'transport', admits: false}, // the outcome is the transport reason itself (rate_limited, upstream_5xx, network_error, ...)
+  tmdb_failed: {outcome: 'tmdb_fetch_failed', retryClass: 'definite', admits: false},
+  tmdb_unreadable: {outcome: 'page_unreadable', retryClass: 'definite', admits: false},
+});
+// The transport reasons of the existing classifier (src/letterboxd-diary-identity.js TRANSPORT_REASONS); a test keeps the two in step.
+const TRANSPORT_STOPS = new Set(['forbidden', 'challenge', 'rate_limited', 'timeout', 'network_error', 'upstream_5xx', 'tmdb_unavailable', 'upstream_cooldown']);
+const typed = (state, extra = {}) => ({state, ...TMDB_STATES[state], ...extra});
+// A fetch answer's `network` and `until` ride along with a transport stop, as the live callers read them.
+const carried = answer => ({...(answer && answer.network ? {network: true} : {}), ...(answer && answer.until !== undefined ? {until: answer.until} : {})});
+const stopReason = answer => (answer.stop === 'fetch_failed' && answer.network ? 'network_error' : answer.stop); // as `pageReason` of the Diary check
+// The page's own answer that is not a read page and not TMDB's: the existing reason, class and charge are kept (a 404 or 410 is `not_found`, a 5xx is `upstream_5xx`).
+function pageNotRead(reason, answer) {
+  const retryClass = reason === 'not_found' ? 'gone' : 'definite';
+  return {state: 'page_not_read', outcome: reason, retryClass, admits: false, ...carried(answer)};
+}
+function unavailable(reason, answer) {
+  return typed('tmdb_unavailable', {outcome: reason, ...carried(answer)});
+}
+// The raw value of every occurrence of an attribute, read from the HTML itself: `pageEvidence` keeps only well-formed numeric ids and lowercase alphabetic types, so a malformed value would otherwise vanish.
+const rawValues = (html, name) => [...html.matchAll(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>"\']*))', 'gi'))].map(match => match[1] ?? match[2] ?? match[3] ?? '');
+
+// What the film page says about TMDB: an observation of the page, never an admission. `fetched` is the follow result ({html} or {stop} or {review, status}); `evidence` is pageEvidence of it.
+// A page that is incomplete (no closing html tag), not parseable, has no id block, several ids, a malformed or doubled id or type value anywhere in its raw markup, or an unknown type is `tmdb_unreadable`,
+// never "no TMDB". A page that names exactly one movie id is `page_movie` (not admitting: the TMDB document still has to agree), one TV id is `tmdb_tv`.
+export function pageTmdbObservation(fetched, evidence) {
+  if (!fetched) return typed('tmdb_unreadable');
+  if (fetched.stop) {
+    const reason = stopReason(fetched);
+    if (TRANSPORT_STOPS.has(reason)) return unavailable(reason, fetched);
+    return reason === 'oversized' ? typed('tmdb_unreadable') : pageNotRead(reason, fetched);
+  }
+  if (fetched.review) {
+    const status = fetched.status;
+    const reason = fetched.review === 'fetch_failed' && Number.isInteger(status) ? (status === 404 || status === 410 ? 'not_found' : status >= 500 ? 'upstream_5xx' : 'fetch_failed') : fetched.review;
+    return reason === 'upstream_5xx' ? unavailable(reason, fetched) : pageNotRead(reason, fetched);
+  }
+  const html = typeof fetched.html === 'string' ? fetched.html : '';
+  if (!/<\/html\s*>\s*$/i.test(html)) return typed('tmdb_unreadable');
+  if (!evidence || evidence.kind !== 'page') return typed('tmdb_unreadable');
+  const ids = new Set(rawValues(html, 'data-tmdb-id'));
+  const types = new Set(rawValues(html, 'data-tmdb-type'));
+  if (ids.size !== 1 || ![...ids].every(id => TMDB.test(id))) return typed('tmdb_unreadable');
+  const [id] = ids;
+  const parsed = Array.isArray(evidence.tmdbIds) ? evidence.tmdbIds.map(String) : [];
+  if (parsed.length !== 1 || parsed[0] !== id) return typed('tmdb_unreadable');
+  if (types.size !== 1) return typed('tmdb_unreadable');
+  const [type] = types;
+  if (type === 'tv') return typed('tmdb_tv', {tmdbId: id});
+  if (type !== 'movie') return typed('tmdb_unreadable');
+  return {state: 'page_movie', outcome: null, retryClass: null, admits: false, tmdbId: id};
+}
+
+// What TMDB says about the movie id: `result` is the movieDetail answer. The answers keep their established classes (AIR-599): a 5xx is the transport reason `upstream_5xx`, a transport stop keeps `network` and `until`,
+// a 404 is `tmdb_missing`, any other non-200 or an unparseable or oversized document is `tmdb_failed`. Only a usable document is compared (movieDetailAgrees); its disagreement keeps the existing reason.
+function detailTmdbState(result, tmdbId, title, year) {
+  if (!result) return typed('tmdb_failed');
+  if (result.stop) {
+    const reason = stopReason(result);
+    return TRANSPORT_STOPS.has(reason) ? unavailable(reason, result) : typed('tmdb_failed');
+  }
+  if (result.review) {
+    const status = result.status;
+    if (status === 404 || result.state === 'tmdb_missing') return typed('tmdb_missing');
+    return Number.isInteger(status) && status >= 500 ? unavailable('upstream_5xx', result) : typed('tmdb_failed');
+  }
+  const agree = movieDetailAgrees(result.detail, tmdbId, title, year);
+  if (agree.ok) return typed('tmdb_movie');
+  return agree.reason === 'tmdb_tv' ? typed('tmdb_tv') : typed('tmdb_disagrees', {outcome: agree.reason});
+}
+
+// The one composition of a check: the final state is admitting (`tmdb_movie`) only when the page names one movie id, the page carries the evidence the existing movie path requires, AND the TMDB document for that id
+// agrees. The movie path's page evidence is the one `LetterboxdDiaryIdentity.verifyPage` already demands: a non-empty title and exactly one page year (`title_missing`, `page_year_inconsistent`, `page_year_missing`, the
+// existing reasons, `definite`). Only a lid-only admission may omit the year (ADR 0217 decision 2), and that is not this function. There is no caller fallback: a title or year the page did not show is never evidence of
+// agreement. Such a page is `page_refused` before TMDB is asked, as in the live check; while the document has not been fetched (`detail` undefined) a page that passes is the non-admitting `page_movie`.
+export function tmdbCheckState({fetched, evidence, detail}) {
+  const page = pageTmdbObservation(fetched, evidence);
+  if (page.state !== 'page_movie') return page;
+  const years = Array.isArray(evidence.years) ? evidence.years : [];
+  const refusal = !evidence.title ? 'title_missing' : years.length !== 1 ? (years.length ? 'page_year_inconsistent' : 'page_year_missing') : null;
+  if (refusal) return {state: 'page_refused', outcome: refusal, retryClass: 'definite', admits: false, tmdbId: page.tmdbId};
+  if (detail === undefined) return page;
+  return {...detailTmdbState(detail, page.tmdbId, evidence.title, years[0]), tmdbId: page.tmdbId};
+}
+
 // The Film id is the verified movie id. No watchlist field is stored.
 export function admissionFilm({tmdb, sourceCode, archiveSha256, title = null, year = null}) {
   if (!TMDB.test(String(tmdb || '')) || !CODE.test(String(sourceCode || ''))) return null;

@@ -146,6 +146,8 @@ The browser apply on `/admin/letterboxd` does not replace this protocol ([admin 
 
 At the marker mode `d1` an inferred entry of a committed chunk carries an `admission` field in the chunk receipt (`admitted`, `present`, `present_other_code`, `conflict`, `refused_after_link`); a chunk committed before the activation has none and a replay offers it no admission. The pair is classified against D1 **before** the link and admitted **after** it, so a link that conflicts leaves nothing to withdraw; a refusal after the link is terminal (no fact, no claim; the inferred-marked link stays and is never claim proof, [ADR 0184](../../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md)). At `r2` the field is absent and the delivered R2 protocol above applies; under `closed` a chunk with an `admit` item is refused (409 `admission_closed`) before its intent. See the [baseline runbook](../../runbooks/letterboxd-baseline-import.md) and the [Film/Person reference](../domain/film-person.md).
 
+**Typed TMDB states (AIR-670, dormant).** The identity check names `tmdb_missing` (TMDB `404`) and `tmdb_unreadable` (unusable page) as states of their own, with the outcomes `tmdb_contradiction` and `page_unreadable`, while transport answers keep the established no-attempt class. No fact record is written or changed by them and no live path reads them yet; see the [state table](letterboxd-ratings.md#typed-tmdb-states-of-the-identity-check-air-670-adr-0217-decision-3-dormant).
+
 ## D1 mapping (future migration)
 
 The D1 home must keep the same states and order, including `rating: null` and `watchlist: false`:
