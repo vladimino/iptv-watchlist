@@ -442,6 +442,15 @@ export const FILES={
  "catalog-enrichment-wake.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-recorded-tmdb.mjs": {
+  "suite": "core"
+ },
+ "catalog-enrichment-discovery.mjs": {
+  "suite": "core"
+ },
+ "migration-0050-discovery-enrichment.mjs": {
+  "suite": "core"
+ },
  "catalog-enrichment-bootstrap.mjs": {
   "suite": "core"
  },
