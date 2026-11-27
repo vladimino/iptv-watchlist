@@ -49,11 +49,12 @@
     </section>
     <section aria-labelledby="settings-cooldowns-title" class="admin-card settings-cooldowns-card">
       <h2 id="settings-cooldowns-title">Паузы источников</h2>
+      <p class="settings-source">Так же, как со строками: сбой чтения этого списка на сервере выглядит как пустой список.</p>
       <div id="settings-cooldowns"><p class="muted">Появится после чтения.</p></div>
     </section>
     <section aria-labelledby="settings-attention-title" class="admin-card settings-attention">
       <h2 id="settings-attention-title">Требуют внимания</h2>
-      <p class="settings-source">«Повторить» возвращает выбранные строки в очередь и ничего не пишет в метаданные. Если строки изменились после чтения, запрос отклоняется целиком.</p>
+      <p class="settings-source">Кнопка относится ровно к одной строке: под строкой написано, что именно она вернёт в очередь. Метаданные не пишутся. Если строка изменилась после чтения, запрос отклоняется. Пустой список здесь не доказывает отсутствия проблем: при сбое чтения этого списка сервер отдаёт пустой, и страница не может отличить это от настоящей пустоты.</p>
       <div id="settings-attention"><p class="muted">Появится после чтения.</p></div>
     </section>
       </div>
