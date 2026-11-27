@@ -242,6 +242,9 @@ export const FILES={
  "letterboxd-admission-authority.mjs": {
   "suite": "core"
  },
+ "film-lid-admission-migration.mjs": {
+  "suite": "core"
+ },
  "letterboxd-check-legacy-report.mjs": {
   "suite": "core"
  },
