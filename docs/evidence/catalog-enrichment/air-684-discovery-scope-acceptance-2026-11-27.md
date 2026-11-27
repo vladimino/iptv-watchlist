@@ -4,11 +4,11 @@
 
 | Scenario (ADR 0219) | Covered by |
 | --- | --- |
-| Activation and publication race: an insert before the first activation is history, after it is stream; a row staged before the activation and published after it is stream; a row published before it is history | `migration-0048-discovery-enrichment` section 3a, 3c (schema); `catalog-enrichment-discovery` A1, A5 (the actual `replaceCatalog`) |
+| Activation and publication race: an insert before the first activation is history, after it is stream; a row staged before the activation and published after it is stream; a row published before it is history | `migration-0049-discovery-enrichment` section 3a, 3c (schema); `catalog-enrichment-discovery` A1, A5 (the actual `replaceCatalog`) |
 | No-op admission, a new admission of an existing Film, a delayed canonical admission | `catalog-enrichment-drain` Discovery section (existing Film 701, delayed anchor 702 resolved on the claim event, no spin while unresolved) |
-| Competing identities, TV collisions | `catalog-enrichment-discovery` A1 (a TV row with a movie id is never staged or signalled); `migration-0048-discovery-enrichment` section 3a |
-| Repeated, staged and aborted events; transfer recovery | `catalog-enrichment-discovery` A2, A6 (retry settles by identity, an interrupted transfer stays inert and not runnable); `migration-0048-discovery-enrichment` sections 3d to 3g |
-| Old-version writers and import or restore | `migration-0048-discovery-enrichment` sections 3e to 3g (no origin, a stale origin, a later unrelated transfer never promotes); `catalog-enrichment-discovery` A4, B2 (before the apply the code is the former code) |
+| Competing identities, TV collisions | `catalog-enrichment-discovery` A1 (a TV row with a movie id is never staged or signalled); `migration-0049-discovery-enrichment` section 3a |
+| Repeated, staged and aborted events; transfer recovery | `catalog-enrichment-discovery` A2, A6 (retry settles by identity, an interrupted transfer stays inert and not runnable); `migration-0049-discovery-enrichment` sections 3d to 3g |
+| Old-version writers and import or restore | `migration-0049-discovery-enrichment` sections 3e to 3g (no origin, a stale origin, a later unrelated transfer never promotes); `catalog-enrichment-discovery` A4, B2 (before the apply the code is the former code) |
 | Resolver publication versus import with the actual writers, drained by the producer | `catalog-enrichment-drain` Discovery section (transfer path 740 and 741) |
 | Guarded effect and acknowledgement; no self-wake | `catalog-enrichment-drain` Discovery section (a moved control generation records no member and no acknowledgement; zero pending inbox rows after the producer's own write cycle) |
 | Overlap with rated; one state set, one TMDB response | `catalog-enrichment-drain` Discovery section (Film 710) |

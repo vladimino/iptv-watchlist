@@ -22,9 +22,9 @@
 // ({sql, params}) and answers `{refused:true}` when its batch was refused; the attempt then replans (ADR 0207 decision 3, step 5).
 import {database,failed,many,one} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
-import {RETRY_POLICY} from './canonical-receipts.js';
-import {historyGuard,runOperationKey} from './receipt-operation-key.js';
-import {admitRatedFilm,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
+import {RETRY_POLICY,digestOf} from './canonical-receipts.js';
+import {historyGuard,ownedAttemptCondition,reconcileOperationKey,runOperationKey} from './receipt-operation-key.js';
+import {admitLidOnlyFilm,admitRatedFilm,hasLidAdmissionTable,lidOnlyFilmId,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 import {FILM_ADMISSION_OPERATION,RATED_ADMISSION_ORIGIN,admissionDigestD1} from './canonical-rated-admission-producer.js';
 import {admissionClosedError,admissionRoute,readAdmissionAuthority} from './letterboxd-admission-authority.js';
 import {planIdentityEvidence,recordIdentityEvidenceKeyed} from './identity-evidence.js';
@@ -46,10 +46,22 @@ export function admissionOperationKey({lid=null,kind='lid',code=null}={}){
  throw failed('film_person_invalid');
 }
 
-// The pair against D1, by the table of ADR 0207 decision 3 (read only). -> {outcome:'admit'|'present'|'other_code'|'conflict'|'held'|'redirect', id?, revision?, reason?}
+// The pair against D1, by the table of ADR 0207 decision 3 (read only). -> {outcome:'admit'|'present'|'other_code'|'conflict'|'held'|'redirect'|'lid_only', id?, revision?, reason?}
 export async function planAdmissionD1(env,{tmdb,sourceCode}){
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');
+ // AIR-672 / ADR 0217 decision 5b: a lid-only Film for this lid is never attached or duplicated by a TMDB-proved admission (natural sync never attaches). Read while migration 0047 is applied; before it there is no such row.
+ if(await hasLidAdmissionTable(db)){
+  const lidOnly=await one(db,'SELECT film_id FROM film_lid_admission WHERE lid=?',[sourceCode]);
+  if(lidOnly){
+   // The existing row is classified by the SAME ownership validation as the lid-only kind (complete, non-conflicting ownership, no redirect): a row whose claim moved, was duplicated or untrusted, or whose Film became a
+   // redirect source is never reported as a lid-only Film that settles an item.
+   const own=await planLidOnlyD1(env,{lid:sourceCode});
+   if(own.outcome==='present_lid_only')return {outcome:'lid_only',id:own.id,reason:'lid_only_present'};
+   if(own.outcome==='redirect')return {outcome:'redirect',id:own.id};
+   return {outcome:'conflict',id:own.id??lidOnly.film_id,reason:'lid_only_ownership_incomplete'};
+  }
+ }
  const target=await resolveAdmissionFilm(env,tmdb);
  if(target.redirected)return {outcome:'redirect',id:target.id};
  if(target.held)return {outcome:'held',id:target.id,reason:target.held};
@@ -164,14 +176,30 @@ export async function admitVerifiedFilm(env,input={}){
   if(plan.outcome==='present')return {kind:'none',result:result('present',{id:plan.id})};
   if(plan.outcome==='held'||plan.outcome==='redirect')return {kind:'none',result:result(plan.outcome,{id:plan.id,reason:plan.reason??null})};
   if(plan.outcome==='conflict'||plan.outcome==='other_code')return terminalOf(result(plan.outcome,{id:plan.id,reason:plan.reason}));
+  // ADR 0217 decision 5b (the table of "Moment it is seen"): by the planner, before any link. Diary and Watchlist (kind `lid`): the lid-only Film is the answer, settle only; the rated step: needs_review; the inferred import: conflict.
+  if(plan.outcome==='lid_only'){
+   if(kind==='lid')return {kind:'none',result:result('present_lid_only',{id:plan.id,reason:plan.reason})};
+   return terminalOf(result(kind==='short_code'?'needs_review':'conflict',{id:plan.id,reason:plan.reason}));
+  }
   const digest=await admissionDigestD1({kind,tmdb:a.tmdb,sourceCode:code,evidenceDigest:a.evidenceDigest,title:a.admission.title,year:a.admission.year});
   const target={kind:'film',id:plan.id};
   return {kind:'reserve',
    request:{operation:FILM_ADMISSION_OPERATION,target,expectedRevision:plan.revision,digest,source:digest},
    write:{
     atomic:true,
-    run:ctx2=>admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
-     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence:a.evidence}),
+    run:async ctx2=>{
+     // AIR-672 / ADR 0217 decision 5b: the caller's pre-canonical effects (the inferred import's mark and link) run INSIDE this owned execution, after the reservation. `statement` is the assertion of the exact currently
+     // owned pending attempt, for the caller to add to each of its own batches (Ratings `admissionGuards`); an expired or abandoned attempt can therefore never land a late effect.
+     if(typeof input.beforeCanonical==='function'){
+      // The deadline is enforced AT THE EFFECT, in the batch's own SQL: the assertion compares the receipt's window with the time the DATABASE executes the statement at, so a batch built in time but delayed past the
+      // deadline (a queued write, a slow link) still fails, and so does every later batch of the attempt. No Worker clock enters it.
+      const owned=ownedAttemptCondition({origin:RATED_ADMISSION_ORIGIN,operationKey,requestId:ctx2.requestId,attempt:ctx2.attempt});
+      const statement=[fenced.assertSql(owned.sql),owned.params];
+      await input.beforeCanonical({requestId:ctx2.requestId,attempt:ctx2.attempt,operationKey,statement});
+     }
+     return admitRatedFilm(env,{receiptKey:'tmdb_'+a.tmdb,receipt:a.receipt,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
+      receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},evidence:a.evidence});
+    },
     // The receipt's own readback (a reconcile of an unresolved attempt): the pair is committed when the admission row exists for it.
     readback:async()=>{const snap=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});return {digest:snap.outcome==='present'?digest:null,revision:snap.revision??await revisionOf(db,plan.id)};},
     revalidate:async()=>{const snap=await planAdmissionD1(env,{tmdb:a.tmdb,sourceCode:code});return snap.outcome==='admit'?'proceed':snap.outcome==='present'?'superseded':'stale';},
@@ -181,7 +209,7 @@ export async function admitVerifiedFilm(env,input={}){
  try{ran=await runOperationKey(env,{origin:RATED_ADMISSION_ORIGIN,operationKey,now:clock,policy},{validate,decide});}
  catch(error){
   // A race inside the writer's batch: the typed refusals of the d1 writer are outcomes, not crashes. The attempt's receipt stays pending and is abandoned by the next attempt of the key.
-  if(error?.code==='admission_conflict')return result(error.reason==='code_on_other_film'?'conflict':'other_code',{reason:error.reason??null,error:error.code});
+  if(error?.code==='admission_conflict')return result(error.reason==='code_on_other_film'||error.reason==='lid_only_present'?'conflict':'other_code',{reason:error.reason??null,error:error.code});
   if(error?.code==='admission_identity_held')return result('held',{reason:error.reason??null,error:error.code});
   if(error?.code==='film_person_redirect')return result('redirect',{error:error.code});
   throw error;
@@ -241,4 +269,180 @@ export async function admittedMovieIds(env,{exceptCode=null}={}){
   after=list[list.length-1].film_id;
  }
  return ids;
+}
+
+// AIR-672 / ADR 0217 (Accepted) decisions 5 and 6 (delivery step 3), DORMANT: the `lid_only` kind of the coordinator. A verified Letterboxd film page with a positively absent TMDB relation (H1, the caller's
+// `reacquire` returns the proof of `lidOnlyPageProof`) is admitted as the canonical Film `film:lb:<lid>` by `admitLidOnlyFilm`, under the ONE common key `admission:lid:<lid>` (the same key as the TMDB-proved
+// kind `lid`), so a lid has at most one unresolved attempt across all paths and kinds. It runs only at the marker `d1` (`closed` and `r2` refuse before the first effect, as `admitVerifiedFilm` does) and only
+// when migration 0047 is applied (`admission_unavailable` otherwise, before any effect).
+export const LID_ONLY_KIND='lid_only';
+const OLDER_KEY_KINDS=Object.freeze(['short_code','inferred_import']);
+
+// The lid against D1 (read only), by the cases of ADR 0217 decision 6. -> {outcome, id?, revision?, reason?}
+//   present_lid_only   `film_lid_admission` names this lid (replay, lost response, crash before settlement): settle only (case 4)
+//   present            a trusted, non-conflicting `letterboxd` claim of the lid sits on a TMDB Film, or a rated admission holds the code (case 4b): the existing Film, neither a conflict nor lid-only
+//   redirect | held    the Film is a redirect source (case 9), or the claim is the only trusted one on a Film that is a redirect source: non-terminal
+//   conflict           any other claim of the lid (untrusted, conflicting, a second row), or the id `film:lb:<lid>` taken by something that is not this admission (case 7): owner review
+//   admit              nothing of the lid exists: revision of `film:lb:<lid>` (0)
+export async function planLidOnlyD1(env,{lid}){
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ const id=lidOnlyFilmId(lid);
+ if(!await hasLidAdmissionTable(db))throw failed('admission_unavailable',new Error('film_lid_admission_missing'));
+ const [row,claims,rated,film,redirect]=await Promise.all([
+  one(db,'SELECT film_id FROM film_lid_admission WHERE lid=?',[lid]),
+  many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='letterboxd' AND value=?",[lid]),
+  one(db,'SELECT film_id FROM film_rated_admission WHERE source_code=?',[lid]),
+  one(db,'SELECT id FROM film WHERE id=?',[id]),
+  one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]),
+ ]);
+ const followed=async from=>{let at=from;for(let hop=0;hop<8;hop++){const next=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[at]);if(!next)return {id:at,redirected:hop>0};at=next.to_film_id;}return {id:at,redirected:true,loop:true};};
+ // Complete, non-conflicting ownership (ADR 0217 5b): exactly one trusted, non-conflicting `letterboxd` claim of the lid, on the very Film the proof row names; that Film exists; no redirect leaves it. An unresolved redirect
+ // is non-terminal (`redirect`, case 9) and a loop fails closed; anything else incomplete is an owner-review conflict. Never a success.
+ if(row){
+  const owner=claims.find(claim=>claim.trusted===1&&claim.conflicting===0);
+  if(claims.length!==1||!owner||owner.film_id!==row.film_id)return {outcome:'conflict',id:row.film_id,reason:'ownership_incomplete'};
+  const target=await followed(row.film_id);
+  if(target.loop)return {outcome:'conflict',id:row.film_id,reason:'redirect_loop'};
+  if(target.redirected)return {outcome:'redirect',id:target.id};
+  if(!await one(db,'SELECT id FROM film WHERE id=?',[row.film_id]))return {outcome:'conflict',id:row.film_id,reason:'film_missing'};
+  return {outcome:'present_lid_only',id:row.film_id};
+ }
+ if(claims.length){
+  const owner=claims.find(claim=>claim.trusted===1&&claim.conflicting===0);
+  if(claims.length===1&&owner){
+   const target=await followed(owner.film_id);
+   if(target.loop)return {outcome:'conflict',id:owner.film_id,reason:'redirect_loop'};
+   if(target.redirected)return {outcome:'redirect',id:target.id};
+   return {outcome:'present',id:target.id};
+  }
+  return {outcome:'conflict',reason:'lid_claim_conflict'};
+ }
+ // A rated admission holds the code but NO trusted `letterboxd` claim of the lid exists yet (the claim unit settles later): ownership is incomplete, so this fails closed and is retried, never reported as present.
+ if(rated)return {outcome:'held',id:rated.film_id,reason:'ownership_incomplete'};
+ if(redirect)return {outcome:'redirect',id:redirect.to_film_id};
+ if(film)return {outcome:'conflict',id,reason:'film_id_taken'};
+ return {outcome:'admit',id,revision:await revisionOf(db,id)};
+}
+
+// The content digest of a lid-only receipt: the kind, the lid and the proof's own digest (the causal root). The route and the check time are not in it, so two routes that check the same page agree.
+export const lidOnlyReceiptDigest=({lid,proofDigest})=>digestOf({operation:FILM_ADMISSION_OPERATION,d1:true,content:{kind:LID_ONLY_KIND,lid,proofDigest}});
+
+// The coordinator for ONE lid. input:
+//   lid, route   the Letterboxd id and the entry point that checked it (`watchlist_admission`, `ratings_diary`, `letterboxd_rated_archive`)
+//   reacquire    `async () => {ok:true, proof, links?:{fence:{key,parts,etag}, tmdbAlias?:string|null}} | {ok:false, reason, ...}`: the REAL bounded page check (H1), run only after the key's history and the
+//                older keys' history are reconciled. `proof` is `lidOnlyPageProof`'s `tmdb_none` proof. A failed check is `source_unavailable` and writes nothing. A page whose TMDB state is not `tmdb_none` never reaches
+//                here: the caller maps its typed state (decision 3) and does not call the coordinator.
+//   links        the Ratings link document as the caller read it, when `reacquire` does not return it
+//   olderKeysKnown   `false` when the older keys of the code this lid resolves from cannot be named (an unresolved short code, an alias without a reverse entry): the attempt is HELD (`older_key_unknown`), never
+//                admitted on an assumed absence. Default true (the lid is the code).
+//   finalize, now, policy   as for `admitVerifiedFilm`
+// -> {outcome, terminal, ...}: admitted_lid_only | present_lid_only | present | conflict | lid_unverified | ratings_tmdb_link (held) | wait | held | redirect | deferred | failed | unknown | source_unavailable | history_exhausted.
+export async function admitVerifiedLidOnly(env,input={}){
+ const lid=input.lid??null;
+ if(typeof lid!=='string'||!LID.test(lid))return result('lid_unverified',{reason:'lid_unverified'});
+ const authority=await readAdmissionAuthority(env);
+ if(admissionRoute(authority)!=='d1')throw admissionClosedError(authority.mode);
+ const clock=clockOf(input.now);
+ const policy=input.policy||RETRY_POLICY;
+ const db=database(env);
+ if(!await hasLidAdmissionTable(db))throw failed('admission_unavailable',new Error('film_lid_admission_missing'));
+ if(input.olderKeysKnown===false)return result('deferred',{reason:'older_key_unknown'});
+ // Read-only reconciliation of the OLDER keys of this code (ADR 0217 decision 5a): a live attempt waits (non-terminal), any other unresolved receipt is abandoned (ADR 0207 step 2), an applied one is validated
+ // against current state by the planner below. Only then is the lid key reserved; the older key is never reserved again for this lid.
+ for(const kind of OLDER_KEY_KINDS){
+  const older=await reconcileOperationKey(env,{origin:RATED_ADMISSION_ORIGIN,operationKey:admissionOperationKey({kind,code:lid}),now:clock},{validate:async()=>'historical'});
+  if(older.status==='wait')return result('wait',{reason:'older_key_'+(older.reason||'in_flight'),olderKey:kind,dueAt:older.dueAt??null});
+ }
+ const operationKey=admissionOperationKey({lid});
+ let src=null;
+ const acquire=async()=>{
+  if(src)return src;
+  let got;
+  if(typeof input.reacquire==='function'){
+   got=await input.reacquire();
+   if(!got||got.ok!==true){src={fail:got||{reason:'source_unavailable'}};return src;}
+  }else got={proof:input.proof,links:input.links};
+  src={proof:got.proof,links:got.links??input.links??null,intent:null};
+  return src;
+ };
+ if(typeof input.reacquire!=='function'&&input.settleOnly!==true)await acquire();
+ // An applied attempt is settled only while the CURRENT durable rows still show a complete lid-only admission of the lid (decision 5b, "complete, non-conflicting ownership").
+ const validate=async(applied,{currentTarget})=>{
+  const plan=await planLidOnlyD1(env,{lid});
+  return plan.outcome==='present_lid_only'&&plan.id===currentTarget.id?'settled':'historical';
+ };
+ let observed=null;
+ const guardOf=guard=>({...guard,statement:[fenced.assertSql(guard.sql),guard.params],holds:async()=>{
+  const row=await one(db,'SELECT CASE WHEN ('+guard.sql+') THEN 1 ELSE 0 END AS ok',guard.params);
+  return Number(row?.ok)===1;
+ }});
+ const terminalOf=terminal=>{
+  if(typeof input.finalize!=='function')return {kind:'none',result:terminal};
+  return {kind:'finalize',write:async guard=>{const out=await input.finalize(terminal,guardOf(guard));return out?.refused===true?{refused:true}:{...terminal,finalized:out??null};}};
+ };
+ const decide=async ctx=>{
+  if(input.settleOnly===true)return {kind:'none',result:result('needs_check',{guardInput:{fingerprint:ctx.fingerprint}})};
+  // The durable state first: a replay, a lost response and the TMDB-held lid settle WITHOUT a fetch (case 4, "replay never fetches").
+  const plan=await planLidOnlyD1(env,{lid});
+  observed=plan;
+  if(plan.outcome==='present_lid_only')return {kind:'none',result:result('present_lid_only',{id:plan.id})};
+  if(plan.outcome==='present')return {kind:'none',result:result('present',{id:plan.id})};
+  if(plan.outcome==='held'||plan.outcome==='redirect')return {kind:'none',result:result(plan.outcome,{id:plan.id??null,reason:plan.reason??null})};
+  if(plan.outcome==='conflict')return terminalOf(result('conflict',{id:plan.id??null,reason:plan.reason}));
+  const a=await acquire();
+  if(a.fail){
+   const unavailable=result('source_unavailable',{reason:a.fail.reason??'source_unavailable',detail:a.fail,charged:a.fail.charged===true});
+   return unavailable.charged?terminalOf(unavailable):{kind:'none',result:unavailable};
+  }
+  // The Ratings link of the lid's fact key carries a TMDB alias: the page said no TMDB but the Ratings says otherwise. Stop at the pending state, never admit (decision 5b).
+  if(a.links?.tmdbAlias)return {kind:'none',result:result('held',{reason:'ratings_tmdb_link'})};
+  const proofDigest=a.proof?.proofDigest;
+  if(typeof proofDigest!=='string')throw failed('admission_not_verified');
+  // ADR 0217 5b: a POSITIVE observation of the Ratings link document is mandatory: the exact `links.json` parts the caller read (zero parts for a proven absent document) and the answer to "does the lid's fact key carry a
+  // TMDB alias" (`tmdbAlias`, null for none). A caller that did not read it cannot admit. Nothing is reserved yet.
+  if(!a.links||!a.links.fence||a.links.tmdbAlias===undefined){const error=failed('admission_not_verified');error.reason='links_observation_missing';throw error;}
+  const digest=await lidOnlyReceiptDigest({lid,proofDigest});
+  const target={kind:'film',id:plan.id};
+  return {kind:'reserve',
+   request:{operation:FILM_ADMISSION_OPERATION,target,expectedRevision:plan.revision,digest,source:digest},
+   write:{
+    atomic:true,
+    run:ctx2=>admitLidOnlyFilm(env,{lid,route:input.route,proof:a.proof,filmId:plan.id,expectedRevision:ctx2.currentRevision,at:clock(),requestId:ctx2.requestId,
+     receiptMark:{requestId:ctx2.requestId,attempt:ctx2.attempt,now:clock(),target:ctx2.target},linksFence:a.links.fence}),
+    readback:async()=>{const snap=await planLidOnlyD1(env,{lid});return {digest:snap.outcome==='present_lid_only'?digest:null,revision:await revisionOf(db,plan.id)};},
+    revalidate:async()=>{const snap=await planLidOnlyD1(env,{lid});return snap.outcome==='admit'?'proceed':snap.outcome==='present_lid_only'?'superseded':'stale';},
+   }};
+ };
+ let ran;
+ try{ran=await runOperationKey(env,{origin:RATED_ADMISSION_ORIGIN,operationKey,now:clock,policy},{validate,decide});}
+ catch(error){
+  if(error?.code==='admission_conflict')return result('conflict',{reason:error.reason??null,error:error.code});
+  if(error?.code==='film_person_redirect')return result('redirect',{error:error.code});
+  throw error;
+ }
+ const base={operationKey,replans:ran.replans??0,fingerprint:ran.fingerprint??null};
+ if(ran.status==='none'&&ran.result?.outcome==='needs_check'){
+  const cond=historyGuard({origin:RATED_ADMISSION_ORIGIN,operationKey,fingerprint:ran.result.guardInput.fingerprint});
+  return {...ran.result,...base,guard:guardOf(cond)};
+ }
+ let out;
+ switch(ran.status){
+  case 'wait':out=result('wait',{reason:ran.reason??'in_flight',dueAt:ran.dueAt??null});break;
+  case 'settled':out=result('present_lid_only',{id:ran.currentTarget?.id??null,requestId:ran.receipt?.requestId??null,fromReceipt:true});break;
+  case 'none':out=ran.result;break;
+  case 'finalized':out=ran.result;break;
+  case 'refused':out=result('deferred',{reason:'finalize_refused'});break;
+  case 'exhausted':out=result('history_exhausted',{});break;
+  case 'reserved':{
+   const o=ran.outcome||{};
+   if(o.state==='applied'||o.state==='already')out=result(o.already?'present_lid_only':'admitted_lid_only',{id:observed?.id??null,requestId:ran.requestId});
+   else if(o.state==='unknown')out=result('unknown',{requestId:ran.requestId,errorClass:o.errorClass??null});
+   else if(o.state==='failed'||o.state==='abandoned')out=result('failed',{requestId:ran.requestId,errorClass:o.errorClass??o.receipt?.errorClass??null});
+   else out=result('deferred',{requestId:ran.requestId,reason:o.reason??o.state??null});
+   break;
+  }
+  default:out=result('deferred',{reason:'contended'});
+ }
+ return {...out,...base};
 }

@@ -79,6 +79,18 @@ export async function keyedRequestIdOf({origin,operation,operationKey,ordinal,so
 // it in its own assertion statement (the canonical domain: `historyAssertion`; the Watchlist ledger and the Ratings fence take caller guards).
 export function historyGuard({origin,operationKey,fingerprint}){return operationHistoryCondition({origin,operationKey,fingerprint});}
 // The same condition as one statement of a fenced canonical batch (film_person_cas): a false condition fails the CHECK and rolls the whole batch back.
+// AIR-672 / ADR 0217 decision 5b: the OWNED-ATTEMPT assertion of a batch that is not the canonical batch (the inferred import's Ratings link batch). One [sql, params] boolean: the receipt of this key is still `pending` with exactly
+// this request id and attempt number and is not past its window at `now`. An expired or abandoned attempt (ADR 0207 step 2) is `abandoned`, so its late effect fails the batch whole. The Ratings tables and the receipts
+// live in one D1 database, so this is a statement of the very same batch as the effect.
+// The deadline is compared with the time the DATABASE executes the statement at (`now` omitted: SQLite's UTC clock in the receipts' own ISO convention), so a batch that was built in time but is delayed past the deadline before it
+// runs still fails. A caller may pass `now` (an ISO string) to bind a fixed instant instead; that variant is for the deterministic unit tests and is not accepted by the Ratings carrier.
+export function ownedAttemptCondition({origin,operationKey,requestId,attempt,now}){
+ const scope=scopeOf({origin,operationKey});
+ if(typeof requestId!=='string'||!requestId||!Number.isInteger(attempt)||attempt<1||(now!==undefined&&(typeof now!=='string'||!now)))throw failed('film_person_invalid');
+ const head="EXISTS (SELECT 1 FROM canonical_write_receipt WHERE origin=? AND operation_key=? AND request_id=? AND state='pending' AND attempts=? AND next_attempt_at>";
+ if(now===undefined)return {sql:head+"strftime('%Y-%m-%dT%H:%M:%fZ','now'))",params:[scope.origin,scope.operationKey,requestId,attempt]};
+ return {sql:head+'?)',params:[scope.origin,scope.operationKey,requestId,attempt,now]};
+}
 export function historyAssertion(scope){const guard=historyGuard(scope);return [fenced.assertSql(guard.sql),guard.params];}
 
 // ---- storage ----

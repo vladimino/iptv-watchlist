@@ -109,12 +109,12 @@ const catalog=(...ids)=>Object.fromEntries(ids.map(id=>['tmdb_'+id,film(id)]));
  assert.ok(sig(file).includes('tmdb:46=pending@v1'));
 }
 {
- // B2. before schema 48 the code is the former code: no origin column, the same writes, no signal
- const {file,env}=await setup({schema:47,activate:true});
+ // B2. before schema 49 the code is the former code: no origin column, the same writes, no signal
+ const {file,env}=await setup({schema:48,activate:true});
  await Authority.replaceCatalog(env,catalog(50),{admission:{origin:'resolver',programmeRunId:RUN}});
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission WHERE tmdb_id='50'")[0].n,1);
- assert.deepEqual(sig(file),[],'schema 47: deploying the code before the migration changes nothing');
- assert.equal(sql(file,'SELECT version FROM schema_contract')[0].version,47);
+ assert.deepEqual(sig(file),[],'schema 48: deploying the code before the migration changes nothing');
+ assert.equal(sql(file,'SELECT version FROM schema_contract')[0].version,48);
 }
 
 // ---- C. the source_changed emitter: unit level (the parity with the producer's persisted state and the real revalidation path are proved in tests/catalog-enrichment-producer.mjs and tests/discovery-revalidation.mjs) ----
@@ -200,10 +200,10 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
 
 // ---- D. the activation preflight ----
 {
- const {file,env}=await setup({schema:47});
+ const {file,env}=await setup({schema:48});
  const before=sql(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n;
  const old=await D.activationPreflight(env);
- assert.deepEqual([old.ok,old.problems],[false,['schema_not_applied']],'schema 47: the settlement is not deployed');
+ assert.deepEqual([old.ok,old.problems],[false,['schema_not_applied']],'schema 48: the settlement is not deployed');
  const clean=await setup();
  const ok=await D.activationPreflight(clean.env);
  assert.deepEqual([ok.ok,ok.problems],[true,[]]);

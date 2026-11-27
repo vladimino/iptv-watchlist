@@ -1393,7 +1393,7 @@ function validateCatalog(films){
 }
 // AIR-684 (ADR 0219 decision 3): the explicit provenance of a catalog transfer. ONLY the resolver run that publishes the catalog declares `context.admission = {origin: 'resolver', programmeRunId}`, and only when that run is
 // the one the authority gate names; an import, a restore, an operator tool or any other caller passes nothing (or something else) and is non-authoritative: its origin stays NULL. The loading statement stamps the origin and
-// the transfer identity (`programme_run_id`) in the same statement that sets `loading`; schema 48's triggers stage the movie admissions inserted meanwhile and settle them at the commit. Before schema 48 is applied the
+// the transfer identity (`programme_run_id`) in the same statement that sets `loading`; schema 49's triggers stage the movie admissions inserted meanwhile and settle them at the commit. Before schema 48 is applied the
 // columns do not exist and the statement is the former one, so the code is safe to deploy first.
 const transferOrigin=(context,gate)=>{
  const declared=context?.admission;

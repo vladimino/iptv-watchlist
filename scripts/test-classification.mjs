@@ -242,6 +242,15 @@ export const FILES={
  "letterboxd-admission-authority.mjs": {
   "suite": "core"
  },
+ "film-lid-admission-migration.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-lid-only-proof.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-lid-only-admission-d1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-check-legacy-report.mjs": {
   "suite": "core"
  },
@@ -421,7 +430,7 @@ export const FILES={
  "catalog-enrichment-discovery.mjs": {
   "suite": "core"
  },
- "migration-0048-discovery-enrichment.mjs": {
+ "migration-0049-discovery-enrichment.mjs": {
   "suite": "core"
  },
  "catalog-enrichment-bootstrap.mjs": {
