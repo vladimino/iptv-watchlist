@@ -8,6 +8,7 @@ import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as U from '../src/catalog-enrichment-units.js';
+import {createGateReuse} from '../src/film-person-authority.js';
 import {blankFieldGuard} from '../src/catalog-enrichment-plan.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-enrich-units-'));
@@ -29,7 +30,8 @@ function world(stage='open'){
   assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
   assert.equal(sqlite(file,BASELINE).status,0);
  }
- return {file,env:{DB:d1Standin(file)}};
+ // AIR-688: GATE_REUSE=1 runs this whole suite with the drain's gate scope on every env (tests/catalog-enrichment-units-scoped.mjs), so the real Person, credit, replay, lost-response and concurrent paths are exercised scoped.
+ return {file,env:{DB:d1Standin(file),...(process.env.GATE_REUSE==='1'?{gateReuse:createGateReuse()}:{})}};
 }
 const T='2026-11-26T10:00:00.000Z';
 const at=s=>new Date(Date.parse(T)+s*1000).toISOString();
@@ -151,5 +153,24 @@ assert.deepEqual([U.unitKeys.localization('film:a','tmdb'),U.unitKeys.credits('f
  const first=await U.rollGeneration(other.env,{unitKey:KEY,generation:0,fingerprint:'100:0',at:T});
  const second=await U.rollGeneration(other.env,{unitKey:KEY,generation:0,fingerprint:'100:0',at:T});
  assert.equal(first,1);assert.equal(second,null,'a concurrent writer cannot roll the unit twice');
+}
+
+// ---- AIR-688 review P1: a warmed gate scope never authorizes a unit that executes no fenced batch ----
+// The scope is warmed by a real applied unit, the marker moves to held, and the next unit is one whose effect is already in place (a settled replay, a fresh noop). The routing read is fresh, so nothing is settled, no
+// receipt or state moves, and after the reopen (a new generation) the same unit settles normally.
+{
+ const {file,env}=world();seedFilm(file);
+ env.gateReuse=createGateReuse({ttlMs:60000});
+ assert.equal((await U.runUnit(env,{kind:'facts',unitKey:KEY,input:facts(),now:clock()})).state,'applied');
+ assert.ok(env.gateReuse.gate,'the applied unit warmed the scope');
+ const before=JSON.stringify([receipts(file,KEY),metaOf(file)]);
+ assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+ await assert.rejects(()=>U.runUnit(env,{kind:'facts',unitKey:KEY,input:facts(),now:clock()}),error=>error.code==='film_person_held','settled replay on a held marker');
+ await assert.rejects(()=>U.runUnit(env,{kind:'facts',unitKey:U.unitKeys.core('film:tmdb:1'),input:facts({metadata:{updatedAt:T,year:1999}}),now:clock()}),error=>error.code==='film_person_held','fresh noop on a held marker');
+ assert.equal(JSON.stringify([receipts(file,KEY),metaOf(file)]),before,'nothing settled or written while held');
+ assert.equal(env.gateReuse.gate,null,'a non-open routing read clears the scope');
+ assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1").status,0);
+ assert.equal((await U.runUnit(env,{kind:'facts',unitKey:KEY,input:facts(),now:clock()})).state,'settled','normal recovery after the reopen');
+ assert.equal(env.gateReuse.gate.generation,4,'the routing read refreshed the scope to the new generation');
 }
 console.log('catalog enrichment units: ok');

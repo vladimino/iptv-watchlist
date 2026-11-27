@@ -38,7 +38,7 @@
 // The table is writable only while the marker is `d1`/`open` (a trigger); at `r2` and `prepared` it stays empty and nothing here reaches it (`assertWritable` refuses first).
 // APPEND-ONLY during initial stabilization: nothing here deletes, prunes, expires, archives or rewrites a terminal row (a trigger refuses it too); `abandoned` stays visible (`listAttention`). The 7-day rule below
 // is about the state of an operation (abandon instead of retry), not about deleting rows. Retention and lifecycle are an owner decision that returns later, after growth and cost are measured.
-import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {assertWritable,database,dropGateReuse,failed,many,one,readAuthority,readWriterGate,reuseSchemaFact} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 
 export const RECEIPT_MIN_VERSION=19;
@@ -292,7 +292,7 @@ export async function operationKeyStatus(env){
  return 'invalid';
 }
 export async function assertOperationKeyReady(env){
- const status=await operationKeyStatus(env);
+ const status=await reuseSchemaFact(env,'operation_key',()=>operationKeyStatus(env),value=>value==='ready');
  if(status==='absent')throw failed('receipt_operation_key_missing');
  if(status!=='ready')throw failed('receipt_operation_key_invalid');
 }
@@ -411,6 +411,7 @@ async function writeBatch(env,gate,statements){
  const all=[...fenced.head(gate,[]),...statements];
  try{await db.batch(all.map(([sql,params])=>db.prepare(sql).bind(...params)));}
  catch(error){
+  dropGateReuse(env);
   const message=String(error?.message||error);
   if(/UNIQUE constraint failed: canonical_receipt_watermark/i.test(message))throw failed('receipt_baseline_exists',error);
   // The partial unique index of schema 39 (one unresolved receipt per origin and operation key) names its columns, the primary key names request_id.
@@ -548,9 +549,9 @@ export async function receiptedWrite(env,input,hooks){
  if(!atomic)exceptionOf({exception:hooks?.exception},hooks?.approvedExceptions||APPROVED_EXCEPTIONS);
  const policy=input.policy||RETRY_POLICY,clock=input.now||(()=>new Date().toISOString());
  // AIR-599 / ADR 0207 decision 4b: through the Letterboxd Sync's fenced env every receipt transition (reserve, retry, settle) asserts the Sync epoch too.
- const status=await receiptsStatus(env);
+ const status=await reuseSchemaFact(env,'receipts',()=>receiptsStatus(env),value=>value==='ready');
  if(status==='no_schema')throw failed('receipt_schema_missing');
- const gate=fenced.bindLetterboxdFence(env,assertWritable(await readAuthority(env)));
+ const gate=fenced.bindLetterboxdFence(env,assertWritable(await readWriterGate(env)));
  if(status==='no_baseline')throw failed('receipt_baseline_missing');
  // AIR-600 R1: with `operationKey` and `history` the receipt is RESERVED under its key: the insert carries the key and, in the same batch, asserts that the key's history still has the fingerprint
  // the caller observed and holds no unresolved receipt. Any other outcome (the history moved, another attempt is unresolved, this id already exists) is `operation_key_moved` or
