@@ -86,7 +86,7 @@ Authority is per domain, not per database. A domain is D1-authoritative only whi
 
 | Domain | Marker | Authoritative store | R2 still holds |
 | --- | --- | --- | --- |
-| Canonical Film/Person | `film_person_authority` `d1`/`open` | D1, fenced adapters (the retired projector was compare-only; removed in AIR-537 slice 3) | Immutable sources, frozen `titles.json` / `people.json` mirrors (not a fallback) |
+| Canonical Film/Person | `film_person_authority` `d1`/`open` | D1, fenced adapters (the retired projector was compare-only; removed in AIR-537 slice 3) | Immutable sources, frozen `titles.json` / `people.json` mirrors (not a fallback); recovery artifacts of the one-off localization repair under `film-localization-repair/air-664/` (immutable intent and outcome objects of [ADR 0225](../adr/0225-one-off-localization-repair-checkpoint-in-r2.md), never read as Film values) |
 | Metadata cache | `metadata_cache_authority` `d1` | D1 working set | `metadata.json` mirror |
 | Mutable predictions | `prediction_domain_authority` `d1` | D1 queue, lease, profile and current/history pointers | Immutable fingerprint, prediction and profile version bodies |
 | Published EPG and watchlist | `published_epg_authority` `d1`/`open` | D1 generation | Compatibility mirrors, raw XMLTV inputs, seal payloads and receipts |
