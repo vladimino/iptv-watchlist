@@ -730,7 +730,7 @@ The route does not write `programme.json`, `titles.json`, `people.json`, `epg/pu
 
 ## Film metadata owner API: `/api/admin/films/<id>/metadata`
 
-The owner's read and correction of the per-field provenance of one Film's `film_metadata` ([ADR 0214](../../adr/0214-film-metadata-per-field-provenance.md) decision 9, Accepted; language-bound per [ADR 0224](../../adr/0224-russian-first-catalog-metadata.md); card PV3, [AIR-634](https://trello.com/c/tznjf1v6)). Source: `src/admin/film-metadata-route.js`. `<id>` is the record id (`film:...`, percent-encoded). **Dormant:** every write is refused while migration 0049 is not applied (`schema_absent`) or the control mode is `off` (`provenance_off`); deploying the route writes nothing, changes no mode, no flag and no Access setting, and starts no run, no check and no Task. There is no page yet (card PVU).
+The owner's read and correction of the per-field provenance of one Film's `film_metadata` ([ADR 0214](../../adr/0214-film-metadata-per-field-provenance.md) decision 9, Accepted; language-bound per [ADR 0224](../../adr/0224-russian-first-catalog-metadata.md); card PV3, [AIR-634](https://trello.com/c/tznjf1v6)). Source: `src/admin/film-metadata-route.js`. `<id>` is the record id (`film:...`, percent-encoded). **Dormant:** every write is refused while migration 0049 is not applied (`schema_absent`) or the control mode is `off` (`provenance_off`); deploying the route writes nothing, changes no mode, no flag and no Access setting, and starts no run, no check and no Task. The catalogue page shows and drives it ([The metadata provenance panel](#the-metadata-provenance-panel), card PVU, [AIR-635](https://trello.com/c/XdcXaf79)).
 
 ### `GET /api/admin/films/<id>/metadata`
 
@@ -769,6 +769,19 @@ A metadata action is exactly one `writeFilmFacts` batch with owner authority (so
 | 503 | `storage_unavailable` with `outcome: unknown` | the batch may or may not have committed and the row could not be read: read the Film again or resend the same command |
 
 A refresh also asserts, inside its batch, the fence marker, the Film revision, the control row's mode (not `off`) and revision, that the Film exists and is not redirected, the ADR 0211 control generation and every row the owner saw; after the commit the Catalog Enrichment runner is woken best effort. Hold keeps the route working; a refresh planned before a mode change fails on its fences and the owner reads again.
+
+### The metadata provenance panel
+
+Source: `src/admin/film-metadata-client.js`, bundled into `/admin.js` and mounted by `public/admin.js` in the film detail of `/admin` as a collapsed section «Происхождение метаданных» (it appears for a film with a stored id). It is the page for the API above and adds no route, no field and no rule: every decision stays in the Worker and the single writer.
+
+- **Read on demand.** Nothing is requested until the section is opened; then one `GET /api/admin/films/<id>/metadata`. A failed read says so and the section can be opened again. «Показать ещё» follows `history.next` and appends the next page (50 rows per page); the redirect predecessors' history is part of the same list.
+- **Six fields** (`year`, `runtime`, `synopsis`, `poster`, `url`, `genres`): the stored value, its rank (`owner`, `confirmed`, `superseded`, `unconfirmed`, `unknown`), source and tier, anchor, language and its basis, `observedAt`. A value with no stored lineage is labelled `unattributed` and no lineage is invented; with mode `off` no rank is claimed. A pinned field is marked as owner-locked; a mismatching anchor and a value not bound to its row are flagged. The metadata dimension lock and `disagreement` are shown at the top.
+- **Conflicts and hints** of the core/localization rows are listed from `c1`; a missing C1 schema is said, not hidden.
+- **Actions** send exactly the POST shapes above: `set` (value parsed to the raw JSON type the API demands: integer, array of strings, string), `lock`, `release`, `revert` (per history row) and `refresh` (the `core` rows the owner saw as `expectedRows`). Each command carries the `expectedRevision` of the readback the owner saw. After a success the Film is read again; the page never updates a value optimistically.
+- **Refusals are explained, not just shown.** Mode `off`, schema absent and a redirected Film disable every write and say why while the values stay readable. A history row that cannot be reverted shows `identity_unknown`, `anchor_changed` or `no_value` in words and states that setting a new value is still allowed. `stale_revision` and `stale_rows` re-read the Film and ask the owner to repeat the action; other API errors are named.
+- **Retry.** The `requestId` is minted once per command. A network failure or `503 storage_unavailable` (outcome unknown) keeps the same command: the next press sends the identical body, so the stored command row decides (`already_applied` is reported as «уже была выполнена»). A definite refusal ends the attempt; the next press is a new command with a new `requestId` planned on the re-read revision.
+- **Not here:** no global catalogue UI, no bulk refresh (one Film at a time), no mode, flag or schema control, no screenshot or export. The panel is dormant wherever the API is: it writes only when the owner presses a button.
+- **Rollback:** reverting the UI code removes the panel; stored provenance, history and command rows are untouched.
 
 ## Limits
 
