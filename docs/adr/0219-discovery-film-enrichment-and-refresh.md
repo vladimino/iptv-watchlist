@@ -9,6 +9,8 @@
 **Amends, only upon acceptance of this record, narrowly and by the clauses named in decision 11:** [ADR 0211](0211-catalog-enrichment-producer.md) decisions 2, 3, 3b, 4, 5 and 6 (the shared upstream coordination 0211-5 = C is preserved), [ADR 0214](0214-film-metadata-per-field-provenance.md) decision 10 and [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) decision 3 (only the generation of an exhausted receipt key); adds an admission signal to the Discovery authority contract; and **relies on, without amending**, ADR 0203 (the Watchlist membership effect as the emitter point), ADR 0207 decision 7 (CM and C2, the apply and activation chain) and ADR 0216 decision 7 (the read budgets)  
 **Superseded by:** None
 
+**Amended by ADR 0224:** Amended in part by [ADR 0224](0224-russian-first-catalog-metadata.md) (Accepted 2026-11-27, decisions 2, 9–11 only: shared verified language projection and coverage for admitted cohorts; [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7221071584)); original status and approval retained. All other clauses remain binding.
+
 ## Context
 
 ### What exists (main `40c8a3a`, 25 Nov 2026)
