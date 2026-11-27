@@ -92,6 +92,7 @@ const FILE_SITES={
  'src/admin/letterboxd-archive-apply.js':{r2:2,wrapper:0,dynamic:1}, // AIR-558: -1 write, the candidates-rollback marker of the retired archive rollback
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
  'src/canonical-producer-events.js':{r2:1,wrapper:0,dynamic:1},   // AIR-594 / ADR 0208: the immutable canonical_producer events (events/items/<reverse-timestamp>-<id>.json, create-only) put by the hourly drain from the D1 outcome rows; not a projector input; the hourly Producer reconcile only
+ 'src/catalog-enrichment-store.js':{r2:1,wrapper:0,dynamic:1},   // AIR-605 / ADR 0219: the immutable catalog_enrichment run events (events/items/<reverse-timestamp>-<id>.json, create-only) put by the end-of-run and reconcile delivery from the D1 run outbox; not a projector input
  'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
  'src/letterboxd-sync.js':{r2:1,wrapper:0,dynamic:1},   // ADR 0186: the create-only put of a slot Event (events/items/..., not a projector input)
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input); AIR-595: that one site now names its key per ledger (the same object or events/discovery-report-faults-v2.json, also not a projector input), hence dynamic
@@ -202,6 +203,7 @@ const classes={
  'catalogPosterNegativesSave@src/discovery.js':'the poster negative index epg/catalog-poster-negatives.json (not a projector input), by compare-and-swap: the route, the weekly sweep and the admission seed, which runs inside the chunk that holds the lease',
  'writeCheckpoint@src/catalog-poster-weekly.js':'the weekly poster checkpoint epg/catalog-poster-weekly.json (not a projector input), by compare-and-swap; the daily cron entry only',
  'deliver@src/catalog-poster-weekly.js':'immutable catalog_posters events under events/items/ (not a projector input) and the outbox mark; the daily cron entry only',
+ 'putTickEvent@src/catalog-enrichment-store.js':'immutable catalog_enrichment run events under events/items/ by a create-only put (not a projector input); reached only from the end-of-run and reconcile delivery of the Catalog Enrichment outbox, never from Discovery or publication (the name is shared by the call graph, the module is not)',
  'putEvent@src/letterboxd-sync.js':'immutable slot Events (ratings, watchlist) under events/items/ by a create-only put (not a projector input); reached only from the Letterboxd Sync delivery, never from Discovery or publication (the name is matched, the call graph is not)',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);

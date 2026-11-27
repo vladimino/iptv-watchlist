@@ -572,7 +572,7 @@ if(section('10')){
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!selfs.includes(full)){const text=fs.readFileSync(full,'utf8');if(/canonical-epg-person-producer|canonical-person-adapters/.test(text))importers.push(full);}}};
  walk('src');
  // AIR-374 S4-4: the dormant driver (src/canonical-producer-driver.js) composes it; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
- assert.deepEqual(importers.filter(file=>file!=='src/canonical-epg-person-producer.js').sort(),['src/canonical-producer-driver.js','src/canonical-producer-workflow.js','src/canonical-producers.js'],'the driver, Workflow and producers registry import them');
+ assert.deepEqual(importers.filter(file=>file!=='src/canonical-epg-person-producer.js').sort(),['src/canonical-producer-driver.js','src/canonical-producer-workflow.js','src/canonical-producers.js','src/catalog-enrichment-units.js'],'the driver, Workflow, producers registry and the dormant Catalog Enrichment units (AIR-605) import them');
  for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!/canonical-epg-person-producer|canonical-person-adapters/.test(fs.readFileSync(file,'utf8')),file+' does not name them');
  assert.ok(/canonical-epg-person-producer/.test(fs.readFileSync('build.mjs','utf8')),'AIR-497 bundles the EPG Person producer');
  const text=name=>fs.readFileSync(path.join(SRC,name),'utf8');

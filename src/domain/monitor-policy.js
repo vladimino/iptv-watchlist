@@ -29,6 +29,9 @@ export const THRESHOLDS = Object.freeze({
   // passes its verdict in `facts.stall` (AIR-556), so the two surfaces cannot disagree.
   switchStuckMs: 2 * HOUR,            // a mode switch that stays open
   producerNoProgressMs: 2 * HOUR,     // AIR-572: the canonical Producer has no DURABLE progress for this long after publication or its last progress
+  enrichmentRunAbandonedMs: 10 * MIN, // ADR 0219: a run whose record and lease are both older than TWICE the five-minute drainer lease TTL is abandoned (derived from the lease, not an alert gate of its own)
+  enrichmentTransportMs: 24 * HOUR,   // ADR 0211 decision 5: an upstream source with no successful answer for 24 h while work is due
+  enrichmentRepairMs: 24 * HOUR,      // a part that stays in `deferred_repair` for the cap interval of its own recheck schedule
   producerClockFreshMs: 90 * MIN,     // AIR-593: a reader trusts the Monitor's stored Producer clock for this long (hourly tick + slack); must stay below producerNoProgressMs
 });
 export const ALERT_POLICY = Object.freeze({
@@ -419,6 +422,53 @@ export function evaluateCanonicalProducer(facts, now) {
   return out('waiting', published !== null && now - published > THRESHOLDS.producerNoProgressMs ? 'lagging' : 'waiting', []);
 }
 
+// ---- Catalog Enrichment Producer (AIR-605; ADR 0211 decision 5 as amended by ADR 0219). Judged from D1 facts only (`CatalogEnrichmentStore.readMonitorFacts`): the Monitor keeps no enrichment clock. A dormant or absent
+// producer (no schema, no control row, `inactive`) is NEUTRAL and never alerts; a pause is the owner's choice and is `delayed`, not an alert. A run that is PARKED or has HANDED OVER is healthy; only a run whose record and drainer
+// lease are both stale is abandoned. Source-specific counts are kept in the facts and the messages.
+export function evaluateCatalogEnrichment(facts, now) {
+  if (!facts || facts.error || facts.readable === false) return unreadable('catalog_enrichment', 'Catalog Enrichment');
+  const out = (state, status, issues, extra = {}) => ({stream: 'catalog_enrichment', state, issues, facts: {status, ...extra}});
+  if (!facts.configured) return out('waiting', 'not_configured', [], {reason: facts.reason ?? null});
+  if (facts.control?.state === 'inactive') return out('waiting', 'not_active', []);
+  if (facts.control?.state === 'paused') return out('delayed', 'paused_by_owner', []);
+  const issues = [];
+  const typed = {due: facts.due?.films ?? 0, oldestDueSince: facts.due?.oldestDueSince ?? null, progressAt: facts.progressAt ?? null};
+  // 1. An abandoned run: its record is stale and no live drainer lease backs it. `running` and `parked` past its wake time are judged the same way.
+  const leaseLive = time(facts.leaseUntil) !== null && time(facts.leaseUntil) > now;
+  const recordAt = time(facts.run?.at);
+  const wake = time(facts.run?.wakeAt);
+  const stale = recordAt === null || now - recordAt > THRESHOLDS.enrichmentRunAbandonedMs;
+  const overdueWake = facts.run?.phase === 'parked' && wake !== null && now - wake > THRESHOLDS.enrichmentRunAbandonedMs;
+  const startedAt = time(facts.lastTick?.startedAt);
+  const tickOpen = facts.lastTick?.state === 'started' && startedAt !== null && now - startedAt > THRESHOLDS.enrichmentRunAbandonedMs;
+  if (!leaseLive && ((facts.run?.phase === 'running' && stale) || overdueWake || tickOpen)) {
+    issues.push(issue('catalog_enrichment_run_abandoned', 'degraded', 'catalog_enrichment', 'The Catalog Enrichment run ' + (facts.run?.instance || '') + ' was abandoned: no drainer lease and no movement for ' + (recordAt === null ? 'an unknown time' : hours(now - recordAt) + ' h'), {metrics: {phase: facts.run?.phase ?? null}}));
+  }
+  // 2. Due work that is not progressing: runnable Films (their retry has passed, scope enabled, not blocked) while no run committed a unit for the one existing producer no-progress window.
+  const oldest = time(facts.due?.oldestDueSince), progress = time(facts.progressAt);
+  if (typed.due > 0 && oldest !== null && now - oldest > THRESHOLDS.producerNoProgressMs && (progress === null || now - progress > THRESHOLDS.producerNoProgressMs)) {
+    issues.push(issue('catalog_enrichment_no_progress', 'degraded', 'catalog_enrichment', typed.due + ' Film(s) have due Catalog Enrichment work and no unit was committed for ' + hours(progress === null ? now - oldest : now - progress) + ' h', {metrics: {due: typed.due}}));
+  }
+  // 3. An upstream source with a transport streak for 24 h while work is due: one issue per source, so the counts are source-specific.
+  for (const [source, streak] of Object.entries(facts.transport || {})) {
+    const since = time(streak?.since);
+    if (typed.due > 0 && since !== null && now - since > THRESHOLDS.enrichmentTransportMs) {
+      issues.push(issue('catalog_enrichment_transport_' + String(source).replace(/[^a-z_]/g, '').slice(0, 20), 'degraded', 'catalog_enrichment', 'Catalog Enrichment has had no successful ' + source + ' answer for ' + hours(now - since) + ' h with work due (' + (streak.films ?? 0) + ' Film(s) waiting)', {metrics: {source, films: streak.films ?? 0}}));
+    }
+  }
+  // 4. Actionable diagnostics: a verified identity disagreement or an owner-required part waits for the owner; repairable work stuck at its cap interval is reported once with its counts.
+  const owner = (facts.attention || []).reduce((sum, row) => sum + (row.count || 0), 0);
+  if (owner > 0) {
+    const bySource = (facts.attention || []).map(row => row.status + '/' + row.source + ': ' + row.count).join(', ');
+    issues.push(issue('catalog_enrichment_attention', 'degraded', 'catalog_enrichment', owner + ' Catalog Enrichment item(s) need the owner (' + bySource + ')', {metrics: {owner}}));
+  }
+  const stuck = (facts.repair || []).filter(row => time(row.oldestAt) !== null && now - time(row.oldestAt) > THRESHOLDS.enrichmentRepairMs);
+  if (stuck.length) {
+    issues.push(issue('catalog_enrichment_repair_deferred', 'degraded', 'catalog_enrichment', 'Catalog Enrichment has repairable work deferred for over ' + hours(THRESHOLDS.enrichmentRepairMs) + ' h (' + stuck.map(row => row.source + ': ' + row.count).join(', ') + ')', {metrics: {deferred: stuck.reduce((sum, row) => sum + row.count, 0)}}));
+  }
+  return out(issues.length ? 'degraded' : (typed.due > 0 ? 'waiting' : 'healthy'), issues.length ? 'attention' : (facts.run?.phase === 'parked' ? 'parked' : 'current'), issues, {...typed, run: facts.run?.phase ?? null, owner, repair: facts.repair || [], transport: facts.transport || {}});
+}
+
 // All four streams (plus catalog posters, Letterboxd Sync and the canonical Producer when their facts are supplied) and the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
 export function evaluateAll(facts, previous, now, helpers) {
   const streams = [
@@ -429,6 +479,7 @@ export function evaluateAll(facts, previous, now, helpers) {
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
     ...(facts.letterboxd === undefined ? [] : [evaluateLetterboxd(facts.letterboxd, now)]),
     ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now)]),
+    ...(facts.catalogEnrichment === undefined ? [] : [evaluateCatalogEnrichment(facts.catalogEnrichment, now)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);
   const overall = streams.reduce((state, stream) => STATE_RANK[stream.state] > STATE_RANK[state] ? stream.state : state, 'healthy');

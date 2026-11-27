@@ -60,6 +60,11 @@
       "name": "iptv-prediction-start",
       "binding": "PREDICTION_START_WORKFLOW",
       "class_name": "PredictionStartWorkflow"
+    },
+    {
+      "name": "iptv-catalog-enrichment",
+      "binding": "CATALOG_ENRICHMENT_WORKFLOW",
+      "class_name": "CatalogEnrichmentWorkflow"
     }
   ]
 }
