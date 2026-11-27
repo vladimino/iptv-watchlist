@@ -161,11 +161,12 @@ export function slotEventPayloads(slot, {ratings, watchlist, closedAt}) {
   if (ratings?.event && typeof ratings.event === 'object') for (const key of RATINGS_CONTRACT) if (ratings.event[key] !== undefined) contract[key] = ratings.event[key];
   // AIR-694: an interrupted Ratings phase that never produced the pipeline's contract (lease lost, run no longer recognised) is frozen with an honest «unknown» contract: state, cause and the known phase,
   // and NO diary/removal groups, so no zero counter stands in for an unknown one. A contract the pipeline did build is never overwritten.
-  if (rOutcome === 'interrupted' && contract.state === undefined) Object.assign(contract, {state: 'unknown', cause: 'interrupted', diary: null, removal: null, ...(['diary', 'removal'].includes(ratings?.phase) ? {interruptedPhase: ratings.phase} : {})});
+  const interruption = ratings?.interruption || (rOutcome === 'interrupted' ? {reason: ratings?.reason, phase: ratings?.phase} : null);
+  if (interruption && contract.state === undefined) Object.assign(contract, {state: 'unknown', cause: 'interrupted', diary: null, removal: null, ...(['diary', 'removal'].includes(interruption.phase) ? {interruptedPhase: interruption.phase} : {})});
   const added = filmsOf(watchlist?.added), removed = filmsOf(watchlist?.removed);
   const addedCount = watchlist?.addedCount ?? (watchlist?.added?.length ?? 0), removedCount = watchlist?.removedCount ?? (watchlist?.removed?.length ?? 0);
   return {
-    ratings: {at: ratingsAt, payload: fitPayload({type: 'ratings', slot: slot.key, status: RATINGS_STATUS[rOutcome] || 'error', outcome: rOutcome, at: ratingsAt, ...contract, runId: contract.runId ?? slot.runId ?? null, counts: bounded(ratings?.counts ?? null), reason: ratings?.reason ? String(ratings.reason).slice(0, 60) : null})},
+    ratings: {at: ratingsAt, payload: fitPayload({type: 'ratings', slot: slot.key, status: RATINGS_STATUS[rOutcome] || 'error', outcome: rOutcome, at: ratingsAt, ...contract, runId: contract.runId ?? slot.runId ?? null, counts: bounded(ratings?.counts ?? null), reason: (ratings?.reason || interruption?.reason) ? String(ratings?.reason || interruption.reason).slice(0, 60) : null})},
     watchlist: {at: watchlistAt, payload: fitPayload({type: 'watchlist', slot: slot.key, status: WATCHLIST_STATUS[wOutcome] || 'error', outcome: wOutcome, at: watchlistAt, snapshotVersion: watchlist?.snapshotVersion ?? null, lastSuccessAt: watchlist?.lastSuccessAt ?? null, total: watchlist?.total ?? null, baseline: watchlist?.baseline === true, added, removed, addedCount, removedCount, reason: watchlist?.reason ? String(watchlist.reason).slice(0, 60) : null})}
   };
 }
@@ -680,7 +681,8 @@ export async function run(env, payload, step, hooks = {}) {
   // Phase 3. Operational only: it never changes an Event outcome and never creates a third Event.
   const reconcile = await runPhase(env, ports.reconcile, ctx, 'reconcile', ['done', 'deferred', 'error', 'skipped'], step, nameOf);
   // The AIR-361 contract is complete only when the run ended, which phase 3 does; either phase may hand it over.
-  const ratingsFinal = {...ratings, event: ratings.event || reconcile.event || null};
+  // An interruption the reconciliation phase met (its own run record, or a lost lease in the removal phase) travels beside the Ratings outcome; it never changes a finished Diary outcome and never adds a third Event.
+  const ratingsFinal = {...ratings, event: ratings.event || reconcile.event || null, ...(reconcile.interrupted && ratings.outcome !== 'interrupted' ? {interruption: reconcile.interrupted} : {})};
   const closed = await step.do(nameOf('close'), async () => {
     const adm = await admit(env, {slotKey: key, series, epoch});
     if (!adm.ok) return {closed: false, reason: adm.reason};

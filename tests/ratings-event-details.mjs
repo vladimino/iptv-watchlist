@@ -376,4 +376,25 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  text=html({incomplete:true,added:[{id:'a',title:'Фильм А',year:2001,tmdb:null,rating:4}]});assert.match(text,/список неполный/);assert.match(text,/Фильм А \(2001\)/);
  text=html({added:'x',updated:{},rated:[null,1,'s'],more:{rated:-1}});assert.doesNotMatch(text,/event-group/,'malformed details draw nothing');
 }
+// AIR-694: a step that loses its lease logs ONE bounded diagnostic line (enums and millisecond counts only) and answers `lease_lost`; a real run record shows an unknown result with null groups.
+{
+ const lines=[],{clock:fc,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket();
+ const ctx=loadContext({net,clock:fc,FakeDate,crypto,extra:{console:{log(){},warn(line){lines.push(String(line));}}}});
+ const clock=fc,env=baseEnv(bucket,{...SEPARATE}),R=g(ctx,'LetterboxdRatings');
+ migrated(bucket,{films:{}});net.diary.set(1,diaryPage([diaryRow('lost',8,'2026-11-08','v1')]));
+ const started=plain(await R.start(env,{trigger:'scheduled'}));assert.equal(started.created,true,JSON.stringify(started));
+ let jumped=0;
+ const reply=plain(await R.step(env,{runId:started.runId},{now:clock.now,clock:()=>{jumped++;return clock.now+(jumped>3?4*60000:0);}}));
+ assert.equal(reply.reason,'lease_lost');
+ const logged=lines.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(item=>item?.event==='ratings_step_lease_lost');
+ assert.equal(logged.length,1,'one diagnostic line');
+ const d=logged[0];
+ assert.deepEqual(Object.keys(d).sort(),['diaryPages','elapsedMs','event','how','leaseMs','lookups','marks','phase','runId']);
+ assert.ok(['expired','record_taken','cas_retries'].includes(d.how));assert.equal(d.leaseMs,180000);assert.ok(Number.isInteger(d.elapsedMs));
+ assert.doesNotMatch(lines.join('\n'),/https?:|letterboxd\.com|demo-user/,'no URL, row or personal data');
+ const ev=plain(R.ratingsEventOf({runId:'r',trigger:'scheduled',state:'unknown',cause:'interrupted',interruptedPhase:'diary',closedAt:at(T0),checkpoint:{diaryPagesRead:0},diary:{counts:{rows:0}},removal:null},{slotOwned:false}));
+ eq([ev.diary,ev.removal,ev.interruptedPhase],[null,null,'diary'],'unconfirmed groups are unknown, not zero');
+ const kept=plain(R.ratingsEventOf({runId:'r',trigger:'scheduled',state:'finished',finishedAt:at(T0),checkpoint:{diaryPagesRead:1},diary:{counts:{rows:0}},removal:{settled:{},lookup:{}}}));
+ eq([kept.diary.rows,kept.removal.resolved],[0,0],'a finished run keeps its real zero counts');
+}
 console.log('AIR-393 ratings event details: every group, caps, retry and delivery, checkpoint, no-change and legacy compatibility, links and unknown titles passed');
