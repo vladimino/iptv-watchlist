@@ -1714,6 +1714,8 @@ async function consistentQueueReport(pinned,report){
  return reloaded;
 }
 // AIR-536: `options.now` pins the evaluation instant (the parity read evaluates at its own cutoff); every caller that omits it keeps the wall clock.
+// AIR-673 / ADR 0217 decision 9 (M1): the ONE predicate of the three enforcement points (queue rebuild, manifest build, `submit`). Absent module (a legacy bundle) excludes nothing.
+async function lidOnlyDeferredIds(env,ids){return typeof PredictionLidOnly==='undefined'?new Set():PredictionLidOnly.readLidOnlyDeferred(env,ids);}
 async function buildPredictionQueue(env,report,trigger,previous,capture=null,options={}){
  const pinned=await queuePin(env,report);
  // AIR-529: read BEFORE the programme and catalog are used, so an assignment landing during the rebuild leaves the stored signature older than the data and costs one more refresh, never a missed one.
@@ -1737,7 +1739,10 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null,opt
  const catalogFilms=allEnrichmentFilms(membership,catalog),queueIds=new Set(catalogFilms.map(f=>String(f.id)));
  // ADR 0201: an active recovery intent names a stored id; its catalog film carries it, so the index, the intent and the manifest agree on one key.
  const recovered=recovery.ready&&typeof PredictionRecoveryIntent!=='undefined'&&typeof PredictionRecoveryIntent.readRecoveredIds==='function'?await PredictionRecoveryIntent.readRecoveredIds(env):[],storedAliases=await storedIdCatalogAliases(env,recovered.filter(id=>!queueIds.has(id))),aliasOf=new Map([...storedAliases].map(([id,key])=>[key,id]));
- const films=catalogFilms.map(film=>aliasOf.has(String(film.id))?{...film,id:aliasOf.get(String(film.id))}:film).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
+ const admittedFilms=catalogFilms.map(film=>aliasOf.has(String(film.id))?{...film,id:aliasOf.get(String(film.id))}:film).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
+ // AIR-673 / ADR 0217 decision 9 (M1): a lid-only Film with no trusted `tmdb` claim is not admitted to the queue (temporary, ends on attach). An unreadable answer fails the rebuild closed.
+ const lidDeferred=await lidOnlyDeferredIds(env,admittedFilms.map(film=>String(film.id)));
+ const films=lidDeferred.size?admittedFilms.filter(film=>!lidDeferred.has(String(film.id))):admittedFilms;
  const watchlistIds=new Set(eligibleEnrichmentFilms(membership).map(f=>String(f.id)));
  if(capture)capture.films=films;
  let priorityBasis='completed',priorityProgrammeRunId=safeSource.runId;
@@ -3001,9 +3006,12 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
  // and left to the ordinary queue.
  const take=async(chunk,recoverySlot)=>{
   const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmStateCurrent(env,id):null));
+  // AIR-673 (M1): a stale queue may still name a lid-only Film; it is never put in a manifest and costs no slot.
+  const lidDeferred=await lidOnlyDeferredIds(env,chunk);
   let added=0;const deferred=[];
   chunk.forEach((id,i)=>{
    const film=found.get(id);if(!film){skipped.missingAdmission.push(id);return;}
+   if(lidDeferred.has(id)){notEligible.push({filmId:id,reason:'lid_only_deferred'});return;}
    const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres,id)){skipped.alreadyCurrent.push(id);return;}
    if(recoverySlot&&!(state.predictions?.current&&overlay.deniesPrediction(id,state.predictions.current))){deferred.push(id);return;}
    const plan=freshness.fingerprintUsable(state.fingerprint,film.genres,id)?'prediction_only':'fingerprint_and_prediction';
@@ -3931,6 +3939,8 @@ async function batchGuardedCommit(env,ctx,work){
 async function batchSubmitItem(env,ctx,item){
  const {run,freshness,change,source,guarded}=ctx,id=String(item.filmId);
  if(!run.selectedIds.includes(id))return {result:{filmId:id,status:'not_in_manifest'}};
+ // AIR-673 (M1): the per-film guard, so a manifest or queue built before the Film became lid-only (or stale) cannot submit it. An unreadable answer is a storage error, never permission.
+ if((await lidOnlyDeferredIds(env,[id])).has(id))return {result:{filmId:id,status:'not_eligible',reason:'lid_only_deferred'}};
  item=withDerivedSource(item,source[id]);
  run.submitted||={};
  const digest=await batchItemDigest(id,item),recorded=run.submitted[id];
