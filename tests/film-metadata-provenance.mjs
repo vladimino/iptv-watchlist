@@ -380,8 +380,13 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  // lock of an unknown (legacy) value: pinned as unattributed, no invented source; a blank field cannot be locked; revert and its refusals
  const {file,env}=fresh();await seed(env);setMode(file,'enforce');
  await undeclared(env,{year:1999});
- const lock=await owner(env,[{action:'lock',field:'year'},{action:'lock',field:'runtime'}]);
- assert.deepEqual(lock.skipped,[{field:'runtime',reason:'blank_field'}],'a blank field cannot be locked');
+ const rejects=(promise,reasons)=>assert.rejects(promise,error=>error.code==='film_metadata_rejected'&&JSON.stringify(error.rejected)===JSON.stringify(reasons));
+ const command=n=>({requestId:'rej-'+n,action:'lock',digest:CMD('rej-'+n)});
+ const revBefore=await revisionOf(env);
+ await rejects(owner(env,[{action:'lock',field:'year'},{action:'lock',field:'runtime'}],{command:command(1)}),[{field:'runtime',reason:'blank_field'}]);
+ assert.equal(rows(file,'SELECT COUNT(*) c FROM film_metadata_owner_command')[0].c,0,'a rejected command commits no command record');
+ assert.equal(await revisionOf(env),revBefore,'and no revision bump');assert.equal(field(file,'year'),undefined,'and no effect on the other action of the batch');
+ await owner(env,[{action:'lock',field:'year'}]);
  const row=field(file,'year');
  assert.deepEqual([row.tier,row.source,row.origin,row.anchor_scheme,row.anchor_digest,row.agreement],['owner','unattributed','owner_route',null,null,null]);
  const h=history(file)[0];assert.deepEqual([h.reason,h.old_value_text,h.old_tier],['owner_lock','1999',null]);
@@ -403,11 +408,10 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  assert.equal(history(file).at(-1).reason,'owner_revert');void reverted;
  // an identity change refuses the revert (anchor_changed); an old value of unknown identity is refused too (identity_unknown) and the owner may set it instead
  exec(file,`UPDATE film_external_id SET value='lid-new' WHERE film_id='${ID}' AND scheme='letterboxd'`);
- const refused=await owner(env,[{action:'revert',field:'runtime',history:historyAction(set,'runtime')}],{at:T3});
- assert.deepEqual(refused.skipped,[{field:'runtime',reason:'anchor_changed'}]);
+ await rejects(owner(env,[{action:'revert',field:'runtime',history:historyAction(set,'runtime')}],{at:T3,command:command(2)}),[{field:'runtime',reason:'anchor_changed'}]);
  const unknown=history(file).find(item=>item.field==='year'&&item.old_anchor_digest===null);
- const refusedUnknown=await owner(env,[{action:'revert',field:'year',history:historyAction(unknown,'year')}],{at:T3});
- assert.deepEqual(refusedUnknown.skipped,[{field:'year',reason:'identity_unknown'}]);
+ await rejects(owner(env,[{action:'revert',field:'year',history:historyAction(unknown,'year')}],{at:T3,command:command(3)}),[{field:'year',reason:'identity_unknown'}]);
+ assert.equal(rows(file,"SELECT COUNT(*) c FROM film_metadata_owner_command WHERE request_id LIKE 'rej-%'")[0].c,0,'no rejected command was recorded');
  await owner(env,[{action:'set',field:'year',value:1999}],{at:T3});assert.equal(meta(file).year,1999,'set works where revert is refused');
  // owner authority from any other origin is refused; an invalid value is film_person_invalid
  await assert.rejects(writeFilmFacts(env,{id:ID,at:T,requestId:req(),expectedRevision:await revisionOf(env),film:{contractVersion:1},metadata:{updatedAt:T,ownerActions:[{action:'set',field:'year',value:2000}]},metadataAuthority:{authority:'owner',origin:'epg'}}),error=>error.code==='film_person_invalid');
@@ -457,7 +461,7 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  exec(file,"UPDATE film_metadata_provenance_control SET mode='enforce',revision=revision+1,updated_at='"+T+"',updated_by='t'");
  assert.equal(field(file,'year').tier,'owner');assert.equal(field(file,'runtime').agreement,'confirmed');assert.equal(meta(file).year,1999);
  // fail closed: an unreadable field table
- exec(file,'DROP TRIGGER film_metadata_field_invalidate_update;DROP TRIGGER film_metadata_field_invalidate_delete;DROP TRIGGER film_metadata_field_invalidate_move;DROP TRIGGER film_metadata_field_invalidate_insert;DROP TRIGGER film_metadata_field_protection_released;DROP TRIGGER film_metadata_field_protection_deleted;DROP TRIGGER film_metadata_field_owner_updated;DROP TRIGGER film_metadata_field_owner_deleted;DROP TRIGGER film_metadata_owner_value_locked;DROP TRIGGER film_metadata_owner_row_deleted;DROP TRIGGER film_metadata_owner_row_moved;DROP TABLE film_metadata_field');
+ exec(file,'DROP TRIGGER film_metadata_field_invalidate_update;DROP TRIGGER film_metadata_field_invalidate_delete;DROP TRIGGER film_metadata_field_invalidate_move;DROP TRIGGER film_metadata_field_invalidate_insert;DROP TRIGGER film_metadata_field_protection_released;DROP TRIGGER film_metadata_field_owner_inserted;DROP TRIGGER film_metadata_owner_row_inserted;DROP TRIGGER film_metadata_owner_row_moved_in;DROP TRIGGER film_metadata_field_owner_updated;DROP TRIGGER film_metadata_field_owner_deleted;DROP TRIGGER film_metadata_owner_value_locked;DROP TRIGGER film_metadata_owner_row_deleted;DROP TRIGGER film_metadata_owner_row_moved;DROP TABLE film_metadata_field');
  await assert.rejects(undeclared(env,{poster:'/x'}),error=>error.code==='film_person_unavailable');
 }
 
@@ -611,5 +615,125 @@ const signals=file=>rows(file,"SELECT kind,subject,part FROM enrichment_signal W
  await declare(env,all,{guards:caller(12)});
  assert.equal(meta(file).year,1999,'twelve caller guards plus the writer\'s own fences fit');
  await assert.rejects(declare(env,{year:2000},{at:T3,observedAt:T3,guards:caller(13)}),error=>error.code==='film_person_invalid','a thirteenth caller guard is still refused');
+}
+// ---- 11. review of 8c0cb0a5: merge authorization, destination protection, history binding, rejected commands, the wake ----
+{
+ const B='film:tmdb:604';
+ const pair=async()=>{const w=fresh();await seed(w.env);await seed(w.env,{id:B,tmdb:'604',lid:'lid604'});setMode(w.file,'enforce');return w;};
+ const mergeIn=async(w,extra={})=>({from:B,to:ID,expected:{from:await revisionOf(w.env,B),to:await revisionOf(w.env,ID)},at:T3,evidence:{verified:true},...extra});
+ const releases=file=>rows(file,'SELECT COUNT(*) c FROM film_metadata_owner_release')[0].c;
+ // a retired Film with NO metadata row merged into a pinned survivor leaves no release row behind, and the pin still protects
+ {
+  const w=await pair();
+  await declare(w.env,{year:1999});await owner(w.env,[{action:'lock',field:'year'}]);
+  const done=await mergeFilms(w.env,await mergeIn(w));
+  assert.equal(done.merged,true);assert.equal(releases(w.file),0,'no transient authorization stays');
+  fails(w.file,`UPDATE film_metadata SET year=1 WHERE film_id='${ID}'`,/film_metadata_owner_locked/);
+  assert.equal(field(w.file,'year').tier,'owner');
+ }
+ // an UNATTRIBUTED retired value chosen over a pinned survivor replaces the pin with the exact provenance of the choice (none)
+ {
+  const w=await pair();
+  await undeclared(w.env,{year:1998},{id:B});
+  await declare(w.env,{year:1999});await owner(w.env,[{action:'set',field:'year',value:2001}]);
+  await assert.rejects(mergeFilms(w.env,await mergeIn(w,{resolve:{metadata:'retired'}})),error=>error.code==='film_person_data_conflict');
+  const done=await mergeFilms(w.env,await mergeIn(w,{resolve:{metadataFields:{year:'retired'}}}));
+  assert.equal(done.merged,true);assert.equal(meta(w.file).year,1998);
+  assert.equal(field(w.file,'year'),undefined,'the old pin does not survive on the value it did not describe');
+  assert.equal(history(w.file).find(item=>item.reason==='merge_discarded').old_tier,'owner','the discarded pin is in history');
+  assert.equal(releases(w.file),0);
+  exec(w.file,`UPDATE film_metadata SET year=1997 WHERE film_id='${ID}'`);
+ }
+ // two pins with equal values keep the survivor's and record the retired PIN; equal values with different lineage compare the full semantic row
+ {
+  const w=await pair();
+  await declare(w.env,{year:1999,runtime:100});await declare(w.env,{year:1999,runtime:100},{id:B});
+  await owner(w.env,[{action:'lock',field:'year'}]);await owner(w.env,[{action:'lock',field:'year'}],{id:B});
+  await mergeFilms(w.env,await mergeIn(w));
+  const discarded=history(w.file).filter(item=>item.reason==='merge_discarded');
+  assert.ok(discarded.some(item=>item.field==='year'&&item.old_tier==='owner'&&item.merged_from===B),'the retired pin is recorded');
+  assert.ok(discarded.some(item=>item.field==='runtime'&&item.old_anchor_value==='lid604'),'equal values, different lineage (another anchor): the survivor row stays and the retired one is recorded');
+  assert.equal(field(w.file,'runtime').anchor_value,'lid603');
+ }
+ // the destination of a raw insert or move is protected like the origin
+ {
+  const w=fresh();await seed(w.env);await seed(w.env,{id:'film:tmdb:700',tmdb:'700',lid:null});setMode(w.file,'enforce');
+  const C='film:tmdb:700';
+  exec(w.file,`INSERT INTO film_dimension (film_id,dimension,status,source,provenance_json,authority,attempts,next_action,updated_at) VALUES ('${C}','metadata','reviewed','owner','{}','owner',0,'none','${T}')`);
+  const row=`INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES ('${C}',1,1999,NULL,NULL,NULL,NULL,'[]',NULL,'{}',NULL,NULL,'${T}')`;
+  fails(w.file,row,/film_metadata_owner_locked/);
+  const skipped=await declare(w.env,{year:1999},{id:C,source:'tmdb'}).catch(error=>error);
+  assert.ok(!(skipped instanceof Error)||skipped.code!=='film_person_unavailable','an automatic writer does not even try to create a row in a locked empty Film');
+  assert.equal(meta(w.file,C),undefined,'and nothing was created');
+  exec(w.file,`BEGIN;INSERT INTO film_metadata_owner_release (film_id) VALUES ('${C}');${row};DELETE FROM film_metadata_owner_release WHERE film_id='${C}';COMMIT;`);
+  assert.equal(meta(w.file,C).year,1999,'the release row opens the destination');
+  // a move INTO a locked empty destination
+  exec(w.file,`DELETE FROM film_metadata_owner_release;PRAGMA foreign_keys=OFF;BEGIN;INSERT INTO film_metadata_owner_release (film_id) VALUES ('${C}');DELETE FROM film_metadata WHERE film_id='${C}';DELETE FROM film_metadata_owner_release;COMMIT;`);
+  await undeclared(w.env,{year:2000});
+  fails(w.file,`PRAGMA foreign_keys=OFF;UPDATE film_metadata SET film_id='${C}' WHERE film_id='${ID}'`,/film_metadata_owner_locked/);
+  // an owner field row at the destination (no metadata row) protects it as well; INSERT OR REPLACE cannot drop a pin
+  const D='film:tmdb:701';
+  await seed(w.env,{id:D,tmdb:'701',lid:null});
+  exec(w.file,`PRAGMA foreign_keys=OFF;INSERT INTO film_metadata_field (film_id,field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,observed_at,checked_at,value_digest,write_key,written_revision,updated_at) VALUES ('${D}','year','owner','unattributed','owner_route',NULL,NULL,NULL,NULL,'${T}','${T}','${'a'.repeat(64)}','k',1,'${T}')`);
+  fails(w.file,row.replace(`'${C}'`,`'${D}'`),/film_metadata_owner_locked/);
+  fails(w.file,`INSERT OR REPLACE INTO film_metadata_field (film_id,field,tier,source,origin,anchor_scheme,anchor_value,anchor_digest,agreement,observed_at,checked_at,value_digest,write_key,written_revision,updated_at) VALUES ('${D}','year','released','unattributed','owner_route',NULL,NULL,NULL,NULL,'${T}','${T}','${'b'.repeat(64)}','k2',2,'${T}')`,/film_metadata_owner_locked/);
+ }
+ // the history a revert restores is bound to the stored row and to this Film (or one redirected into it)
+ {
+  const w=fresh();setMode(w.file,'enforce');
+  const none=async id=>mutateFilm(w.env,{id,expectedRevision:0,at:T,film:{contractVersion:1,originalTitle:'X',externalIds:[],aliases:[]}});
+  await none('film:x1');await none('film:x2');
+  const X1='film:x1',X2='film:x2';
+  await owner(w.env,[{action:'set',field:'year',value:2000}],{id:X2});await owner(w.env,[{action:'set',field:'year',value:2001}],{id:X2,at:T1});
+  await owner(w.env,[{action:'set',field:'year',value:5000>2200?2100:5}],{id:X1});
+  const foreign=history(w.file).find(item=>item.film_id===X2&&item.old_value_text==='2000');
+  assert.ok(foreign&&foreign.old_anchor_digest,'a history row of another Film with the same (empty) anchor digest');
+  const revision=await revisionOf(w.env,X1);
+  await assert.rejects(owner(w.env,[{action:'revert',field:'year',history:historyAction(foreign,'year')}],{id:X1,command:{requestId:'foreign',action:'revert',digest:CMD('f')}}),/.+/,'a foreign history row is refused');
+  assert.equal(await revisionOf(w.env,X1),revision);assert.equal(rows(w.file,"SELECT COUNT(*) c FROM film_metadata_owner_command WHERE request_id='foreign'")[0].c,0);
+  exec(w.file,`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('${X2}','${X1}','${T}')`);
+  await assert.rejects(owner(w.env,[{action:'revert',field:'year',history:{...historyAction(foreign,'year'),oldSource:'letterboxd'}}],{id:X1}),/.+/,'caller-supplied lineage that differs from the stored row is refused');
+  await owner(w.env,[{action:'revert',field:'year',history:historyAction(foreign,'year')}],{id:X1});
+  assert.equal(meta(w.file,X1).year,2000,'a row of a Film redirected into this one is accepted');
+ }
+ // an owner-authority clear is refused while nothing is enforced, like the non-null path
+ {
+  const w=fresh();await seed(w.env);
+  await assert.rejects(writeFilmFacts(w.env,{id:ID,at:T,requestId:req(),expectedRevision:await revisionOf(w.env),film:{contractVersion:1},metadata:null,metadataAuthority:{authority:'owner',origin:'owner_route'}}),error=>error.code==='film_person_precondition');
+ }
+ // the wake: an actual release kicks an idle producer; an ordinary C1 write does not; no signal while the dimension lock still protects
+ {
+  const kicks=[];
+  globalThis.CatalogEnrichmentRunner={hasRunnable:async()=>true,kick:async()=>{kicks.push(1);}};
+  try{
+   const w=fresh();await seed(w.env);setMode(w.file,'enforce');
+   // the kick is decided from the batch's SQL: the provenance statements of an ordinary C1 write (field upserts, history, the agreed touch) match nothing of the release wake; only the owner `release` and an owner clear do
+   const WAKES=/UPDATE film_metadata_field SET tier=|INTO enrichment_signal/;
+   const snapshot=await readFilmSnapshot(w.env,ID);
+   const ordinary=planFilmFacts(snapshot,{id:ID,at:T,requestId:'p',expectedRevision:snapshot.revision,film:{contractVersion:1},metadata:{updatedAt:T,year:1999,runtime:100,declared:Object.fromEntries(['year','runtime'].map(name=>[name,{source:'letterboxd',anchor:{scheme:'letterboxd',value:'lid603'},observedAt:T,agreedAnchorDigest:snapshot.provenance.anchors.digest}]))},requireExisting:true});
+   assert.equal(ordinary.statements.some(([text])=>WAKES.test(text)),false,'an ordinary provenance write does not match the release wake');
+   await declare(w.env,{year:1999,runtime:100});
+   await owner(w.env,[{action:'lock',field:'year'}]);
+   const beforeRelease=kicks.length;
+   await owner(w.env,[{action:'release',field:'year'}]);
+   assert.ok(kicks.length>beforeRelease,'an actual release kicks the idle producer');
+   assert.deepEqual(signals(w.file),[{kind:'protection_released',subject:ID,part:'core'}]);
+   const locked=fresh();await seed(locked.env);setMode(locked.file,'enforce');
+   await declare(locked.env,{year:1999});await owner(locked.env,[{action:'lock',field:'year'}]);
+   exec(locked.file,`INSERT INTO film_dimension (film_id,dimension,status,source,provenance_json,authority,attempts,next_action,updated_at) VALUES ('${ID}','metadata','reviewed','owner','{}','owner',0,'none','${T}')`);
+   const before=rows(locked.file,'SELECT COUNT(*) c FROM enrichment_signal')[0].c;
+   await owner(locked.env,[{action:'release',field:'year'}]);
+   assert.equal(rows(locked.file,'SELECT COUNT(*) c FROM enrichment_signal')[0].c,before,'a still-protected field (dimension lock) signals nothing');
+   // an owner clear of a pin signals; a merge that keeps the pin does not
+   const cleared=fresh();await seed(cleared.env);setMode(cleared.file,'enforce');
+   await undeclared(cleared.env,{year:1999});await owner(cleared.env,[{action:'lock',field:'year'}]);
+   await writeFilmFacts(cleared.env,{id:ID,at:T,requestId:req(),expectedRevision:await revisionOf(cleared.env),film:{contractVersion:1},metadata:null,metadataAuthority:{authority:'owner',origin:'owner_route'}});
+   assert.equal(signals(cleared.file).length,1,'an owner clear that removed a pin is an actual release');
+   const merged=fresh();await seed(merged.env);await seed(merged.env,{id:B,tmdb:'604',lid:'lid604'});setMode(merged.file,'enforce');
+   await undeclared(merged.env,{year:1999});await owner(merged.env,[{action:'lock',field:'year'}]);
+   await mergeFilms(merged.env,{from:B,to:ID,expected:{from:await revisionOf(merged.env,B),to:await revisionOf(merged.env,ID)},at:T3,evidence:{verified:true}});
+   assert.equal(signals(merged.file).length,0,'a merge that keeps the pin releases nothing');
+  }finally{delete globalThis.CatalogEnrichmentRunner;}
+ }
 }
 console.log('film metadata provenance (AIR-631): the sync SHA-256 and the writer digest, schema absent and off byte-identical, binding, invalidation and declaration, anchor and mode races, the comparator with convergence over every permutation, locks, triggers and owner actions, modes, clear rules and the field-wise merge, and the statement bounds: ok');

@@ -144,7 +144,9 @@ export function planMetadataProvenance(snapshot,input,at){
  const revision=(Number.isInteger(input.expectedRevision)?input.expectedRevision:snapshot.revision)+1,writeKey=String(input.requestId).slice(0,200);
  const row=snapshot.metadata,digest=prov.anchors.digest,computed=prov.anchors.computed;
  const dimLocked=!!snapshot.dimensions.metadata&&(snapshot.dimensions.metadata.status==='reviewed'||snapshot.dimensions.metadata.authority==='owner');
- const out={effective:{...meta},post:[],pre:[],changes:[],skipped:[],guards:[],counts:emptyCounts(),owner,declared:Object.keys(declared).length>0,fences:{anchor:false}};
+ const out={effective:{...meta},post:[],pre:[],changes:[],skipped:[],rejected:[],guards:[],counts:emptyCounts(),owner,declared:Object.keys(declared).length>0,fences:{anchor:false},lockedEmpty:false};
+ // ADR 0214 decision 9: an owner action the rules refuse is REJECTED (no effect, no command record, no revision), never a skipped no-op; the caller (planFilmFacts) throws film_metadata_rejected.
+ const reject=(field,reason)=>{out.rejected.push({field,reason});out.skipped.push({field,reason});};
  const history=(field,reason,old,next)=>{out.post.push(historyStatement(id,field,reason,old,next,writeKey,atIso));out.counts.history++;};
  for(const field of FIELDS)if(meta[field]!==undefined)out.effective[field]=null; // only a field that is written below is passed on
  const actions=new Map();
@@ -171,7 +173,7 @@ export function planMetadataProvenance(snapshot,input,at){
     out.post.push(ownerRow('owner','owner','owner_route',{anchorScheme:null,anchorValue:null,anchorDigest:digest,observedAt:atIso},value));
     out.changes.push('owner_set:'+field);
    }else if(action.action==='lock'){
-    if(stored===null){out.skipped.push({field,reason:'blank_field'});continue;}
+    if(stored===null){reject(field,'blank_field');continue;}
     if(current?.tier==='owner'&&stand.bound)continue;
     const keep=stand.name==='confirmed'||stand.name==='superseded'||stand.name==='unconfirmed'?stand.row:null;
     history(field,'owner_lock',old,{valueDigest:valueDigest(stored),tier:'owner',source:keep?keep.source:'unattributed',anchorDigest:keep?keep.anchor_digest:null});
@@ -187,10 +189,11 @@ export function planMetadataProvenance(snapshot,input,at){
    }else{
     const hist=action.history;
     if(!plain(hist)||!Number.isInteger(hist.id)||hist.field!==field||typeof hist.oldValueText!=='string')throw failed('film_person_invalid');
-    if(hist.oldAnchorDigest==null){out.skipped.push({field,reason:'identity_unknown'});continue;}
-    if(hist.oldAnchorDigest!==digest){out.skipped.push({field,reason:'anchor_changed'});continue;}
+    if(hist.oldAnchorDigest==null){reject(field,'identity_unknown');continue;}
+    if(hist.oldAnchorDigest!==digest){reject(field,'anchor_changed');continue;}
     const value=ownerValue(field,parse(hist.oldValueText));
-    out.guards.push({sql:'EXISTS (SELECT 1 FROM film_metadata_history WHERE id=? AND field=? AND old_anchor_digest=? AND old_value_text=?)',params:[hist.id,field,hist.oldAnchorDigest,hist.oldValueText]});
+    // the caller's history row is bound to the STORED immutable row in the batch: every lineage column it restores must equal the stored one, and the row must belong to this Film or to a Film redirected into it (one hop)
+    out.guards.push({sql:'EXISTS (SELECT 1 FROM film_metadata_history h WHERE h.id=? AND h.field=? AND h.old_value_text=? AND h.old_source IS ? AND h.old_anchor_scheme IS ? AND h.old_anchor_value IS ? AND h.old_anchor_digest IS ? AND h.old_observed_at IS ? AND (h.film_id=? OR h.film_id IN (SELECT r.from_id FROM film_redirect r WHERE r.to_film_id=?)))',params:[hist.id,field,hist.oldValueText,hist.oldSource??null,hist.oldAnchorScheme??null,hist.oldAnchorValue??null,hist.oldAnchorDigest,hist.oldObservedAt??null,id,id]});
     anchorGuard=true;
     const source=hist.oldSource||'owner',lineageOwned=source==='owner'||source==='unattributed';
     out.effective[field]=value;
@@ -254,6 +257,8 @@ export function planMetadataProvenance(snapshot,input,at){
  // fences (decision 4): a declared batch asserts the planned anchor set; an automatic declared batch also asserts no known disagreement. An owner batch asserts neither (a revert adds its own anchor assertion above).
  if(anchorGuard&&!out.guards.some(guard=>guard.anchorSet))out.guards.unshift(Object.assign(anchorSetGuard(id,computed),{anchorSet:true}));
  if(out.declared&&prov.disagreementTable)out.guards.push({sql:"NOT EXISTS (SELECT 1 FROM catalog_enrichment_state WHERE film_id=? AND part='film' AND source='*' AND status='identity_disagreement')",params:[id]});
+ // A Film that is locked (its metadata dimension, or an owner field row) and has no metadata row is protected too: an automatic writer must not even create the row (the destination trigger would abort the batch)
+ out.lockedEmpty=!owner&&!snapshot.metadata&&(dimLocked||Object.values(prov.fields).some(item=>item.tier==='owner'));
  // owner batch: the release row is the FIRST statement and is deleted LAST, so the lock triggers let this batch through and it never stays
  if(owner){out.pre.push(['INSERT OR IGNORE INTO film_metadata_owner_release (film_id) VALUES (?)',[id]]);out.post.push(['DELETE FROM film_metadata_owner_release WHERE film_id=?',[id]]);}
  return out;
@@ -279,6 +284,8 @@ export function planMetadataClear(snapshot,input,at){
  for(const item of rows){if(item.value===null)continue;pre.push(historyStatement(id,item.field,'cleared',oldOf(item.value,item.stand),null,writeKey,atIso));counts.history++;}
  // the row's own delete (the caller's statement) fires the invalidation trigger for non-owner rows; this removes whatever remains, owner rows included under the release row
  post.push(['DELETE FROM film_metadata_field WHERE film_id=?',[id]]);
+ // an owner clear that removed pins is an actual protection release: wake the core part (the delete under the release row cannot tell it from a move, so the writer says it)
+ if(owner&&!dimLocked&&rows.some(item=>item.raw&&item.raw.tier==='owner'))post.push(["INSERT INTO enrichment_signal (kind, subject, source, part, version, acked_version, state, cause_ref, armed_at, attempts) VALUES ('protection_released', ?, '', 'core', 1, 0, 'pending', 'film_metadata_clear', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 0) ON CONFLICT (kind, subject, source, part) DO UPDATE SET version = version + 1, state = 'pending', cause_ref = excluded.cause_ref, armed_at = excluded.armed_at, attempts = 0, last_error = NULL, retry_at = NULL",[id]]);
  if(owner)post.push(['DELETE FROM film_metadata_owner_release WHERE film_id=?',[id]]);
  return {pre,post,counts,owner};
 }
@@ -310,6 +317,8 @@ export async function reconcileMetadata(db,from,to,resolve,at){
  const [fromRow,toRow,fromProv,toProv,fromDim,toDim]=await Promise.all([one(db,META_SELECT,[from]),one(db,META_SELECT,[to]),readProvenance(db,from),readProvenance(db,to),one(db,"SELECT status,authority FROM film_dimension WHERE film_id=? AND dimension='metadata'",[from]),one(db,"SELECT status,authority FROM film_dimension WHERE film_id=? AND dimension='metadata'",[to])]);
  const out={pre:[],items:[],post:[],bodyFromRetired:false,discarded:[]};
  const writeKey='merge:'+from+'>'+to;
+ // a retired Film with no metadata row has nothing to merge: no release row is inserted, so none can stay behind
+ if(!fromRow)return out;
  const lockedFrom=dimLockedRow(fromDim),lockedTo=dimLockedRow(toDim);
  const pinnedRow=(prov,field)=>!!prov&&prov.fields[field]?.tier==='owner';
  const anyPin=lockedFrom||lockedTo||FIELDS.some(field=>pinnedRow(fromProv,field)||pinnedRow(toProv,field));
@@ -317,8 +326,10 @@ export async function reconcileMetadata(db,from,to,resolve,at){
  const releaseDone=()=>{if(anyPin){out.post.push(['DELETE FROM film_metadata_owner_release WHERE film_id=?',[from]]);out.post.push(['DELETE FROM film_metadata_owner_release WHERE film_id=?',[to]]);}};
  // the retired Film's field rows under the survivor's id (a moved row); the trigger of the row move removes the non-owner ones first, so every row is written explicitly after it
  const moved=(field,row)=>[FIELD_UPSERT,[to,field,row.tier,row.source,row.origin,row.anchor_scheme,row.anchor_value,row.anchor_digest,row.agreement,row.observed_at,row.checked_at,row.value_digest,row.written_revision?row.write_key:writeKey,row.written_revision,row.updated_at]];
- const discard=(film,prov,dim,field,value,stand)=>{const old=oldOf(value,stand);out.items.push(historyStatement(to,field,'merge_discarded',old,null,writeKey,atIso,from));out.discarded.push('metadata:'+field+':'+(film===from?'retired':'survivor'));};
- if(!fromRow){return out;}
+ // The row that describes a value: a pin always, an automatic row only while it is bound to its value. Anything else is `unknown` (no row).
+ const effective=(raw,stand)=>raw&&(raw.tier==='owner'||stand.bound)?raw:null;
+ const semantic=row=>row?JSON.stringify([row.tier,row.source,row.anchor_scheme,row.anchor_value,row.anchor_digest,row.agreement,row.observed_at,row.value_digest]):null;
+ const discard=(film,prov,dim,field,value,stand)=>{const row=effective(prov?.fields[field],stand);const old=oldOf(value,{row,bound:!!row});out.items.push(historyStatement(to,field,'merge_discarded',old,null,writeKey,atIso,from));out.discarded.push('metadata:'+field+':'+(film===from?'retired':'survivor'));};
  if(!toRow){
   // the survivor holds no metadata row: the retired row moves whole, with its field rows
   out.items.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);
@@ -336,18 +347,19 @@ export async function reconcileMetadata(db,from,to,resolve,at){
   const fromValue=storedValue(fromRow,field),toValue=storedValue(toRow,field);
   const fromStand=standing(fromProv?.fields[field],fromValue,fromProv?.anchors.digest,lockedFrom),toStand=standing(toProv?.fields[field],toValue,toProv?.anchors.digest,lockedTo);
   const fromPinned=fromValue!==null&&(lockedFrom||pinnedRow(fromProv,field)),toPinned=toValue!==null&&(lockedTo||pinnedRow(toProv,field));
-  const retiredRow=()=>fromProv?.fields[field]&&fromStand.bound||fromProv?.fields[field]?.tier==='owner'?fromProv.fields[field]:null;
-  const takeRetired=()=>{if(fromValue!==null){sets.push(COLUMN_OF[field]+'=?');params.push(field==='genres'?valueText(fromValue):fromValue);}const row=retiredRow();if(row)out.items.push(moved(field,row));out.bodyFromRetired=true;};
+  const retiredRow=()=>effective(fromProv?.fields[field],fromStand);
+  // the chosen value's exact provenance (absence included) replaces whatever the survivor held for the field: an unknown retired value leaves NO row, so a survivor pin is deleted with the value it described
+  const takeRetired=()=>{if(fromValue!==null){sets.push(COLUMN_OF[field]+'=?');params.push(field==='genres'?valueText(fromValue):fromValue);}const row=retiredRow();if(row)out.items.push(moved(field,row));else out.items.push(['DELETE FROM film_metadata_field WHERE film_id=? AND field=?',[to,field]]);out.bodyFromRetired=true;};
   if(fromValue===null)continue;
   if(toValue===null){takeRetired();continue;}
   if(same(fromValue,toValue)){
    // equal values: the pin is preserved by default; with two pins the survivor's is kept
    const fromRank=rankOf(fromStand.rank,fromStand.row?.source,fromStand.row?.observed_at,fromStand.row?.value_digest),toRank=rankOf(toStand.rank,toStand.row?.source,toStand.row?.observed_at,toStand.row?.value_digest);
-   const rowsEqual=compare(fromRank,toRank)===0&&(fromStand.row?.tier??null)===(toStand.row?.tier??null);
+   const rowsEqual=semantic(retiredRow())===semantic(effective(toProv?.fields[field],toStand));
    if(rowsEqual)continue;
    const retiredWins=toPinned?false:fromPinned?true:compare(fromRank,toRank)>0;
-   if(retiredWins){if(toStand.row&&toStand.bound)discard(to,toProv,toDim,field,toValue,toStand);const row=retiredRow();if(row)out.items.push(moved(field,row));else out.items.push(['DELETE FROM film_metadata_field WHERE film_id=? AND field=?',[to,field]]);}
-   else if(fromStand.row&&fromStand.bound)discard(from,fromProv,fromDim,field,fromValue,fromStand);
+   if(retiredWins){if(effective(toProv?.fields[field],toStand))discard(to,toProv,toDim,field,toValue,toStand);const row=retiredRow();if(row)out.items.push(moved(field,row));else out.items.push(['DELETE FROM film_metadata_field WHERE film_id=? AND field=?',[to,field]]);}
+   else if(retiredRow())discard(from,fromProv,fromDim,field,fromValue,fromStand);
    continue;
   }
   // different values

@@ -235,6 +235,7 @@ export function planFilmFacts(snapshot,input){
  const prov=snapshot.provenance,active=!!prov&&prov.mode!=='off';
  const guards=[];let counts=null,ownerBatch=false,ownerChanged=false;
  if(input.metadata!==undefined&&input.metadata!==null&&!active&&(input.metadata.ownerActions!==undefined||input.metadataAuthority!==undefined))throw failed('film_person_precondition');
+ if(input.metadata===null&&!active&&input.metadataAuthority!==undefined)throw failed('film_person_precondition');
  if(input.metadata===null){
   if(active){
    const clear=planMetadataClear(snapshot,input,at);
@@ -250,11 +251,12 @@ export function planFilmFacts(snapshot,input){
  }else if(input.metadata!==undefined){
   if(!plain(input.metadata)||typeof input.metadata.updatedAt!=='string'||!input.metadata.updatedAt)throw failed('film_person_invalid');
   const decided=active?planMetadataProvenance(snapshot,input,at):null;
+  if(decided&&decided.rejected.length){const refusal=failed('film_metadata_rejected');refusal.rejected=decided.rejected;throw refusal;}
   const merged=mergeMetadata(snapshot.metadata,decided?decided.effective:input.metadata),params=metadataParams(id,merged),row=snapshot.metadata;
   const same=!!row&&['schema_version','year','runtime','synopsis','poster','url','genres_json','people_version','payload_json','r2_key','content_sha256'].every((name,index)=>(row[name]??null)===(params[index+1]??null));
-  if(!same)changes.push('metadata');
+  if(!same&&!(decided&&decided.lockedEmpty))changes.push('metadata');
   if(decided){statements.push(...decided.pre);}
-  statements.push([METADATA_UPSERT,params]);
+  if(!(decided&&decided.lockedEmpty))statements.push([METADATA_UPSERT,params]);
   if(decided){
    statements.push(...decided.post);changes.push(...decided.changes);skipped.push(...decided.skipped);guards.push(...decided.guards);counts=decided.counts;ownerBatch=decided.owner;ownerChanged=decided.changes.length>0;
   }

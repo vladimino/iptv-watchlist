@@ -9,8 +9,8 @@
 --  - LOCKS (gated by the control mode, so they do nothing at `off`): once the mode is `enforce` or `hold`, a changed pinned column, a delete or a move of a pinned Film's row, and an update or delete of an owner field row abort with `film_metadata_owner_locked`
 --    unless the release row of that Film exists. The metadata dimension lock (status `reviewed` or authority `owner`) protects every field the same way. A statement that changes none of the six value columns is never refused by the value lock.
 --  - IMMUTABILITY: history and command rows refuse UPDATE and DELETE; the control row refuses DELETE, a return to `off`, an illegal transition and an update that does not raise `revision`.
---  - PROTECTION RELEASED (guarded, inbox only): an owner pin that becomes unprotected, or is deleted under a release row, writes the coalesced `protection_released` signal of part `core` into `enrichment_signal` (ADR 0219 decision 8). The release row is a transient
---    authorization, not a protection state, so it signals nothing; C1 never writes a pin, so C1 never wakes itself.
+--  - PROTECTION RELEASED (guarded, inbox only): an owner pin that becomes unprotected (and is not still protected by the metadata dimension lock) writes the coalesced `protection_released` signal of part `core` into `enrichment_signal` (ADR 0219 decision 8). The release row is a transient
+--    authorization, not a protection state, so it signals nothing; a pin that is only moved or kept signals nothing; C1 never writes a pin, so C1 never wakes itself.
 -- DORMANT: the file is in the repository and is NOT applied to any database by a deploy. Applying it is card PVM, a separate production GO. At mode `off` the writer writes no provenance, the lock triggers do nothing, and the invalidation triggers delete nothing (no row exists).
 -- It follows a complete version 48 (which follows the Catalog Enrichment schema of 47, whose inbox the signal triggers write; written as 0048 and renumbered to 0049 at merge because AIR-672's 0048 landed first) and refuses anything else before an object is created: the first statement inserts a row that CHECK (id = 1) forbids and so aborts the file.
 -- If another change takes number 49 first, this file is renumbered at merge. Identifiers only; no LIKE or GLOB pattern beyond the 64-hex digest checks and a short name prefix in the refusal guard (D1 limits pattern length, see 0021; tests/migration-pattern-limit.mjs scans this file).
@@ -204,6 +204,37 @@ WHEN NEW.film_id IS NOT OLD.film_id
 BEGIN
  SELECT RAISE(ABORT, 'film_metadata_owner_locked');
 END;
+-- The DESTINATION is protected like the origin (review of 8c0cb0a5): a raw insert of a NEW row (an upsert that takes DO UPDATE is an update, which the value trigger judges) into a Film whose metadata dimension is locked, or that still holds an owner field row, and a move of a row INTO such a Film, abort unless the destination has its release row.
+-- A locked Film with no metadata row is protected by the approved rule, so these cover the empty destination too.
+CREATE TRIGGER film_metadata_owner_row_inserted BEFORE INSERT ON film_metadata
+WHEN EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id = 1 AND mode IN ('enforce', 'hold'))
+ AND NOT EXISTS (SELECT 1 FROM film_metadata m WHERE m.film_id = NEW.film_id)
+ AND NOT EXISTS (SELECT 1 FROM film_metadata_owner_release WHERE film_id = NEW.film_id)
+ AND (
+  EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id = NEW.film_id AND d.dimension = 'metadata' AND (d.status = 'reviewed' OR COALESCE(d.authority, '') = 'owner'))
+  OR EXISTS (SELECT 1 FROM film_metadata_field f WHERE f.film_id = NEW.film_id AND f.tier = 'owner')
+ )
+BEGIN
+ SELECT RAISE(ABORT, 'film_metadata_owner_locked');
+END;
+CREATE TRIGGER film_metadata_owner_row_moved_in BEFORE UPDATE OF film_id ON film_metadata
+WHEN NEW.film_id IS NOT OLD.film_id
+ AND EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id = 1 AND mode IN ('enforce', 'hold'))
+ AND NOT EXISTS (SELECT 1 FROM film_metadata_owner_release WHERE film_id = NEW.film_id)
+ AND (
+  EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id = NEW.film_id AND d.dimension = 'metadata' AND (d.status = 'reviewed' OR COALESCE(d.authority, '') = 'owner'))
+  OR EXISTS (SELECT 1 FROM film_metadata_field f WHERE f.film_id = NEW.film_id AND f.tier = 'owner')
+ )
+BEGIN
+ SELECT RAISE(ABORT, 'film_metadata_owner_locked');
+END;
+-- An insert (also INSERT OR REPLACE, which would remove the row without firing the delete trigger) over an existing owner field row aborts unless the Film has its release row.
+CREATE TRIGGER film_metadata_field_owner_inserted BEFORE INSERT ON film_metadata_field
+WHEN EXISTS (SELECT 1 FROM film_metadata_field f WHERE f.film_id = NEW.film_id AND f.field = NEW.field AND f.tier = 'owner')
+ AND NOT EXISTS (SELECT 1 FROM film_metadata_owner_release WHERE film_id = NEW.film_id)
+BEGIN
+ SELECT RAISE(ABORT, 'film_metadata_owner_locked');
+END;
 -- A pin cannot be overwritten, deleted or moved away. Not gated: an owner field row exists only after activation.
 CREATE TRIGGER film_metadata_field_owner_updated BEFORE UPDATE ON film_metadata_field
 WHEN OLD.tier = 'owner' AND NOT EXISTS (SELECT 1 FROM film_metadata_owner_release WHERE film_id = OLD.film_id)
@@ -216,19 +247,14 @@ BEGIN
  SELECT RAISE(ABORT, 'film_metadata_owner_locked');
 END;
 
--- PROTECTION RELEASED (ADR 0219 decision 8): only a change from protected to unprotected (a pin released or deleted under a release row) wakes the `core` part. Inbox only; the same coalescing upsert as the identity emitters of 0047.
+-- PROTECTION RELEASED (ADR 0219 decision 8): only an ACTUAL release wakes the `core` part: an owner pin that becomes unprotected while the Film's metadata dimension lock does not still protect it. Inbox only; the same coalescing upsert as the identity emitters of 0047.
+-- A pin that is merely moved or rewritten under a release row stays a pin and signals nothing; an owner-authority clear signals through its own statement (the writer), because a delete under the release row cannot tell a release from a move.
 CREATE TRIGGER film_metadata_field_protection_released AFTER UPDATE ON film_metadata_field
 WHEN OLD.tier = 'owner' AND NEW.tier <> 'owner'
+ AND NOT EXISTS (SELECT 1 FROM film_dimension d WHERE d.film_id = NEW.film_id AND d.dimension = 'metadata' AND (d.status = 'reviewed' OR COALESCE(d.authority, '') = 'owner'))
 BEGIN
  INSERT INTO enrichment_signal (kind, subject, source, part, version, acked_version, state, cause_ref, armed_at, attempts)
  VALUES ('protection_released', NEW.film_id, '', 'core', 1, 0, 'pending', 'film_metadata_field', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 0)
- ON CONFLICT (kind, subject, source, part) DO UPDATE SET version = version + 1, state = 'pending', cause_ref = excluded.cause_ref, armed_at = excluded.armed_at, attempts = 0, last_error = NULL, retry_at = NULL;
-END;
-CREATE TRIGGER film_metadata_field_protection_deleted AFTER DELETE ON film_metadata_field
-WHEN OLD.tier = 'owner'
-BEGIN
- INSERT INTO enrichment_signal (kind, subject, source, part, version, acked_version, state, cause_ref, armed_at, attempts)
- VALUES ('protection_released', OLD.film_id, '', 'core', 1, 0, 'pending', 'film_metadata_field', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 0)
  ON CONFLICT (kind, subject, source, part) DO UPDATE SET version = version + 1, state = 'pending', cause_ref = excluded.cause_ref, armed_at = excluded.armed_at, attempts = 0, last_error = NULL, retry_at = NULL;
 END;
 

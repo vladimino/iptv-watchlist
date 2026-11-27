@@ -64,7 +64,8 @@ async function current(db,kind,id){return Number((await one(db,'SELECT revision 
 // error says whether the authority moved, an entity moved, or the data itself refused (a trusted id, an ordinal, a missing person).
 // ADR 0219 causal wake. After a commit that touched a table whose triggers write the Catalog Enrichment inbox, make idle runnable work start without waiting for the cron.
 // Best effort, AFTER the commit (never inside the batch, no network in a transaction): a lost wake is recovered by reconcile, and while the producer is dormant (not bundled, schema absent, control not active) it is a no-op.
-const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission|film_rated_admission/i;
+// AIR-631: an ACTUAL protection release (the owner `release` statement and the owner clear's own signal) wakes too; an ordinary provenance upsert matches neither.
+const ENRICHMENT_CAUSAL=/film_external_id|film_dimension|film_redirect|tmdb_retirement_decision|letterboxd_admission|film_rated_admission|UPDATE\s+film_metadata_field\s+SET\s+tier=|INTO\s+enrichment_signal/i;
 async function wakeEnrichment(env,statements){
  if(typeof CatalogEnrichmentRunner==='undefined')return;
  if(!statements.some(([sql])=>ENRICHMENT_CAUSAL.test(sql)))return;

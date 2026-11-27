@@ -30,8 +30,8 @@ const sortedEq=(actual,expected,message)=>assert.deepEqual([...actual].sort(),[.
 // ---- 1. The classification table ----
 {
  const byClass=cls=>Object.entries(R.ERROR_CLASSES).filter(([,value])=>value===cls).map(([code])=>code);
- sortedEq(byClass(CLASS.UNIT),['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history','film_person_metadata_locked','localization_owner_moved','localization_inputs_moved'],'unit-specific');
- sortedEq(byClass(CLASS.PERMANENT),['film_person_invalid','film_person_bounded','dictionary_source_ambiguous','localization_replay_mismatch','localization_invalid'],'permanent');
+ sortedEq(byClass(CLASS.UNIT),['film_metadata_locked','film_metadata_attributed','film_metadata_hold','film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history','film_person_metadata_locked','localization_owner_moved','localization_inputs_moved'],'unit-specific');
+ sortedEq(byClass(CLASS.PERMANENT),['film_person_invalid','film_person_bounded','dictionary_source_ambiguous','localization_replay_mismatch','localization_invalid','film_metadata_rejected'],'permanent');
  sortedEq(byClass(CLASS.RECOVERABLE),['no_identity_row','needs_trusted_tmdb_id','film_person_reference','film_person_redirect','dictionary_identity_ambiguous','owner_review_inconsistent'],'recoverable');
  sortedEq(byClass(CLASS.KEPT),['owner_kept','reviewed_kept','unranked_kept','identity_mismatch','snapshot_already_applied','absent','credits_absent_from_source'],'kept');
  sortedEq(byClass(CLASS.UNCLASSIFIED),['unclassified'],'unclassified');
