@@ -150,19 +150,20 @@ function node(attrs = {}) {
     set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html; }};
   return n;
 }
-function mount() {
-  const section = node(), body = node(), result = node(), reading = node(), pendingBox = node();
+function mount(id = 'film:1', label = 'Фильм') {
+  const section = node({'data-film-label': label}), body = node(), result = node(), reading = node(), pendingBox = node();
   section.children = {'[data-meta-body]': body, '[data-meta-result]': result, '[data-meta-reading]': reading, '[data-meta-pending]': pendingBox};
   const inputs = {};
   body.querySelector = sel => { const m = /data-meta-input="(\w+)"/.exec(sel); return m ? (inputs[m[1]] ||= node()) : null; };
-  api.adminBindFilmMetadata({querySelector: sel => sel === '[data-film-metadata]' ? section : null}, 'film:1');
+  api.adminBindFilmMetadata({querySelector: sel => sel === '[data-film-metadata]' ? section : null}, id);
   const press = attrs => section.listeners.click({target: node(attrs)});
   return {section, body, result, reading, pendingBox, inputs, press, open: () => { section.open = true; return section.listeners.toggle(); }};
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const settle = async () => { for (let i = 0; i < 6; i++) await tick(); };
 const posts = () => calls.filter(c => c.init && c.init.method === 'POST').map(c => JSON.parse(c.init.body));
-const reset = () => { calls.length = 0; context.eval && 0; vm.runInContext('adminMetaPending = null;', context); };
+const reset = () => { calls.length = 0; vm.runInContext('adminMetaPending = null; adminMetaFlight = null; adminMetaLive = null;', context); };
+const shared = () => J(vm.runInContext('({pending: adminMetaPending, flight: adminMetaFlight})', context));
 const gate = () => { let go; const promise = new Promise(resolve => { go = resolve; }); return {promise, go}; };
 const SET = {'data-meta-action': 'set', 'data-field': 'year'};
 
@@ -408,5 +409,120 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   const refresh = await sentBody({'data-meta-action': 'refresh'});
   assert.deepEqual(Object.keys(refresh).sort(), ['action', 'expectedRevision', 'expectedRows', 'requestId']);
   assert.equal(refresh.expectedRows[0].refreshEpoch, 2);
+}
+// NAVIGATION between two Films: an unknown command of A survives opening B; B cannot replace or erase it; A shows it again with an identical retry
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount('film:1', 'Матрица');
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '1999';
+  script = [new Error('offline')];
+  await a.press(SET); await settle();
+  const heldBody = JSON.stringify(posts()[0]);
+  assert.equal(shared().pending.storedId, 'film:1');
+  // the page opens Film B (the detail DOM is replaced): B reads, and its writes are blocked with an explanation that names Film A
+  script = [{status: 200, body: view({filmId: 'film:2'})}];
+  const b = mount('film:2', 'Другой фильм');
+  await b.open(); await settle();
+  assert.match(b.pendingBox.innerHTML, /data-meta-pending-elsewhere/);
+  assert.match(b.pendingBox.innerHTML, /Матрица/);
+  assert.match(b.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
+  assert.match(b.body.innerHTML, /ждёт в другом фильме/);
+  const before = calls.length;
+  b.inputs.year = node(); b.inputs.year.value = '2005';
+  await b.press(SET); await b.press({'data-meta-action': 'lock', 'data-field': 'year'}); await b.press({'data-meta-retry': ''}); await b.press({'data-meta-discard': ''}); await settle();
+  assert.equal(calls.length, before, 'B sends nothing and can neither retry nor discard the command of A');
+  assert.equal(JSON.stringify(shared().pending.command), JSON.stringify(JSON.parse(heldBody)), 'the held command of A is untouched');
+  // back to A: the command is shown again and retried with the identical body
+  script = [{status: 200, body: view()}];
+  const a2 = mount('film:1', 'Матрица'); await settle();
+  assert.match(a2.pendingBox.innerHTML, /Год = 1999/);
+  script = [{status: 200, body: {ok: true, outcome: 'already_applied', action: 'set'}}, {status: 200, body: view({revision: 8})}];
+  await a2.press({'data-meta-retry': ''}); await settle();
+  assert.equal(posts().length, 2);
+  assert.equal(JSON.stringify(posts()[1]), heldBody, 'the retry body is the identical command');
+  assert.equal(shared().pending, null);
+  assert.equal(shared().flight, null);
+}
+// a remount while the POST is still in flight: the new view cannot send, the old reply settles only its own attempt, and the visible view reads again before it is writable
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount();
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '2001';
+  const pg = gate();
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}, gate: pg.promise}, {status: 200, body: view()}, {status: 200, body: view({revision: 8})}];
+  const first = a.press(SET); await settle();
+  assert.equal(shared().flight.requestId, posts()[0].requestId);
+  const a2 = mount(); await settle();
+  assert.match(a2.body.innerHTML, /data-meta-action="set" data-field="year" disabled/, 'the new view is read-only while the old chain runs');
+  assert.match(a2.body.innerHTML, /Идёт отправка команды|Команда с неизвестным исходом/);
+  a2.inputs.year = node(); a2.inputs.year.value = '2002';
+  await a2.press(SET); await a2.press({'data-meta-retry': ''}); await a2.press({'data-meta-discard': ''}); await settle();
+  assert.equal(posts().length, 1, 'a remount does not unlock a still-running chain');
+  pg.go(); await first; await settle();
+  assert.equal(shared().pending, null); assert.equal(shared().flight, null);
+  assert.equal(calls.filter(c => !c.init.method).length, 3, 'the live view read again after the old command settled');
+  assert.doesNotMatch(a2.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}}, {status: 200, body: view({revision: 9})}];
+  await a2.press(SET); await settle();
+  assert.equal(posts()[1].expectedRevision, 8, 'planned on the revision read after the first command settled');
+}
+// the old command settles while the NEW view is still reading: what it read may predate the commit, so it reads once more and is writable only on the later revision
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount();
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '2001';
+  const pg = gate(), rg = gate();
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}, gate: pg.promise}, {status: 200, body: view(), gate: rg.promise}, {status: 200, body: view({revision: 8})}];
+  const first = a.press(SET); await settle();
+  const a2 = mount(); await settle(); // the held command opens it and its read is pending (gated, revision 7)
+  pg.go(); await first; await settle();
+  assert.equal(shared().flight, null);
+  assert.match(a2.body.innerHTML === '' ? 'disabled' : a2.body.innerHTML, /disabled/, 'nothing is writable while its early read is pending');
+  rg.go(); await settle(); await settle();
+  assert.equal(calls.filter(c => !c.init.method).length, 3, 'the early read was followed by one more');
+  assert.doesNotMatch(a2.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}}, {status: 200, body: view({revision: 9})}];
+  a2.inputs.year = node(); a2.inputs.year.value = '2002';
+  await a2.press(SET); await settle();
+  assert.equal(posts()[1].expectedRevision, 8, 'planned on the later revision, never on the one read before the commit');
+}
+// a remount while the READBACK is in flight: the old reply is dropped, the live view reads once more, and nothing is writable until then
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount();
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '2001';
+  const rg = gate();
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}}, {status: 200, body: view({revision: 8}), gate: rg.promise}, {status: 200, body: view({revision: 8})}, {status: 200, body: view({revision: 8})}];
+  const first = a.press(SET); await settle();
+  const a2 = mount(); await a2.open(); await settle(); // nothing is held, so the new detail is collapsed until it is opened
+  assert.match(a2.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
+  assert.notEqual(shared().flight, null, 'the flight lasts until the readback ends');
+  rg.go(); await first; await settle();
+  assert.equal(shared().flight, null);
+  assert.equal(calls.filter(c => !c.init.method).length, 4);
+  assert.doesNotMatch(a2.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
+}
+// a late unknown reply of an old view keeps its command as the held one, for the right Film
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount('film:1', 'Матрица');
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '2001';
+  const pg = gate();
+  script = [{status: 503, body: {error: 'storage_unavailable', outcome: 'unknown'}, gate: pg.promise}, {status: 200, body: view({filmId: 'film:2'})}];
+  const first = a.press(SET); await settle();
+  const b = mount('film:2', 'Другой'); await b.open(); await settle();
+  b.inputs.year = node(); b.inputs.year.value = '1980';
+  await b.press(SET); await settle();
+  assert.equal(posts().length, 1, 'B cannot start a command while A is in flight');
+  pg.go(); await first; await settle();
+  assert.equal(shared().pending.storedId, 'film:1', 'the late unknown reply keeps A\'s command held');
+  assert.equal(shared().flight, null);
+  assert.match(b.pendingBox.innerHTML, /data-meta-pending-elsewhere/);
+  assert.match(b.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
 }
 console.log('Admin film metadata page: provenance view, pin vs dimension lock, frozen unknown command, serialized readback, pagination coherence and write shapes passed');

@@ -19,6 +19,8 @@ const ADMIN_META_REFUSAL_TEXT = {
   stale_revision: 'Карточка изменилась с момента чтения. Команда не выполнена. Данные перечитываются, повторите действие.',
   stale_rows: 'Состояние источников изменилось с момента чтения. Команда не выполнена. Данные перечитываются, повторите действие.',
   pending: 'Есть команда с неизвестным исходом: повторите её или откажитесь от повтора выше. Другие действия отключены.',
+  pending_other: 'Команда с неизвестным исходом ждёт в другом фильме. Откройте его в каталоге, чтобы повторить её или отказаться от повтора. Здесь действия отключены, чтобы не потерять её.',
+  flight: 'Идёт отправка команды. Действия отключены, пока она и перечитывание не завершатся.',
   stale_view: 'Данные устарели или читаются заново. Действия отключены, пока чтение не завершится успешно.',
   request_mismatch: 'Этот requestId уже использован для другой команды. Нажмите действие ещё раз, получится новая команда.',
   redirected: 'Фильм объединён с другим. Откройте целевой фильм.',
@@ -39,7 +41,14 @@ const ADMIN_META_REFUSAL_TEXT = {
 };
 // the writer's own bounds (ownerValue in src/film-metadata-provenance.js); the server stays the judge, the page only does not forbid a value the writer accepts
 const ADMIN_META_MAXLENGTH = {year: 5, runtime: 5, synopsis: 20000, poster: 2000, url: 2000};
+// Shared by EVERY mounted Film, because the page replaces the detail's DOM on navigation:
+//  adminMetaPending  {storedId, label, command}: the one command whose outcome is unknown
+//  adminMetaFlight   {storedId, requestId}: the one command (POST and its readback) in flight
+//  adminMetaLive     the binding of the Film now on screen; an older binding is `dead` and only settles the shared state
+// Writes are serialized across Films; a settlement touches the shared state only when its own `requestId` is the one stored.
 let adminMetaPending = null;
+let adminMetaFlight = null;
+let adminMetaLive = null;
 const adminMetaText = value => String(value === null || value === undefined ? '' : value);
 const adminMetaEsc = value => adminMetaText(value).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 
@@ -69,7 +78,10 @@ function adminMetaWritable(view, options) {
   if (!view || view.redirectedTo) return {ok: false, reason: 'redirected'};
   if (view.schemaAbsent) return {ok: false, reason: 'schema_absent'};
   if (view.mode === 'off') return {ok: false, reason: 'provenance_off'};
+  // a command in flight is not an unknown outcome yet: it is said first
+  if (options && options.flight) return {ok: false, reason: 'flight'};
   if (options && options.pending) return {ok: false, reason: 'pending'};
+  if (options && options.pendingElsewhere) return {ok: false, reason: 'pending_other'};
   if (options && options.stale) return {ok: false, reason: 'stale_view'};
   return {ok: true, reason: null};
 }
@@ -143,8 +155,10 @@ function adminMetaDescribe(command) {
   if (command.action === 'refresh') parts.push('(источники: ' + (command.expectedRows || []).map(row => row.source).join(', ') + ')');
   return parts.join(' ');
 }
-function adminMetaPendingHtml(pending) {
+// `elsewhere`: the held command belongs to another Film; it can be retried or given up only there
+function adminMetaPendingHtml(pending, elsewhere) {
   if (!pending) return '';
+  if (elsewhere) return `<div class="admin-meta-pending" data-meta-pending-elsewhere><p><strong>Команда с неизвестным исходом ждёт в другом фильме:</strong> ${adminMetaEsc(pending.label || pending.storedId)}. ${adminMetaEsc(adminMetaDescribe(pending.command))}.</p><p class="muted">${adminMetaEsc(ADMIN_META_REFUSAL_TEXT.pending_other)}</p></div>`;
   return `<div class="admin-meta-pending" data-meta-pending-box><p><strong>Команда с неизвестным исходом.</strong> ${adminMetaEsc(adminMetaDescribe(pending.command))}. requestId: <code>${adminMetaEsc(pending.command.requestId)}</code>.</p>`
     + '<p class="muted">Неизвестно, записана ли она. «Повторить» отправит ровно эту же команду, а сохранённая запись решит, выполнена ли она уже. Другие действия отключены. Отказ от повтора не означает, что команда не записалась: после него проверьте значение и журнал.</p>'
     + '<div class="admin-meta-controls"><button type="button" data-meta-retry>Повторить ту же команду</button><button type="button" data-meta-discard>Отказаться от повтора</button></div></div>';
@@ -247,21 +261,26 @@ function adminBindFilmMetadata(host, storedId) {
   const result = section.querySelector('[data-meta-result]');
   const reading = section.querySelector('[data-meta-reading]');
   const pendingBox = section.querySelector('[data-meta-pending]');
-  const state = {view: null, stale: true, loaded: false, busy: false, seq: 0, readFailed: false};
-  const held = () => (adminMetaPending && adminMetaPending.storedId === storedId ? adminMetaPending : null);
-  const say = text => { result.textContent = text; };
+  const label = section.getAttribute && section.getAttribute('data-film-label') || storedId;
+  const state = {view: null, stale: true, loaded: false, busy: false, seq: 0, readFailed: false, dead: false};
+  const mine = () => (adminMetaPending && adminMetaPending.storedId === storedId ? adminMetaPending : null);
+  const elsewhere = () => (adminMetaPending && adminMetaPending.storedId !== storedId ? adminMetaPending : null);
+  // a command of ANY Film in flight blocks this view's writes too
+  const flying = () => !!adminMetaFlight;
+  const say = text => { if (!state.dead) result.textContent = text; };
   const render = () => {
-    if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!held()});
-    pendingBox.innerHTML = adminMetaPendingHtml(held());
+    if (state.dead) return;
+    if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!mine(), pendingElsewhere: !!elsewhere(), flight: flying()});
+    pendingBox.innerHTML = flying() ? '<p class="muted" data-meta-flight>Идёт отправка команды…</p>' : (mine() ? adminMetaPendingHtml(mine()) : (elsewhere() ? adminMetaPendingHtml(elsewhere(), true) : ''));
     reading.innerHTML = state.readFailed ? '<span>Не удалось прочитать метаданные. Действия отключены.</span> <button type="button" data-meta-reload>Повторить чтение</button>' : (state.busy && !state.loaded ? '<span>Читаю метаданные…</span>' : '');
   };
   // one read of the first page, or of the page after `cursor`; resolves true only when the answer was applied
   const load = async cursor => {
-    const mine = ++state.seq;
+    const token = ++state.seq;
     state.stale = true; state.readFailed = false;
     render();
     const response = await adminReadFilmMetadata(storedId, cursor);
-    if (mine !== state.seq) return false; // an answer that is not the latest read is dropped
+    if (state.dead || token !== state.seq) return false; // an answer that is not the latest read, or from a view that left the screen, is dropped
     if (!response.ok) { state.readFailed = true; state.stale = true; if (response.status === 404) reading.textContent = 'Фильм не найден.'; else render(); return false; }
     const incoming = response.body;
     if (cursor && state.view) {
@@ -279,43 +298,69 @@ function adminBindFilmMetadata(host, storedId) {
     return true;
   };
   const run = async work => {
-    if (state.busy) return;
+    if (state.busy || state.dead) return;
     state.busy = true;
-    try { await work(); } finally { state.busy = false; render(); }
+    try { await work(); } finally {
+      state.busy = false;
+      // a command settled while this view was reading: what it read may predate the commit, so it reads once more before any control is enabled
+      if (state.again && !state.dead) { state.again = false; run(() => load(null)); } else render();
+    }
+  };
+  // a command that settled while ANOTHER view is on screen: the live view re-renders, and reads again when it is the Film that changed
+  const settled = film => {
+    const live = adminMetaLive;
+    if (!live || live === self || live.state.dead) return; // the view on screen settled its own command and has just read again
+    if (live.storedId === film) live.reread(); else live.render();
   };
   const send = async (command, action) => {
+    const own = command.requestId;
+    // the flight and the held command are claimed together, inside the serialized chain; they are released only by the attempt that owns them
+    adminMetaFlight = {storedId, requestId: own};
+    adminMetaPending = {storedId, label, command: JSON.parse(JSON.stringify(command))};
     state.stale = true; render();
     say('Записываем…');
-    const response = await adminWriteFilmMetadata(storedId, command);
+    let response;
+    try { response = await adminWriteFilmMetadata(storedId, command); }
+    finally { /* adminWriteFilmMetadata never throws; the finally keeps the claim honest if that changes */ }
+    const ownsPending = () => adminMetaPending && adminMetaPending.command.requestId === own;
+    const release = () => { if (adminMetaFlight && adminMetaFlight.requestId === own) adminMetaFlight = null; };
     if (response.ok) {
-      adminMetaPending = null;
-      const text = adminMetaOutcomeText(response, action);
-      say(text);
+      if (ownsPending()) adminMetaPending = null;
+      say(adminMetaOutcomeText(response, action));
+      if (state.dead) { release(); settled(storedId); return; }
       await load(null); // a failed read leaves the controls disabled and says so in its own place; the result above stays
+      release(); settled(storedId); render();
       return;
     }
     if (adminMetaRetryable(response)) {
       state.stale = false; // the old read is still the latest known state; only the held command can be sent
       say(adminMetaRefusalText(response.error === 'network' ? 'network' : 'storage_unavailable'));
+      release(); settled(storedId);
       return;
     }
-    // a definite refusal ends the attempt
-    adminMetaPending = null;
+    // a definite refusal ends THIS attempt, and only this one
+    if (ownsPending()) adminMetaPending = null;
     say(adminMetaRefusalText(response.error));
-    if (response.error === 'stale_revision' || response.error === 'stale_rows') await load(null);
-    else state.stale = false;
+    const reload = !state.dead && (response.error === 'stale_revision' || response.error === 'stale_rows');
+    if (reload) await load(null); else state.stale = false;
+    release(); settled(storedId); render();
   };
+  const self = {storedId, state, render, reread: () => { if (state.busy) state.again = true; else run(() => load(null)); }};
+  // the view that was on screen before is gone: it may still be settling a command, and must not touch this one's DOM
+  if (adminMetaLive && adminMetaLive !== self) adminMetaLive.state.dead = true;
+  adminMetaLive = self;
   section.addEventListener('toggle', () => { if (section.open && !state.loaded && !state.busy) run(() => load(null)); });
   section.addEventListener('click', event => {
     const target = event.target && event.target.closest ? event.target.closest('button') : null;
-    if (!target || target.disabled || state.busy) return;
+    if (!target || target.disabled || state.busy || state.dead) return;
     if (target.hasAttribute && target.hasAttribute('data-meta-reload')) return run(() => load(null));
     if (target.hasAttribute && target.hasAttribute('data-meta-retry')) {
-      const pending = held();
-      if (!pending) return;
+      const pending = mine();
+      if (!pending || flying()) return;
       return run(() => send(pending.command, pending.command.action));
     }
     if (target.hasAttribute && target.hasAttribute('data-meta-discard')) {
+      if (!mine() || flying()) return;
       adminMetaPending = null;
       say('Повтор отменён. Исход прошлой команды неизвестен: проверьте значение и журнал.');
       return run(() => load(null));
@@ -323,7 +368,7 @@ function adminBindFilmMetadata(host, storedId) {
     const more = target.getAttribute('data-meta-more');
     if (more) return run(() => load(more));
     const action = target.getAttribute('data-meta-action');
-    if (!action || !state.view || state.stale || held()) return;
+    if (!action || !state.view || state.stale || adminMetaPending || flying()) return;
     const field = target.getAttribute('data-field');
     const options = {field, requestId: adminMetaNewRequestId()};
     if (action === 'set') {
@@ -335,14 +380,14 @@ function adminBindFilmMetadata(host, storedId) {
     if (action === 'revert') options.historyRef = Number(target.getAttribute('data-history-ref'));
     const command = adminMetaCommand(state.view, action, options);
     if (action === 'refresh' && !command.expectedRows.length) { say(adminMetaRefusalText('not_in_scope')); return; }
-    // frozen inside the serialized chain: a click that finds the chain busy can never replace a held command
-    return run(() => { adminMetaPending = {storedId, command: JSON.parse(JSON.stringify(command))}; return send(command, action); });
+    return run(() => send(command, action));
   });
   render();
-  // a held command survives a re-render of the detail: show it again; this READS only and never sends
-  if (held()) { section.open = true; say('Команда с неизвестным исходом сохранена. Её можно повторить или отменить.'); run(() => load(null)); }
+  // a command held for THIS Film survives a re-render of the detail: show it again; this READS only and never sends
+  if (mine()) { section.open = true; say(flying() ? 'Команда ещё отправляется.' : 'Команда с неизвестным исходом сохранена. Её можно повторить или отменить.'); run(() => load(null)); }
 }
 function adminFilmMetadataSection(record) {
   if (!record || !record.storedId) return '';
-  return `<details class="admin-meta" data-film-metadata data-stored-id="${adminMetaEsc(record.storedId)}"><summary>Происхождение метаданных</summary><div class="admin-meta-status" data-meta-result role="status" tabindex="-1"></div><div class="admin-meta-status" data-meta-reading role="status"></div><div data-meta-pending></div><div data-meta-body><p class="muted">Раздел читает данные при открытии. Запись выполняется только по кнопке.</p></div></details>`;
+  const label = record.preferred || record.original || record.originalTitle || record.id || record.storedId;
+  return `<details class="admin-meta" data-film-metadata data-stored-id="${adminMetaEsc(record.storedId)}" data-film-label="${adminMetaEsc(label)}"><summary>Происхождение метаданных</summary><div class="admin-meta-status" data-meta-result role="status" tabindex="-1"></div><div class="admin-meta-status" data-meta-reading role="status"></div><div data-meta-pending></div><div data-meta-body><p class="muted">Раздел читает данные при открытии. Запись выполняется только по кнопке.</p></div></details>`;
 }
