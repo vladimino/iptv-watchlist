@@ -64,8 +64,9 @@ const num=value=>value===null||value===undefined?null:Number(value);
 
 export const fileBytes=(item,root=ROOT)=>fs.readFileSync(path.join(root,item.file));
 export const filePinned=(item,bytes)=>sha256(bytes)===item.sha256&&gitBlob(bytes)===item.blob;
-export const manifestText=()=>MANIFEST.map(item=>item.version+' '+item.file+' '+item.sha256+' '+item.blob).join('\n')+'\n';
-export const manifestSha256=()=>sha256(manifestText());
+// The digest the GO names covers the ordered files AND the pinned reference schema.
+export const manifestText=(root=ROOT)=>MANIFEST.map(item=>item.version+' '+item.file+' '+item.sha256+' '+item.blob).join('\n')+'\nreference '+referenceSha256(root)+'\n';
+export const manifestSha256=(root=ROOT)=>sha256(manifestText(root));
 export const operatorSha256=()=>sha256(fs.readFileSync(OPERATOR_PATH));
 export const stepOf=version=>MANIFEST.find(item=>item.version===version)||null;
 
@@ -83,50 +84,75 @@ export function stepStatements(item,bytes=fileBytes(item)){
  return statements;
 }
 
-// What the files leave behind, by name, folded in order: the CREATE text of each object (null when a rename means the stored text is SQLite's own), the names that must be
-// absent (created and dropped or renamed away, e.g. the `*_hold` and `*_v53` staging tables), and the columns ALTER ... ADD COLUMN added.
-export function expectedSchema(upTo,{root=ROOT}={}){
- const objects=new Map(),removed=new Set(),columns=new Map();
- for(const item of MANIFEST.filter(candidate=>candidate.version<=upTo)){
-  const bytes=fileBytes(item,root);
-  for(const sql of stepStatements(item,bytes)){
-   let match;
-   if((match=/^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER)( IF NOT EXISTS)? ("?)([A-Za-z0-9_]+)\3/i.exec(sql))){
-    const name=match[4];removed.delete(name);objects.set(name,{type:match[1].toLowerCase(),sql:match[2]?null:sql,ine:Boolean(match[2])});
-   }else if((match=/^DROP (TABLE|INDEX|TRIGGER) (?:IF EXISTS )?([A-Za-z0-9_]+)$/i.exec(sql))){
-    objects.delete(match[2]);removed.add(match[2]);
-   }else if((match=/^ALTER TABLE ([A-Za-z0-9_]+) RENAME TO ([A-Za-z0-9_]+)$/i.exec(sql))){
-    objects.delete(match[1]);removed.add(match[1]);removed.delete(match[2]);objects.set(match[2],{type:'table',sql:null,ine:false});
-   }else if((match=/^ALTER TABLE ([A-Za-z0-9_]+) ADD COLUMN ([A-Za-z0-9_]+)\b/i.exec(sql))){
-    columns.set(match[1]+'.'+match[2],{table:match[1],column:match[2]});
-    // SQLite appends the column to the stored CREATE text: the earlier text no longer equals the file's, the column check above stands for it.
-    if(objects.has(match[1]))objects.set(match[1],{...objects.get(match[1]),sql:null});
-   }
-  }
+// ---- the exact reference schema ----
+// The expected schema of EVERY version 38..54 is a pinned reference (scripts/d1-migration-window-reference.json), generated from the unchanged migration files by
+// scripts/d1-migration-window-reference.mjs on a scratch SQLite database (a test regenerates it and requires equality, so it cannot drift from the files). It holds the
+// fingerprint (type, table, normalized CREATE text) of EVERY object, including the base v38 objects, the ALTERed tables, the renamed v53 tables and the IF NOT EXISTS
+// definitions, so a status never certifies a predecessor by version and names alone. Its SHA-256 is part of the manifest digest the GO names.
+export const REFERENCE_PATH=path.join(ROOT,'scripts/d1-migration-window-reference.json');
+// Comments, whitespace, quoting, letter case and IF NOT EXISTS are dropped from both sides: the operator sends extracted statements (no comments), a database built from the
+// raw file keeps them, and SQLite quotes a renamed table. Everything else (every column, CHECK, default, trigger body) counts.
+export const normalizeSql=text=>String(text||'').replace(/--[^\n]*/g,'').replace(/\/\*[\s\S]*?\*\//g,'').replace(/["`]/g,'').replace(/\s+/g,'').toLowerCase().replace(/ifnotexists/g,'');
+export const objectFingerprint=row=>[row.type,row.tbl??row.tbl_name,sha256(normalizeSql(row.sql)).slice(0,16)];
+// Names that SQLite or the platform own: never part of the comparison.
+export const ownedName=name=>name.startsWith('sqlite_')||name.startsWith('_cf_');
+export const referenceBytes=(root=ROOT)=>fs.readFileSync(path.join(root,'scripts/d1-migration-window-reference.json'));
+export const referenceSha256=(root=ROOT)=>sha256(referenceBytes(root));
+const referenceCache=new Map();
+// -> {at:version -> Map(name -> [type,tbl,hash]), later:name -> Map(hash -> lowest version carrying it)}
+export function loadReference(root=ROOT){
+ const bytes=referenceBytes(root),key=sha256(bytes);
+ if(referenceCache.has(key))return referenceCache.get(key);
+ const data=JSON.parse(bytes.toString('utf8'));
+ if(data.format!==1)throw new OperatorStop('reference_invalid',3);
+ const at=new Map();let current=new Map(Object.entries(data.base));at.set(BASE_VERSION,current);
+ for(let version=BASE_VERSION+1;version<=CHECKPOINT_B;version++){
+  const delta=data.steps[String(version)];
+  if(!delta)throw new OperatorStop('reference_invalid',3);
+  current=new Map(current);
+  for(const name of delta.del)current.delete(name);
+  for(const [name,value] of Object.entries(delta.set))current.set(name,value);
+  at.set(version,current);
  }
- return {objects,removed,columns};
+ const loaded={at,sha256:key,transient:new Set(data.transient||[])};
+ referenceCache.set(key,loaded);
+ return loaded;
 }
 
 // ---- reads ----
-const rowsOf=async(binding,sql)=>(await binding.prepare(sql).bind().all()).results;
-const oneOf=async(binding,sql)=>(await rowsOf(binding,sql))[0]??null;
+// Every read must carry a result array: a missing or malformed answer is never read as "no rows" (an idle lease, an empty table). The reused adapter turns a missing
+// result into []; the production binding of this operator uses allStrict, and this check covers any other binding.
+const rowsOf=async(binding,sql)=>{
+ const answer=await binding.prepare(sql).bind().all();
+ if(!answer||!Array.isArray(answer.results))throw new OperatorStop('unknown_state',3,{reason:'malformed_read'});
+ return answer.results;
+};
+// A COUNT or MAX read always answers exactly one row with numbers; anything else is unreadable, never zero.
+const factOf=async(binding,sql,...keys)=>{
+ const rows=await rowsOf(binding,sql);
+ if(rows.length!==1||keys.some(key=>!Number.isFinite(Number(rows[0]?.[key]))||rows[0][key]===null))throw new OperatorStop('unknown_state',3,{reason:'malformed_fact'});
+ return Object.fromEntries(keys.map(key=>[key,Number(rows[0][key])]));
+};
 const stable=value=>JSON.stringify(value,(key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.keys(item).sort().map(name=>[name,item[name]])):item);
+const sortedRows=rows=>[...rows].sort((a,b)=>stable(a)<stable(b)?-1:stable(a)>stable(b)?1:0);
 // Tables whose rows an apply must leave exactly as they are: every authority marker and the identity evidence writer control and its history (0052 rebuilds them).
 const isMarker=name=>name.endsWith('_authority');
-const CONTROL_TABLES=['identity_evidence_writer','identity_evidence_writer_change','film_metadata_provenance_control'];
+const CONTROL_TABLES=['identity_evidence_writer','identity_evidence_writer_change','film_metadata_provenance_control','catalog_enrichment_control','catalog_enrichment_scope'];
 // Row-bearing tables a rebuild must preserve whole (0049 -> 0053): compared by count and a digest of their ordered rows.
 const PRESERVED_TABLES=['film_metadata_field','film_metadata_history','film_metadata_owner_command','film_metadata_owner_release'];
 // The large catalog tables are never read whole: a count and the highest rowid prove that no row came or went (a rebuild or a trigger of these files touches none of them).
 const COUNTED_TABLES=['film','film_metadata','film_external_id','canonical_write_receipt','film_identity_evidence'];
-const sortedRows=rows=>[...rows].sort((a,b)=>stable(a)<stable(b)?-1:stable(a)>stable(b)?1:0);
+// The quiet-window facts the window needs, and the version from which each table exists. A required fact that cannot be read is `state_unreadable`, never idle.
+export const REQUIRED_QUIET=[['producerLiveLeases','canonical_producer_chain',23],['predictionLease','prediction_lease',7],['discoveryLease','discovery_lease',11],['discoveryTransferLoading','discovery_transfer',11],['projectorWindow','projector_window',18],['importRunsOpen','identity_evidence_import_run',44]];
 
 export async function readState(binding,{clock=Date.now,root=ROOT}={}){
  try{
   const contract=(await rowsOf(binding,'SELECT id, version, typeof(version) AS kind FROM schema_contract ORDER BY id, version')).map(row=>({id:num(row.id),version:num(row.version),kind:row.kind}));
   const master=await rowsOf(binding,"SELECT type, name, tbl_name AS tbl, sql FROM sqlite_master WHERE type IN ('table','index','trigger','view')");
+  if(!master.length)throw new OperatorStop('unknown_state',3,{reason:'empty_schema'});
   const tables=new Set(master.filter(row=>row.type==='table').map(row=>row.name));
   const schemaVersion=contract.length===1&&contract[0].id===1&&contract[0].kind==='integer'?contract[0].version:null;
-  const state={contract,schemaVersion,master,tables:[...tables].sort(),markers:{},control:{},preserved:{},quiet:null,transfer:null,retired:null,deployment:null};
+  const state={contract,schemaVersion,master,tables:[...tables].sort(),markers:{},control:{},preserved:{},quiet:null,retired:null,chain:null};
   for(const name of tables){
    if(isMarker(name))state.markers[name]=sortedRows(await rowsOf(binding,'SELECT * FROM '+name));
    else if(CONTROL_TABLES.includes(name))state.control[name]=sortedRows(await rowsOf(binding,'SELECT * FROM '+name));
@@ -136,31 +162,30 @@ export async function readState(binding,{clock=Date.now,root=ROOT}={}){
    state.preserved[name]={rows:rows.length,digest:sha256(stable(rows))};
   }
   for(const name of COUNTED_TABLES)if(tables.has(name)){
-   const row=await oneOf(binding,'SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS top FROM '+name);
-   state.preserved[name]={rows:num(row.n),top:num(row.top)};
+   const row=await factOf(binding,'SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS top FROM '+name,'n','top');
+   state.preserved[name]={rows:row.n,top:row.top};
   }
   // Quiet-window facts that live in D1. The Workflow instances, the Scheduled Tasks and the EPG orchestration documents are NOT visible here: the status says so (`unobservable`).
-  const quiet={producerLiveLeases:null,predictionLease:null,discoveryLease:null,discoveryTransferLoading:null,projectorWindow:null};
+  const quiet={};
   if(tables.has('canonical_producer_chain')){
    const chains=await rowsOf(binding,"SELECT owner_state AS state, lease_expires_at AS lease FROM canonical_producer_chain WHERE owner_state IN ('pending','active','released')");
    const nowMs=clock();
    quiet.producerLiveLeases=chains.filter(row=>row.state==='pending'||(row.state==='active'&&!(Date.parse(row.lease)+CHAIN_BOUNDARY_MARGIN_MS<nowMs))).length;
   }
   const nowMs=clock();
-  if(tables.has('prediction_lease'))quiet.predictionLease=num((await oneOf(binding,'SELECT COUNT(*) AS n FROM prediction_lease WHERE expires_at > '+nowMs)).n);
-  if(tables.has('discovery_lease'))quiet.discoveryLease=num((await oneOf(binding,'SELECT COUNT(*) AS n FROM discovery_lease WHERE lease_id IS NOT NULL AND expires_at > '+nowMs)).n);
-  if(tables.has('discovery_transfer'))quiet.discoveryTransferLoading=num((await oneOf(binding,"SELECT COUNT(*) AS n FROM discovery_transfer WHERE state = 'loading'")).n);
-  if(tables.has('projector_window'))quiet.projectorWindow=num((await oneOf(binding,"SELECT COUNT(*) AS n FROM projector_window WHERE state <> 'idle'")).n);
-  if(tables.has('identity_evidence_import_run'))quiet.importRunsOpen=num((await oneOf(binding,"SELECT COUNT(*) AS n FROM identity_evidence_import_run WHERE state IN ('staging', 'running')")).n);
+  if(tables.has('prediction_lease'))quiet.predictionLease=(await factOf(binding,'SELECT COUNT(*) AS n FROM prediction_lease WHERE expires_at > '+nowMs,'n')).n;
+  if(tables.has('discovery_lease'))quiet.discoveryLease=(await factOf(binding,'SELECT COUNT(*) AS n FROM discovery_lease WHERE lease_id IS NOT NULL AND expires_at > '+nowMs,'n')).n;
+  if(tables.has('discovery_transfer'))quiet.discoveryTransferLoading=(await factOf(binding,"SELECT COUNT(*) AS n FROM discovery_transfer WHERE state = 'loading'",'n')).n;
+  if(tables.has('projector_window'))quiet.projectorWindow=(await factOf(binding,"SELECT COUNT(*) AS n FROM projector_window WHERE state <> 'idle'",'n')).n;
+  if(tables.has('identity_evidence_import_run'))quiet.importRunsOpen=(await factOf(binding,"SELECT COUNT(*) AS n FROM identity_evidence_import_run WHERE state IN ('staging', 'running')",'n')).n;
   state.quiet=quiet;
   // 0054: the three tables must hold nothing and nothing may depend on them (the same condition the file's own guard checks).
-  const retired={present:RETIRED_TABLES.filter(name=>tables.has(name))};
-  retired.rows=Object.fromEntries(await Promise.all(retired.present.map(async name=>[name,num((await oneOf(binding,'SELECT COUNT(*) AS n FROM '+name)).n)])));
+  const retired={present:RETIRED_TABLES.filter(name=>tables.has(name)),rows:{}};
+  for(const name of retired.present)retired.rows[name]=(await factOf(binding,'SELECT COUNT(*) AS n FROM '+name,'n')).n;
   const needles=RETIRED_TABLES.map(name=>name.toLowerCase());
   retired.dependents=master.filter(row=>!RETIRED_TABLES.includes(row.name)&&row.sql&&needles.some(needle=>row.sql.toLowerCase().includes(needle))).map(row=>row.type+':'+row.name).sort();
   retired.attached=master.filter(row=>RETIRED_TABLES.includes(row.tbl)&&row.type!=='table'&&row.sql).map(row=>row.type+':'+row.name).sort();
   state.retired=retired;
-  // The chain: which objects of the files up to a version are present as the files made them, and which objects of a LATER file already exist (a partial or mixed schema).
   state.chain=chainReport(state,{root});
   return state;
  }catch(error){
@@ -169,29 +194,46 @@ export async function readState(binding,{clock=Date.now,root=ROOT}={}){
  }
 }
 
-// For a given actual version: the objects of every file up to it must exist with the stored CREATE text of the files (folded, so a later rebuild supersedes an earlier text);
-// the objects only a LATER file creates must not exist. Anything else is a damaged or partial schema.
+// The actual schema against the pinned reference of the actual version: every object (base v38 ones included) present with the reference fingerprint, nothing else.
+//  missing: in the reference, absent here.  changed: same name, another type or text.  extra: here, not in the reference.
+//  early: a changed or extra object that equals what a LATER version creates (the next file was started, or a staging table is left): a partial schema, never a resume.
 export function chainReport(state,{root=ROOT}={}){
  const version=state.schemaVersion;
- if(version===null||version<BASE_VERSION||version>CHECKPOINT_B)return {verified:false,missing:[],mismatched:[],early:[],leftovers:[]};
- const have=new Map(state.master.map(row=>[row.name,row]));
- const upTo=expectedSchema(version,{root});
- const future=expectedSchema(CHECKPOINT_B,{root});
- const missing=[],mismatched=[],leftovers=[];
- for(const [name,spec] of upTo.objects){
-  const row=have.get(name);
-  if(!row||row.type!==spec.type)missing.push(spec.type+':'+name);
-  else if(spec.sql&&squash(row.sql)!==squash(spec.sql))mismatched.push(spec.type+':'+name);
+ const empty={verified:false,missing:[],changed:[],extra:[],early:[]};
+ if(version===null||version<BASE_VERSION||version>CHECKPOINT_B)return empty;
+ const {at,transient:transientNames}=loadReference(root);
+ const reference=at.get(version);
+ const actual=new Map(state.master.filter(row=>row.sql!==null&&row.sql!==undefined&&!ownedName(row.name)).map(row=>[row.name,objectFingerprint(row)]));
+ const later=(name,fingerprint)=>{for(let v=version+1;v<=CHECKPOINT_B;v++){const spec=at.get(v).get(name);if(spec&&stable(spec)===stable(fingerprint))return true;}return false;};
+ // a staging object a later file creates and removes again within itself (the pinned `transient` list) or a name a later version drops: its mere presence is a started file
+ const transient=name=>transientNames.has(name)||(()=>{for(let v=version+1;v<=CHECKPOINT_B;v++)if(at.get(v).has(name)&&!at.get(CHECKPOINT_B).has(name))return true;return false;})();
+ const missing=[],changed=[],extra=[],early=[];
+ for(const [name,spec] of reference){
+  const found=actual.get(name);
+  if(!found)missing.push(spec[0]+':'+name);
+  else if(stable(found)!==stable(spec)){changed.push(spec[0]+':'+name);if(later(name,found))early.push(spec[0]+':'+name);}
  }
- for(const name of upTo.removed)if(have.has(name)&&!upTo.objects.has(name))leftovers.push(name);
- for(const {table,column} of upTo.columns.values()){
-  const row=have.get(table);
-  if(row&&!new RegExp('[(,\\s"]'+column+'[\\s",]','i').test(row.sql||''))missing.push('column:'+table+'.'+column);
- }
- // Objects that only a later file creates (not in the cumulative expectation of this version): their presence means that file was started.
- const hasColumn=(table,column)=>{const row=have.get(table);return Boolean(row)&&new RegExp('[(,\\s"]'+column+'[\\s",]','i').test(row.sql||'');};
- const early=[...future.columns].filter(([key,{table,column}])=>!upTo.columns.has(key)&&hasColumn(table,column)).map(([key])=>'column:'+key).sort().concat([...future.objects].filter(([name,spec])=>!spec.ine&&!upTo.objects.has(name)&&have.has(name)&&!upTo.removed.has(name)).map(([name])=>name).sort());
- return {verified:!missing.length&&!mismatched.length&&!leftovers.length&&!early.length,missing:missing.sort(),mismatched:mismatched.sort(),early,leftovers:leftovers.sort()};
+ for(const [name,found] of actual)if(!reference.has(name)){extra.push(found[0]+':'+name);if(later(name,found)||transient(name))early.push(found[0]+':'+name);}
+ return {verified:!missing.length&&!changed.length&&!extra.length,missing:missing.sort(),changed:changed.sort(),extra:extra.sort(),early:[...new Set(early)].sort()};
+}
+
+// ---- the dormant baseline: this window is schema-only ----
+// Applying the files changes no behaviour only while the state they land on is the dormant one: Letterboxd admission at `r2` generation 0, no enrichment scope active or
+// enabled and the control not active, provenance off, every identity evidence writer off. A different state is NOT silently treated as dormant: it needs an updated plan that
+// names that baseline (for example a later B after A2 or C2 would), and the operator refuses until then.
+export function dormantProblems(state){
+ const problems=[];
+ const admission=state.markers.letterboxd_admission_authority;
+ if(admission){const row=admission[0];if(admission.length!==1||!row||row.mode!=='r2'||Number(row.generation)!==0)problems.push('letterboxd_admission_authority:not_r2_generation_0');}
+ const scope=state.control.catalog_enrichment_scope;
+ if(scope&&scope.some(row=>Number(row.activated)!==0||Number(row.enabled)!==0))problems.push('catalog_enrichment_scope:activated_or_enabled');
+ const control=state.control.catalog_enrichment_control;
+ if(control&&control.some(row=>row.state!=='inactive'||Number(row.generation)!==0))problems.push('catalog_enrichment_control:not_inactive_generation_0');
+ const provenance=state.control.film_metadata_provenance_control;
+ if(provenance&&(provenance.length!==1||provenance[0].mode!=='off'))problems.push('film_metadata_provenance_control:not_off');
+ const writers=state.control.identity_evidence_writer;
+ if(writers&&writers.some(row=>row.state!=='off'))problems.push('identity_evidence_writer:not_off');
+ return problems;
 }
 
 // ---- decisions ----
@@ -200,6 +242,9 @@ export const nearHourlyTick=nowMs=>{const date=new Date(nowMs);const intoHour=(d
 export function busyReason(state,item,{nowMs}){
  const q=state.quiet;
  if(!q)return 'state_unreadable';
+ // fail closed: a fact the actual version requires that is missing or not a number is never idle
+ const version=state.schemaVersion??0;
+ for(const [key,,since] of REQUIRED_QUIET)if(version>=since&&!Number.isFinite(q[key]))return 'state_unreadable';
  if(q.producerLiveLeases>0)return 'producer_busy';
  if(q.predictionLease>0)return 'prediction_busy';
  if(q.discoveryLease>0)return 'discovery_busy';
@@ -225,12 +270,19 @@ export function decide(state,{through,start=null,nowMs=Date.now(),apply=false}={
  if(state.schemaVersion===null)return {decision:'schema_contract_unexpected'};
  const version=state.schemaVersion;
  if(version<BASE_VERSION||version>CHECKPOINT_B)return {decision:'schema_unexpected'};
- if(!state.chain.verified)return {decision:state.chain.early.length||state.chain.leftovers.length?'partial_schema':'predecessor_unverified'};
+ if(!state.chain.verified){
+  // At v53 an extra object that names or is attached to a retired table is exactly what 0054 defers on (not a damaged predecessor): everything else must still match the reference.
+  const known=new Set([...(state.retired?.dependents||[]),...(state.retired?.attached||[])]);
+  const defers=version===53&&!state.chain.missing.length&&!state.chain.changed.length&&!state.chain.early.length&&state.chain.extra.length>0&&state.chain.extra.every(entry=>known.has(entry));
+  if(!defers)return {decision:state.chain.early.length?'partial_schema':'predecessor_unverified'};
+ }
  if(!TARGETS.includes(through))return {decision:'target_invalid'};
  if(apply&&start!==version)return {decision:'start_mismatch'};
  if(version===through)return {decision:'already_at_target'};
  if(version>through)return {decision:'target_behind'};
  const item=stepOf(version+1);
+ const dormant=dormantProblems(state);
+ if(dormant.length)return {decision:'baseline_not_dormant',detail:dormant.join(','),next:item.version};
  const guard=stepGuard(state,item);
  if(guard)return {decision:guard.startsWith('defer_0054')?'defer_0054':guard,detail:guard,next:item.version};
  const busy=busyReason(state,item,{nowMs});
@@ -240,10 +292,10 @@ export function decide(state,{through,start=null,nowMs=Date.now(),apply=false}={
 const plan=(version,through)=>MANIFEST.filter(item=>item.from>=version&&item.to<=through).map(item=>item.version);
 
 // The invariants one file must leave untouched, as a comparable value: every authority marker, every control row and the preserved tables; minus what that very file creates.
-function invariants(state,item){
- const created=new Set([...expectedSchema(item.to).objects.keys()].filter(name=>!expectedSchema(item.from).objects.has(name)));
+function invariants(state,item,root=ROOT){
+ const {at}=loadReference(root);
+ const created=new Set([...at.get(item.to).keys()].filter(name=>!at.get(item.from).has(name)));
  const pick=map=>Object.fromEntries(Object.entries(map).filter(([name])=>!created.has(name)));
- // 0052/0053 rebuild these tables: their rows must come back value for value.
  return stable({markers:pick(state.markers),control:pick(state.control),preserved:pick(state.preserved)});
 }
 // Expected new rows: 0046 inserts the Letterboxd marker as r2/0, 0049 the provenance control as off. Nothing else seeds a row.
@@ -254,67 +306,76 @@ export function seedProblems(state,item){
  return problems;
 }
 
-export const view=state=>state?({schemaVersion:state.schemaVersion,schemaContractRows:state.contract.length,chain:state.chain,quiet:state.quiet,retired54:state.retired?{present:state.retired.present.length,rows:state.retired.rows,dependents:state.retired.dependents,attached:state.retired.attached}:null,
- markers:Object.fromEntries(Object.entries(state.markers).map(([name,rows])=>[name,rows.map(row=>({mode:row.mode??null,cutover:row.cutover??null,generation:num(row.generation)}))])),
- controlRows:Object.fromEntries(Object.entries(state.control).map(([name,rows])=>[name,rows.length])),preserved:state.preserved}):null;
+export const view=state=>state?({schemaVersion:state.schemaVersion,schemaContractRows:state.contract.length,chain:state.chain,quiet:state.quiet,dormantBaseline:{ok:dormantProblems(state).length===0,problems:dormantProblems(state)},
+ retired54:state.retired?{present:state.retired.present.length,rows:state.retired.rows,dependents:state.retired.dependents,attached:state.retired.attached}:null,
+ markers:Object.fromEntries(Object.entries(state.markers).map(([name,rows])=>[name,rows.map(row=>({mode:row.mode??null,cutover:row.cutover??null,generation:num(row.generation)}))])),controlRows:Object.fromEntries(Object.entries(state.control).map(([name,rows])=>[name,rows.length])),preserved:state.preserved}):null;
 
+// One file, one batch. `ctx.submitted` names the file whose batch left this process, so every later exit can say which file the outcome belongs to.
 async function write(binding,statements,ctx,before,item,{clock,root}){
+ ctx.submitted={version:item.version,file:path.basename(item.file)};
  ctx.track('unknown');
  try{await binding.batch(statements);}
  catch(error){
   if(error instanceof OperatorStop){ctx.track('none');throw error;}
   let after=null;try{after=await readState(binding,{clock,root});}catch{after=null;}
   // Only a PROVEN statement rejection whose read-back equals the before-state in the version, the chain and every invariant may end as "not applied". Everything else is unknown.
-  const clean=error instanceof D1Error&&error.kind==='statement'&&Boolean(after)&&after.schemaVersion===item.from&&after.chain.verified&&invariants(after,item)===invariants(before,item);
+  const clean=error instanceof D1Error&&error.kind==='statement'&&Boolean(after)&&after.schemaVersion===item.from&&after.chain.verified&&invariants(after,item,root)===invariants(before,item,root);
   ctx.track(clean?'none':'unknown');
-  throw new OperatorStop(clean?'statement_failed':'write_uncertain',3,{file:item.file,state:view(after)});
+  throw new OperatorStop(clean?'statement_failed':'write_uncertain',3,{file:item.file,fileOutcome:clean?'not_applied':'unknown',applied:[...(ctx.applied||[])],state:view(after)});
  }
 }
 
 export async function execute(command,{binding,ctx={track:()=>{}},params={},clock=Date.now,root=ROOT}={}){
+ ctx.applied=ctx.applied||[];
+ const done=ctx.applied;
  const startedMs=clock();
- const before=await readState(binding,{clock,root});
- const digest=manifestSha256(),opDigest=operatorSha256();
+ let current=await readState(binding,{clock,root});
+ const digest=manifestSha256(root),opDigest=operatorSha256();
  const decidedMs=clock();
  const pins=MANIFEST.every(item=>filePinned(item,fileBytes(item,root)));
  if(command==='status'){
-  const out={operation:'status',writes:false,writeState:'none',manifestSha256:digest,operatorSha256:opDigest,filesPinned:pins,files:MANIFEST.map(item=>({version:item.version,file:path.basename(item.file),sha256:item.sha256,gitBlob:item.blob,checkpoint:item.to<=CHECKPOINT_A?'A':'B',scope:item.scope})),
-   at:new Date(decidedMs).toISOString(),...view(before),
-   plan:Object.fromEntries(TARGETS.map(target=>[target,{remaining:before.schemaVersion===null?null:plan(before.schemaVersion,target),...decide(before,{through:target,nowMs:decidedMs})}])),
+  const beyond=fs.readdirSync(path.join(root,'migrations')).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))>CHECKPOINT_B).sort();
+  return {operation:'status',writes:false,writeState:'none',manifestSha256:digest,operatorSha256:opDigest,referenceSha256:referenceSha256(root),filesPinned:pins,
+   files:MANIFEST.map(item=>({version:item.version,file:path.basename(item.file),sha256:item.sha256,gitBlob:item.blob,checkpoint:item.to<=CHECKPOINT_A?'A':'B',scope:item.scope})),
+   treeBeyondManifest:beyond,at:new Date(decidedMs).toISOString(),...view(current),
+   plan:Object.fromEntries(TARGETS.map(target=>[target,{remaining:current.schemaVersion===null?null:plan(current.schemaVersion,target),...decide(current,{through:target,nowMs:decidedMs})}])),
    unobservable:['Workflow instances','Scheduled Tasks','EPG orchestration documents','deployed Worker version','D1 account/UUID are checked by the transport, the deployed commit by the owner-approved preflight']};
-  return out;
  }
  if(params.manifestSha256!==digest)throw new OperatorStop('manifest_sha256_mismatch',3);
  if(params.operatorSha256!==opDigest)throw new OperatorStop('operator_sha256_mismatch',3);
  if(!pins)throw new OperatorStop('file_not_pinned',3);
- const through=params.through,start=params.start;
- const done=[];
- let current=before,lastReadMs=startedMs;
+ const {through,start}=params;
+ // The freshness of every quiet-window observation is measured from when that observation BEGAN, never from when the previous readback ended. The first file uses the
+ // observation above; every later file gets its own fresh observation (the readback of the previous file is verification only, not a preflight).
+ let observedMs=startedMs;
  for(;;){
-  const nowMs=clock();
-  const verdict=decide(current,{through,start:done.length?current.schemaVersion:start,nowMs,apply:true});
-  if(verdict.decision==='already_at_target'&&done.length)return {operation:'apply',writes:true,writeState:'committed',manifestSha256:digest,operatorSha256:opDigest,through,applied:done,after:view(current)};
-  if(verdict.decision!=='apply')throw new OperatorStop(verdict.decision,3,{applied:done,...(verdict.detail?{detail:verdict.detail}:{}),state:view(current)});
+  const verdict=decide(current,{through,start:done.length?current.schemaVersion:start,nowMs:clock(),apply:true});
+  if(verdict.decision==='already_at_target'&&done.length)return {operation:'apply',writes:true,writeState:'committed',manifestSha256:digest,operatorSha256:opDigest,through,applied:[...done],after:view(current)};
+  if(verdict.decision!=='apply')throw new OperatorStop(verdict.decision,3,{applied:[...done],...(verdict.detail?{detail:verdict.detail}:{}),state:view(current)});
   const item=stepOf(verdict.next);
   const statements=stepStatements(item,fileBytes(item,root)).map(sql=>binding.prepare(sql).bind());
-  // The write boundary: the real clock again, immediately before this file. A preflight that crossed into the tick guard or took too long refuses with nothing sent.
+  // The write boundary: the real clock again, immediately before this file. A preflight that crossed into the tick guard, or whose observation began too long ago, refuses with nothing sent.
   const boundaryMs=clock();
-  if(nearHourlyTick(boundaryMs))throw new OperatorStop('hourly_tick_window',3,{applied:done,at:new Date(boundaryMs).toISOString()});
-  if(boundaryMs-lastReadMs>PREFLIGHT_MAX_MS)throw new OperatorStop('preflight_stale',3,{applied:done,elapsedMs:boundaryMs-lastReadMs});
+  if(nearHourlyTick(boundaryMs))throw new OperatorStop('hourly_tick_window',3,{applied:[...done],at:new Date(boundaryMs).toISOString()});
+  if(boundaryMs-observedMs>PREFLIGHT_MAX_MS)throw new OperatorStop('preflight_stale',3,{applied:[...done],elapsedMs:boundaryMs-observedMs});
   await write(binding,statements,ctx,current,item,{clock,root});
   let after;
   try{after=await readState(binding,{clock,root});}
-  catch{ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{file:item.file,reason:'readback_unreadable',applied:done});}
+  catch{ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{file:item.file,fileOutcome:'unknown',reason:'readback_unreadable',applied:[...done]});}
   const problems=[];
   if(after.schemaVersion!==item.to||after.contract.length!==1)problems.push('schema_version');
-  if(!after.chain.verified)problems.push(...after.chain.missing.map(name=>'missing:'+name),...after.chain.mismatched.map(name=>'object_sql:'+name),...after.chain.early.map(name=>'early:'+name),...after.chain.leftovers.map(name=>'leftover:'+name));
-  if(invariants(after,item)!==invariants(current,item))problems.push('changed_invariant');
+  if(!after.chain.verified)problems.push(...after.chain.missing.map(name=>'missing:'+name),...after.chain.changed.map(name=>'changed:'+name),...after.chain.extra.map(name=>'extra:'+name));
+  if(invariants(after,item,root)!==invariants(current,item,root))problems.push('changed_invariant');
   problems.push(...seedProblems(after,item));
   if(item.version===54&&after.tables.some(name=>RETIRED_TABLES.includes(name)))problems.push('retired_table_present');
-  if(problems.length){ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{file:item.file,reason:'readback_mismatch',problems,applied:done,state:view(after)});}
+  if(problems.length){ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{file:item.file,fileOutcome:'unknown',reason:'readback_mismatch',problems,applied:[...done],state:view(after)});}
   ctx.track('committed');
   done.push({version:item.version,file:path.basename(item.file),sha256:item.sha256,at:new Date(clock()).toISOString()});
-  current=after;lastReadMs=clock();
+  ctx.submitted=null;
+  if(item.to>=through)return {operation:'apply',writes:true,writeState:'committed',manifestSha256:digest,operatorSha256:opDigest,through,applied:[...done],after:view(after)};
+  // the next file's own fresh observation
+  observedMs=clock();
+  current=await readState(binding,{clock,root});
  }
 }
 
@@ -346,31 +407,49 @@ export function parseArgs(argv){
  return {command,params:{through,start,manifestSha256:parsed.manifestSha256,operatorSha256:parsed.operatorSha256}};
 }
 
+// The production binding reads through allStrict: a response without a result array is an error, never an empty table.
+const strictBinding=(binding,adapter)=>({...binding,prepare:sql=>({bind:(...params)=>{const bound=binding.prepare(sql).bind(...params);return {...bound,async all(){return {results:await adapter.allStrict(sql,params)};}};}})});
+
 export async function runD1MigrationWindowProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,deps=null,clock=Date.now,root=ROOT}={}){
- const ctx={writeState:'none',track(state){ctx.writeState=state;}};
+ // `ctx` outlives the try: whatever happened before a failure (the committed prefix, the file whose batch was sent, the recovery bookmark) is reported on EVERY exit.
+ const ctx={writeState:'none',applied:[],submitted:null,bookmark:null,track(state){ctx.writeState=state;}};
+ let binding=null,target=null,readBookmarkAfter=null;
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0,result:parsed.report};
-  let binding,target=null,bookmark=null;
-  if(deps)({binding}=deps);
-  else{
+  if(deps){
+   ({binding}=deps);
+   if(parsed.command==='apply'&&deps.bookmark){ctx.bookmark=await deps.bookmark();readBookmarkAfter=deps.bookmark;}
+  }else{
    target=productionTarget(env);
    if(target.accountId!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('account_mismatch',3);
    const adapter=trackProductionWrites(createD1Adapter({target,databaseId:PRODUCTION_DATABASE_ID,fetchImpl,retries:0}),{writeState:'none'});
    const described=await adapter.describe();
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
-   binding=createPublishedBinding(adapter);
+   binding=strictBinding(createPublishedBinding(adapter),adapter);
    // A Time Travel bookmark is the recovery point recorded before the first high-impact schema change; no whole-database restore without a separate GO.
-   if(parsed.command==='apply')bookmark=await readBookmark(target,fetchImpl);
+   if(parsed.command==='apply'){ctx.bookmark=await readBookmark(target,fetchImpl);readBookmarkAfter=()=>readBookmark(target,fetchImpl);}
   }
   const result=await execute(parsed.command,{binding,ctx,params:parsed.params,clock,root});
   let after=null;
-  if(parsed.command==='apply'&&target)try{after=await readBookmark(target,fetchImpl);}catch{after=null;}
-  return {exit:0,result:{...result,...(bookmark?{bookmarkBefore:bookmark}:{}),...(after?{bookmarkAfter:after}:{})}};
+  if(parsed.command==='apply'&&readBookmarkAfter)try{after=await readBookmarkAfter();}catch{after=null;}
+  return {exit:0,result:{...result,...(ctx.bookmark?{bookmarkBefore:ctx.bookmark}:{}),...(after?{bookmarkAfter:after}:{})}};
  }catch(error){
   const stop=normalize(error);
-  const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'?ctx.writeState:'none';
-  return {exit:stop.exit,result:{reason:stop.reason,writeState,writes:writeState==='committed'?true:writeState==='unknown'?null:false,...(writeState!=='none'?{retry:false}:{}),...(stop.details&&Object.keys(stop.details).length?{details:stop.details}:{})}};
+  const applied=ctx.applied||[];
+  // Aggregate outcome: a file whose batch may have committed is `unknown`; otherwise any committed file makes the run `committed` (partial); a refused or stopped-before run is `none`.
+  const writeState=ctx.writeState==='unknown'?'unknown':applied.length?'committed':'none';
+  const any=writeState!=='none';
+  let postState,bookmarkAfter=null;
+  if(any){
+   try{postState=view(await readState(binding,{clock,root}));}catch{postState={readable:false};}
+   if(readBookmarkAfter)try{bookmarkAfter=await readBookmarkAfter();}catch{bookmarkAfter=null;}
+  }
+  const details={...(stop.details||{})};delete details.applied;
+  return {exit:stop.exit,result:{reason:stop.reason,writeState,writes:writeState==='none'?false:applied.length?true:null,...(any?{retry:false,partial:applied.length>0&&stop.reason!=='usage',applied,
+   ...(ctx.submitted?{failedFile:ctx.submitted,failedFileOutcome:ctx.writeState==='unknown'?'unknown':'not_applied'}:{}),
+   ...(postState?{postState}:{}),...(ctx.bookmark?{bookmarkBefore:ctx.bookmark}:{}),...(bookmarkAfter?{bookmarkAfter}:{})}:{}),
+   ...(Object.keys(details).length?{details}:{})}};
  }
 }
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;

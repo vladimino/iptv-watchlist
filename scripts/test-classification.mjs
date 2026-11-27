@@ -215,6 +215,10 @@ export const FILES={
  "canonical-film-external-ids-producer.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-fixtures.mjs": {
+  "suite": "support",
+  "note": "AIR-605 library: injected Letterboxd, TMDB and Wikidata responses for the Catalog Enrichment producer. Executing this file runs no check; catalog-enrichment-producer.mjs and migration-window-v47-runtime-compat.mjs import it."
+ },
  "d1-migration-window-production.mjs": {
   "suite": "core"
  },
