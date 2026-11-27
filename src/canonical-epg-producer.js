@@ -93,7 +93,7 @@ export async function applyEpgUnits(env,{plan,cursor=0,limit=EPG_UNIT_LIMIT_DEFA
    }
    const outcome=await applyFilmFacts(env,{origin:EPG_ORIGIN,event:plan.event,input,...(now?{now}:{}),...(policy?{policy}:{})});
    // ADR 0214 decision 13 (AIR-633): the writer's per-field outcome counts of an EPG unit (these callers are undeclared, so refusals such as attributed_kept or hold are the evidence); the key exists only when the writer reported any
-   if(outcome.result?.provenance)counts.provenance=sumProvenance(counts.provenance||{refusals:{}},outcome.result.provenance);
+   {const measured=outcome.state==='noop'?outcome.provenance:outcome.already===true?null:outcome.result?.provenance;if(measured)counts.provenance=sumProvenance(counts.provenance||{refusals:{}},measured);} // a refusal-only no-op reports its pre-plan refusals; an already-applied replay counts nothing
    if(outcome.state==='noop')counts.noop++;
    else if(outcome.already===true)counts.already++;
    else if(outcome.state==='applied')counts.applied++;

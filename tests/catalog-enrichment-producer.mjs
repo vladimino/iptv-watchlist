@@ -806,11 +806,21 @@ for(const scenario of ['unknown_observation','verified_ru','absence']){
  assert.equal(plan({mode:'off',fields:{}},'old',{args:['lb','tm','ru']}).pending[0].field,'synopsis','off records it too');
  assert.equal(plan({mode:'off',fields:{}},'old',{args:['lb','tm']}).pending.length,0,'no Russian observation, nothing pending');
  assert.equal(plan(enforce({name:'unknown',language:null}),'tm',{args:['lb','tm','ru']}).offers.synopsis.mode,'adopt','an equal Russian value is an adoption of its language evidence');
- const gone={letterboxd:{status:'ok',fields:{synopsis:null},language:{synopsis:null}},tmdb:{status:'ok',fields:{synopsis:null},language:{synopsis:null}}};
+ const gone={letterboxd:{status:'ok',fields:{synopsis:null},language:{synopsis:null},coverage:{synopsis:'absent'}},tmdb:{status:'ok',fields:{synopsis:null},language:{synopsis:null},coverage:{synopsis:'absent'}}};
  const absentPlan=fields=>Plan.planReplacements({provenance:enforce(fields),applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,stored:{synopsis:'old'},answers:gone,locked:false,fills:{}});
  assert.deepEqual(absentPlan({name:'superseded',language:null,source:'letterboxd'}).supersededKept,['synopsis'],'a superseded value with no observation is listed as superseded_kept');
  assert.equal(absentPlan({name:'confirmed',language:null,source:'tmdb'}).offers.synopsis.mode,'absent','the source that attributed the value and verifiably has none declares its absence (the writer counts source_absent and keeps the value)');
  assert.equal(absentPlan({name:'confirmed',language:null,source:null}).offers.synopsis,undefined,'an unattributed value is not declared absent');
+ // an ABSENCE is only an explicit typed observation: a settled but unfetched source (the scheduling placeholder), a pending, unresolved or failed source is neither a value nor an absence
+ const withTmdb=tmdb=>Plan.planReplacements({provenance:enforce({name:'confirmed',language:'ru',source:'tmdb'}),applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,stored:{synopsis:'old'},answers:{letterboxd:gone.letterboxd,tmdb},locked:false,fills:{}});
+ assert.equal(withTmdb({status:'ok',fields:{}}).offers.synopsis,undefined,'an unfetched settled source (placeholder without coverage) declares no absence');
+ assert.equal(withTmdb({status:'transport'}).offers.synopsis,undefined,'a transport-unavailable source declares no absence');
+ assert.equal(withTmdb({status:'ok',fields:{synopsis:null},coverage:{synopsis:'unreadable'}}).offers.synopsis,undefined,'unreadable coverage is no absence');
+ assert.equal(withTmdb({status:'ok',fields:{synopsis:null},coverage:{synopsis:'ambiguous'}}).offers.synopsis,undefined,'ambiguous coverage is no absence');
+ assert.equal(withTmdb({status:'ok',fields:{synopsis:null},coverage:{synopsis:'absent'}}).offers.synopsis.mode,'absent','and an explicit verified absence is');
+ const stale=tmdb=>Plan.planReplacements({provenance:enforce({name:'superseded',language:null,source:'letterboxd'}),applicable:['letterboxd','tmdb'],hasLetterboxdAnchor:true,agreed:true,stored:{synopsis:'old'},answers:{letterboxd:gone.letterboxd,tmdb},locked:false,fills:{}});
+ assert.deepEqual(stale({status:'ok',fields:{}}).supersededKept,[],'superseded_kept is listed only after EVERY applicable source settled as a verified absence under the new anchors');
+ assert.deepEqual(stale({status:'ok',fields:{synopsis:null},coverage:{synopsis:'absent'}}).supersededKept,['synopsis']);
 }
 {
  // a changed confirmed value (owner refresh or a changed source version) reaches the comparator; an equal one is a no-op; a lower-ranked source cannot replace
@@ -942,6 +952,145 @@ for(const scenario of ['unknown_observation','verified_ru','absence']){
  const plan=String(sqlite(w.file,"EXPLAIN QUERY PLAN SELECT s.kind FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<='x') AND (s.cause_ref IS NOT 'language_upgrade' OR 1=1) ORDER BY s.armed_at LIMIT 50").stdout);
  assert.match(plan,/enrichment_signal_by_state/,'the inbox read uses its (state, armed_at) index: '+plan);
  assert.doesNotMatch(plan,/SCAN catalog_enrichment_state/,'and never scans the Film state table');
+}
+
+
+// ---- AIR-633 second review round: the held signal is fenced at emission, effect and ack; absence is only a typed observation; supersededKept has a lifecycle; the source-set change is causal ----
+{
+ // emission fence: a plan whose fence moved between the read and the publication publishes NOTHING and does not settle the part (here: the mode left `off` during the fetch; the plan epoch moved during the fetch)
+ const racing=async(w,mutation)=>{const up=upstream({tm:ruMovie()});const impl=async(url,init)=>{if(String(url).startsWith('https://api.themoviedb.org/'))mutation(w);return up(url,init);};impl.calls=up.calls;return impl;};
+ for(const race of ['mode','plan_epoch']){
+  const w=await world();
+  await step(w,upstream({tm:noRuMovie()}),at(10));await step(w,upstream({tm:noRuMovie()}),at(11));
+  reopenCore(w.file);
+  const mutation=race==='mode'?file=>setMode(file,'enforce',2):file=>assert.equal(sqlite(file,"UPDATE catalog_enrichment_state SET plan_epoch=plan_epoch+1 WHERE part='film' AND source='*'").status,0);
+  const out=await step(w,await racing(w,()=>mutation(w.file)),at(12));
+  assert.equal(upgradeSignals(w.file).length,0,'nothing is published by a plan whose fence moved: '+race+' '+out.state);
+  assert.ok(coreStatus(w.file).every(status=>status==='due'),'and the part is NOT settled by an observation whose publication did not hold: '+race);
+ }
+ // after the mode race the next plan runs under enforce and writes the Russian value directly
+ const w2=await world();
+ await step(w2,upstream({tm:noRuMovie()}),at(10));await step(w2,upstream({tm:noRuMovie()}),at(11));
+ reopenCore(w2.file);
+ setMode(w2.file,'enforce',2);
+ await step(w2,upstream({tm:ruMovie()}),at(12));
+ assert.equal(meta(w2.file).synopsis,RU_SYNOPSIS);
+}
+{
+ // effect and ack fence: a signal SELECTED under enforce and consumed after a switch to hold does nothing and stays pending; enforce again consumes it (enforce -> hold -> enforce)
+ const w=await world();
+ await step(w,upstream({tm:noRuMovie()}),at(10));await step(w,upstream({tm:noRuMovie()}),at(11));
+ reopenCore(w.file);
+ await step(w,upstream({tm:ruMovie()}),at(12));
+ assert.equal(upgradeSignals(w.file).length,1);
+ setMode(w.file,'enforce',2);
+ const [selected]=await S.runnableSignals(w.env,{now:at(13),limit:50});
+ assert.equal(selected.cause,'language_upgrade');
+ setMode(w.file,'hold',3);
+ assert.equal((await S.consumeSignal(w.env,{signal:selected,generation:w.generation,leaseId:w.leaseId,now:at(14)})).consumed,false,'consumption under hold changes nothing');
+ assert.deepEqual(upgradeSignals(w.file).map(r=>r.state),['pending'],'and the acknowledgement did not settle it');
+ assert.deepEqual(coreStatus(w.file),['complete','complete'],'the part was not reopened');
+ // the same Russian value observed under hold does not lose the upgrade
+ reopenCore(w.file);
+ await step(w,upstream({tm:ruMovie()}),at(15));
+ assert.equal(upgradeSignals(w.file).length,1);
+ setMode(w.file,'enforce',4);
+ assert.equal(await consumeUpgrades(w,at(16)),1,'back in enforce the upgrade is still there and is consumed');
+ await step(w,upstream({tm:ruMovie()}),at(17));
+ assert.equal(meta(w.file).synopsis,RU_SYNOPSIS,'and written');
+}
+{
+ // the actual reader pages through a cohort larger than one page: every held signal is read once, in order, bounded by the limit, and nothing is skipped
+ const w=await world();
+ setMode(w.file,'enforce',2);
+ const insert=`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<55)
+  INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) SELECT 'film:tmdb:'||(9000+i),2,NULL,'P'||i,'${T}' FROM n;
+  INSERT INTO catalog_enrichment_member (film_id,scope,admitted_at,signal_key) SELECT id,'rated','${T}','k'||id FROM film WHERE id LIKE 'film:tmdb:9%';
+  INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) SELECT 'source_changed',id,'','core',1,0,'pending','${'b'.repeat(64)}','language_upgrade',substr('${T}',1,20)||printf('%03d',abs(random())%1000)||'Z',0 FROM film WHERE id LIKE 'film:tmdb:9%';`;
+ assert.equal(sqlite(w.file,insert).status,0);
+ const seen=new Set();let pages=0;
+ for(;;){
+  const page=(await S.runnableSignals(w.env,{now:at(20),limit:20})).filter(x=>x.cause==='language_upgrade');
+  if(!page.length)break;
+  assert.ok(page.length<=20,'a page is bounded by its limit');
+  for(const signal of page){assert.equal(seen.has(signal.subject),false,'a signal is never read twice after its acknowledgement');seen.add(signal.subject);assert.equal((await S.consumeSignal(w.env,{signal,generation:w.generation,leaseId:w.leaseId,now:at(21)})).consumed,true);}
+  pages++;
+ }
+ assert.deepEqual([seen.size,pages],[55,3],'the whole cohort is read and consumed across pages (20, 20, 15)');
+}
+{
+ // an absence is only a typed observation: the attributing source (tmdb) is NOT asked while only Letterboxd core is refreshed, so Letterboxd's own absent synopsis is no `source_absent` of tmdb
+ const w=await enforceWorld();
+ await step(w,upstream({tm:movie()}),at(10));await step(w,upstream({tm:movie()}),at(11));
+ assert.equal(fieldRow(w.file,'synopsis').source,'tmdb');
+ assert.equal(sqlite(w.file,"UPDATE catalog_enrichment_state SET status='due',refresh_epoch=refresh_epoch+1 WHERE part='core' AND source='letterboxd'").status,0);
+ const up=upstream({lb:lbPage({synopsis:''}),tm:movie()});
+ const out=await step(w,up,at(12));
+ assert.ok(!up.calls.some(url=>url.startsWith('https://api.themoviedb.org/')),'TMDB was not asked');
+ assert.equal(out.report.provenance.source_absent||0,0,'an unobserved source is not an absence: '+JSON.stringify(out.report.provenance));
+ assert.equal(meta(w.file).synopsis,'tm synopsis');
+}
+{
+ // supersededKept lifecycle: listed after an identity correction whose answer lacks the value, readable by the owner API, and CLEARED when a later observation reconfirms or replaces the value
+ const w=await enforceWorld({lid:null});
+ await step(w,upstream({tm:movie()}),at(10));await step(w,upstream({tm:movie()}),at(11));
+ sqlite(w.file,"UPDATE film_external_id SET value='604' WHERE film_id='"+FILM+"' AND scheme='tmdb'");
+ await step(w,upstream({tm:movie({id:604,runtime:null})}),at(12));
+ await step(w,upstream({tm:movie({id:604,runtime:null})}),at(13));
+ assert.deepEqual(filmJson(w.file).supersededKept,['runtime'],'listed once the source settled as a verified absence under the new anchors');
+ reopenCore(w.file);
+ await step(w,upstream({tm:movie({id:604,runtime:120})}),at(14));
+ assert.equal(meta(w.file).runtime,120,'the new identity confirms a runtime: it replaces the superseded value');
+ assert.equal(filmJson(w.file).supersededKept,undefined,'and the owner-review list is cleared');
+}
+{
+ // the source-set change is CAUSAL: remove and re-add a TMDB claim through the real inbox (anchor_changed), then fetch the re-added source; the new digest and attribution are checked and independent settled parts stay settled
+ const w=await enforceWorld();
+ const up=upstream({});
+ await step(w,up,at(10));await step(w,up,at(11));
+ const {readFilmSnapshot}=await import('../src/canonical-film-writers.js');
+ const credits0=rows(w.file,"SELECT part,source,status FROM catalog_enrichment_state WHERE part IN ('credits','localization') ORDER BY part,source");
+ const change=async(statementSql,when)=>{
+  sqlite(w.file,statementSql);
+  const [sql,params]=S.emitStatement({kind:'anchor_changed',subject:FILM,at:when});
+  assert.equal(sqlite(w.file,sql.replace(/\?/g,()=>{const v=params.shift();return v===null?'NULL':"'"+String(v).replace(/'/g,"''")+"'";})).status,0);
+  const signals=(await S.runnableSignals(w.env,{now:when,limit:50})).filter(x=>x.kind==='anchor_changed');
+  assert.equal(signals.length,1,'the real anchor_changed signal is runnable');
+  assert.equal((await S.consumeSignal(w.env,{signal:signals[0],generation:w.generation,leaseId:w.leaseId,now:when})).consumed,true);
+ };
+ await change("DELETE FROM film_external_id WHERE film_id='"+FILM+"' AND scheme='tmdb'",at(12));
+ await step(w,up,at(13));await step(w,up,at(14));
+ const digestAfterRemove=(await readFilmSnapshot(w.env,FILM)).provenance.anchors.digest;
+ assert.equal(fieldRow(w.file,'year').source,'letterboxd');
+ assert.equal(rows(w.file,"SELECT anchor_digest FROM film_metadata_field WHERE film_id='"+FILM+"' AND field='year'")[0].anchor_digest,digestAfterRemove,'the surviving values are re-confirmed under the NEW anchor set');
+ await change("INSERT INTO film_external_id VALUES ('"+FILM+"','tmdb','603',1,0,NULL)",at(15));
+ const before=up.calls.length;
+ await step(w,up,at(16));await step(w,up,at(17));
+ assert.ok(up.calls.slice(before).some(url=>url.startsWith('https://api.themoviedb.org/')),'the re-added source is fetched');
+ const tmdbCore=rows(w.file,"SELECT status,source_version FROM catalog_enrichment_state WHERE film_id='"+FILM+"' AND part='core' AND source='tmdb'")[0];
+ assert.equal(tmdbCore.status,'complete');assert.ok(tmdbCore.source_version,'the newly applicable core has its own comparable version');
+ const digestAfterAdd=(await readFilmSnapshot(w.env,FILM)).provenance.anchors.digest;
+ assert.equal(rows(w.file,"SELECT anchor_digest FROM film_metadata_field WHERE film_id='"+FILM+"' AND field='year'")[0].anchor_digest,digestAfterAdd,'attribution follows the new anchor set');
+ assert.deepEqual(rows(w.file,"SELECT part,source,status FROM catalog_enrichment_state WHERE part IN ('credits','localization') AND source='letterboxd' ORDER BY part,source"),credits0.filter(r=>r.source==='letterboxd'),'independently settled applicable credits and localization are untouched');
+}
+
+
+{
+ // ADR 0214 decision 12: in enforce `storedDiffers` is derived from what the writer actually REFUSED, never from a pre-comparator comparison: a successful replacement is not presented as a refusal
+ const w=await enforceWorld();
+ await step(w,upstream({lb:lbPage({runtime:136}),tm:movie()}),at(10));await step(w,upstream({lb:lbPage({runtime:136}),tm:movie()}),at(11));
+ reopenCore(w.file);
+ await step(w,upstream({lb:lbPage({runtime:140}),tm:movie({runtime:100})}),at(12));
+ assert.equal(meta(w.file).runtime,140,'the newer confirmed Letterboxd value replaced the stored one');
+ assert.deepEqual(filmJson(w.file).storedDiffers??[],[],'a successful replacement is not a refusal; the planner-side difference (tmdb 100) was never offered to the writer either');
+ // the same facts under hold keep the legacy planner list
+ const h=await world();
+ await step(h,upstream({lb:lbPage({runtime:136}),tm:movie()}),at(10));
+ setMode(h.file,'enforce',2);setMode(h.file,'hold',3);
+ await step(h,upstream({lb:lbPage({runtime:136}),tm:movie()}),at(11));
+ reopenCore(h.file);
+ await step(h,upstream({lb:lbPage({runtime:136}),tm:movie({runtime:100})}),at(12));
+ assert.ok((filmJson(h.file).storedDiffers||[]).some(item=>item.field==='runtime'),'off and hold keep the planner list of differences');
 }
 
 console.log('catalog enrichment producer: ok');

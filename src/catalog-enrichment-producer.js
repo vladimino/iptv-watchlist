@@ -4,7 +4,7 @@
 // Every state write asserts the lease and the control generation; the units additionally assert the anchor set, the plan epoch and the metadata lock. A stale plan therefore writes nothing and is replanned.
 import {database,failed,many,one} from './film-person-authority.js';
 import {Plan} from './catalog-enrichment-plan.js';
-import {readControl,emitStatement} from './catalog-enrichment-store.js';
+import {readControl,emitUpgradeStatement} from './catalog-enrichment-store.js';
 import {runUnit as runUnitRaw,unitKeys} from './catalog-enrichment-units.js';
 import {fetchLetterboxd,fetchTmdb,fetchWikidata} from './catalog-enrichment-sources.js';
 import {readProvenance,confidenceOf,storedValue,valueDigest,addCounts as addProvenance,emptyCounts as emptyProvenanceCounts} from './film-metadata-provenance.js';
@@ -272,20 +272,31 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
  const writeFields=Object.keys(core.writes);
  report.provenance.offered=(report.provenance.offered||0)+Object.keys(replacements.offers).length;
  report.provenance.superseded_kept=(report.provenance.superseded_kept||0)+replacements.supersededKept.length;
- // A Russian upgrade that off or hold cannot make is recorded as ONE inbox signal (source_changed for the whole core part, held by the signal reader until the mode is enforce and by the membership/scope fences like every signal),
- // emitted before the part completes so a failure leaves the part due and replanned. The digest binds the waiting values: an identical observation re-arms nothing, a new Russian value does.
+ // A Russian upgrade that off or hold cannot make is recorded as ONE inbox signal (source_changed for the whole core part, held by the signal reader until the mode is enforce and by the membership/scope fences like every signal).
+ // It is published INSIDE this plan's fence (lease, control generation, identity, anchor set, plan epoch, and the provenance mode and revision the plan read), so a stale fetch, a lost lease or a mode change publishes nothing; the signal
+ // is read back, and when the publication does not hold the part is NOT settled (it stays due and is replanned). The digest binds the waiting values and the provenance revision: an identical observation re-arms nothing, a new Russian
+ // value or a new mode era does. Schema absent: nothing can be held, nothing is published (fail closed).
  const emitUpgrade=async()=>{
   const waiting=replacements.pending.filter(item=>item.reason==='language_upgrade');
-  if(!waiting.length||context.provenance.mode==='enforce')return;
-  const digestOfWaiting=await sha({upgrade:waiting.map(item=>[item.field,item.source,item.value])});
-  const [statement,params]=emitStatement({kind:'source_changed',subject:filmId,source:'',part:'core',digest:digestOfWaiting,cause:'language_upgrade',at:now});
+  if(!waiting.length||context.provenance.mode==='enforce'||context.provenance.revision===null)return true;
+  const digestOfWaiting=await sha({upgrade:waiting.map(item=>[item.field,item.source,item.value]),mode:context.provenance.mode,revision:context.provenance.revision});
+  const [statement,params]=emitUpgradeStatement({subject:filmId,digest:digestOfWaiting,at:now,guard:guardSql(ctx),mode:context.provenance.mode,revision:context.provenance.revision});
   await db(env).prepare(statement).bind(...params).run();
+  const held=await one(db(env),"SELECT cause_digest FROM enrichment_signal WHERE kind='source_changed' AND subject=? AND source='' AND part='core'",[filmId]);
+  if(held?.cause_digest!==digestOfWaiting)return false;
   report.provenance.upgrades_waiting=(report.provenance.upgrades_waiting||0)+waiting.length;
+  return true;
  };
- const noteFilm=async()=>{
-  if(!(core.fallbackFill.length||core.unconfirmedAgreement.length||core.storedDiffers.length||replacements.supersededKept.length))return;
+ // The owner-review lists of the Film row. In enforce `storedDiffers` is derived from what the writer ACTUALLY refused (`stored_differs`), never from a pre-comparator comparison (a successful replacement is not a refusal); off and hold keep
+ // the planner's list. `supersededKept` is recomputed on every settled evaluation and CLEARED when the value was reconfirmed or replaced, or the source no longer settles it as absent.
+ const noteFilm=async(refused=[])=>{
+  const enforcing=context.provenance.mode==='enforce';
+  const storedDiffers=enforcing?core.storedDiffers.filter(item=>refused.some(skip=>skip.field===item.field&&skip.reason==='stored_differs')):core.storedDiffers;
   const refreshed=(await readRows(env,filmId)).find(row=>row.part==='film');
-  await putRow(env,ctx,{...refreshed,film:{...(refreshed.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement,storedDiffers:core.storedDiffers,...(replacements.supersededKept.length?{supersededKept:replacements.supersededKept}:{}),writtenFields:[...new Set([...(refreshed.film?.writtenFields||[]),...report.written])]}},{expectEpoch:refreshed.planEpoch});
+  const prior=refreshed.film?.supersededKept||[];
+  if(!(core.fallbackFill.length||core.unconfirmedAgreement.length||storedDiffers.length||replacements.supersededKept.length||prior.length||(refreshed.film?.storedDiffers||[]).length))return;
+  const {supersededKept:_old,...rest}=refreshed.film||{};
+  await putRow(env,ctx,{...refreshed,film:{...rest,fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement,storedDiffers,...(replacements.supersededKept.length?{supersededKept:replacements.supersededKept}:{}),writtenFields:[...new Set([...(refreshed.film?.writtenFields||[]),...report.written])]}},{expectEpoch:refreshed.planEpoch});
  };
  if(metadataEligible&&writeFields.length){
   const sourceRow=rowOf('core',core.writes[writeFields[0]].source);
@@ -318,22 +329,22 @@ export async function processFilm(env,{filmId,leaseId,generation,now,tools,fetch
    report.written.push(...(Array.isArray(changed)&&context.provenance.mode!=='off'?writeFields.filter(field=>changed.some(item=>['provenance:','replace:'].some(prefix=>String(item)===prefix+field))):unit.state==='applied'?writeFields.filter(field=>!core.writes[field].offer):[]));
    // the typed declarations of what was offered: the one explicit boundary to a provenance writer (AIR-631); each value is bound to the language and basis its observation carried
    report.declarations=writeFields.map(name=>({field:name,...declared[name]}));
-   await emitUpgrade();
+   if(!await emitUpgrade())return {state:'done',report:{...report,upgradeNotPublished:true}};
    const next=[...byKey.values()].filter(row=>row.part==='core'&&applicable.includes(row.source)&&settles(row.source));
    for(const row of next){
     const complete=core.complete||CORE_FIELDS.every(field=>!Plan.blank(stored[field])||core.writes[field]);
     await putRow(env,ctx,{...row,status:complete?(core.gaps.length?'complete_with_gaps':'complete'):row.status,gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source]?.observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null,film:{...(row.film||{}),fallbackFill:core.fallbackFill,unconfirmedAgreement:core.unconfirmedAgreement}},{expectEpoch:row.refreshEpoch});
    }
-   await noteFilm();
+   await noteFilm(unit.result?.skipped||unit.skipped||[]);
   }
  }else if(metadataEligible&&core.complete){
   // A refresh whose verified answer has nothing left to offer (every field settled, kept or pinned) still COMPLETES the part and stores the comparable source version of what was verified: without it a reopened part
   // (a verified source change) would stay due for ever and a later equal observation could never be told from a change.
-  await emitUpgrade();
+  if(!await emitUpgrade())return {state:'done',report:{...report,upgradeNotPublished:true}};
   for(const row of [...byKey.values()].filter(item=>item.part==='core'&&applicable.includes(item.source)&&settles(item.source)&&['due','deferred_repair'].includes(item.status))){
    await putRow(env,ctx,{...row,status:core.gaps.length?'complete_with_gaps':'complete',gaps:core.gaps,conflicts:core.conflicts,hints:report.hints,sourceVersion:await Plan.coreVersion(row.source,row.anchor,answers[row.source].observation),failures:0,transportStreak:0,pendingSince:null,retryAt:null},{expectEpoch:row.refreshEpoch});
   }
-  await noteFilm();
+  await noteFilm([]);
  }
  // An OK answer whose observation has an unreadable or ambiguous field: the sections that ARE valid may fill (above), but the source's core part is REPAIRABLE (it backs off and counts like any malformed section, with the existing
  // quarantine and recovery), never settled, never given a version and never a reason to clear its counters.

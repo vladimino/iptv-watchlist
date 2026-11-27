@@ -437,7 +437,7 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  for(let i=0;i<30;i++){await post(env,{action:'set',field:'runtime',value:100+i});}
  for(let i=0;i<30;i++){await post(env,{action:'set',field:'year',value:1900+i});}
  // producer-shaped C1 state (src/catalog-enrichment-producer.js rowStatement): the disagreement and the written-field evidence live in the Film row's film_json, conflicts and hints on the core row
- exec(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,film_json) VALUES ('${ID}','film','*',0,'identity_disagreement','${T}','${T}','{"disagreement":{"reasons":["year_differs"],"at":"${T}","source":"letterboxd"},"fallbackFill":["year"],"unconfirmedAgreement":["synopsis"],"storedDiffers":["runtime"],"writtenFields":["year"],"agreedAnchorDigest":"${'a'.repeat(64)}","ownerRetry":"internal-token"}');
+ exec(file,`INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,film_json) VALUES ('${ID}','film','*',0,'identity_disagreement','${T}','${T}','{"disagreement":{"reasons":["year_differs"],"at":"${T}","source":"letterboxd"},"fallbackFill":["year"],"supersededKept":["runtime"],"unconfirmedAgreement":["synopsis"],"storedDiffers":["runtime"],"writtenFields":["year"],"agreedAnchorDigest":"${'a'.repeat(64)}","ownerRetry":"internal-token"}');
  INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at,conflicts_json,hints_json,gaps_json) VALUES ('${ID}','core','tmdb',0,'complete_with_gaps','${T}','${T}','[{"field":"year"}]','["hint"]','["poster"]');
  WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<199) INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,due_since,updated_at) SELECT '${ID}','credits','tmdb',i,'complete','${T}','${T}' FROM n;`);
  // a Film redirected into it contributes its history (one hop)
@@ -456,7 +456,7 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  assert.deepEqual(first.body.c1.conflicts,[{part:'core',source:'tmdb',value:[{field:'year'}]}]);assert.deepEqual(first.body.c1.hints,[{part:'core',source:'tmdb',value:['hint']}]);assert.deepEqual(first.body.c1.gaps,[{part:'core',source:'tmdb',value:['poster']}]);
  // the Film row's own evidence is read directly, whatever the number of credits chunks; internal markers are not exposed
  assert.equal(first.body.c1.film.status,'identity_disagreement');assert.deepEqual(first.body.c1.film.disagreement.reasons,['year_differs']);
- assert.deepEqual(first.body.c1.film.fallbackFill,['year']);assert.deepEqual(first.body.c1.film.unconfirmedAgreement,['synopsis']);assert.deepEqual(first.body.c1.film.storedDiffers,['runtime']);assert.equal(first.body.c1.film.ownerRetry,undefined);
+ assert.deepEqual(first.body.c1.film.fallbackFill,['year']);assert.deepEqual(first.body.c1.film.unconfirmedAgreement,['synopsis']);assert.deepEqual(first.body.c1.film.storedDiffers,['runtime']);assert.deepEqual(first.body.c1.film.supersededKept,['runtime'],'AIR-633: the superseded-kept owner-review list is part of the owner readback');assert.equal(first.body.c1.film.ownerRetry,undefined);
  assert.equal(first.body.c1.credits.chunks,200);assert.equal(first.body.c1.credits.byStatus.complete,200);
  assert.ok(first.body.c1.rows.some(row=>row.part==='film')&&first.body.c1.rows.some(row=>row.part==='core'),'the fixed rows are never pushed out by credits chunks');
  assert.equal(first.body.redirects.count,1);

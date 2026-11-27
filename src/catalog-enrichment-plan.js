@@ -368,6 +368,17 @@ export function planReplacements(input){
  const mode=provenance?.mode||'off';
  const confirmed=!hasLetterboxdAnchor||!!agreed; // an unconfirmed observation never replaces a different nonblank value (ADR 0214 decision 5)
  if(!confirmed)return out;
+ // the explicit state of a source for a field, from its own typed observation: value | absent (verified) | unresolved | unobserved (settled, not asked now) | pending | not_applicable
+ const observedState=(source,field)=>{
+  if(!applicable.includes(source))return 'not_applicable';
+  const answer=answers[source];
+  if(!answer||answer.status!=='ok')return 'pending';
+  const coverage=answer.coverage?.[field];
+  if(coverage===undefined)return 'unobserved';
+  if(coverage==='absent')return 'absent';
+  if(coverage==='verified')return blank(answer.fields?.[field])?'absent':'value';
+  return 'unresolved';
+ };
  const valuesOf=field=>CORE_ORDER.filter(source=>fieldState(source,field,{applicable,answers})==='value').map(source=>({source,value:answers[source].fields[field],language:languageOf(answers[source],field)}));
  for(const field of CORE_FIELDS){
   const isLanguage=LANGUAGE_FIELDS.includes(field);
@@ -386,9 +397,12 @@ export function planReplacements(input){
   const seen=valuesOf(field);
   if(!seen.length){
    if(mode!=='enforce')continue;
-   if(standing.name==='superseded')out.supersededKept.push(field);
-   // a source that answered and verifiably has no value, which is the very source that attributed the stored value: the writer counts it as `source_absent` and keeps the value (a blank never clears)
-   if(standing.source&&answers[standing.source]?.status==='ok'&&fieldState(standing.source,field,{applicable,answers})==='absent')out.offers[field]={source:standing.source,value:null,mode:'absent',language:null};
+   // An ABSENCE is only what a source's own typed observation says (`answer.coverage[field] === 'absent'`): a source that was not asked this tick (the scheduling placeholder of a settled part), is pending or transport-unavailable,
+   // failed, or has unreadable or ambiguous coverage is neither a value nor an absence. A superseded value is listed as kept only after EVERY applicable source's current coverage settled as a verified absence under the new anchors.
+   const states=CORE_ORDER.filter(source=>applicable.includes(source)).map(source=>observedState(source,field));
+   if(standing.name==='superseded'&&states.length&&states.every(state=>state==='absent'))out.supersededKept.push(field);
+   // the very source that attributed the stored value verifiably has none now: the writer counts it as `source_absent` and keeps the value (a blank never clears)
+   if(standing.source&&observedState(standing.source,field)==='absent')out.offers[field]={source:standing.source,value:null,mode:'absent',language:null};
    continue;
   }
   // for synopsis and poster, language quality is compared BEFORE provider precedence (ADR 0224); every other field keeps the plain source order

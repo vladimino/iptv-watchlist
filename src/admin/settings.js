@@ -73,7 +73,7 @@ async function catalogEnrichmentEffective(env){
  out.attention=attention.slice(0,CATALOG_ENRICHMENT_ATTENTION_LIMIT).map(row=>{
   let film=null;try{film=row.film_json?JSON.parse(row.film_json):null;}catch{film=null;}
   return {filmId:row.film_id,part:row.part,source:row.source,slot:Number(row.slot),status:row.status,reason:row.reason,failureClass:row.failure_class,failureSignature:row.failure_signature,failures:Number(row.failures),transportStreak:Number(row.transport_streak),pendingSince:row.pending_since,retryAt:row.retry_at,updatedAt:row.updated_at,
-   lists:film?{fallbackFill:film.fallbackFill||[],unconfirmedAgreement:film.unconfirmedAgreement||[],writtenUnderSupersededAnchor:film.writtenUnderSupersededAnchor||[],disagreement:film.disagreement||null}:null,retry:{action:'retry',filmId:row.film_id,part:row.part==='film'?undefined:row.part,source:row.source==='*'?undefined:row.source}};
+   lists:film?{fallbackFill:film.fallbackFill||[],unconfirmedAgreement:film.unconfirmedAgreement||[],writtenUnderSupersededAnchor:film.writtenUnderSupersededAnchor||[],supersededKept:film.supersededKept||[],disagreement:film.disagreement||null}:null,retry:{action:'retry',filmId:row.film_id,part:row.part==='film'?undefined:row.part,source:row.source==='*'?undefined:row.source}};
  });
  out.attentionTruncated=attention.length>CATALOG_ENRICHMENT_ATTENTION_LIMIT;
  out.provenance=await catalogProvenanceTotals(first,all);

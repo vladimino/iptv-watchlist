@@ -127,7 +127,7 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
  assert.equal(open.status,200);assert.equal(open.body.control.state,'inactive');assert.equal(open.body.attention.length,0);
  activate(file);
  sql(file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,revision,updated_at) VALUES ('rated',1,1,1,'${T}');
-  INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,film_json) VALUES ('film:a','film','*',0,'identity_disagreement',NULL,'${T}','${T}','{"disagreement":{"reasons":["tmdb_differs"]},"fallbackFill":[{"field":"year"}],"unconfirmedAgreement":["year"]}');
+  INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,due_since,updated_at,film_json) VALUES ('film:a','film','*',0,'identity_disagreement',NULL,'${T}','${T}','{"disagreement":{"reasons":["tmdb_differs"]},"fallbackFill":[{"field":"year"}],"supersededKept":["runtime"],"unconfirmedAgreement":["year"]}');
   INSERT INTO catalog_enrichment_state (film_id,part,source,slot,status,reason,failure_class,failure_signature,failures,due_since,updated_at) VALUES ('film:a','credits','tmdb',0,'deferred_repair','unreadable_credits','repairable','unreadable',6,'${T}','${T}');
   INSERT INTO catalog_enrichment_tick (tick_id,started_at,state,counts_json) VALUES ('run-1','${T}','started','{"films":2}');
   INSERT INTO enrichment_signal (kind,subject,state,version,armed_at) VALUES ('anchor_changed','film:a','pending',1,'${T}');
@@ -148,7 +148,7 @@ const req=over=>({action:'pause',expectedRevision:2,requestId:'req-00000001',...
  const list=active.body.attention;
  assert.deepEqual(list.map(item=>item.part+':'+item.status),['film:identity_disagreement','credits:deferred_repair'].sort((a,b)=>list.findIndex(x=>x.part+':'+x.status===a)-list.findIndex(x=>x.part+':'+x.status===b)));
  const film=list.find(item=>item.part==='film');
- assert.deepEqual([film.lists.fallbackFill.length,film.lists.unconfirmedAgreement,film.lists.disagreement.reasons],[1,['year'],['tmdb_differs']],'the lists kept for owner review, each with a retry action');
+ assert.deepEqual([film.lists.fallbackFill.length,film.lists.unconfirmedAgreement,film.lists.disagreement.reasons,film.lists.supersededKept],[1,['year'],['tmdb_differs'],['runtime']],'the lists kept for owner review, each with a retry action');
  assert.deepEqual(film.retry,{action:'retry',filmId:'film:a',part:undefined,source:undefined}.part===undefined?{action:'retry',filmId:'film:a'}:film.retry);
  // a pause with a run that has not been written as stopped: the drain is displayed
  sql(file,"UPDATE catalog_enrichment_control SET state='paused',generation=generation+1,revision=revision+1");

@@ -103,10 +103,20 @@ export function emitStatement({kind,subject,source='',part='',digest=null,cause=
  return [`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) VALUES (?,?,?,?,1,0,'pending',?,?,?,0) ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest OR excluded.cause_digest IS NULL`,[kind,subject,source,part,digest,cause,at]];
 }
 
+export const UPGRADE_CAUSE='language_upgrade';
 export async function provenanceEnforcing(handle){
  try{const row=await one(handle,'SELECT mode FROM film_metadata_provenance_control WHERE id=1');return row?.mode==='enforce';}
  catch(error){if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return false;throw error;}
 }
+// ADR 0224 (AIR-633): the GUARDED emission of the deferred language upgrade. The signal is published only inside the producer's own fence (`guard`: lease, control generation, the resolved identity, the anchor set and the Film's plan epoch)
+// AND only while the provenance mode and revision the plan read are still the stored ones and the mode is not `enforce` (so a stale fetch, a lost lease, an anchor correction or a mode change publishes nothing). The re-arm rule is the one of
+// `emitStatement` (a new cause digest re-arms, an identical one does not). -> [sql, params]; the caller reads the signal back to learn whether the publication holds.
+export function emitUpgradeStatement({subject,digest,at,guard,mode,revision}){
+ instant(at);
+ if(typeof subject!=='string'||!subject||!/^[0-9a-f]{64}$/.test(String(digest))||!guard||typeof guard.sql!=='string'||!['off','hold'].includes(mode)||!Number.isInteger(revision))throw failed('film_person_invalid');
+ return [`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_digest,cause_ref,armed_at,attempts) SELECT 'source_changed',?,'','core',1,0,'pending',?,'${UPGRADE_CAUSE}',?,0 WHERE ${guard.sql} AND EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id=1 AND mode=? AND revision=?) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=?) ON CONFLICT (kind,subject,source,part) DO UPDATE SET version=version+1,state='pending',cause_digest=excluded.cause_digest,cause_ref=excluded.cause_ref,armed_at=excluded.armed_at,attempts=0,last_error=NULL,retry_at=NULL WHERE enrichment_signal.cause_digest IS NOT excluded.cause_digest`,[subject,digest,at,...guard.params,mode,revision,subject]];
+}
+
 // ---- runnable signals ----
 // A signal is runnable when it is pending, its scope is enabled (an `admitted` signal) or some enabled membership of its Film exists (the others), it is RESOLVED (its Film exists) and its retry is due. Held (disabled
 // scope), unresolved and backed-off signals are not runnable, so they cannot keep a run spinning or cancel a park. -> [{kind, subject, source, part, version, filmId}]
@@ -119,10 +129,10 @@ export async function runnableSignals(env,{now,limit=50}){
  const sources=Object.keys(SOURCE_SCOPES).filter(source=>(SOURCE_SCOPES[source]||[]).length);
  const eligible=[...sources.map(source=>`(s.source=? AND s.part='' AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope IN (${marks(SOURCE_SCOPES[source])})))`),...PART_SCOPES.map(()=>"(s.part=? AND EXISTS (SELECT 1 FROM catalog_enrichment_scope c WHERE c.enabled=1 AND c.scope=?))")].join(' OR ')||'0';
  const eligibleParams=[...sources.flatMap(source=>[source,...SOURCE_SCOPES[source]]),...PART_SCOPES.flatMap(scope=>[scope,scope])];
- const admitted=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,e.film_id AS film_id FROM enrichment_signal s JOIN film_external_id e ON e.scheme='tmdb' AND e.value=substr(s.subject,6) AND e.trusted=1 AND e.conflicting=0 WHERE s.kind='admitted' AND s.state='pending' AND s.acked_version<s.version AND s.subject LIKE 'tmdb:%' AND (s.retry_at IS NULL OR s.retry_at<=?) AND (${eligible}) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) ORDER BY s.armed_at LIMIT ?`,[now,...eligibleParams,limit]);
- const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND (s.cause_ref IS NOT 'language_upgrade' OR ?=1) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=s.subject) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,enforcing?1:0,limit]);
+ const admitted=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.cause_ref AS cause_ref,e.film_id AS film_id FROM enrichment_signal s JOIN film_external_id e ON e.scheme='tmdb' AND e.value=substr(s.subject,6) AND e.trusted=1 AND e.conflicting=0 WHERE s.kind='admitted' AND s.state='pending' AND s.acked_version<s.version AND s.subject LIKE 'tmdb:%' AND (s.retry_at IS NULL OR s.retry_at<=?) AND (${eligible}) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=e.film_id) ORDER BY s.armed_at LIMIT ?`,[now,...eligibleParams,limit]);
+ const others=await many(handle,`SELECT s.kind,s.subject,s.source,s.part,s.version,s.cause_digest AS digest,s.cause_ref AS cause_ref,s.subject AS film_id FROM enrichment_signal s WHERE s.kind<>'admitted' AND s.state='pending' AND s.acked_version<s.version AND (s.retry_at IS NULL OR s.retry_at<=?) AND (s.cause_ref IS NOT 'language_upgrade' OR ?=1) AND NOT EXISTS (SELECT 1 FROM film_redirect r WHERE r.from_id=s.subject) AND EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=s.subject) ORDER BY s.armed_at LIMIT ?`,[now,enforcing?1:0,limit]);
 
- return [...admitted,...others].map(row=>({kind:row.kind,subject:row.subject,source:row.source,part:row.part,version:Number(row.version),digest:row.digest??null,filmId:row.film_id}));
+ return [...admitted,...others].map(row=>({kind:row.kind,subject:row.subject,source:row.source,part:row.part,version:Number(row.version),digest:row.digest??null,cause:row.cause_ref??null,filmId:row.film_id}));
 }
 
 // ---- guarded consumption ----
@@ -141,8 +151,11 @@ function identityGuard(signal){
 export function consumeGuard({signal,generation,leaseId,now,scopes=null}){
  const lease=leaseGuard(leaseId,now),control=controlGuard(generation),identity=identityGuard(signal);
  const justification=scopes?{sql:`EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE enabled=1 AND scope IN (${marks(scopes)}))`,params:[...scopes]}:{sql:'EXISTS (SELECT 1 FROM catalog_enrichment_member m JOIN catalog_enrichment_scope c ON c.scope=m.scope AND c.enabled=1 WHERE m.film_id=?)',params:[signal.filmId||signal.subject]};
- const sql=`(EXISTS (SELECT 1 FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=? AND state='pending' AND version=? AND acked_version<?) AND ${control.sql} AND ${lease.sql} AND ${justification.sql} AND ${identity.sql})`;
- return {sql,params:[signal.kind,signal.subject,signal.source??'',signal.part??'',signal.version,signal.version,...control.params,...lease.params,...justification.params,...identity.params]};
+ // ADR 0224 (AIR-633): a deferred `language_upgrade` signal is applied, and acknowledged, ONLY while the provenance mode is `enforce` AT COMMIT (the same guard is repeated in every effect and in the ack): a signal selected under
+ // enforce and consumed after a switch to hold therefore does nothing and stays pending. A schema without the control table cannot satisfy it (fail closed); ordinary signals are unchanged.
+ const upgrade=signal.cause===UPGRADE_CAUSE?{sql:" AND EXISTS (SELECT 1 FROM film_metadata_provenance_control WHERE id=1 AND mode='enforce')",params:[]}:{sql:'',params:[]};
+ const sql=`(EXISTS (SELECT 1 FROM enrichment_signal WHERE kind=? AND subject=? AND source=? AND part=? AND state='pending' AND version=? AND acked_version<?) AND ${control.sql} AND ${lease.sql} AND ${justification.sql} AND ${identity.sql}${upgrade.sql})`;
+ return {sql,params:[signal.kind,signal.subject,signal.source??'',signal.part??'',signal.version,signal.version,...control.params,...lease.params,...justification.params,...identity.params,...upgrade.params]};
 }
 // The effect statements of one signal kind, each `WHERE <guard>`; the acknowledgement is appended last by `consumeSignal`.
 // admitted: the retained membership and the Film's state row. The other kinds reopen work: the Film's `plan_epoch` and, once, the `refresh_epoch` of the affected rows (every row for an anchor change, the part for a protection
