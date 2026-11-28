@@ -115,13 +115,13 @@ const mark=(ctx,clock)=>({requestId:ctx.requestId,attempt:ctx.attempt,now:clock(
 // refused; what the fresh read saw is proven again INSIDE the batch (the Film row must exist, the revision is the one read).
 // AIR-618 (ADR 0215 decision 1, canonical path): the optional input function `evidence({requestId,at})` returns the [sql,params] statements of an identity evidence row that joins THIS batch (see `claimBridgeEvidence` in
 // src/identity-evidence-writer.js). It is NOT content: the request id and the content digest are the same with or without it. It is called only when a batch is about to be written (never for a no-op), with the receipt's request id.
-async function writeUnit(env,input,requestId,ctx,clock){
+async function writeUnit(env,input,requestId,ctx,clock,approvedPins=null){
  const plan=await planFilmExternalIds(env,input);
  if(plan.absent)throw failed('film_person_reference');
  if(plan.noop)return {id:input.id,revision:plan.revision,already:true};
  if(input.evidence!==undefined&&typeof input.evidence!=='function')throw failed('film_person_invalid');
  const evidence=input.evidence?await input.evidence({requestId,at:input.at}):[];
- return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,requireExisting:true,...(input.guards!==undefined?{guards:input.guards}:{}),...(evidence.length?{evidence}:{}),
+ return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,requireExisting:true,...(approvedPins?{approvedPins}:{}),...(input.guards!==undefined?{guards:input.guards}:{}),...(evidence.length?{evidence}:{}),
   film:{contractVersion:plan.contractVersion,
    removeExternalIds:plan.remove.map(({scheme,value})=>({scheme,value})),
    externalIds:plan.add.map(({scheme,value,trusted,conflicting,provenance})=>({scheme,value,trusted,conflicting,provenance}))},
@@ -174,7 +174,9 @@ export function filmExternalIdsOperation({replan,now=()=>new Date().toISOString(
 //   {state:'absent', receipt:false}                                  the Film is not in the store: nothing is created;
 //   {state:'noop', receipt:false}                                    the stored ids already equal the source in the owned schemes: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
-export async function applyFilmExternalIds(env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
+// `approvedPins` (AIR-653, optional, never content: the digest and the request id are the same with or without it): the authority pins an operation froze at its approval; the receipt's RESERVATION and the domain batch assert them in the same batches.
+// `noReplay` (AIR-653, optional): an owner-run operation never replays or retries an existing unsettled receipt of the same id (see receiptedWrite).
+export async function applyFilmExternalIds(env,{origin,event,input,replan,now,policy=RETRY_POLICY,approvedPins=null,noReplay=false}={}){
  const route=await writerRoute(env);
  if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await filmExternalIdsDigest(input);
@@ -185,11 +187,11 @@ export async function applyFilmExternalIds(env,{origin,event,input,replan,now,po
  if(plan.absent)return {state:'absent',receipt:false,requestId};
  if(plan.noop)return {state:'noop',receipt:false,requestId};
  const hooks=filmExternalIdsOperation({replan:replan||(async()=>input),now:clock});
- const outcome=await receiptedWrite(env,{requestId,operation:FILM_EXTERNAL_IDS_OPERATION,origin,target,expectedRevision:plan.revision,digest,now:clock,policy},{
+ const outcome=await receiptedWrite(env,{requestId,operation:FILM_EXTERNAL_IDS_OPERATION,origin,target,expectedRevision:plan.revision,digest,now:clock,policy,...(approvedPins?{approvedPins}:{}),...(noReplay?{noReplay:true}:{})},{
   atomic:true,
   readback:hooks.readback,
   revalidate:hooks.revalidate,
-  run:ctx=>writeUnit(env,input,requestId,ctx,clock),
+  run:ctx=>writeUnit(env,input,requestId,ctx,clock,approvedPins),
  });
  return {...outcome,requestId};
 }

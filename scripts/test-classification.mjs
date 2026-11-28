@@ -432,6 +432,9 @@ export const FILES={
  "letterboxd-claim-cohort-preflight-production.mjs": {
   "suite": "core"
  },
+ "letterboxd-claim-historical-production.mjs": {
+  "suite": "core"
+ },
  "film-metadata-provenance.mjs": {
   "suite": "core"
  },

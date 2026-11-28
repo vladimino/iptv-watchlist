@@ -599,6 +599,9 @@ export async function receiptedWrite(env,input,hooks){
  if(!sameRequest(row,request))throw failed('receipt_conflict');
  if(row.state==='applied')return {ran:false,state:'applied',already:true,receipt:row};
  if(row.state==='abandoned')return {ran:false,state:'abandoned',receipt:row};
+ // AIR-653: an owner-run operation passes `noReplay`: an id that already has an unsettled receipt is never replayed, settled or retried by this call. It is reported as `receipt_prior_attempt` BEFORE anything is read or
+ // written for it; the owner decides on a separately approved recovery. Ordinary producers never pass it, so their retry behavior is unchanged.
+ if(!created&&input.noReplay===true)throw failed('receipt_prior_attempt');
  let attempt=row.attempts,currentRevision=request.expectedRevision;
  if(!created){
   const now=clock();

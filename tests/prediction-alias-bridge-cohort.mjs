@@ -184,6 +184,35 @@ const before=dump(file);
   assert.deepEqual([out.decision,out.reason,out.missing,out.work.statements,out.candidateDigest],['unknown','required_index_missing',[name],1,null],name);
   assert.deepEqual(out.liveBlockers,[REQUIRED_INDEXES[name]],name+': the missing index is the blocker of THIS run');
  }
+ // The definition counts, not the name: an index of the right name on another column does not bound the predicate.
+ {
+  const f=world();run(f,'DROP INDEX ratings_view_fact_key;CREATE INDEX ratings_view_fact_key ON ratings_view (updated_at)');
+  const out=await preflight(envOf(f),{scope:SCOPE});
+  assert.deepEqual([out.decision,out.reason,out.missing,out.work.statements],['unknown','required_index_missing',['ratings_view_fact_key'],1],'a same-named index of another definition');
+ }
+ // A GIVEN list of pairs (the owner's allowlist) instead of the pointer discovery: the same bounded capture, oracle and fence for exactly those lids.
+ {
+  const given=[{lid:'BR01',tmdb:'1'},{lid:'BR02',tmdb:'2'},{lid:'BR03',tmdb:'3'}];
+  const out=await preflight(envOf(file),{scope:ALL,subjects:given});
+  assert.deepEqual([out.decision,out.counts,out.work.pointerRows],['complete',{eligible_in_scope:3},0],'no discovery ran: no pointer row was inspected');
+  assert.deepEqual(out.results.map(item=>[item.lid,item.movie,item.state]),[['BR01','1','eligible_in_scope'],['BR02','2','eligible_in_scope'],['BR03','3','eligible_in_scope']]);
+  assert.equal(out.candidateDigest,await cohortDigest(given),'the digest of exactly the given pairs');
+  assert.deepEqual(out.sources,{direct_excluded:0,bridge_resolved:3,bridge_unresolved:0});
+  // A pair whose authoritative link names another movie is unknown and never eligible.
+  const wrong=await preflight(envOf(file),{scope:ALL,subjects:[{lid:'BR01',tmdb:'2'}]});
+  assert.deepEqual(stateOf(wrong,'BR01'),{state:'unknown',reason:'allowlist_movie_mismatch'});
+  // The planner refusals of the full cohort hold for given pairs too (a rival third alias; the witness).
+  const mixed=await preflight(envOf(file),{scope:ALL,subjects:[{lid:'BR04',tmdb:'4'},{lid:'BR08',tmdb:'8'},{lid:'BR01',tmdb:'1'}]});
+  assert.deepEqual([stateOf(mixed,'BR04'),stateOf(mixed,'BR08'),stateOf(mixed,'BR01')],[{state:'ineligible',reason:'inferred_admission_witness'},{state:'ineligible',reason:'ratings_link_ambiguous'},{state:'eligible_in_scope',reason:'planner_pass_and_negative_witness_all_archives'}]);
+  // Empty or over-cap lists are refused; duplicates collapse to one.
+  assert.equal((await preflight(envOf(file),{scope:ALL,subjects:[]})).reason,'subjects_invalid');
+  assert.equal((await preflight(envOf(file),{scope:ALL,subjects:given,caps:{candidates:2}})).reason,'subjects_invalid');
+  assert.equal((await preflight(envOf(file),{scope:ALL,subjects:[...given,...given]})).counts.eligible_in_scope,3);
+  // Movement between the two passes is `read_set_moved` for a given list too.
+  const moving=world();
+  const moved=await preflight(envOf(moving),{scope:ALL,subjects:given,hooks:{afterClassify:async()=>run(moving,"INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('RIVAL','tmdb-1',NULL,NULL,0,0,"+q(U)+")")}});
+  assert.deepEqual([moved.decision,moved.reason,moved.candidateDigest],['unknown','read_set_moved',null]);
+ }
 }
 
 // ---- 2. DIFFERENTIAL: the planner over the private snapshot answers exactly what it answers over the live fixture, so the token binds the exact consumed data ----

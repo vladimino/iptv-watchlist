@@ -164,10 +164,12 @@ export async function replanLetterboxdClaim(env,{lid,tmdb,filmId,now,extraGuards
 }
 
 // The unit input. `evidence` (a function, not content: the request id and the content digest are the same with or without it) is present only for a rooted write; it adds the bridge row's two statements to the claim's own batch.
+// The one external id a claim adds (AIR-653: also the content an operator recomputes to verify the receipt of a written claim; the same shape the unit's digest and request id are derived from).
+export const claimExternalIds=({lid,tmdb})=>[{scheme:'letterboxd',value:lid,trusted:true,conflicting:false,provenance:{source:LETTERBOXD_CLAIM_SOURCE,tmdb,adr:'0184'}}];
 function claimInput(plan,at,extraGuards=[],root=null,env=null){
  const evidence=root?claimBridgeEvidence(env,{filmId:plan.filmId,lid:plan.lid,root}):undefined;
  return {id:plan.filmId,at,schemes:['letterboxd'],addOnly:true,guards:[...plan.guards,...extraGuards],...(evidence?{evidence}:{}),
-  externalIds:[{scheme:'letterboxd',value:plan.lid,trusted:true,conflicting:false,provenance:{source:LETTERBOXD_CLAIM_SOURCE,tmdb:plan.tmdb,adr:'0184'}}]};
+  externalIds:claimExternalIds(plan)};
 }
 
 // ONE claim: plan, then the fenced unit, then an AUTHORITATIVE readback. {state:'written'|'already'|'refused'|'unknown'|'deferred', verdict, reason, filmId, requestId?}. A refusal (`conflict`, `not_proved`) writes nothing and names its reason.
@@ -177,17 +179,20 @@ function claimInput(plan,at,extraGuards=[],root=null,env=null){
 // `extraGuards` ([{sql,params}], at most 5) are the caller's frozen-state pins (an operator's approved generations), asserted INSIDE the same fenced batch next to the planner's own guards; one that does not hold writes nothing.
 // `root` (AIR-618, ADR 0215 choice 0215-8b = C): the page-check digest handed over by the Diary or Watchlist caller that has just verified and linked this pair. Rooted: the claim batch also carries the `claim_alias_bridge` evidence row
 // (inserted only while that writer is `pending` or `on`; absent or `off`: nothing). Rootless (the backfill, a replay, a pre-A2 link, a lost hand-over): the claim write is unchanged and writes no row.
-export async function applyLetterboxdClaim(env,{event,lid,tmdb,now,extraGuards=[],root}={}){
+// `approvedPins` (AIR-653, optional): the authority pins an operator froze at its approval (see approvedPinsOf in src/canonical-mutations.js, with optional extra `guards`). They are asserted in the receipt's RESERVATION and in the claim's batch, not only in the claim's batch.
+// `expectedFilmId` (AIR-653, optional): the Film an operator's approval selected; a fresh proof that names another Film is refused (`target_moved`) before anything is reserved. `noReplay`: see receiptedWrite.
+export async function applyLetterboxdClaim(env,{event,lid,tmdb,now,extraGuards=[],root,approvedPins=null,expectedFilmId,noReplay=false}={}){
  if(typeof event!=='string'||!event.trim())throw failed('film_person_invalid');
  const clock=typeof now==='function'?now:()=>now||new Date().toISOString();
  const plan=await planLetterboxdClaim(env,{lid,tmdb});
  if(plan.verdict!=='pass')return {state:'refused',...plan};
  if(plan.already)return {state:'already',...plan};
+ if(expectedFilmId!==undefined&&plan.filmId!==expectedFilmId){const {guards:_ignored,...shown}=plan;return {state:'refused',...shown,verdict:'conflict',reason:'target_moved'};}
  if(!Array.isArray(extraGuards)||extraGuards.length>5)throw failed('film_person_invalid');
  const rooted=rootOf(root);
  const input=claimInput(plan,clock(),extraGuards,rooted,env);
  const replan=()=>replanLetterboxdClaim(env,{lid,tmdb,filmId:plan.filmId,now:clock,extraGuards,root:rooted});
- const outcome=await applyFilmExternalIds(env,{origin:LETTERBOXD_CLAIM_ORIGIN,event,input,replan,now:clock});
+ const outcome=await applyFilmExternalIds(env,{origin:LETTERBOXD_CLAIM_ORIGIN,event,input,replan,now:clock,...(approvedPins?{approvedPins}:{}),...(noReplay?{noReplay:true}:{})});
  const {guards:_guards,...shown}=plan;
  if(outcome.state==='absent'||outcome.state==='skipped')return {state:'refused',...shown,verdict:'not_proved',reason:outcome.state==='absent'?'film_absent':'film_person_route_not_open',outcomeState:outcome.state,requestId:outcome.requestId??null};
  if(outcome.state==='applied'||outcome.state==='already'||outcome.state==='noop'){
