@@ -129,15 +129,64 @@ const snapshot=file=>JSON.stringify([rows(file,'SELECT * FROM catalog_enrichment
  assert.equal((await Op.execute('status',{binding:spy,now:NOW,params:{cutoff:CUTOFF}})).decision,'already_active');
 }
 {
- // exit codes and write states of the outcomes (the CLI never reports a refusal or a partial stop as success)
- const ok=Op.judge({outcome:'activated'},'committed'),noop=Op.judge({outcome:'noop'},'none');
- assert.deepEqual([ok,noop],[{exit:0,writeState:'committed'},{exit:0,writeState:'none'}]);
- assert.deepEqual(Op.judge({outcome:'refused'},'none'),{exit:3,writeState:'none'});
- assert.deepEqual(Op.judge({outcome:'uncertain'},'unknown'),{exit:3,writeState:'unknown'});
- assert.deepEqual(Op.judge({outcome:'stopped'},'committed'),{exit:3,writeState:'committed'});
+ // exit codes and DOMAIN write states of the outcomes (never a refusal or a partial stop as success; delivery telemetry is separate)
+ assert.deepEqual(Op.judge({outcome:'activated'}),{exit:0,writeState:'committed',writes:true});
+ assert.deepEqual(Op.judge({outcome:'noop'}),{exit:0,writeState:'none',writes:false});
+ assert.deepEqual(Op.judge({outcome:'refused',effects:{scopeInserted:false,bootstrapRows:0}}),{exit:3,writeState:'none',writes:false});
+ assert.deepEqual(Op.judge({outcome:'uncertain',effects:{scopeInserted:true,bootstrapRows:100}}),{exit:3,writeState:'unknown',writes:null});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:true,bootstrapRows:0}}),{exit:3,writeState:'partial',writes:true,partial:true});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:60}}),{exit:3,writeState:'partial',writes:true,partial:true});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:0}}),{exit:3,writeState:'none',writes:false},'a resume that wrote nothing new');
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:'unknown',bootstrapRows:0}}),{exit:3,writeState:'unknown',writes:null});
  const {db}=world({held:true});
  const run=await Op.runCatalogEnrichmentActivationProduction({argv:A('--activate','--target','iptv','--cutoff',CUTOFF,'--by','operator:AIR-607','--go',GO,'--confirm','activate','--operator-sha256',SHA),now:()=>NOW,deps:{binding:db}});
- assert.equal(run.exit,3);assert.equal(run.result.outcome,'refused');assert.equal(run.result.writeState,'none');assert.equal(run.result.retry,false);assert.deepEqual(run.result.problems,['film_person_marker_not_open']);
+ assert.equal(run.exit,3);assert.equal(run.result.outcome,'refused');assert.equal(run.result.writeState,'none');assert.equal(run.result.writes,false);assert.equal(run.result.retry,false);assert.deepEqual(run.result.problems,['film_person_marker_not_open']);
+}
+
+// ===== 4b. status: inspection is not readiness; an exact cutoff is judged by the activation's own rules; a changed or unreadable state is never ready =====
+{
+ const {file,db}=world();
+ const ins=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:null}});
+ assert.deepEqual([ins.mode,ins.decision],['inspection','inspection'],'no cutoff supplied: an observation that claims no readiness');
+ const exact=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:CUTOFF}});
+ assert.deepEqual([exact.mode,exact.decision],['exact_cutoff','ready']);
+ const future=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:'2026-11-29T00:00:00.000Z'}});
+ assert.deepEqual([future.decision,future.problems],['blocked',['cutoff_in_future']],'a future cutoff is never ready');
+ // an interrupted activation of the same cutoff resumes; another cutoff is blocked with its reason
+ await Op.execute('activate',{binding:db,now:NOW,ctx:{track(){}},params:act({})}).catch(()=>{});
+ const active=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:CUTOFF}});
+ assert.deepEqual([active.decision,active.problems],['already_active',[]]);
+ const wrong=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:OLD}});
+ assert.deepEqual([wrong.decision,wrong.problems,wrong.reasons],['blocked',['active_configuration_mismatch'],['scope_cutoff_mismatch']],'a different cutoff over an active control is blocked, never already_active');
+ const activeInspection=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:null}});
+ assert.deepEqual([activeInspection.decision,activeInspection.reasons],['inspection',[]]);
+ sql(file,"UPDATE catalog_enrichment_scope SET enabled=0,revision=revision+1 WHERE scope='rated'");
+ const disabled=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:CUTOFF}});
+ assert.deepEqual([disabled.decision,disabled.problems,disabled.reasons],['blocked',['active_configuration_mismatch'],['scope_not_enabled']],'a disabled scope over an active control is blocked');
+ sql(file,"UPDATE catalog_enrichment_scope SET enabled=1,revision=revision+1 WHERE scope='rated'");
+ sql(file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,revision,updated_at) VALUES ('discovery',1,1,NULL,1,'${AT}')`);
+ const another=await Op.execute('status',{binding:db,now:NOW,params:{cutoff:CUTOFF}});
+ assert.deepEqual([another.decision,another.reasons],['blocked',['other_scope_present']],'another scope over an active control is blocked');
+ sql(file,"UPDATE catalog_enrichment_scope SET enabled=0,revision=revision+1 WHERE scope='rated'");
+ // the same verdict as the activation: it refuses exactly these
+ const refusal=await Op.execute('activate',{binding:db,now:NOW,ctx:{track(){}},params:act({})});
+ assert.deepEqual([refusal.outcome,refusal.problems,refusal.reasons],['refused',['active_configuration_mismatch'],['other_scope_present','scope_not_enabled']]);
+}
+{
+ // the readback envelope changes between the two reads of one status: unstable, not a verdict
+ const {file,db}=world();
+ await Op.execute('activate',{binding:db,now:NOW,ctx:{track(){}},params:act({})});
+ let seen=0;
+ const moving={prepare:text=>{if(/FROM catalog_enrichment_scope ORDER BY scope/.test(text)&&++seen===2)sql(file,"UPDATE catalog_enrichment_scope SET revision=revision+1 WHERE scope='rated'");return db.prepare(text);},batch:b=>db.batch(b)};
+ const out=await Op.execute('status',{binding:moving,now:NOW,params:{cutoff:CUTOFF}});
+ assert.deepEqual([out.decision,out.problems],['unstable',['state_changed_during_read']]);
+}
+{
+ // a missing or unreadable schema is blocked (not an error, never ready)
+ const file=migrated(46);
+ const out=await Op.execute('status',{binding:d1Standin(file),now:NOW,params:{cutoff:CUTOFF}});
+ assert.equal(out.decision,'blocked');assert.ok(out.problems.includes('schema_not_applied'));
+ assert.equal(out.writes,false);
 }
 
 // ===== 5. the REAL production composition: mocked D1 REST over sqlite, strict reads, atomic rendered batches, response loss =====
@@ -223,6 +272,7 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  const out=await production(ARGV(),file);
  assert.equal(out.exit,0,JSON.stringify(out.result));
  assert.deepEqual([out.result.outcome,out.result.writeState,out.result.writes],['activated','committed',true]);
+ assert.equal(out.result.transport.lastBatch,'committed');
  assert.equal(out.result.control.updatedBy,'operator:AIR-607 go:'+GO);
  assert.deepEqual([out.result.qualifyingAdmissions,out.result.ratedSignals,out.result.onlyRatedScope],[100,100,true]);
  assert.deepEqual(out.result.wake,{outcome:'deferred',reason:'no_workflow_binding'});
@@ -253,7 +303,9 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  const {file}=world();
  const out=await production(ARGV(),file,{loseControlReply:true,blindAfterControl:true});
  assert.equal(out.exit,3);
- assert.deepEqual([out.result.outcome,out.result.reason,out.result.writeState,out.result.retry],['uncertain','control_outcome_unknown','unknown',false]);
+ assert.deepEqual([out.result.outcome,out.result.reason,out.result.writeState,out.result.writes,out.result.retry],['uncertain','control_outcome_unknown','unknown',null,false]);
+ assert.deepEqual(out.result.effects,{scopeInserted:true,bootstrapRows:100},'the confirmed earlier effects are preserved');
+ assert.equal(out.result.transport.lastBatch,'unknown');
  assert.equal(controlRow(file).state,'active','the commit did land; only the operator could not see it');
 }
 {
@@ -265,7 +317,43 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  const fetchImpl=async(url,init)=>{if(!fired&&init.body&&JSON.parse(init.body).batch?.[0]?.sql.startsWith('INSERT INTO catalog_enrichment_scope')){fired=true;sql(file,"UPDATE film_person_authority SET cutover='held',generation=generation+1 WHERE id=1;");}return inner(url,init);};
  const out=await Op.runCatalogEnrichmentActivationProduction({argv:ARGV(),env:ENV,fetchImpl,now:()=>NOW});
  assert.equal(out.exit,3);assert.deepEqual([out.result.outcome,out.result.problems],['refused',['scope_not_written']]);
- assert.equal(out.result.writeState,'committed','the (empty) guarded insert batch itself committed; it inserted no row');
+ assert.deepEqual([out.result.writeState,out.result.writes],['none',false],'the guarded insert batch was delivered and committed but changed no row: that is not a write');
+ assert.equal(out.result.transport.lastBatch,'committed','the delivery telemetry stays separate from the confirmed domain effects');
+ assert.deepEqual(out.result.effects,{scopeInserted:false,bootstrapRows:0});
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM catalog_enrichment_scope')[0].n,0);assert.equal(controlRow(file),null);
+}
+{
+ // a partial stop: the marker is held between bootstrap pages, so only the first page is written. The domain state is `partial` with the confirmed effects; the run ends with exit 3 and no retry
+ const {file}=world();
+ const mock=rest(file);
+ let pages=0;
+ const inner=mock.fetchImpl;
+ const fetchImpl=async(url,init)=>{
+  const body=init.body?JSON.parse(init.body):null;
+  if(body?.batch?.[0]?.sql.startsWith('INSERT INTO enrichment_signal')&&++pages===2)sql(file,"UPDATE film_person_authority SET cutover='held',generation=generation+1 WHERE id=1;");
+  return inner(url,init);
+ };
+ const out=await Op.runCatalogEnrichmentActivationProduction({argv:ARGV(),env:ENV,fetchImpl,now:()=>NOW});
+ assert.equal(out.exit,3);
+ assert.deepEqual([out.result.outcome,out.result.writeState,out.result.writes,out.result.partial,out.result.retry],['stopped','partial',true,true,false]);
+ assert.deepEqual(out.result.effects,{scopeInserted:true,bootstrapRows:50},'only the first page was written under the held marker');
+ assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,50);assert.equal(controlRow(file),null);
+}
+{
+ // an error in the middle of the run (a statement of the second page is rejected): what was confirmed before cannot be re-read from here, so the domain state is unknown, never a guess; the delivery telemetry says the last batch
+ const {file}=world();
+ const mock=rest(file);
+ let pages=0;
+ const inner=mock.fetchImpl;
+ const fetchImpl=async(url,init)=>{
+  const body=init.body?JSON.parse(init.body):null;
+  if(body?.batch?.[0]?.sql.startsWith('INSERT INTO enrichment_signal')&&++pages===2)return {ok:false,status:400,json:async()=>({success:false,errors:[{message:'rejected'}]})};
+  return inner(url,init);
+ };
+ const out=await Op.runCatalogEnrichmentActivationProduction({argv:ARGV(),env:ENV,fetchImpl,now:()=>NOW});
+ assert.equal(out.exit,3);
+ assert.deepEqual([out.result.reason,out.result.writeState,out.result.writes,out.result.retry],['statement_failed','unknown',null,false]);
+ assert.equal(out.result.transport.lastBatch,'unknown');
+ assert.equal(controlRow(file),null,'the control was never enabled');
 }
 console.log('catalog enrichment activation production operator: ok');

@@ -30,11 +30,29 @@ const instant=value=>typeof value==='string'&&ISO.test(value)&&!Number.isNaN(Dat
 // What the control row records as `updated_by` (the column holds at most 200 characters): the operator and the exact GO. It is never truncated: a combination that does not fit is refused.
 const ACTOR_LIMIT=200;
 const actor=(by,goReference)=>`${by} go:${goReference}`;
-function validInput({cutoffAt,by,at,goReference}){
+// The validity of a cutoff at a time. Exported so the operator's read-only status judges an exact cutoff by the same rule as the activation (a future cutoff is never ready).
+export function cutoffProblems(cutoffAt,at){
  const problems=[];
  if(!instant(at))problems.push('invalid_time');
  if(!instant(cutoffAt))problems.push('invalid_cutoff');
  else if(instant(at)&&Date.parse(cutoffAt)>Date.parse(at))problems.push('cutoff_in_future');
+ return problems;
+}
+// The ONE predicate of an applied activation, used by `activateRated` for its noop and by the operator's status for `already_active`: exactly the rated scope, enabled, with the requested cutoff and a done bootstrap.
+// `cutoffAt` null skips the cutoff comparison (an inspection without a requested cutoff). -> the reasons it does NOT match; an empty list is a match. Rows from the table or from a scope view are both read.
+export function activeConfigurationReasons(scopes,cutoffAt=null){
+ const reasons=[];
+ const rated=scopes.filter(row=>row.scope===ACTIVATION_SCOPE);
+ if(scopes.length!==rated.length)reasons.push('other_scope_present');
+ const own=rated[0];
+ if(!own){reasons.push('scope_missing');return reasons;}
+ if(cutoffAt!==null&&(own.cutoff_at??own.cutoffAt??null)!==cutoffAt)reasons.push('scope_cutoff_mismatch');
+ if(Number(own.activated)!==1||Number(own.enabled)!==1)reasons.push('scope_not_enabled');
+ if((own.bootstrap_state??own.bootstrapState)!=='done')reasons.push('bootstrap_not_done');
+ return reasons;
+}
+function validInput({cutoffAt,by,at,goReference}){
+ const problems=cutoffProblems(cutoffAt,at);
  if(typeof goReference!=='string'||!GO_REFERENCE.test(goReference))problems.push('go_reference_missing');
  if(typeof by!=='string'||!by||by.length>120)problems.push('invalid_operator');
  else if(typeof goReference==='string'&&GO_REFERENCE.test(goReference)&&actor(by,goReference).length>ACTOR_LIMIT)problems.push('actor_too_long');
@@ -132,8 +150,8 @@ export async function activateRated(env,{cutoffAt,by,at,goReference,maxPages=BOO
  // writes nothing under it (no recovery, no bootstrap), whatever the authority or schema say.
  if(before.state==='active'){
   const scopes=await many(handle,SCOPE_SQL);
-  const own=scopes.length===1&&scopes[0].scope===ACTIVATION_SCOPE?scopes[0]:null;
-  if(!own||own.cutoff_at!==cutoffAt||Number(own.activated)!==1||Number(own.enabled)!==1||own.bootstrap_state!=='done')return {outcome:'refused',effects,problems:['active_configuration_mismatch'],scopes:scopes.map(scopeView)};
+  const reasons=activeConfigurationReasons(scopes,cutoffAt);
+  if(reasons.length)return {outcome:'refused',effects,problems:['active_configuration_mismatch'],reasons,scopes:scopes.map(scopeView)};
   return finish(env,{outcome:'noop',effects,deps,extra:{reason:'already_active'}});
  }
 

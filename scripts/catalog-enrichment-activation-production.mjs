@@ -19,7 +19,7 @@ import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter} from './d1-backfill.mjs';
 import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
-import {activateRated,ratedActivationPreflight,readActivation} from '../src/catalog-enrichment-activation.js';
+import {activateRated,activeConfigurationReasons,cutoffProblems,ratedActivationPreflight,readActivation} from '../src/catalog-enrichment-activation.js';
 
 export const OPERATOR_PATH=fileURLToPath(import.meta.url);
 const ROOT=path.resolve(path.dirname(OPERATOR_PATH),'..');
@@ -34,10 +34,27 @@ export const fileDigests=()=>PINNED_FILES.map(file=>({file,sha256:sha256(fs.read
 export const operatorSha256=()=>sha256(fileDigests().map(item=>item.file+':'+item.sha256).join('\n'));
 
 // ---- the decision of one status read ----
-export function decide(preflight,control){
- if(control?.state==='active')return preflight.facts.scopes?.length===1&&preflight.facts.scopes[0].scope==='rated'&&preflight.facts.scopes[0].bootstrapState==='done'?'already_active':'blocked';
- if(!preflight.ok)return 'blocked';
- return preflight.facts.resume?'resume':'ready';
+// `inspection`: no cutoff was supplied, so the read is an observation and claims no readiness. With an exact cutoff the decision is `ready`, `resume` (the same cutoff, an interrupted activation), `already_active` (the very
+// predicate `activateRated` uses for its noop), `blocked` (with the problem codes and, for an active control, the reasons) or `unstable` (the control or a scope changed between the two reads of this status).
+// Everything is judged from the ONE preflight snapshot and then compared with the readback; a missing or unreadable schema is `blocked`, never ready. Exit 0 of a status is a successful observation, not an authorization.
+export function decide({preflight,readback,cutoffAt,at}){
+ if(cutoffAt!==null){
+  const invalid=cutoffProblems(cutoffAt,at);
+  if(invalid.length)return {decision:'blocked',problems:invalid};
+ }
+ const facts=preflight.facts||{};
+ if(!facts.control||!Array.isArray(facts.scopes))return {decision:'blocked',problems:preflight.problems.length?preflight.problems:['state_unreadable']};
+ if(!readback)return {decision:'blocked',problems:['state_unreadable']};
+ const same=JSON.stringify([facts.control.state,facts.control.generation,facts.control.revision,facts.scopes])===JSON.stringify([readback.control.state,readback.control.generation,readback.control.revision,readback.scopes]);
+ if(!same)return {decision:'unstable',problems:['state_changed_during_read']};
+ if(facts.control.state==='active'){
+  const reasons=activeConfigurationReasons(facts.scopes,cutoffAt);
+  if(cutoffAt===null)return {decision:'inspection',problems:[],reasons};
+  return reasons.length?{decision:'blocked',problems:['active_configuration_mismatch'],reasons}:{decision:'already_active',problems:[]};
+ }
+ if(cutoffAt===null)return {decision:'inspection',problems:preflight.problems};
+ if(!preflight.ok)return {decision:'blocked',problems:preflight.problems};
+ return {decision:facts.resume?'resume':'ready',problems:[]};
 }
 
 export async function execute(command,{binding,now,ctx={},params={}}){
@@ -46,8 +63,10 @@ export async function execute(command,{binding,now,ctx={},params={}}){
  if(command==='status'){
   const cutoffAt=params.cutoff??null;
   const preflight=await ratedActivationPreflight(binding,{cutoffAt,now:at});
-  const readback=await readActivation(binding);
-  return {operation:'status',writes:false,writeState:'none',at,operatorSha256:operatorSha256(),files:fileDigests(),cutoffAt,decision:decide(preflight,readback.control),problems:preflight.problems,facts:preflight.facts,...readback};
+  let readback=null;
+  try{readback=await readActivation(binding);}catch{readback=null;} // a missing table makes the readback unreadable: a blocked status, not an error and never ready
+  const verdict=decide({preflight,readback,cutoffAt,at});
+  return {operation:'status',writes:false,writeState:'none',at,mode:cutoffAt===null?'inspection':'exact_cutoff',operatorSha256:operatorSha256(),files:fileDigests(),cutoffAt,decision:verdict.decision,problems:verdict.problems,...(verdict.reasons?{reasons:verdict.reasons}:{}),facts:preflight.facts,...(readback||{})};
  }
  if(command!=='activate')throw new OperatorStop('usage',2);
  if(params.operatorSha256!==operatorSha256())throw new OperatorStop('operator_digest_mismatch',3);
@@ -98,14 +117,18 @@ export const strictBinding=(binding,adapter)=>({...binding,prepare:sql=>({bind:(
  return {...inner,async all(){return {results:await adapter.allStrict(sql,params)};},async first(){return (await adapter.allStrict(sql,params))[0]??null;}};
 }})});
 
-// The exit code and the write state of one `activateRated` outcome. Only `activated` and `noop` are successes.
-export function judge(result,ctxWriteState){
+// The exit code and the DOMAIN write state of one `activateRated` outcome, judged from the module's own outcome and confirmed effects, never from the delivery of an SQL batch. A batch that committed and changed no
+// row (a guarded insert whose guard failed) is not a write; a later failure never erases earlier confirmed effects (they stay in `effects`); an effect that no response or readback can establish is unknown.
+//   writes: true (confirmed rows changed), false (confirmed none), null (unknown). Only `activated` and `noop` are successes.
+export function judge(result){
  const outcome=result.outcome;
- if(outcome==='activated')return {exit:0,writeState:'committed'};
- if(outcome==='noop')return {exit:0,writeState:'none'};
- if(outcome==='refused')return {exit:3,writeState:ctxWriteState==='none'?'none':ctxWriteState};
- if(outcome==='uncertain')return {exit:3,writeState:'unknown'};
- return {exit:3,writeState:ctxWriteState==='none'?'none':ctxWriteState}; // stopped: partial effects are in `effects`
+ if(outcome==='activated')return {exit:0,writeState:'committed',writes:true};
+ if(outcome==='noop')return {exit:0,writeState:'none',writes:false};
+ if(outcome==='uncertain')return {exit:3,writeState:'unknown',writes:null};
+ const effects=result.effects||{scopeInserted:false,bootstrapRows:0};
+ if(effects.scopeInserted==='unknown')return {exit:3,writeState:'unknown',writes:null};
+ if(effects.scopeInserted===true||effects.bootstrapRows>0)return {exit:3,writeState:'partial',writes:true,partial:true};
+ return {exit:3,writeState:'none',writes:false};
 }
 
 export async function runCatalogEnrichmentActivationProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),deps=null}={}){
@@ -131,12 +154,14 @@ export async function runCatalogEnrichmentActivationProduction({argv=process.arg
   if(parsed.command==='activate'&&adapterTarget)try{after=await readBookmark(adapterTarget,fetchImpl);}catch{after=null;}
   const bookmarks={...(ctx.bookmark?{bookmarkBefore:ctx.bookmark}:{}),...(after?{bookmarkAfter:after}:{})};
   if(parsed.command==='status')return {exit:0,result:{...result,...bookmarks}};
-  const verdict=judge(result,ctx.writeState);
-  return {exit:verdict.exit,result:{...result,...bookmarks,writeState:verdict.writeState,writes:verdict.writeState==='committed'?true:verdict.writeState==='none'?false:null,...(result.outcome==='stopped'&&verdict.writeState!=='none'?{partial:true}:{}),...(verdict.exit?{reason:result.reason||result.problems?.[0]||result.outcome,retry:false}:{})}};
+  const verdict=judge(result);
+  return {exit:verdict.exit,result:{...result,...bookmarks,writeState:verdict.writeState,writes:verdict.writes,...(verdict.partial?{partial:true}:{}),transport:{lastBatch:ctx.writeState},...(verdict.exit?{reason:result.reason||result.problems?.[0]||result.outcome,retry:false}:{})}};
  }catch(error){
   const stop=normalize(error);
-  const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'?ctx.writeState:'none';
-  return {exit:stop.exit,result:{reason:stop.reason,writeState,writes:writeState==='committed'?true:writeState==='unknown'?null:false,...(writeState!=='none'?{retry:false}:{}),...(stop.details&&Object.keys(stop.details).length?{details:stop.details}:{}),...(ctx.bookmark?{bookmark:ctx.bookmark}:{})}};
+  // an error mid-run: if any batch was sent, what it changed cannot be established here (the module's effects were lost with the exception), so the domain state is unknown; the delivery telemetry stays separate
+  const sent=ctx.writeState==='committed'||ctx.writeState==='unknown';
+  const writeState=sent?'unknown':'none';
+  return {exit:stop.exit,result:{reason:stop.reason,writeState,writes:sent?null:false,transport:{lastBatch:ctx.writeState},...(sent?{retry:false}:{}),...(stop.details&&Object.keys(stop.details).length?{details:stop.details}:{}),...(ctx.bookmark?{bookmark:ctx.bookmark}:{})}};
  }
 }
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
