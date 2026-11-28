@@ -131,7 +131,7 @@ async function finish(env,{outcome,effects,deps,extra={}}){
  return {outcome,effects,wake:await wake(env,deps),...extra,...(await readActivation(env))};
 }
 
-// -> {outcome, effects:{scopeInserted,bootstrapRows}, problems?, reason?, bootstrap?, wake?, ...readback}
+// -> {outcome, effects:{scopeInserted,bootstrapRows,bootstrapPages}, problems?, reason?, bootstrap?, wake?, ...readback}
 //   refused    a precondition or the guard of the first write failed; nothing was written by this call.
 //   stopped    the scope exists but the control is still inactive (bootstrap incomplete, configuration changed, or the control guard failed). Nothing is adopted; repeat the same call to resume.
 //   uncertain  the control commit was sent and its outcome could not be read back: read the state before acting again.
@@ -139,7 +139,8 @@ async function finish(env,{outcome,effects,deps,extra={}}){
 //   noop       the control is already active under the same rated-only configuration with a done bootstrap; the wake is attempted again.
 // `deps.kick` replaces the default wake (the Worker's `kick` when a workflow binding exists); a test injects it.
 export async function activateRated(env,{cutoffAt,by,at,goReference,maxPages=BOOTSTRAP_MAX_PAGES,pageSize=BOOTSTRAP_PAGE}={},deps={}){
- const effects={scopeInserted:false,bootstrapRows:0};
+ // `bootstrapRows` counts the admissions the pages processed; `bootstrapPages` counts the pages whose commit changed the scope's cursor or state, a zero-row final page that marks the bootstrap done included
+ const effects={scopeInserted:false,bootstrapRows:0,bootstrapPages:0};
  const input=validInput({cutoffAt,by,at,goReference});
  if(input.length)return {outcome:'refused',effects,problems:input};
  const handle=database(env);
@@ -186,6 +187,7 @@ export async function activateRated(env,{cutoffAt,by,at,goReference,maxPages=BOO
  // every page asserts the scope pin AND the readiness (authority open at the generation, no staged signal, no live lease, exactly one scope) inside its own writes: a held marker between pages stops the operator's writes
  const bootstrap=await runBootstrap(env,{scope:ACTIVATION_SCOPE,at,pageSize,maxPages,pin,extra:{sql:guard(1),params:[generation,at]}});
  effects.bootstrapRows=bootstrap.rows;
+ effects.bootstrapPages=bootstrap.committed;
  if(bootstrap.outcome!=='done')return {outcome:'stopped',effects,reason:bootstrap.reason||'bootstrap_incomplete',bootstrap,...(await readActivation(env))};
 
  // the final commit: the control, under the SAME approved envelope (scope identity and revision, done bootstrap, no other scope, authority, staged, lease, and the control revision read at the start), initialized in the same batch when absent

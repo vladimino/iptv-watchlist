@@ -125,9 +125,10 @@ export function judge(result){
  if(outcome==='activated')return {exit:0,writeState:'committed',writes:true};
  if(outcome==='noop')return {exit:0,writeState:'none',writes:false};
  if(outcome==='uncertain')return {exit:3,writeState:'unknown',writes:null};
- const effects=result.effects||{scopeInserted:false,bootstrapRows:0};
+ const effects=result.effects||{scopeInserted:false,bootstrapRows:0,bootstrapPages:0};
  if(effects.scopeInserted==='unknown')return {exit:3,writeState:'unknown',writes:null};
- if(effects.scopeInserted===true||effects.bootstrapRows>0)return {exit:3,writeState:'partial',writes:true,partial:true};
+ // a confirmed change of the scope (its insert, processed admissions, or a bootstrap cursor/state change even with zero rows) is a domain write
+ if(effects.scopeInserted===true||effects.bootstrapRows>0||effects.bootstrapPages>0)return {exit:3,writeState:'partial',writes:true,partial:true};
  return {exit:3,writeState:'none',writes:false};
 }
 

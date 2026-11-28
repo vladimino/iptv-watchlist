@@ -132,12 +132,13 @@ const snapshot=file=>JSON.stringify([rows(file,'SELECT * FROM catalog_enrichment
  // exit codes and DOMAIN write states of the outcomes (never a refusal or a partial stop as success; delivery telemetry is separate)
  assert.deepEqual(Op.judge({outcome:'activated'}),{exit:0,writeState:'committed',writes:true});
  assert.deepEqual(Op.judge({outcome:'noop'}),{exit:0,writeState:'none',writes:false});
- assert.deepEqual(Op.judge({outcome:'refused',effects:{scopeInserted:false,bootstrapRows:0}}),{exit:3,writeState:'none',writes:false});
- assert.deepEqual(Op.judge({outcome:'uncertain',effects:{scopeInserted:true,bootstrapRows:100}}),{exit:3,writeState:'unknown',writes:null});
- assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:true,bootstrapRows:0}}),{exit:3,writeState:'partial',writes:true,partial:true});
- assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:60}}),{exit:3,writeState:'partial',writes:true,partial:true});
- assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:0}}),{exit:3,writeState:'none',writes:false},'a resume that wrote nothing new');
- assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:'unknown',bootstrapRows:0}}),{exit:3,writeState:'unknown',writes:null});
+ assert.deepEqual(Op.judge({outcome:'refused',effects:{scopeInserted:false,bootstrapRows:0,bootstrapPages:0}}),{exit:3,writeState:'none',writes:false});
+ assert.deepEqual(Op.judge({outcome:'uncertain',effects:{scopeInserted:true,bootstrapRows:100,bootstrapPages:3}}),{exit:3,writeState:'unknown',writes:null});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:true,bootstrapRows:0,bootstrapPages:0}}),{exit:3,writeState:'partial',writes:true,partial:true});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:60,bootstrapPages:2}}),{exit:3,writeState:'partial',writes:true,partial:true});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:0,bootstrapPages:0}}),{exit:3,writeState:'none',writes:false},'a resume that wrote nothing new');
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:'unknown',bootstrapRows:0,bootstrapPages:0}}),{exit:3,writeState:'unknown',writes:null});
+ assert.deepEqual(Op.judge({outcome:'stopped',effects:{scopeInserted:false,bootstrapRows:0,bootstrapPages:1}}),{exit:3,writeState:'partial',writes:true,partial:true},'a zero-row page that changed the bootstrap state is a domain write');
  const {db}=world({held:true});
  const run=await Op.runCatalogEnrichmentActivationProduction({argv:A('--activate','--target','iptv','--cutoff',CUTOFF,'--by','operator:AIR-607','--go',GO,'--confirm','activate','--operator-sha256',SHA),now:()=>NOW,deps:{binding:db}});
  assert.equal(run.exit,3);assert.equal(run.result.outcome,'refused');assert.equal(run.result.writeState,'none');assert.equal(run.result.writes,false);assert.equal(run.result.retry,false);assert.deepEqual(run.result.problems,['film_person_marker_not_open']);
@@ -304,7 +305,7 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  const out=await production(ARGV(),file,{loseControlReply:true,blindAfterControl:true});
  assert.equal(out.exit,3);
  assert.deepEqual([out.result.outcome,out.result.reason,out.result.writeState,out.result.writes,out.result.retry],['uncertain','control_outcome_unknown','unknown',null,false]);
- assert.deepEqual(out.result.effects,{scopeInserted:true,bootstrapRows:100},'the confirmed earlier effects are preserved');
+ assert.deepEqual(out.result.effects,{scopeInserted:true,bootstrapRows:100,bootstrapPages:3},'the confirmed earlier effects are preserved');
  assert.equal(out.result.transport.lastBatch,'unknown');
  assert.equal(controlRow(file).state,'active','the commit did land; only the operator could not see it');
 }
@@ -319,7 +320,7 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  assert.equal(out.exit,3);assert.deepEqual([out.result.outcome,out.result.problems],['refused',['scope_not_written']]);
  assert.deepEqual([out.result.writeState,out.result.writes],['none',false],'the guarded insert batch was delivered and committed but changed no row: that is not a write');
  assert.equal(out.result.transport.lastBatch,'committed','the delivery telemetry stays separate from the confirmed domain effects');
- assert.deepEqual(out.result.effects,{scopeInserted:false,bootstrapRows:0});
+ assert.deepEqual(out.result.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:0});
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM catalog_enrichment_scope')[0].n,0);assert.equal(controlRow(file),null);
 }
 {
@@ -336,7 +337,7 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  const out=await Op.runCatalogEnrichmentActivationProduction({argv:ARGV(),env:ENV,fetchImpl,now:()=>NOW});
  assert.equal(out.exit,3);
  assert.deepEqual([out.result.outcome,out.result.writeState,out.result.writes,out.result.partial,out.result.retry],['stopped','partial',true,true,false]);
- assert.deepEqual(out.result.effects,{scopeInserted:true,bootstrapRows:50},'only the first page was written under the held marker');
+ assert.deepEqual(out.result.effects,{scopeInserted:true,bootstrapRows:50,bootstrapPages:1},'only the first page was written under the held marker');
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,50);assert.equal(controlRow(file),null);
 }
 {
@@ -355,5 +356,28 @@ const production=(argv,file,options={})=>{const mock=rest(file,options);return O
  assert.deepEqual([out.result.reason,out.result.writeState,out.result.writes,out.result.retry],['statement_failed','unknown',null,false]);
  assert.equal(out.result.transport.lastBatch,'unknown');
  assert.equal(controlRow(file),null,'the control was never enabled');
+}
+{
+ // a resumed activation whose final page has zero qualifying rows changes the scope's bootstrap state; when the control guard then refuses, that confirmed change is a domain write (partial), never `none`
+ const LATE_CUTOFF='2026-11-20T00:00:00.000Z';
+ for(const [label,state,expected] of [['incomplete scope, zero rows, control guard refuses','none',{writeState:'partial',writes:true,partial:true,pages:1}],['already done scope, nothing new, control guard refuses','done',{writeState:'none',writes:false,partial:undefined,pages:0}]]){
+  const {file}=world();
+  sql(file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,bootstrap_state,revision,updated_at) VALUES ('rated',1,1,'${LATE_CUTOFF}','${state}',1,'${AT}')`);
+  const mock=rest(file);
+  let armed=true;
+  const inner=mock.fetchImpl;
+  const fetchImpl=async(url,init)=>{
+   const body=init.body?JSON.parse(init.body):null;
+   if(armed&&body?.batch?.some(item=>/^INSERT INTO catalog_enrichment_control /.test(item.sql))){armed=false;sql(file,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('catalog_enrichment','lease-live-0011','2026-11-28T10:04:00.000Z','2026-11-28T09:59:00.000Z')");}
+   return inner(url,init);
+  };
+  const out=await Op.runCatalogEnrichmentActivationProduction({argv:A('--activate','--target','iptv','--cutoff',LATE_CUTOFF,'--by','operator:AIR-607','--go',GO,'--confirm','activate','--operator-sha256',SHA),env:ENV,fetchImpl,now:()=>NOW});
+  assert.equal(out.exit,3,label);
+  assert.deepEqual([out.result.outcome,out.result.reason],['stopped','control_guard_failed'],label);
+  assert.deepEqual([out.result.writeState,out.result.writes,out.result.partial],[expected.writeState,expected.writes,expected.partial],label);
+  assert.deepEqual(out.result.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:expected.pages},label);
+  assert.equal(rows(file,"SELECT bootstrap_state FROM catalog_enrichment_scope WHERE scope='rated'")[0].bootstrap_state,'done',label);
+  assert.equal(controlRow(file),null,label+': the control was never enabled');
+ }
 }
 console.log('catalog enrichment activation production operator: ok');
