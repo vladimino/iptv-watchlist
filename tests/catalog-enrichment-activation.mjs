@@ -59,7 +59,7 @@ const controlRow=file=>rows(file,'SELECT state,generation,revision,updated_by FR
  ]){
   const out=await A.activateRated(env,op(over));
   assert.equal(out.outcome,'refused');assert.ok(out.problems.includes(code),code+': '+JSON.stringify(out.problems));
-  assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0});
+  assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:0});
  }
  assert.equal(snapshot(file),before,'a refused input writes nothing');
 }
@@ -129,7 +129,7 @@ for(const upTo of [Infinity,47]){
  assert.equal((await S.readControl(env)).state,'inactive');
  const out=await A.activateRated(env,op({pageSize:40}));
  assert.equal(out.outcome,'activated',JSON.stringify(out.problems||out));
- assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:100});
+ assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:100,bootstrapPages:3});
  assert.deepEqual([out.bootstrap.outcome,out.bootstrap.rows,out.bootstrap.pages],['done',100,3]);
  assert.deepEqual(out.scopes,[{scope:'rated',activated:1,enabled:1,cutoffAt:CUTOFF,bootstrapState:'done',revision:1}],'exactly the rated scope with the approved cutoff');
  assert.equal(out.onlyRatedScope,true);
@@ -163,7 +163,7 @@ for(const upTo of [Infinity,47]){
  const {env}=interleaved(file,{before:async(statements)=>{if(isScopeInsert(statements))sql(file,"UPDATE film_person_authority SET cutover='held',generation=generation+1 WHERE id=1;");}});
  const out=await A.activateRated(env,op());
  assert.equal(out.outcome,'refused');assert.deepEqual(out.problems,['scope_not_written']);
- assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0});
+ assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:0});
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM catalog_enrichment_scope')[0].n,0);assert.equal(controlRow(file),null);assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,0);
 }
 {
@@ -188,7 +188,7 @@ for(const upTo of [Infinity,47]){
  const {env}=interleaved(file,{after:async(statements)=>{if(isPage(statements)&&++pages===1)sql(file,"UPDATE catalog_enrichment_scope SET revision=revision+1 WHERE scope='rated';");}});
  const out=await A.activateRated(env,op({pageSize:40}));
  assert.deepEqual([out.outcome,out.reason],['stopped','revision_moved']);
- assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:40},'the committed first page is reported, not hidden');
+ assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:40,bootstrapPages:1},'the committed first page is reported, not hidden');
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,40,'only the first page was written');
  assert.equal(controlRow(file),null,'the control was never activated');
 
@@ -227,7 +227,7 @@ for(const upTo of [Infinity,47]){
  const {env}=interleaved(file,{after:async(statements)=>{if(isScopeInsert(statements))sql(file,"UPDATE catalog_enrichment_scope SET revision=revision+1 WHERE scope='rated';");}});
  const out=await A.activateRated(env,op({pageSize:40}));
  assert.deepEqual([out.outcome,out.reason],['stopped','scope_changed_after_insert']);
- assert.deepEqual(out.effects,{scopeInserted:'unknown',bootstrapRows:0});
+ assert.deepEqual(out.effects,{scopeInserted:'unknown',bootstrapRows:0,bootstrapPages:0});
  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,0,'no bootstrap page was written under the changed revision');
  assert.equal(controlRow(file),null);
 }
@@ -274,7 +274,7 @@ for(const upTo of [Infinity,47]){
   const out=await A.activateRated(env,op({pageSize:40}));
   assert.deepEqual([out.outcome,out.reason],['stopped','control_guard_failed'],label);
   assert.equal(controlRow(file),null,label+': the global control was never enabled');
-  assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:100},label+': partial effects are reported');
+  assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:100,bootstrapPages:3},label+': partial effects are reported');
  }
 }
 {
@@ -329,7 +329,7 @@ for(const upTo of [Infinity,47]){
  // an interrupted activation is resumed, not restarted
  const second=await A.activateRated(env,op({pageSize:40}));
  assert.equal(second.outcome,'activated');
- assert.deepEqual(second.effects,{scopeInserted:false,bootstrapRows:60});
+ assert.deepEqual(second.effects,{scopeInserted:false,bootstrapRows:60,bootstrapPages:2});
  assert.deepEqual([second.qualifyingAdmissions,second.ratedSignals],[100,100]);
  assert.ok(rows(file,'SELECT version FROM enrichment_signal').every(row=>row.version===1),'the resume never re-arms a signal');
  assert.equal(rows(file,"SELECT revision FROM catalog_enrichment_scope WHERE scope='rated'")[0].revision,1,'the scope revision is unchanged by the bootstrap');
@@ -345,8 +345,25 @@ for(const upTo of [Infinity,47]){
  sql(file,"UPDATE projection_run SET lease_id=NULL,lease_until=NULL WHERE projection='catalog_enrichment'");
  const second=await A.activateRated(env,op({pageSize:40}));
  assert.equal(second.outcome,'activated');
- assert.deepEqual(second.effects,{scopeInserted:false,bootstrapRows:0},'nothing is bootstrapped twice');
+ assert.deepEqual(second.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:0},'nothing is bootstrapped twice');
  assert.equal(controlRow(file).state,'active');
+}
+
+// ---- a resume whose final page has ZERO qualifying rows still changes the scope's bootstrap state: that is a confirmed effect, distinct from the number of rows ----
+{
+ const LATE_CUTOFF='2026-11-20T00:00:00.000Z'; // after every admission of the fixture: no qualifying row
+ const lease="INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('catalog_enrichment','lease-live-0010','2026-11-28T10:04:00.000Z','2026-11-28T09:59:00.000Z')";
+ for(const [label,state,pages] of [['pre-existing incomplete scope','none',1],['pre-existing running scope','running',1],['pre-existing done scope','done',0]]){
+  const {file}=world();
+  sql(file,`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,bootstrap_state,revision,updated_at) VALUES ('rated',1,1,'${LATE_CUTOFF}','${state}',1,'${T}')`);
+  const {env}=interleaved(file,{window:()=>sql(file,lease)});
+  const out=await A.activateRated(env,op({cutoffAt:LATE_CUTOFF,pageSize:40}));
+  assert.deepEqual([out.outcome,out.reason],['stopped','control_guard_failed'],label);
+  assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:pages},label+': the bootstrap state change is reported even with zero rows');
+  assert.equal(rows(file,"SELECT bootstrap_state FROM catalog_enrichment_scope WHERE scope='rated'")[0].bootstrap_state,'done',label);
+  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,0,label+': zero qualifying rows');
+  assert.equal(controlRow(file),null,label);
+ }
 }
 
 // ---- noop is strict, and recovery never strands an unfinished bootstrap ----
@@ -372,7 +389,7 @@ for(const upTo of [Infinity,47]){
   const before=snapshot(file);
   const out=await A.activateRated(env,op({pageSize:40}));
   assert.deepEqual([out.outcome,out.problems],['refused',['active_configuration_mismatch']],label);
-  assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0},label);
+  assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0,bootstrapPages:0},label);
   assert.equal(snapshot(file),before,label+': no signal, scope or control was written');
  }
 }
@@ -428,6 +445,6 @@ for(const upTo of [Infinity,47]){
  for(const name of fs.readdirSync('src'))if(name.endsWith('.js')&&name!=='catalog-enrichment-activation.js'&&fs.readFileSync('src/'+name,'utf8').includes('catalog-enrichment-activation'))importers.push(name);
  assert.deepEqual(importers,[],'the activation is reachable only from the owner\'s production operation');
  assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/catalog-enrichment-activation/);
- assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/11-59\/15/,'the reconcile cron is a separate versioned configuration change');
+ assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*", "11-59\/15 \* \* \* \*"\]/,'the reconcile cron is declared once, beside the four existing triggers');
 }
 console.log('catalog enrichment activation: ok');

@@ -501,6 +501,9 @@ export const FILES={
  "catalog-enrichment-activation.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-activation-production.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },
@@ -517,6 +520,15 @@ export const FILES={
   "suite": "core"
  },
  "film-aggregate-resolver.mjs": {
+  "suite": "core"
+ },
+ "sha256-sync.mjs": {
+  "suite": "core"
+ },
+ "film-aggregate-bundle.mjs": {
+  "suite": "core"
+ },
+ "film-aggregate-bundle-scope.mjs": {
   "suite": "core"
  },
  "prediction-lid-only-exclusion.mjs": {

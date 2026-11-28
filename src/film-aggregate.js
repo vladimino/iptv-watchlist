@@ -20,7 +20,7 @@
 // Domain markers are read inline in each section's statement with the same served-state rule as the domain's own reader (ratings d1/open, prediction d1,
 // published EPG d1/open, Watchlist d1 with open writes for the source): one statement per snapshot keeps the 40-statement budget. A missing table, a
 // malformed row or a refused marker makes the section `unavailable`, never a negative.
-import {createHash} from 'node:crypto';
+import {sha256Hex} from './sha256-sync.js';
 import {CREDIT_SELECTION_SQL,database} from './film-person-authority.js';
 import {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization} from './localization-sources.js';
 import {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT} from './film-aggregate-resolver.js';
@@ -51,7 +51,7 @@ const RECORD_PREFIX='letterboxd/facts/films/';
 const FACT_KEY=/^[A-Za-z0-9_-]{1,100}$/;
 const LID=/^[A-Za-z0-9_-]{1,80}$/,TMDB=/^[1-9]\d{0,11}$/;
 
-const digestOf=value=>'sha256:'+createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const digestOf=value=>'sha256:'+sha256Hex(JSON.stringify(value));
 const unavailable=(reason,extra={})=>({status:'unavailable',reason,token:null,tokenStatus:'unavailable',...extra});
 const json=text=>{if(text==null)return null;return typeof text==='string'?JSON.parse(text):text;};
 const list=text=>{const value=json(text);if(value==null)return [];if(!Array.isArray(value))throw sectionError('malformed');return value;};
@@ -156,7 +156,7 @@ function assemble(rows){
  const etag=rows[0].etag;
  if(rows.some((item,index)=>Number(item.part)!==index||item.etag!==etag))throw sectionError('ratings_document_malformed');
  const text=rows.map(item=>item.body).join('');
- if(createHash('sha256').update(text).digest('hex')!==etag)throw sectionError('ratings_document_malformed');
+ if(sha256Hex(text)!==etag)throw sectionError('ratings_document_malformed');
  try{return {value:JSON.parse(text),etag};}catch{throw sectionError('ratings_document_malformed');}
 }
 // -> Map key -> {state:'absent'|'over_cap'|'mixed'|'ok', value?, etag?}. Over-cap and mixed-etag documents are never assembled.

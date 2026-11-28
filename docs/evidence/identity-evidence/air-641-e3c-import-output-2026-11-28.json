@@ -1,0 +1,100 @@
+{
+ "mode": "apply",
+ "digest": "2989f46ce833a068f3f689a05d9e7f5808de3f9a78f3f809dfa2f893a36de904",
+ "database": "iptv",
+ "chunks": 1,
+ "rows": 8,
+ "status": "ready",
+ "loaded": {
+  "runId": "e3c-dryrun-2026-11-28",
+  "digest": "2989f46ce833a068f3f689a05d9e7f5808de3f9a78f3f809dfa2f893a36de904",
+  "state": "sealed",
+  "chunks": 1,
+  "sources": 8,
+  "rows": 8
+ },
+ "imported": {
+  "runId": "e3c-dryrun-2026-11-28",
+  "state": "complete",
+  "done": true,
+  "chunks": [
+   {
+    "runId": "e3c-dryrun-2026-11-28",
+    "chunkNo": 1,
+    "attempt": 1,
+    "stagedKeys": 8,
+    "inserted": 8,
+    "alreadyImported": 0,
+    "liveCovered": 0,
+    "reconstructedEquivalent": 0,
+    "recordedAt": "2026-11-28T09:06:38.773Z"
+   }
+  ],
+  "totals": {
+   "stagedKeys": 8,
+   "inserted": 8,
+   "alreadyImported": 0,
+   "liveCovered": 0,
+   "reconstructedEquivalent": 0
+  }
+ },
+ "run": {
+  "runId": "e3c-dryrun-2026-11-28",
+  "family": "c",
+  "manifestSha256": "2989f46ce833a068f3f689a05d9e7f5808de3f9a78f3f809dfa2f893a36de904",
+  "cohortAt": "2026-11-28T08:48:21.020Z",
+  "chunkCount": 1,
+  "sourceCount": 8,
+  "rowCount": 8,
+  "writers": [],
+  "state": "complete",
+  "attempt": 1,
+  "leaseOwner": "executor-air-641",
+  "leaseExpiresAt": "2026-11-28T09:07:35.970Z",
+  "stopReason": null,
+  "createdAt": "2026-11-28T09:06:29.213Z",
+  "updatedAt": "2026-11-28T09:06:39.331Z"
+ },
+ "report": {
+  "run": {
+   "runId": "e3c-dryrun-2026-11-28",
+   "family": "c",
+   "manifestSha256": "2989f46ce833a068f3f689a05d9e7f5808de3f9a78f3f809dfa2f893a36de904",
+   "cohortAt": "2026-11-28T08:48:21.020Z",
+   "chunkCount": 1,
+   "sourceCount": 8,
+   "rowCount": 8,
+   "writers": [],
+   "state": "complete",
+   "attempt": 1,
+   "leaseOwner": "executor-air-641",
+   "leaseExpiresAt": "2026-11-28T09:07:35.970Z",
+   "stopReason": null,
+   "createdAt": "2026-11-28T09:06:29.213Z",
+   "updatedAt": "2026-11-28T09:06:39.331Z"
+  },
+  "receipts": [
+   {
+    "runId": "e3c-dryrun-2026-11-28",
+    "chunkNo": 1,
+    "attempt": 1,
+    "stagedKeys": 8,
+    "inserted": 8,
+    "alreadyImported": 0,
+    "liveCovered": 0,
+    "reconstructedEquivalent": 0,
+    "recordedAt": "2026-11-28T09:06:38.773Z"
+   }
+  ],
+  "totals": {
+   "stagedKeys": 8,
+   "inserted": 8,
+   "alreadyImported": 0,
+   "liveCovered": 0,
+   "reconstructedEquivalent": 0
+  },
+  "equivalents": [],
+  "equivalentsMatchReceipts": true,
+  "r2Objects": []
+ }
+}

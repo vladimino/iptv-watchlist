@@ -15,7 +15,7 @@
 //   as explicit zero counts). An earlier round never contributes a row to the answer.
 // - The final fence (decision 4) runs the SAME statement over the SAME key set after every section read and compares the digest. Its statement is reserved from
 //   the request budget before any section read. A different digest, a moved marker, or a fence that cannot run is 503 with no section.
-import {createHash} from 'node:crypto';
+import {sha256Hex} from './sha256-sync.js';
 import {database,many,readAuthority} from './film-person-authority.js';
 
 export const FILM_AGGREGATE_CONTRACT='film-aggregate/v1';
@@ -146,7 +146,7 @@ export function identityDigest(keys,snapshot){
   movies:sorted(keys.movies).map(movie=>({movie,decisions:snapshot.decisions.filter(d=>d.movie===movie).map(d=>d.seq)})),
   owned:snapshot.owned,claimed:snapshot.claimed,decisions:snapshot.decisions,
  };
- return 'sha256:'+createHash('sha256').update(JSON.stringify(body)).digest('hex');
+ return 'sha256:'+sha256Hex(JSON.stringify(body));
 }
 
 const isOwn=row=>row.trusted&&!row.conflicting;

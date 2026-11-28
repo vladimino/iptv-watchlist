@@ -314,7 +314,7 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  // AIR-571 E: the activation deployment registers the Workflow and the :30 cron (declared after the three existing triggers); they stay inert until the owner's `complete` sets the mode to cloudflare with the canary hold.
  const wranglerText=fs.readFileSync('wrangler.jsonc','utf8');
  assert.match(wranglerText,/"name": "iptv-letterboxd",\s*"binding": "LETTERBOXD_WORKFLOW",\s*"class_name": "LetterboxdWorkflow"/,'the Letterboxd Workflow is registered');
- assert.match(wranglerText,/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*"\]/,'the :30 cron is the fourth trigger and the first three are unchanged');
+ assert.match(wranglerText,/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*", "11-59\/15 \* \* \* \*"\]/,'the :30 cron is the fourth trigger, the first three are unchanged and the AIR-607 Catalog Enrichment reconcile cron follows it');
 }
 // 12. T17 / T30: the legacy Ratings writer is FENCED (not merely `external`) while the Letterboxd Sync owns or takes over the Diary; both Workflows can never write.
 // Loaded the way the Worker bundle loads them: one scope, the real ratings-orchestration source, the real Sync, a D1 stand-in.
