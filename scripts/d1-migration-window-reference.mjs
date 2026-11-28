@@ -21,12 +21,20 @@ const snapshot=file=>{
  const rows=JSON.parse(sqlite(file,"SELECT type, name, tbl_name AS tbl, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table','index','trigger','view');",true)||'[]');
  return new Map(rows.filter(row=>!ownedName(row.name)).map(row=>[row.name,objectFingerprint(row)]));
 };
+// The ONE documented alternate fingerprint (AIR-603, 28 Nov 2026, owner decision): production's stored text of `canonical_producer_chain` differs from migrations/0023 in a single token,
+// `substr(created_at, 11, 1) = 'T'` where the file has `substr(updated_at, 11, 1) = 'T'` inside the CHECK of `updated_at`; origin unknown, never in any committed version of the file.
+// It is accepted ONLY for this table, ONLY at exactly this fingerprint, and only while the table is unchanged (versions 38-54). Not a new canonical schema contract, not a general allowlist.
+export const ACCEPTED_ALTERNATES={
+ canonical_producer_chain:{type:'table',hash:'68a792a519e37cfe',fromVersion:38,toVersion:54,
+  token:{canonical:"AND substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)",observed:"AND substr(created_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)"},
+  reason:'one-token drift in the CHECK of updated_at observed in production on 27 Nov 2026 (docs/evidence/d1-migration/air-603-canonical-producer-chain-drift-2026-11-28.md)'},
+};
 export function buildReference(root=ROOT){
  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'air603-reference-'));
  try{
   const file=path.join(directory,'chain.sqlite');
   const names=fs.readdirSync(path.join(root,'migrations')).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=CHECKPOINT_B).sort();
-  let previous=null;const data={format:1,base:null,transient:[],steps:{}};
+  let previous=null;const data={format:1,base:null,transient:[],acceptedAlternates:Object.fromEntries(Object.entries(ACCEPTED_ALTERNATES).map(([name,{type,hash,fromVersion,toVersion,reason}])=>[name,{type,hash,fromVersion,toVersion,reason}])),steps:{}};
   for(const name of names){
    const version=Number(name.slice(0,4));
    // the statements as extracted (no comments), each ended by `;`, exactly what the operator sends

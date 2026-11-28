@@ -1823,6 +1823,15 @@
   "identity_evidence_writer_change_hold",
   "identity_evidence_writer_hold"
  ],
+ "acceptedAlternates": {
+  "canonical_producer_chain": {
+   "type": "table",
+   "hash": "68a792a519e37cfe",
+   "fromVersion": 38,
+   "toVersion": 54,
+   "reason": "one-token drift in the CHECK of updated_at observed in production on 27 Nov 2026 (docs/evidence/d1-migration/air-603-canonical-producer-chain-drift-2026-11-28.md)"
+  }
+ },
  "steps": {
   "39": {
    "set": {

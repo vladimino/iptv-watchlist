@@ -145,7 +145,7 @@ export function loadReference(root=ROOT){
   for(const [name,value] of Object.entries(delta.set))current.set(name,value);
   at.set(version,current);
  }
- const loaded={at,sha256:key,transient:new Set(data.transient||[])};
+ const loaded={at,sha256:key,transient:new Set(data.transient||[]),alternates:data.acceptedAlternates||{}};
  referenceCache.set(key,loaded);
  return loaded;
 }
@@ -230,10 +230,11 @@ export async function readState(binding,{clock=Date.now,root=ROOT}={}){
 //  early: a changed or extra object that equals what a LATER version creates (the next file was started, or a staging table is left): a partial schema, never a resume.
 export function chainReport(state,{root=ROOT}={}){
  const version=state.schemaVersion;
- const empty={verified:false,missing:[],changed:[],extra:[],early:[]};
+ const empty={verified:false,missing:[],changed:[],extra:[],early:[],acceptedAlternates:[]};
  if(version===null||version<BASE_VERSION||version>CHECKPOINT_B)return empty;
- const {at,transient:transientNames}=loadReference(root);
+ const {at,transient:transientNames,alternates}=loadReference(root);
  const reference=at.get(version);
+ const accepted=[];
  const actual=new Map(state.master.filter(row=>row.sql!==null&&row.sql!==undefined&&!ownedName(row.name)).map(row=>[row.name,objectFingerprint(row)]));
  const later=(name,fingerprint)=>{for(let v=version+1;v<=CHECKPOINT_B;v++){const spec=at.get(v).get(name);if(spec&&stable(spec)===stable(fingerprint))return true;}return false;};
  // a staging object a later file creates and removes again within itself (the pinned `transient` list) or a name a later version drops: its mere presence is a started file
@@ -242,10 +243,12 @@ export function chainReport(state,{root=ROOT}={}){
  for(const [name,spec] of reference){
   const found=actual.get(name);
   if(!found)missing.push(spec[0]+':'+name);
+  // the single documented alternate: this object, this exact type and fingerprint, only inside its version range; every other difference stays `changed`
+  else if(stable(found)!==stable(spec)&&alternates[name]&&alternates[name].type===found[0]&&alternates[name].hash===found[2]&&version>=alternates[name].fromVersion&&version<=alternates[name].toVersion&&found[0]===spec[0]&&found[1]===spec[1])accepted.push(spec[0]+':'+name);
   else if(stable(found)!==stable(spec)){changed.push(spec[0]+':'+name);if(later(name,found))early.push(spec[0]+':'+name);}
  }
  for(const [name,found] of actual)if(!reference.has(name)){extra.push(found[0]+':'+name);if(later(name,found)||transient(name))early.push(found[0]+':'+name);}
- return {verified:!missing.length&&!changed.length&&!extra.length,missing:missing.sort(),changed:changed.sort(),extra:extra.sort(),early:[...new Set(early)].sort()};
+ return {verified:!missing.length&&!changed.length&&!extra.length,missing:missing.sort(),changed:changed.sort(),extra:extra.sort(),early:[...new Set(early)].sort(),acceptedAlternates:accepted.sort()};
 }
 
 // ---- the dormant baseline: this window is schema-only ----

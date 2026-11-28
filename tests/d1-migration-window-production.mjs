@@ -361,6 +361,61 @@ for(const [name,seed,detail] of [
   await refusesWithoutWrite(w,'predecessor_unverified',chain=>assert.deepEqual(chain.changed,['trigger:schema_contract_no_downgrade']));}
 }
 
+// ---- the ONE documented alternate fingerprint (owner decision of 28 Nov 2026): canonical_producer_chain with created_at where updated_at belongs in one token of the updated_at CHECK ----
+{
+ const CANON="AND substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)",OBSERVED="AND substr(created_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)";
+ const rewrite=(file,name,from,to)=>{
+  const input="PRAGMA writable_schema=1;UPDATE sqlite_master SET sql=replace(sql,'"+from.replace(/'/g,"''")+"','"+to.replace(/'/g,"''")+"') WHERE name='"+name+"';";
+  const result=spawnSync('sqlite3',['-unsafe-testing',file],{input,encoding:'utf8'});assert.equal(result.status,0,result.stderr);
+  assert.equal(sql(file,"SELECT instr(sql,'"+from.replace(/'/g,"''")+"') AS at FROM sqlite_master WHERE name='"+name+"'")[0].at,0,'the fixture really changed '+name);
+ };
+ const observed=upTo=>{const w=world(upTo);rewrite(w.file,'canonical_producer_chain',CANON,OBSERVED);return w;};
+ const alt=Op.loadReference().alternates.canonical_producer_chain;
+ // the pinned value is exactly the one-token change: the canonical stored text with that token swapped fingerprints to it, and the real production text did too
+ {const w=world(38);const row=sql(w.file,"SELECT type,name,tbl_name AS tbl,sql FROM sqlite_master WHERE name='canonical_producer_chain'")[0];
+  assert.ok(row.sql.includes(CANON),'the canonical text carries the canonical token');
+  assert.equal(Op.objectFingerprint({...row,sql:row.sql.replace(CANON,OBSERVED)})[2],alt.hash,'the accepted hash is the one-token change and nothing else');
+  assert.notEqual(Op.objectFingerprint(row)[2],alt.hash);assert.equal(Object.keys(Op.loadReference().alternates).join(),'canonical_producer_chain','exactly one alternate, no general allowlist');}
+ // both forms verify, plan and apply on the A and the B chain, from every start
+ for(const [name,make] of [['canonical',upTo=>world(upTo)],['observed',observed]]){
+  const w=make(38);
+  const status=await Op.execute('status',{binding:w.db,clock:at(MID)});
+  assert.equal(status.chain.verified,true,name);assert.deepEqual(status.chain.acceptedAlternates,name==='observed'?['table:canonical_producer_chain']:[],name+': the alternate is reported, never silent');
+  assert.equal(status.plan[47].decision,'apply',name);assert.equal(status.plan[54].decision,'apply',name);
+  const out=await run(w.db,params(54,38));
+  assert.equal(version(w.file),54,name);assert.equal(out.applied.length,16,name);assert.equal(out.after.chain.verified,true,name+': the readback of every file accepted it');
+  assert.equal(sql(w.file,"SELECT instr(sql,'"+OBSERVED.replace(/'/g,"''")+"') AS at FROM sqlite_master WHERE name='canonical_producer_chain'")[0].at>0,name==='observed','the table is not rewritten by the window');
+ }
+ for(const start of [47,53]){const w=observed(start);const out=await run(w.db,params(54,start));assert.equal(version(w.file),54,'resume from '+start);assert.equal(out.after.chain.verified,true);}
+ {const w=observed(38);const out=await run(w.db,params(47,38));assert.equal(version(w.file),47);assert.equal(out.applied.length,9,'checkpoint A with the observed form');}
+ // every OTHER difference of the same table still fails closed, with nothing sent
+ const refuses=async(w,why)=>{
+  const before=master(w.file);const status=await Op.execute('status',{binding:w.db,clock:at(MID)});
+  assert.equal(status.chain.verified,false,why);assert.deepEqual(status.chain.changed,['table:canonical_producer_chain'],why);assert.deepEqual(status.chain.acceptedAlternates,[],why);
+  const ctx=tracker();await stop(run(w.db,params(47,status.schemaVersion),{ctx}),'predecessor_unverified');assert.deepEqual(ctx.states,[],why+': no batch');assert.deepEqual(master(w.file),before,why);
+ };
+ {const w=observed(38);rewrite(w.file,'canonical_producer_chain',"substr(created_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)","substr(created_at, 11, 1) = 't' AND substr(updated_at, 12, 8)");await refuses(w,'a literal changed on top of the observed form');}
+ {const w=observed(38);rewrite(w.file,'canonical_producer_chain',"length(updated_at) BETWEEN 20 AND 32","length(updated_at) BETWEEN 19 AND 32");await refuses(w,'another constraint changed on top of the observed form');}
+ {const w=world(38);rewrite(w.file,'canonical_producer_chain',"length(updated_at) BETWEEN 20 AND 32","length(updated_at) BETWEEN 19 AND 32");await refuses(w,'another constraint changed on the canonical form');}
+ {const w=world(38);rewrite(w.file,'canonical_producer_chain',CANON,"AND substr(created_at, 12, 1) = 'T' AND substr(updated_at, 12, 8)");await refuses(w,'a different token');}
+}
+{
+ // the same token swap on ANOTHER object is not covered (the alternate is per object), and the alternate does not carry over to a changed object type
+ const CANON="AND substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)";
+ const w=world(38);
+ const other=sql(w.file,"SELECT name FROM sqlite_master WHERE type='table' AND name<>'canonical_producer_chain' AND instr(sql,'"+CANON.replace(/'/g,"''")+"')>0 LIMIT 1")[0];
+ assert.ok(other,'the fixture finds another table with the same token');
+ {
+  const input="PRAGMA writable_schema=1;UPDATE sqlite_master SET sql=replace(sql,'"+CANON.replace(/'/g,"''")+"','"+"AND substr(created_at, 11, 1) = 'T' AND substr(updated_at, 12, 8)".replace(/'/g,"''")+"') WHERE name='"+other.name+"';";
+  assert.equal(spawnSync('sqlite3',['-unsafe-testing',w.file],{input,encoding:'utf8'}).status,0);
+  const status=await Op.execute('status',{binding:w.db,clock:at(MID)});assert.equal(status.chain.verified,false,'the swap on '+other.name+' is not accepted');assert.deepEqual(status.chain.changed,['table:'+other.name]);
+ }
+ // a mid-run change to a non-accepted form is caught by the readback of the next file: write_uncertain, nothing further sent
+ const run2=world(38);const spy=[];
+ const tamper={prepare:text=>run2.db.prepare(text),async batch(statements){await run2.db.batch(statements);spy.push(statements.length);if(spy.length===1)spawnSync('sqlite3',['-unsafe-testing',run2.file],{input:"PRAGMA writable_schema=1;UPDATE sqlite_master SET sql=replace(sql,'BETWEEN 20 AND 32','BETWEEN 19 AND 32') WHERE name='canonical_producer_chain';",encoding:'utf8'});}};
+ await stop(run(tamper,params(47,38)),'write_uncertain');assert.equal(spy.length,1,'no further batch after the readback mismatch');assert.equal(version(run2.file),39);
+}
+
 // ---- fail closed: missing or malformed facts, and a dormant baseline ----
 {
  const mid=Object.fromEntries(Op.REQUIRED_QUIET.map(([key])=>[key,0]));
