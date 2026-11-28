@@ -191,7 +191,7 @@ The projector fails closed on its R2 inputs. Missing, malformed or unpublished i
 
 ## Metadata sync clocks (schema v5)
 
-[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md): migration `0005` adds `film_sync_state` and is applied on production. The enrichment projector wrote it when `schema_contract.version` was 5, 6 or 7 and the table existed; the projector was removed in AIR-537 slice 3. At `d1`/`open` the fenced canonical Film adapters write the table (`writeFilmFacts`, `SYNC_UPSERT` in `src/canonical-film-writers.js`, reached from the metadata-sync producer), and `/api/d1/status` still counts the `metadata_sync` checkpoints of `projection_state` read-only. There is no new flag and no new cron. `metadataSync` does not read the table. While the schema v6 marker is `r2` or absent, the clocks still come from `metadata.json`.
+[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md): migration `0005` adds `film_sync_state` and is applied on production. The enrichment projector wrote it when `schema_contract.version` was 5, 6 or 7 and the table existed; the projector was removed in AIR-537 slice 3. At `d1`/`open` the fenced canonical Film adapters write the table (`writeFilmFacts`, `SYNC_UPSERT` in `src/canonical-film-writers.js`, reached from the metadata-sync producer), and, until AIR-690, `/api/d1/status` counted the `metadata_sync` checkpoints of `projection_state` read-only (it no longer does). There is no new flag and no new cron. `metadataSync` does not read the table. While the schema v6 marker is `r2` or absent, the clocks still come from `metadata.json`.
 
 | Column | Holds |
 | --- | --- |
