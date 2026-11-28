@@ -1,6 +1,6 @@
 # Identity evidence manifest import (ADR 0215 decision 7; operator contract of card ER, AIR-639)
 
-**Status:** the operators and migration `0044_identity_evidence_reconstruction_import.sql` are delivered **dormant**. The migration is **not applied** (card ERM is a separate production GO), and no family has a dry run yet (cards E3a-E3c). Nothing here authorizes a production operation: **every step below that touches production needs its own owner-approved GO** (a dry run that reads production needs a production read approval; an import is L3 and names the manifest digest). A deploy never applies the migration, runs a dry run or starts an import.
+**Status:** the operators and migration `0044_identity_evidence_reconstruction_import.sql` are delivered **dormant**. The applied state of the migration is read live from the schema contract (see the [D1 schema contract](../reference/data/d1-schema.md) and the [migration registry](../../migrations/README.md)), never from this file; no family has run an import (cards E3a-E3c; the family (c) extraction of E3c is delivered dormant, see below). Nothing here authorizes a production operation: **every step below that touches production needs its own owner-approved GO** (a dry run that reads production needs a production read approval; an import is L3 and names the manifest digest). A deploy never applies the migration, runs a dry run or starts an import.
 
 ## What the path is
 
@@ -44,6 +44,21 @@ A code rollback does not revert D1 rows. Before use, undoing 0044 is a forward m
 ## Readback
 
 `readImportRun` (state, attempt, lease, stop reason), `readImportReport` (receipts, totals, the equivalent pairs of receipted chunks only with `equivalentsMatchReceipts`, and the pinned ETag, chunks and residual window of every R2 object) and `readStagedManifest` through an authorized read path. Record them with the GO's evidence in [evidence](../evidence/README.md). Dated production results never go in this file.
+
+## Family (c): canonical claim history and retirement (E3c, AIR-641)
+
+`src/identity-evidence-claim-history.js` is the **dormant, pure** extraction of family (c) ([ADR 0215](../adr/0215-identity-evidence-full-model.md) Table 5). It reads nothing: `CLAIM_HISTORY_READS` lists the exact plain `SELECT`s of the dry run, and running them against production needs the owner's **production read approval**. The rows they return go to `extractClaimHistory`, whose `records` are the input of `planManifest({family: 'c', ...})`. Stages: (1) the approved read-only dry run, (2) a dated coverage report and the manifest digest in [evidence](../evidence/README.md), (3) the owner's import decision and L3 GO naming that digest, (4) the import and the scoped readback. The import needs the prerequisite cards [ER AIR-639](https://trello.com/c/wmCtyd2b), [ECM](https://trello.com/c/JyQ3UkbR) and [ERM](https://trello.com/c/cQOnWHlR); family (c) needs no live writer. Dated counts and digests belong in evidence, not here.
+
+| Source | Result |
+| --- | --- |
+| c1 trusted minting ids (`film:tmdb:<n>`, `film:<lid>`, `film:lb:<lid>` of [ADR 0217](../adr/0217-source-independent-film-admission.md)), c6 slug, c7 receipts, c8 redirects | no row, counted |
+| c9 the 0001 assertion tables | retired by migration 0054, not read, no row |
+| c2 trusted `tmdb` on a Film not minted from it | **null provenance** only is c2: no row, listed by Film. Non-null provenance is reported separately (`nonNullProvenance`, with its `source`), no row |
+| c3 trusted `letterboxd` on a Film not minted from it | no row, each `bridge_root_unavailable`; reported as `verified_bridge` (`ratings_alias_bridge` whose `tmdb` is the Film's own minting id) or `unknown_origin`. A root is never derived from a receipt or a `same_work` row. A causal record found by a reviewer (`causalRoots`) is listed in `reviewRequired` and **never imported** by this run |
+| c4 `tmdb_retirement_decision` | `retire`: `same_work(tmdb_movie, tmdb_tv)`, `asserts`, `owner_action`, `owner_statement`, root = `request_id`, `source_order` = `seq`, Film-bound. `observed_at` is `confirmation.at` only for a full instant; a date-only `at` keeps its date and precision in the report (`precision`) and the time stays unknown (no midnight is invented). `restore`: the scoped withdrawal (`refutes`, `scope_evidence_key` = the retire row's key) of the retire its `supersedes_seq` names; a restore whose target is not a matching retire of the same Film and ids is `restoreUnresolved`, no row |
+| c5 trusted `tmdb_tv` claims | `film_has_id(film, tmdb_tv)` only when the claim's provenance matches exactly one `retire` field by field: film, lid, TV id, `source` `letterboxd_tmdb_link`, link, URL, link check time, confirmation; every compared field must exist on both sides (two missing values are no proof). `observedAt` and `sourceOrder` stay null (neither is recorded). Otherwise `unattributable` (`no_matching_decision` or `ambiguous_decisions`). The untrusted retired `tmdb` rows give no row |
+
+The guard of a decision record covers every field the mapping reads (`recorded_at`, the load time, is not read); the guard of a claim covers `trusted`, `conflicting` and `provenance_json`. A changed or deleted record stops the chunk as `source_moved` (above). With no eligible row the dry run is report-only (`no_import`): no digest, no GO, no invented root. Recovery is the resume of the exact manifest above; history is never deleted. Proof: `tests/identity-evidence-claim-history.mjs`.
 
 ## Offline proof
 
