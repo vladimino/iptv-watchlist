@@ -1,38 +1,60 @@
 // AIR-607 (card C2; ADR 0219 decisions 2, 3 and 6; ADR 0207 decision 7): the OPERATOR contract that activates the Catalog Enrichment Producer for the RATED scope only. DORMANT: nothing in the Worker imports it and a deploy
-// never runs it. It is executed by the owner's production operation under an exact owner GO that names the cutoff; it is not reachable from any route, flag or Scheduled Task.
-//   - FAIL CLOSED: `ratedActivationPreflight` is read-only and refuses on a missing schema, a Film/Person marker that is not open, a control row that is not `inactive`, any existing scope row (no other scope, and no second
-//     activation), or a stale `staged` signal. An invalid cutoff, a cutoff in the future, a missing GO reference or an invalid operator identity refuse before any read of the database.
-//   - ORDER (no gap, ADR 0219 decision 3): (1) ONE guarded statement inserts the rated scope row `activated=1, enabled=1` with the approved cutoff, so the live trigger is enabled first; (2) the bounded, revision-fenced bootstrap
-//     writes `admitted` signals for the qualifying existing admissions (the unique inbox key deduplicates the overlap with the live tail); (3) only when the bootstrap is `done` the control goes `inactive` -> `active`.
-//   - RESUMABLE and IDEMPOTENT: a stopped run (the page budget, a crash) is resumed by repeating the same call with the same cutoff; a different cutoff, or a control that is already active, never changes anything.
-//   - It enables no other scope, sets no feature flag, creates no Scheduled Task and delivers no cron expression (that is a separate versioned configuration change).
-// Pause is the stop control (`POST /api/admin/settings/catalog-enrichment`), never a code rollback.
+// never runs it. It is executed by the owner's production operation under an exact owner GO that names the cutoff; it is not reachable from any route, flag or Scheduled Task, and it starts no production instance of its own.
+//   - FAIL CLOSED: `ratedActivationPreflight` is read-only. It refuses on an incomplete producer schema, a Film/Person authority that is not actually `open` (a held marker is refused), a live drainer lease, a control row that is
+//     not `inactive`, any scope row other than `rated`, and a `staged` signal. A malformed input (impossible calendar instant, a cutoff in the future, a missing GO link, a combined actor longer than the column) refuses before the database is read.
+//   - THE APPROVED ENVELOPE (cutoff, scope revision, authority generation, no other scope, no staged signal, no live lease, control revision) is asserted INSIDE every write that makes the activation true: the scope insert, every
+//     bootstrap page (`pin`) and the control compare-and-swap, which also carries the done bootstrap and the scope identity. A change at any boundary applies nothing and is reported, never adopted.
+//   - ORDER (no gap, ADR 0219 decision 3): (1) scope row (live trigger on); (2) bootstrap of the qualifying existing admissions; (3) control `inactive` -> `active`; (4) the wake of the already-runnable work (below); (5) readback.
+//   - OUTCOMES are never rounded up: `refused` (nothing written by this call), `stopped` (scope and/or bootstrap effects exist, the control is still `inactive`; the same call resumes), `uncertain` (the control commit's outcome could
+//     not be read back), `activated` (the control is active under this operator's own write), `noop` (already active, same rated-only configuration, bootstrap done).
+//   - WAKE: signals written while the control was inactive are not woken by any later writer, and `kick` refuses an inactive control. Only after the final commit is confirmed the operator wakes the drainer through the EXISTING
+//     protocol (`hasRunnable`, then `kick`; the producer's own reconcile is the safety net, delivered with the reconcile cron under the GO). It never starts an instance outside that protocol, never throws, and a failed or deferred
+//     wake leaves the activation applied. A repeated call is `noop` (or recovers an unfinished bootstrap) and wakes again, so a lost reply or a lost kick is recovered by repeating the same call or by the reconcile.
+// It enables no other scope, sets no feature flag, creates no Scheduled Task and delivers no cron expression. Pause is the stop control (`POST /api/admin/settings/catalog-enrichment`), never a code rollback.
 import {failed,many,one,database,readAuthority} from './film-person-authority.js';
-import {activateControl,readControl} from './catalog-enrichment-store.js';
+import {readControl,LEASE_PROJECTION} from './catalog-enrichment-store.js';
 import {runBootstrap,readScope,BOOTSTRAP_MAX_PAGES,BOOTSTRAP_PAGE} from './catalog-enrichment-bootstrap.js';
+import {hasRunnable,kick} from './catalog-enrichment-workflow.js';
 
 export const ACTIVATION_SCOPE='rated';
 export const MIN_SCHEMA_VERSION=47;
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const GO_REFERENCE=/^https:\/\/[^\s]{8,300}$/;
-const TABLES=['enrichment_signal','catalog_enrichment_scope','catalog_enrichment_member','catalog_enrichment_state','catalog_enrichment_control','film_rated_admission'];
+// The whole relevant schema: the producer's own tables (0047), the operation-key contract (0039), the shared upstream coordination (0045), the lease row and the rated emitter.
+const TABLES=['enrichment_signal','catalog_enrichment_scope','catalog_enrichment_member','catalog_enrichment_state','catalog_enrichment_control','catalog_enrichment_unit_generation','catalog_enrichment_tick','film_rated_admission','upstream_cooldown','upstream_coordination','projection_run','canonical_write_receipt'];
 const TRIGGER='catalog_enrichment_rated_admitted';
 const absent=error=>/no such (table|column)/i.test(String(error?.cause?.message||error?.message||error));
+const instant=value=>typeof value==='string'&&ISO.test(value)&&!Number.isNaN(Date.parse(value))&&new Date(value).toISOString()===value; // rejects impossible calendar instants (month 99, day 31 of April) that the pattern alone accepts
 
+// What the control row records as `updated_by` (the column holds at most 200 characters): the operator and the exact GO. It is never truncated: a combination that does not fit is refused.
+const ACTOR_LIMIT=200;
+const actor=(by,goReference)=>`${by} go:${goReference}`;
 function validInput({cutoffAt,by,at,goReference}){
  const problems=[];
- if(typeof at!=='string'||!ISO.test(at))problems.push('invalid_time');
- if(typeof cutoffAt!=='string'||!ISO.test(cutoffAt))problems.push('invalid_cutoff');
- else if(typeof at==='string'&&ISO.test(at)&&Date.parse(cutoffAt)>Date.parse(at))problems.push('cutoff_in_future');
+ if(!instant(at))problems.push('invalid_time');
+ if(!instant(cutoffAt))problems.push('invalid_cutoff');
+ else if(instant(at)&&Date.parse(cutoffAt)>Date.parse(at))problems.push('cutoff_in_future');
  if(typeof goReference!=='string'||!GO_REFERENCE.test(goReference))problems.push('go_reference_missing');
  if(typeof by!=='string'||!by||by.length>120)problems.push('invalid_operator');
+ else if(typeof goReference==='string'&&GO_REFERENCE.test(goReference)&&actor(by,goReference).length>ACTOR_LIMIT)problems.push('actor_too_long');
  return problems;
 }
-// What the control row records as `updated_by` (at most 200 characters): who ran the operation and the exact GO it ran under.
-const actor=(by,goReference)=>`${by} go:${goReference}`.slice(0,200);
 
-// READ-ONLY. -> {ok, problems:[code,...], facts}. `resume` is true when the rated scope already exists with the SAME cutoff and the control is still `inactive` (an interrupted activation): that is not a problem, it is continued.
-export async function ratedActivationPreflight(env,{cutoffAt=null}={}){
+// ---- the guards asserted inside the writes ----
+// authority open at the generation read; no staged signal; no live drainer lease; exactly `scopes` scope rows. Parameters, in order: generation, at.
+const guard=scopes=>`EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?) AND NOT EXISTS (SELECT 1 FROM enrichment_signal WHERE state='staged') AND NOT EXISTS (SELECT 1 FROM projection_run WHERE projection='${LEASE_PROJECTION}' AND lease_id IS NOT NULL AND lease_until>?) AND (SELECT COUNT(*) FROM catalog_enrichment_scope)=${scopes}`;
+// the approved scope identity at the final commit. Parameters: cutoff, revision.
+const SCOPE_DONE="EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope='rated' AND activated=1 AND enabled=1 AND cutoff_at=? AND revision=? AND bootstrap_state='done')";
+const INSERT_SCOPE=`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,bootstrap_state,bootstrap_cursor,revision,updated_at) SELECT 'rated',1,1,?,'none',NULL,1,? WHERE ${guard(0)} AND COALESCE((SELECT revision FROM catalog_enrichment_control WHERE id=1),0)=? AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_control WHERE state<>'inactive')`;
+const INIT_CONTROL=`INSERT INTO catalog_enrichment_control (id,state,generation,revision,updated_at,updated_by) SELECT 1,'inactive',0,1,?,? WHERE NOT EXISTS (SELECT 1 FROM catalog_enrichment_control) AND ${guard(1)} AND ${SCOPE_DONE}`;
+const ACTIVATE_CONTROL=`UPDATE catalog_enrichment_control SET state='active',generation=generation+1,revision=revision+1,updated_at=?,updated_by=? WHERE id=1 AND state='inactive' AND revision=? AND ${guard(1)} AND ${SCOPE_DONE}`;
+
+const scopeView=row=>({scope:row.scope,activated:Number(row.activated),enabled:Number(row.enabled),cutoffAt:row.cutoff_at,bootstrapState:row.bootstrap_state,revision:Number(row.revision)});
+const SCOPE_SQL='SELECT scope,activated,enabled,cutoff_at,bootstrap_state,bootstrap_cursor,revision FROM catalog_enrichment_scope ORDER BY scope';
+
+// READ-ONLY. -> {ok, problems:[code,...], facts}. `facts.resume` is true when the rated scope already exists with the SAME cutoff, enabled, and the control is still `inactive` (an interrupted activation): continued, not a problem.
+// `now` (an instant) is the time the lease is judged at.
+export async function ratedActivationPreflight(env,{cutoffAt=null,now=new Date().toISOString()}={}){
  const handle=database(env);
  if(!handle)throw failed('film_person_unavailable');
  const problems=[],facts={resume:false};
@@ -41,14 +63,23 @@ export async function ratedActivationPreflight(env,{cutoffAt=null}={}){
   facts.schemaVersion=version==null?null:Number(version);
   const present=new Set((await many(handle,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(()=>'?').join(',')+")",TABLES)).map(row=>row.name));
   const trigger=await one(handle,"SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",[TRIGGER]);
-  facts.tables=TABLES.filter(name=>present.has(name));
+  const keyed=present.has('canonical_write_receipt')?await one(handle,"SELECT name FROM pragma_table_info('canonical_write_receipt') WHERE name='operation_key'"):null;
+  facts.missingTables=TABLES.filter(name=>!present.has(name));
   facts.ratedTrigger=!!trigger;
-  if(!(facts.schemaVersion>=MIN_SCHEMA_VERSION)||present.size!==TABLES.length||!trigger){problems.push('schema_not_applied');return {ok:false,problems,facts};}
-  try{await readAuthority(env);facts.filmPersonMarker='open';}catch{facts.filmPersonMarker='not_open';problems.push('film_person_marker_not_open');}
+  facts.operationKey=!!keyed;
+  if(!(facts.schemaVersion>=MIN_SCHEMA_VERSION)||facts.missingTables.length||!trigger||!keyed){problems.push('schema_not_applied');return {ok:false,problems,facts};}
+  try{
+   const gate=await readAuthority(env);
+   facts.filmPersonMarker={state:gate.state,generation:gate.generation};
+   if(gate.open!==true||gate.state!=='open')problems.push('film_person_marker_not_open');
+  }catch{facts.filmPersonMarker={state:'unreadable',generation:null};problems.push('film_person_marker_not_open');}
+  const lease=await one(handle,'SELECT lease_id,lease_until FROM projection_run WHERE projection=?',[LEASE_PROJECTION]);
+  facts.lease=lease?.lease_id&&lease.lease_until&&lease.lease_until>now?{until:lease.lease_until}:null;
+  if(facts.lease)problems.push('lease_held');
   const control=await readControl(env);
   facts.control={state:control.state,present:control.present,generation:control.generation,revision:control.revision};
-  const scopes=await many(handle,'SELECT scope,activated,enabled,cutoff_at,bootstrap_state,bootstrap_cursor,revision FROM catalog_enrichment_scope ORDER BY scope');
-  facts.scopes=scopes.map(row=>({scope:row.scope,activated:Number(row.activated),enabled:Number(row.enabled),cutoffAt:row.cutoff_at,bootstrapState:row.bootstrap_state,revision:Number(row.revision)}));
+  const scopes=await many(handle,SCOPE_SQL);
+  facts.scopes=scopes.map(scopeView);
   const own=scopes.find(row=>row.scope===ACTIVATION_SCOPE);
   if(scopes.some(row=>row.scope!==ACTIVATION_SCOPE))problems.push('other_scope_present');
   if(control.state!=='inactive')problems.push('control_not_inactive');
@@ -66,50 +97,93 @@ export async function ratedActivationPreflight(env,{cutoffAt=null}={}){
  return {ok:problems.length===0,problems,facts};
 }
 
-// The step-1 statement: inserts the rated scope only while the control is not active and NO scope row exists (the unique scope key already refuses a second rated row; this refuses any other row too).
-const INSERT_SCOPE="INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,bootstrap_state,bootstrap_cursor,revision,updated_at) SELECT 'rated',1,1,?,'none',NULL,1,? WHERE NOT EXISTS (SELECT 1 FROM catalog_enrichment_scope) AND NOT EXISTS (SELECT 1 FROM catalog_enrichment_control WHERE state<>'inactive')";
+// The wake of already-runnable work, after the control is active. Never throws. -> {outcome:'kicked'|'nothing_runnable'|'not_kicked'|'failed'|'deferred', ...}
+async function wake(env,{kick:inject=null}){
+ const send=inject||(env?.CATALOG_ENRICHMENT_WORKFLOW?()=>kick(env):null);
+ if(!send)return {outcome:'deferred',reason:'no_workflow_binding'}; // the safety net (the reconcile cron, delivered under the GO) wakes it
+ try{
+  if(!inject&&!await hasRunnable(env,{now:new Date().toISOString()}))return {outcome:'nothing_runnable'};
+  const result=await send();
+  return result?.kicked?{outcome:'kicked',mode:result.mode??null}:{outcome:'not_kicked',reason:result?.reason??'unknown'};
+ }catch(error){return {outcome:'failed',reason:String(error?.message||error).slice(0,200)};}
+}
 
-// -> {outcome:'activated'|'stopped'|'refused'|'noop', problems?, reason?, bootstrap?, scope?, control?, signals?}
-//   refused  a precondition failed; nothing was written by this call.
-//   stopped  the scope exists (and its trigger is live) but the bootstrap did not finish; the control is still inactive. Repeat the same call to resume.
-//   noop     the control is already active under this same scope and cutoff with a finished bootstrap: nothing to do.
-export async function activateRated(env,{cutoffAt,by,at,goReference,maxPages=BOOTSTRAP_MAX_PAGES,pageSize=BOOTSTRAP_PAGE}={}){
+async function finish(env,{outcome,effects,deps,extra={}}){
+ return {outcome,effects,wake:await wake(env,deps),...extra,...(await readActivation(env))};
+}
+
+// -> {outcome, effects:{scopeInserted,bootstrapRows}, problems?, reason?, bootstrap?, wake?, ...readback}
+//   refused    a precondition or the guard of the first write failed; nothing was written by this call.
+//   stopped    the scope exists but the control is still inactive (bootstrap incomplete, configuration changed, or the control guard failed). Nothing is adopted; repeat the same call to resume.
+//   uncertain  the control commit was sent and its outcome could not be read back: read the state before acting again.
+//   activated  the control is active under this operator's own write; the wake of the runnable work was attempted and is reported.
+//   noop       the control is already active under the same rated-only configuration with a done bootstrap; the wake is attempted again.
+// `deps.kick` replaces the default wake (the Worker's `kick` when a workflow binding exists); a test injects it.
+export async function activateRated(env,{cutoffAt,by,at,goReference,maxPages=BOOTSTRAP_MAX_PAGES,pageSize=BOOTSTRAP_PAGE}={},deps={}){
+ const effects={scopeInserted:false,bootstrapRows:0};
  const input=validInput({cutoffAt,by,at,goReference});
- if(input.length)return {outcome:'refused',problems:input};
- const before=await readControl(env);
- if(before.tables===false)return {outcome:'refused',problems:['schema_not_applied']};
- if(before.state==='active'){
-  const scope=await readScope(env,ACTIVATION_SCOPE);
-  if(scope&&scope.cutoff_at===cutoffAt&&scope.bootstrap_state==='done')return {outcome:'noop',reason:'already_active',control:before,scope};
- }
- const preflight=await ratedActivationPreflight(env,{cutoffAt});
- if(!preflight.ok)return {outcome:'refused',problems:preflight.problems,facts:preflight.facts};
+ if(input.length)return {outcome:'refused',effects,problems:input};
  const handle=database(env);
+ const before=await readControl(env);
+ if(before.tables===false)return {outcome:'refused',effects,problems:['schema_not_applied']};
+
+ // an applied activation: the same rated-only configuration proves a noop; an unfinished bootstrap is recovered, never stranded
+ if(before.state==='active'){
+  const scopes=await many(handle,SCOPE_SQL);
+  const own=scopes.length===1&&scopes[0].scope===ACTIVATION_SCOPE?scopes[0]:null;
+  if(!own||own.cutoff_at!==cutoffAt||Number(own.activated)!==1||Number(own.enabled)!==1)return {outcome:'refused',effects,problems:['active_configuration_mismatch'],scopes:scopes.map(scopeView)};
+  if(own.bootstrap_state==='done')return finish(env,{outcome:'noop',effects,deps,extra:{reason:'already_active'}});
+  const bootstrap=await runBootstrap(env,{scope:ACTIVATION_SCOPE,at,pageSize,maxPages,pin:{revision:Number(own.revision),cutoffAt}});
+  effects.bootstrapRows=bootstrap.rows;
+  if(bootstrap.outcome!=='done')return {outcome:'stopped',effects,reason:bootstrap.reason||'bootstrap_incomplete',bootstrap,...(await readActivation(env))};
+  return finish(env,{outcome:'noop',effects,deps,extra:{reason:'bootstrap_recovered',bootstrap}});
+ }
+
+ const preflight=await ratedActivationPreflight(env,{cutoffAt,now:at});
+ if(!preflight.ok)return {outcome:'refused',effects,problems:preflight.problems,facts:preflight.facts};
+ const generation=preflight.facts.filmPersonMarker.generation;
  if(!preflight.facts.resume){
-  try{await handle.batch([handle.prepare(INSERT_SCOPE).bind(cutoffAt,at)]);}catch(error){throw failed('film_person_unavailable',error);}
+  // the first write: guarded by authority open at the generation read, no staged signal, no live lease, no scope row and the control revision read
+  try{await handle.batch([handle.prepare(INSERT_SCOPE).bind(cutoffAt,at,generation,at,before.revision)]);}catch(error){throw failed('film_person_unavailable',error);}
  }
  const scope=await readScope(env,ACTIVATION_SCOPE);
- if(!scope||scope.cutoff_at!==cutoffAt||Number(scope.activated)!==1||Number(scope.enabled)!==1)return {outcome:'refused',problems:['scope_not_written'],scope};
- const bootstrap=await runBootstrap(env,{scope:ACTIVATION_SCOPE,at,pageSize,maxPages});
- if(bootstrap.outcome!=='done')return {outcome:'stopped',reason:bootstrap.reason||'bootstrap_incomplete',bootstrap,scope:await readScope(env,ACTIVATION_SCOPE)};
+ if(!scope||scope.cutoff_at!==cutoffAt||Number(scope.activated)!==1||Number(scope.enabled)!==1)return {outcome:'refused',effects,problems:['scope_not_written'],...(await readActivation(env))};
+ effects.scopeInserted=!preflight.facts.resume;
+ const pin={revision:Number(scope.revision),cutoffAt};
+
+ const bootstrap=await runBootstrap(env,{scope:ACTIVATION_SCOPE,at,pageSize,maxPages,pin});
+ effects.bootstrapRows=bootstrap.rows;
+ if(bootstrap.outcome!=='done')return {outcome:'stopped',effects,reason:bootstrap.reason||'bootstrap_incomplete',bootstrap,...(await readActivation(env))};
+
+ // the final commit: the control, under the SAME envelope (scope identity and revision, done bootstrap, no other scope, authority, staged, lease, control revision), initialized in the same batch when absent
  const control=await readControl(env);
- const change=await activateControl(env,{expectedRevision:control.revision,by:actor(by,goReference),at});
- if(change.outcome!=='applied')return {outcome:'stopped',reason:change.outcome==='uncertain'?'control_outcome_unknown':'control_not_activated',bootstrap,control:change.control};
- return {outcome:'activated',bootstrap,...(await readActivation(env))};
+ const base=control.present?control.revision:1;
+ const by200=actor(by,goReference);
+ const statements=[];
+ if(!control.present)statements.push(handle.prepare(INIT_CONTROL).bind(at,by200,generation,at,cutoffAt,pin.revision));
+ statements.push(handle.prepare(ACTIVATE_CONTROL).bind(at,by200,base,generation,at,cutoffAt,pin.revision));
+ const applied=after=>after&&after.state==='active'&&after.updatedBy===by200&&after.generation>control.generation&&after.revision===base+1;
+ let after=null,sendFailed=null;
+ try{await handle.batch(statements);}catch(error){sendFailed=error;}
+ try{after=await readControl(env);}catch{
+  return {outcome:'uncertain',effects,reason:'control_outcome_unknown',bootstrap,...(sendFailed?{error:String(sendFailed?.message||sendFailed).slice(0,200)}:{})};
+ }
+ if(applied(after))return finish(env,{outcome:'activated',effects,deps,extra:{bootstrap,...(sendFailed?{note:'commit_reply_lost'}:{})}});
+ return {outcome:'stopped',effects,reason:sendFailed?'control_batch_failed':'control_guard_failed',bootstrap,...(await readActivation(env))};
 }
 
 // READ-ONLY readback of the whole activation: the control, the scope rows and the inbox. A claim about the present state is made from this read, never from documentation.
 export async function readActivation(env){
  const handle=database(env);
  const control=await readControl(env);
- const scopes=await many(handle,'SELECT scope,activated,enabled,cutoff_at,bootstrap_state,bootstrap_cursor,revision FROM catalog_enrichment_scope ORDER BY scope');
+ const scopes=await many(handle,SCOPE_SQL);
  const signals=await many(handle,"SELECT source,state,COUNT(*) AS n FROM enrichment_signal GROUP BY source,state ORDER BY source,state");
  const expected=scopes.find(row=>row.scope===ACTIVATION_SCOPE);
  const qualifying=expected?.cutoff_at?Number((await one(handle,'SELECT COUNT(*) AS n FROM film_rated_admission WHERE verified_at>=?',[expected.cutoff_at]))?.n||0):null;
  const bootstrapped=expected?Number((await one(handle,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE kind='admitted' AND source='rated' AND part=''"))?.n||0):null;
  return {
   control:{state:control.state,generation:control.generation,revision:control.revision,updatedBy:control.updatedBy},
-  scopes:scopes.map(row=>({scope:row.scope,activated:Number(row.activated),enabled:Number(row.enabled),cutoffAt:row.cutoff_at,bootstrapState:row.bootstrap_state,revision:Number(row.revision)})),
+  scopes:scopes.map(scopeView),
   signals:signals.map(row=>({source:row.source,state:row.state,count:Number(row.n)})),
   qualifyingAdmissions:qualifying,
   ratedSignals:bootstrapped,
