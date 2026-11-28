@@ -1,8 +1,9 @@
 // AIR-663 / ADR 0218 decision 3 and stage 4 (D1, Accepted). The SEPARATE, bounded reconciler of a stale effective Film localization row: a Film whose stored `localization` row is no
 // longer the output of the existing resolver, with NO new source observation (a historical applied source receipt, an owner-only change in owner_review_entry, a legacy row).
-// The MUTATION paths are DORMANT, like the other canonical writers: importing this module runs nothing and no Worker route, cron tick, Workflow or script calls them. AIR-683 bundles the module only
-// so that the owner-only MCP tool `film_localization_diagnose` can call the READ-ONLY `diagnoseLocalizationCohort`; no MCP tool, route or Workflow reaches apply, resume, recover or restore. They
-// reach the database only when an explicit caller (the production operation of AIR-664, under its own owner GO) invokes them, and only after assertWritable (marker d1/open).
+// The MUTATION paths are DORMANT, like the other canonical writers: importing this module runs nothing and no Worker route, cron tick or Workflow calls them. The bundle reaches ONLY the READ-ONLY
+// `diagnoseLocalizationCohort` (AIR-683, `film_localization_diagnose`) and, for the one-off AIR-664 operation (`src/film-localization-repair.js`, `film_localization_repair`), the exact-intent
+// `readReconcileIntent`, `recoverLocalizationReconcile`, `resumeLocalizationReconcile` and `restoreLocalizationReconcile`; `applyLocalizationReconcile` (the replanning pass) is reached by nothing. They
+// reach the database only when an explicit caller invokes them under its own owner GO, and only after assertWritable (marker d1/open).
 // - Same resolver, same precedence: the output is projectionOf() of the projection writer (resolveLocalization unchanged: owner > reviewed > automatic, fixed source order, then the newer
 //   observation, then the source name; the strong() guard and its SQL WHERE). No new source row is written except the lossless legacy candidate the projection writer already preserves.
 // - Same two fences: the Film revision CAS and the owner-review token (marker generation, every consumed owner row, the redirect closure), re-proved INSIDE the batch.
@@ -20,7 +21,7 @@
 //   D1-authoritative, and only while the Film is at exactly postRevision with the row still equal to postImage; otherwise it refuses and writes nothing (`localization_restore_moved`).
 //   It is not a general mutation API: a fabricated or incomplete token is refused before any receipt is reserved. The alternative is a forward correction through this same reconciler.
 // Person localization is out of scope (unchanged). No table, index or column changes.
-import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {assertWritable,database,failed,many,one,readAuthority,readWriterGate} from './film-person-authority.js';
 import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
 import {canonicalJson,defineOperation,digestOf,readReceipt,receiptedWrite,requestIdOf} from './canonical-receipts.js';
 import {PROJECTION_RESOLVER,PROJECTION_UPSERT,legacyCandidate,ownerTokenStatements,projectionInputs,projectionOf,readOwnerReviewToken} from './film-localization-projection.js';
@@ -148,13 +149,16 @@ export async function readReconcileIntent(env,id,{runId,at=new Date().toISOStrin
 // written (`localization_inputs_moved`, `film_person_revision_conflict`). The batch re-asserts the intent's own pre-image, the owner-review token and the revision CAS. A named refusal
 // `localization_owner_moved` (the owner token was lost between plan and commit) is retryable by a NEW intent. `held` writes nothing and opens no batch.
 // Returns {written, revision, postRevision, preImage, postImage}: the images of the INTENT, which the batch has just proved are the stored ones.
-async function writeFilmLocalizationReconcile(env,{intent: given,receiptMark}={}){
+async function writeFilmLocalizationReconcile(env,{intent: given,receiptMark,approvedPins}={}){
  // PRIVATE: reachable only through the checkpointed, receipted path. A call without the receipt mark of its own pending receipt writes nothing.
  if(receiptMark===undefined||receiptMark===null)throw failed('film_person_invalid');
  const intent=await checkIntent(given);
  const id=intent.id,expected=intent.plannedRevision;
  const tail=fenced.receiptTail(receiptMark,{kind:'film',id});
- const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ // AIR-664: an operation-scoped `env.gateReuse` (AIR-688) skips the repeated marker reads; the batch still asserts the marker generation (and the approved pins) INSIDE its own transaction.
+ const gate=fenced.bindProducerFence(env,assertWritable(await readWriterGate(env)));
+ // AIR-664: the pins the operation froze are asserted INSIDE this batch (the marker generation read fresh above proves no approved generation).
+ if(approvedPins)fenced.bindApprovedPins(gate,approvedPins);
  const snapshot=await readFilmSnapshot(env,id);
  if(snapshot.redirect)throw failed('film_person_redirect');
  if(!snapshot.film)throw failed('film_person_precondition');
@@ -187,7 +191,7 @@ async function writeFilmLocalizationReconcile(env,{intent: given,receiptMark}={}
 
 // The receipt hooks bound to ONE intent (never to a replan): the readback proves nothing from content alone, the revalidation proceeds only while the Film is still exactly where the intent
 // planned it (planned revision and pre-image row), and the run is the intent's own fenced write.
-function intentHooks(env,intent,clock){
+function intentHooks(env,intent,clock,approvedPins){
  const state=async()=>{const snapshot=await readFilmSnapshot(env,intent.id);return {revision:snapshot.revision,image:imageOf(snapshot.dimensions.localization)};};
  return {
   atomic:true,
@@ -199,12 +203,12 @@ function intentHooks(env,intent,clock){
    return {disposition:'abandon',errorClass:RECONCILE_SOURCE_CHANGED};
   },
   revalidate:async()=>{const now=await state();return now.revision===intent.plannedRevision&&sameImage(now.image,intent.preImage)?'proceed':'stale';},
-  run:ctx=>writeFilmLocalizationReconcile(env,{intent,receiptMark:mark(ctx,clock)}),
+  run:ctx=>writeFilmLocalizationReconcile(env,{intent,receiptMark:mark(ctx,clock),approvedPins}),
  };
 }
 // ONE receipted, atomic, fenced write of an intent (a fresh apply or a resume of a recorded one: the same request id never double-writes, an applied receipt returns as applied).
-async function writeIntent(env,intent,{clock,policy}){
- return receiptedWrite(env,{requestId:intent.requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:intent.id},expectedRevision:intent.plannedRevision,digest:intent.digest,now:clock,policy},intentHooks(env,intent,clock));
+async function writeIntent(env,intent,{clock,policy,approvedPins}){
+ return receiptedWrite(env,{requestId:intent.requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:intent.id},expectedRevision:intent.plannedRevision,digest:intent.digest,now:clock,policy,...(approvedPins?{approvedPins}:{})},intentHooks(env,intent,clock,approvedPins));
 }
 const appliedOf=(outcome,intent)=>outcome?.state==='applied'&&outcome.receipt?.appliedRevision===intent.postRevision&&outcome.receipt?.contentDigest===intent.digest;
 
@@ -224,30 +228,63 @@ export function filmLocalizationReconcileOperation(){
 //   applied      the receipt of this request id is applied at exactly postRevision with the intent's digest: the intent is the pre-image token of an effect that exists;
 //   not_applied  no applied receipt and the Film is still at the planned revision with the intent's pre-image row: safe to resume the same intent;
 //   unknown      anything else (a post-write row without an applied receipt, a moved Film): never guessed, never written, for review.
+// PURE classification of an apply intent against its receipt and the Film (one snapshot): `applied` (the receipt is applied at exactly postRevision), `not_applied` (no applied receipt and the Film is still at
+// the planned revision with the pre-image row; `receiptState` and `nextAttemptAt` say whether a receipt of the intent is still NONTERMINAL (pending, unknown, needs_review): an attempt may then still be in flight,
+// so it is NOT a definite no effect), or `unknown`.
+function applyClass(intent,receipt,snapshot){
+ const image=imageOf(snapshot.dimensions.localization);
+ if(receipt&&(receipt.operation!==RECONCILE_OPERATION||receipt.origin!==RECONCILE_ORIGIN||receipt.target.kind!=='film'||receipt.target.id!==intent.id||receipt.contentDigest!==intent.digest))return {state:'unknown',reason:'receipt_mismatch',revision:snapshot.revision};
+ if(receipt?.state==='applied'&&receipt.appliedRevision===intent.postRevision)return {state:'applied',revision:snapshot.revision,rowIsPostImage:snapshot.revision===intent.postRevision&&sameImage(image,intent.postImage),intent};
+ if(receipt?.state!=='applied'&&snapshot.revision===intent.plannedRevision&&sameImage(image,intent.preImage))return {state:'not_applied',revision:snapshot.revision,receiptState:receipt?.state??null,nextAttemptAt:receipt?.nextAttemptAt??null};
+ return {state:'unknown',reason:receipt?.state==='applied'?'applied_revision_mismatch':'moved',revision:snapshot.revision};
+}
+// RECOVERY: settles a recorded intent against the actual applied receipt and the revision, including an unknown outcome (a lost reply). Read only. States:
+//   applied      the receipt of this request id is applied at exactly postRevision with the intent's digest: the intent is the pre-image token of an effect that exists;
+//   not_applied  no applied receipt and the Film is still at the planned revision with the intent's pre-image row (see applyClass for a nonterminal receipt: safe to resume the same intent, never a fresh one);
+//   unknown      anything else (a post-write row without an applied receipt, a moved Film): never guessed, never written, for review.
 export async function recoverLocalizationReconcile(env,{intent: given}={}){
  const intent=await checkIntent(given);
  const receipt=await readReceipt(env,intent.requestId);
  const snapshot=await readFilmSnapshot(env,intent.id);
- const image=imageOf(snapshot.dimensions.localization);
- if(receipt&&(receipt.operation!==RECONCILE_OPERATION||receipt.origin!==RECONCILE_ORIGIN||receipt.target.kind!=='film'||receipt.target.id!==intent.id||receipt.contentDigest!==intent.digest))return {state:'unknown',reason:'receipt_mismatch',revision:snapshot.revision};
- if(receipt?.state==='applied'&&receipt.appliedRevision===intent.postRevision)return {state:'applied',revision:snapshot.revision,rowIsPostImage:snapshot.revision===intent.postRevision&&sameImage(image,intent.postImage),intent};
- if(receipt?.state!=='applied'&&snapshot.revision===intent.plannedRevision&&sameImage(image,intent.preImage))return {state:'not_applied',revision:snapshot.revision,receiptState:receipt?.state??null};
- return {state:'unknown',reason:receipt?.state==='applied'?'applied_revision_mismatch':'moved',revision:snapshot.revision};
+ return applyClass(intent,receipt,snapshot);
+}
+// AIR-664 (D1 budget): the CURRENT proof of an applied intent from ONE Film snapshot: the receipt classification and what the resolver reports now (owner precedence and merged ancestors included), so
+// the receipt, the revision, the row and the resolver are read once together and not twice.
+export async function proveAppliedLocalizationNow(env,{intent: given,at}={}){
+ const intent=await checkIntent(given);
+ const receipt=await readReceipt(env,intent.requestId);
+ const snapshot=await readFilmSnapshot(env,intent.id);
+ const recovery=applyClass(intent,receipt,snapshot);
+ if(snapshot.redirect||!snapshot.film)return {recovery,resolver:{state:'absent',reason:null}};
+ const token=await readOwnerReviewToken(env,intent.id);
+ const plan=planLocalizationReconcile(snapshot,token,{id:intent.id,at});
+ return {recovery,resolver:{state:plan.state==='write'?'stale':plan.state==='held'?'held':plan.state==='absent'?'absent':'noop',reason:plan.reason||null}};
+}
+// AIR-664 (D1 budget): the apply and the restore classification of one intent from ONE Film snapshot.
+export async function proveRecoveryNow(env,{intent: given,runId}={}){
+ const intent=await checkIntent(given);
+ const {requestId,digest}=await restoreIdentity({intent,runId});
+ const applyReceipt=await readReceipt(env,intent.requestId);
+ const restoreReceipt=await readReceipt(env,requestId);
+ const snapshot=await readFilmSnapshot(env,intent.id);
+ return {apply:applyClass(intent,applyReceipt,snapshot),restore:restoreClass(intent,restoreReceipt,snapshot,requestId,digest)};
 }
 // The ONE checkpointed commit of an intent, shared by the apply and the resume: the receipted, atomic, fenced write under the intent's request id, then the durable settlement of the outcome.
 // Returns {state:'applied'|'not_applied'|'unknown', errorClass, settleError}. `not_applied` is a definite replan refusal (the batch rolled back whole); anything else that is not an applied
 // receipt is `unknown`, never guessed. A failed durable settlement is reported (`settleError`), never swallowed: the caller stops and does not treat the Film as complete.
 const REPLAN=new Set(['localization_inputs_moved','localization_owner_moved','film_person_revision_conflict']);
-async function commitIntent(env,port,intent,{clock,policy}){
- let state,errorClass=null,receiptState=null;
+async function commitIntent(env,port,intent,{clock,policy,approvedPins}){
+ // `ran` / `already` / `waiting` keep what the receipt layer said: a fresh commit by THIS call (ran), the replay of an effect that already existed (already: another caller or an earlier run committed it, so it is NOT this
+ // call's write), or nothing ran because the attempt is in flight or backing off (waiting: nonterminal, never a definite no effect).
+ let state,errorClass=null,receiptState=null,ran=null,already=false,waiting=false;
  try{
-  const outcome=await writeIntent(env,intent,{clock,policy});
-  if(appliedOf(outcome,intent))state='applied';
-  else{state='unknown';errorClass=outcome?.errorClass||outcome?.reason||outcome?.state||'unclassified';receiptState=outcome?.state??null;}
+  const outcome=await writeIntent(env,intent,{clock,policy,approvedPins});
+  if(appliedOf(outcome,intent)){state='applied';ran=outcome.ran!==false;already=outcome.already===true||outcome.ran===false;}
+  else{state='unknown';errorClass=outcome?.errorClass||outcome?.reason||outcome?.state||'unclassified';receiptState=outcome?.state??null;waiting=outcome?.ran===false;}
  }catch(error){errorClass=error?.code||'unclassified';state=REPLAN.has(errorClass)?'not_applied':'unknown';}
  let settleError=null;
  try{await port.settle(intent,{state,errorClass,receiptState,...(state==='applied'?{revision:intent.postRevision}:{})});}catch(error){settleError=error?.code||'localization_checkpoint_settle_failed';}
- return {state,errorClass,settleError};
+ return {state,errorClass,settleError,ran,already,waiting,receiptState};
 }
 const portOf=checkpoint=>{
  if(!plain(checkpoint)||typeof checkpoint.record!=='function'||typeof checkpoint.settle!=='function')throw failed('film_person_invalid');
@@ -256,11 +293,12 @@ const portOf=checkpoint=>{
 // Resumes a recorded intent that recovery found `not_applied` (or re-issues an applied one harmlessly). It needs the SAME durable checkpoint port as the apply: the exact intent is recorded
 // (idempotently) BEFORE the write is permitted, a refusal writes nothing (`localization_checkpoint_failed`), and the outcome is settled afterwards. The same request id and digest mean a
 // committed effect is never written twice. Returns {state, errorClass, settleError, intent}; a lost reply is `unknown` with the intent, recoverable like any other.
-export async function resumeLocalizationReconcile(env,{intent: given,checkpoint,now,policy}={}){
+export async function resumeLocalizationReconcile(env,{intent: given,checkpoint,now,policy,approvedPins}={}){
  const port=portOf(checkpoint);
  const intent=await checkIntent(given),clock=clockOf(now);
  try{await port.record(intent);}catch(error){throw failed(CHECKPOINT_FAILED,error);}
- return {...await commitIntent(env,port,intent,{clock,policy}),intent};
+ if(approvedPins)fenced.approvedPinsOf(approvedPins);
+ return {...await commitIntent(env,port,intent,{clock,policy,approvedPins}),intent};
 }
 
 const clampCap=(value,fallback,max)=>{
@@ -444,37 +482,69 @@ export async function applyLocalizationReconcile(env,{runId,checkpoint,after,lim
 // RESTORE: one receipted, atomic, fenced restore of ONE Film from its apply intent (the restore token). The token is validated and bound BEFORE any receipt is reserved: it must be a complete,
 // self-consistent intent (explicit pre-image, complete post-image, digest and request id that recompute), its own apply receipt must exist and be `applied` with the same request id, digest,
 // target and applied revision, the marker must be open and the owner-review domain D1-authoritative. A refusal writes nothing and reserves nothing.
-export async function restoreLocalizationReconcile(env,{runId,token,now,policy}={}){
+export async function restoreLocalizationReconcile(env,{runId,token,now,policy,approvedPins}={}){
  const clock=clockOf(now);
  if(typeof runId!=='string'||!runId.trim()||runId.length>200)throw failed('film_person_invalid');
  const intent=await checkIntent(token);
+ if(approvedPins)fenced.approvedPinsOf(approvedPins);
  assertWritable(await readAuthority(env));
  await readOwnerReviewToken(env,intent.id);
  const original=await readReceipt(env,intent.requestId);
  if(!original||original.operation!==RECONCILE_OPERATION||original.origin!==RECONCILE_ORIGIN||original.target.kind!=='film'||original.target.id!==intent.id||original.state!=='applied'||original.appliedRevision!==intent.postRevision||original.contentDigest!==intent.digest)throw failed(RESTORE_UNBOUND);
  const digest=await restoreDigest(intent);
  const requestId=await reconcileRequestId({runId,action:'restore',id:intent.id,digest});
- const outcome=await receiptedWrite(env,{requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:intent.id},expectedRevision:intent.postRevision,digest,now:clock,policy},{
+ const outcome=await receiptedWrite(env,{requestId,operation:RECONCILE_OPERATION,origin:RECONCILE_ORIGIN,target:{kind:'film',id:intent.id},expectedRevision:intent.postRevision,digest,now:clock,policy,...(approvedPins?{approvedPins}:{})},{
   atomic:true,
   // A restore is fenced on the recorded revision and row, so a replay can never overwrite another writer: the readback proves nothing and the replay is the fenced write itself.
   readback:async()=>({digest:null}),
   revalidate:async()=>'proceed',
-  run:ctx=>restoreFilmLocalization(env,{intent,at:clock(),receiptMark:mark(ctx,clock)}),
+  run:ctx=>restoreFilmLocalization(env,{intent,at:clock(),receiptMark:mark(ctx,clock),approvedPins}),
  });
  return {...outcome,requestId};
+}
+
+// AIR-664: the durable identity of the restore of an intent (request id and digest under a run id), so an operation can read and recover the restore by ITS OWN receipt. Pure.
+export async function restoreIdentity({intent: given,runId}={}){
+ const intent=await checkIntent(given);
+ const digest=await restoreDigest(intent);
+ return {requestId:await reconcileRequestId({runId,action:'restore',id:intent.id,digest}),digest};
+}
+// READ ONLY recovery of a restore by its own receipt and the Film's revision and row. `applied`: the restore receipt of this identity is applied at exactly postRevision+1 (the restore committed, whatever
+// the Film is now). `not_applied`: no applied restore receipt (the restore is atomic with it, so it did not commit) and the Film is still at exactly postRevision with the row equal to the post-image: safe
+// to restore. `moved`: no applied restore receipt and the Film is elsewhere: definitely no effect of this request, and the Film is not restorable. `unknown`: a receipt that is not this restore.
+// PURE classification of a restore against ITS receipt and the Film (one snapshot). See recoverRestoreLocalization.
+function restoreClass(intent,receipt,snapshot,requestId,digest){
+ const image=imageOf(snapshot.dimensions.localization);
+ const at={revision:snapshot.revision,rowIsPostImage:sameImage(image,intent.postImage),rowIsPreImage:sameImage(image,intent.preImage)};
+ if(receipt&&(receipt.operation!==RECONCILE_OPERATION||receipt.origin!==RECONCILE_ORIGIN||receipt.target.kind!=='film'||receipt.target.id!==intent.id||receipt.contentDigest!==digest))return {state:'unknown',reason:'receipt_mismatch',requestId,...at};
+ if(receipt?.state==='applied'&&receipt.appliedRevision===intent.postRevision+1)return {state:'applied',requestId,receiptState:'applied',...at};
+ if(receipt?.state==='applied')return {state:'unknown',reason:'applied_revision_mismatch',requestId,...at};
+ if(snapshot.revision===intent.postRevision&&at.rowIsPostImage)return {state:'not_applied',requestId,receiptState:receipt?.state??null,nextAttemptAt:receipt?.nextAttemptAt??null,...at};
+ return {state:'moved',requestId,receiptState:receipt?.state??null,nextAttemptAt:receipt?.nextAttemptAt??null,...at};
+}
+// READ ONLY recovery of a restore by its own receipt and the Film's revision and row. `applied`: the restore receipt of this identity is applied at exactly postRevision+1 (the restore committed, whatever the Film
+// is now; `revision`, `rowIsPostImage` and `rowIsPreImage` say what the Film is now). `not_applied`: no applied restore receipt and the Film is still at exactly postRevision with the row equal to the post-image
+// (`receiptState` and `nextAttemptAt` say whether a restore attempt may still be in flight). `moved`: no applied restore receipt and the Film is elsewhere. `unknown`: a receipt that is not this restore.
+export async function recoverRestoreLocalization(env,{intent: given,runId}={}){
+ const intent=await checkIntent(given);
+ const {requestId,digest}=await restoreIdentity({intent,runId});
+ const receipt=await readReceipt(env,requestId);
+ const snapshot=await readFilmSnapshot(env,intent.id);
+ return restoreClass(intent,receipt,snapshot,requestId,digest);
 }
 
 // The fenced restore write. It applies ONLY while the Film is at exactly postRevision AND the stored row still equals postImage: any other writer since then moved the revision, so a restore
 // would erase its work and is refused (`localization_restore_moved`, nothing written). A pre-image of null deletes the row the reconciler created. It bumps the revision, so a second restore of
 // the same token is refused. The legacy source row the reconciler preserved is NOT removed (a source row is a durable resolver input, never destroyed by a restore).
-async function restoreFilmLocalization(env,{intent: given,at,receiptMark}={}){
+async function restoreFilmLocalization(env,{intent: given,at,receiptMark,approvedPins}={}){
  // PRIVATE: reachable only through restoreLocalizationReconcile, which binds the intent to its applied receipt and the owner gate before a receipt is reserved.
  if(receiptMark===undefined||receiptMark===null)throw failed('film_person_invalid');
  const intent=await checkIntent(given);
  const id=intent.id,pre=intent.preImage,post=intent.postImage;
  fenced.text(at);
  const tail=fenced.receiptTail(receiptMark,{kind:'film',id});
- const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const gate=fenced.bindProducerFence(env,assertWritable(await readWriterGate(env)));
+ if(approvedPins)fenced.bindApprovedPins(gate,approvedPins);
  // The owner-review domain is re-proved AT the mutation boundary with the CURRENT token (the existing two-fence gate; it need not equal the apply-time token): an owner move between the
  // wrapper's read and this batch refuses the restore (`localization_owner_moved`), which the independent Film CAS would not catch.
  const token=await readOwnerReviewToken(env,id);

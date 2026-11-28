@@ -565,6 +565,10 @@ export async function receiptedWrite(env,input,hooks){
  if(status==='no_schema')throw failed('receipt_schema_missing');
  const gate=fenced.bindLetterboxdFence(env,assertWritable(await readWriterGate(env)));
  if(status==='no_baseline')throw failed('receipt_baseline_missing');
+ // AIR-664: an operation that froze authority pins at its approval passes them as `approvedPins`: the RESERVATION of the receipt and any retry or proof settlement of it are asserted under those pins in
+ // the same batch (never under only the marker generation read fresh). The write's own batch carries the same pins through its writer. The failure bookkeeping of finishAttempt stays on the plain gate.
+ const approvedPins=input.approvedPins===undefined||input.approvedPins===null?null:fenced.approvedPinsOf(input.approvedPins);
+ const guarded=approvedPins?fenced.bindApprovedPins({...gate},approvedPins):gate;
  // AIR-600 R1: with `operationKey` and `history` the receipt is RESERVED under its key: the insert carries the key and, in the same batch, asserts that the key's history still has the fingerprint
  // the caller observed and holds no unresolved receipt. Any other outcome (the history moved, another attempt is unresolved, this id already exists) is `operation_key_moved` or
  // `operation_key_in_flight` before the writer runs: the caller replans from the history (src/receipt-operation-key.js). A keyed receipt is never replayed under its id; it is abandoned and reserved anew.
@@ -576,8 +580,8 @@ export async function receiptedWrite(env,input,hooks){
   try{
    if(keyed){
     const guard=operationHistoryCondition({origin:request.origin,operationKey:keyed.operationKey,fingerprint:keyed.history});
-    await writeBatch(env,gate,[[fenced.assertSql(guard.sql),guard.params],[INSERT_KEYED,[...values,keyed.operationKey]],...reserveExtra]);
-   }else await writeBatch(env,gate,[[INSERT,values]]);
+    await writeBatch(env,guarded,[[fenced.assertSql(guard.sql),guard.params],[INSERT_KEYED,[...values,keyed.operationKey]],...reserveExtra]);
+   }else await writeBatch(env,guarded,[[INSERT,values]]);
    created=true;
    row={requestId:request.requestId,operation:request.operation,origin:request.origin,target:request.target,contentDigest:request.digest,plannedRevision:request.expectedRevision,appliedRevision:null,markerGeneration:gate.generation,state:'pending',attempts:1,nextAttemptAt:plus(now,policy.attemptWindowMs),errorClass:null,createdAt:now,updatedAt:now,settledAt:null,...(keyed?{operationKey:keyed.operationKey}:{})};
   }catch(error){
@@ -604,7 +608,7 @@ export async function receiptedWrite(env,input,hooks){
   const observed=(await hooks.readback(env,row.target,row))??null;
   const declared=abandonOf(observed);
   const action=declared?{action:'abandon',reason:declared}:reconcilePlan({receipts:[row],observed:{[row.requestId]:observed},marker:gate,now,policy}).actions[0];
-  const outcome=await applyAction(env,gate,row,action,{revalidate:hooks.revalidate,observed,clock,policy});
+  const outcome=await applyAction(env,guarded,row,action,{revalidate:hooks.revalidate,observed,clock,policy});
   if(!outcome.retry)return {ran:false,...outcome};
   attempt=row.attempts+1;currentRevision=outcome.retry.currentRevision;
  }

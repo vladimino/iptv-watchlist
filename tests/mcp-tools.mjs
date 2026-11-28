@@ -243,7 +243,7 @@ for(const [name,args] of [
  assert.equal(environment.BUCKET.objects.size,0,name+' refused before any storage access');
 }
 assert.ok(!(await tool(env(),'prediction_batch_start',{trigger:'scheduled',dryRun:true})).body.result.content[0].text.includes('"taskId" is required'),'a scheduled dry run needs no label');
-for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill']){
+for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill','film_localization_repair']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
 // AIR-537: the owner-only Film/Person prepared-to-open operator is retired; neither the listing nor the instructions may name it.
@@ -437,6 +437,19 @@ const anonymousDiagnose=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:T
 assert.equal(anonymousDiagnose.response.status,403);assert.deepEqual(denied,[]);
 const diagnoseNoDb=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'film_localization_diagnose',{});
 assert.equal(diagnoseNoDb.body.result.isError,true);assert.match(diagnoseNoDb.body.result.content[0].text,/Film localization diagnosis/);assert.deepEqual(denied,[],'the diagnosis never touches R2');
+// AIR-664 (ADR 0225): the one-off repair is owner-only, takes no Film id list, key, SQL or intent body, and without the bundled operation scope it is a tool error that reads no R2.
+const repairEnv={BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+const anonymousRepair=await tool(repairEnv,'film_localization_repair',{},{assertion:null});
+assert.equal(anonymousRepair.response.status,403);assert.deepEqual(denied,[]);
+for(const foreign of [{filmIds:['film:1XYA']},{key:'x'},{mode:'preflight',sql:'select 1'},{mode:'apply',intent:{}}]){
+ const refused=await tool(repairEnv,'film_localization_repair',foreign);
+ assert.equal(refused.body.result.isError,true,'a foreign argument is refused before the operator: '+Object.keys(foreign));
+}
+const repairNoDb=await tool(repairEnv,'film_localization_repair',{});
+assert.equal(repairNoDb.body.result.isError,true);assert.match(repairNoDb.body.result.content[0].text,/Film localization repair/,'without the bundled operation scope the tool is a tool error, never a report');
+assert.deepEqual(denied,[],'the tool never touches R2 before the operation runs');
+const repairWriteWithoutGo=await tool(repairEnv,'film_localization_repair',{mode:'apply'});
+assert.equal(repairWriteWithoutGo.body.result.isError,true);assert.deepEqual(denied,[]);
 assert.equal(hotParity.body.result.structuredContent.expected,undefined);
 const diagnosticOverview=await tool(diagnosticEnv,'prediction_queue_overview',{});
 assert.equal(diagnosticOverview.body.result.isError,undefined);
