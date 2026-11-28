@@ -70,7 +70,7 @@ const before=(file,bucket,hook)=>{const db=d1Standin(file),real=db.batch.bind(db
 // A D1 binding that COMMITS the first batch matching `match` and then loses the reply.
 const lossy=(file,bucket,match)=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=true;db.batch=async statements=>{const result=await real(statements);if(armed&&statements.some(item=>match.test(item.text))){armed=false;throw new Error('D1_ERROR: network connection lost');}return result;};return {DB:db,BUCKET:bucket};};
 // An R2 bucket whose conditional put can be made to fail for outcome events or to run a hook after an intent object was created, and whose listing can be made to fail.
-const flaky=inner=>{const flags={failEvents:false,failList:false,afterIntent:null};return {flags,put:async(key,body,options)=>{if(flags.failEvents&&isEvent(key))throw new Error('R2 down');const saved=await inner.put(key,body,options);if(saved&&isIntent(key)&&flags.afterIntent){const hook=flags.afterIntent;flags.afterIntent=null;hook();}return saved;},get:key=>inner.get(key),list:async options=>{if(flags.failList)throw new Error('R2 list down');return inner.list(options);},objects:inner.objects};};
+const flaky=inner=>{const flags={failEvents:false,failList:false,afterIntent:null,beforeIntent:null};return {flags,put:async(key,body,options)=>{if(flags.failEvents&&isEvent(key))throw new Error('R2 down');if(isIntent(key)&&flags.beforeIntent){const hook=flags.beforeIntent;flags.beforeIntent=null;await hook();}const saved=await inner.put(key,body,options);if(saved&&isIntent(key)&&flags.afterIntent){const hook=flags.afterIntent;flags.afterIntent=null;hook();}return saved;},get:key=>inner.get(key),list:async options=>{if(flags.failList)throw new Error('R2 list down');return inner.list(options);},objects:inner.objects};};
 const forged=(intent,seq,state)=>({version:1,requestId:intent.requestId,digest:intent.digest,state,errorClass:null,receiptState:null,revision:state==='applied'?intent.postRevision:null,via:'apply',seq});
 
 // ---- 0. The cohort is the AIR-683 evidence list, fixed, sorted and unique ----
@@ -192,11 +192,15 @@ let pre;
 let applied;
 {
  const otherBefore=JSON.stringify([locRow(file,OTHER),revision(file,OTHER)]);
+ const callsBefore=env.DB.calls.queries+env.DB.calls.batches;
  const result=await tool(env,applyArgs(pre));
  applied=result.body;
  assert.equal(result.status,200);
+ // The REAL budget: D1 allows 1,000 queries per Worker invocation (a batch counts once). The meter counts every execution, failed ones included, and agrees with the stand-in's own counters.
+ assert.equal(applied.d1Queries,env.DB.calls.queries+env.DB.calls.batches-callsBefore,'the meter counts exactly what reached D1');
+ assert.ok(applied.d1Queries<applied.d1QueryLimit&&applied.d1QueryLimit===1000,'the straightforward all-16 apply, closing acceptance proofs included, fits one invocation: '+applied.d1Queries);
  assert.deepEqual([applied.ok,applied.outcome,applied.writes,applied.provedWrites,applied.uncertainEffects,applied.stopped],[true,'complete',16,16,0,null]);
- assert.deepEqual(applied.counts,{applied:16,recoveredThisCall:0,alreadyApplied:0,skipped:0,notAttempted:0,notApplied:0,unknown:0,failed:0,settleFailed:0});
+ assert.deepEqual(applied.counts,{applied:16,alreadyApplied:0,recoveredUnattributed:0,skipped:0,notAttempted:0,inFlight:0,notApplied:0,unknown:0,failed:0,settleFailed:0});
  assert.deepEqual([applied.readback.readable,applied.readback.failure,applied.readback.accepted,applied.readback.counts.applied],[true,null,true,16],'all 16 read applied NOW: receipt at the post-revision, row equal to the post-image, resolver current');
  assert.ok(applied.readback.items.every(item=>item.state==='applied'&&item.current.rowIsPostImage===true&&item.current.resolver==='noop'&&item.current.receipt==='applied'));
  for(const id of COHORT){
@@ -277,6 +281,36 @@ let applied;
  const unrecorded=fresh();
  const none=await tool(unrecorded.env,{mode:'restore',confirmGo:true,filmId:'film:xG0M',expectedFilmPersonGeneration:2,expectedSchemaVersion:Number(one(unrecorded.file,'SELECT version FROM schema_contract WHERE id=1')),expectedOwnerReviewGeneration:1,expectedOwnerReviewWrites:(await preflight(unrecorded.env)).pins.ownerReviewWrites,expectedRestoreDigest:'a'.repeat(64)});
  assert.deepEqual([none.status,none.body.reason,none.body.writes],[409,'no_applied_intent',0],'a Film with no recorded applied intent has nothing to restore');
+}
+
+// ---- 7a. A restore is a deliberate ROLLBACK, not a repair: reported, never reapplied, never counted complete; a later change to it is reported and nothing is overwritten ----
+{
+ // A partial run, one Film restored, the rest resumed: the cohort is never complete while a deliberately restored stale Film remains.
+ const f=fresh();const p=await preflight(f.env);
+ let count=0;
+ const stopAt=before(f.file,f.bucket,statements=>{if(statements.some(isWrite)&&!statements.some(isReservation)&&++count===6)exec(f.file,"INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film',"+q(COHORT[5])+",1,'"+T3+"')");});
+ const partial=await applyAll(stopAt,p);
+ assert.deepEqual([partial.ok,partial.counts.applied,partial.stopped],[false,5,'moved']);
+ const rec=await recoverOf(f.env);
+ const rolled=await tool(f.env,restoreArgs(rec,COHORT[0]));
+ assert.deepEqual([rolled.status,rolled.body.ok,rolled.body.writes],[200,true,1]);
+ assert.equal(locRow(f.file,COHORT[0]),null);
+ const view=await preflight(f.env);
+ assert.equal(view.items[0].state,'restored','a deliberate rollback, proved now by its own receipt, the post-restore revision and the pre-image row');
+ assert.deepEqual(view.items[0].current,{receipt:'applied',revision:2,rowIsPreImage:true});
+ const resumed=await applyAll(f.env,view);
+ assert.equal(resumed.counts.restored===undefined,true);
+ assert.deepEqual([resumed.ok,resumed.outcome,resumed.readback.accepted,resumed.readback.rolledBack],[false,'partial',false,1],'never complete while a restored stale Film remains');
+ assert.equal(locRow(f.file,COHORT[0]),null,'a restored Film is not reapplied automatically');
+ // A later legitimate change to the restored Film: reported (restored_moved), blocks, nothing is overwritten.
+ exec(f.file,"INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,next_action,updated_at) VALUES ("+q(COHORT[0])+",'localization','reviewed','dictionary','verified',NULL,'Новое','dictionary',0,'keep_reviewed','"+T3+"');UPDATE canonical_revision SET revision=revision+1 WHERE kind='film' AND id="+q(COHORT[0]));
+ const snap=dataWorld(f.file);
+ const moved=await preflight(f.env);
+ assert.deepEqual([moved.items[0].state,moved.decision],['restored_moved','blocked']);
+ assert.equal(moved.items[0].current.rowIsPreImage,false);
+ const refused=await tool(f.env,{...applyArgs(moved),expectedCount:1});
+ assert.deepEqual([refused.status,refused.body.reason,refused.body.writes],[409,'not_eligible',0]);
+ assert.equal(dataWorld(f.file),snap,'the later change is neither overwritten nor reapplied');
 }
 
 // ---- 7b. A cohort Film that is already current is skipped, untouched; if every Film is current the operation is a proved no-op ----
@@ -365,7 +399,7 @@ let applied;
  const pre1=await preflight(f.env);
  const first=await applyAll(lossy(f.file,f.bucket,/INSERT INTO film_dimension/),pre1);
  assert.deepEqual([first.ok,first.outcome,first.stopped],[false,'partial','recovered_after_lost_reply']);
- assert.deepEqual([first.counts.recoveredThisCall,first.counts.applied,first.counts.unknown,first.counts.notAttempted,first.writes,first.provedWrites,first.uncertainEffects],[1,0,0,15,1,1,0]);
+ assert.deepEqual([first.counts.recoveredUnattributed,first.counts.applied,first.counts.unknown,first.counts.notAttempted,first.writes,first.provedWrites,first.uncertainEffects],[1,0,0,15,null,0,1],'the effect is proved from the receipt but cannot be attributed to this call: writes is null, not a new write');
  assert.equal(first.items[0].state,'recovered_applied');
  assert.equal(revision(f.file,COHORT[0]),1,'the write DID commit before the reply was lost');
  assert.equal(reconcileReceipts(f.file).length,1);
@@ -499,7 +533,7 @@ let applied;
  const a=fresh();await applyAll(a.env);
  const ra=await recoverOf(a.env);
  const lostResult=await tool(lossy(a.file,a.bucket,/DELETE FROM film_dimension/),restoreArgs(ra,id));
- assert.deepEqual([lostResult.status,lostResult.body.ok,lostResult.body.writes,lostResult.body.recoveredAfterError,lostResult.body.state],[200,true,1,true,'restored']);
+ assert.deepEqual([lostResult.status,lostResult.body.ok,lostResult.body.writes,lostResult.body.recoveredAfterError,lostResult.body.effectProved,lostResult.body.state],[200,true,null,true,true,'restored'],'proved from its own receipt, not attributable to this call');
  assert.equal(locRow(a.file,id),null);assert.equal(revision(a.file,id),2);
  const after=await recoverOf(a.env);
  const replay=await tool(a.env,restoreArgs(after,id));
@@ -573,6 +607,94 @@ let applied;
  const alienView=await tool(envOf(f.file,alien),{});
  assert.equal(alienView.body.decision,'unknown');
  assert.ok(['film_person_invalid','checkpoint_corrupt'].includes(alienView.body.failure),alienView.body.failure);
+}
+
+// ---- 19. The REAL D1 budget (1,000 queries per Worker invocation, a batch counting once): the meter enforces it, a call stops safely before it, and the cohort still completes through the recorded intents ----
+{
+ const call=(environment,args,queryLimit)=>X.handleFilmLocalizationRepairTool(environment,args,{now:clock,queryLimit});
+ // A limit that cannot even prove the cohort: unknown, no pins to approve, nothing written.
+ const t=fresh();const snapT=world(t.file);
+ const tiny=(await call(t.env,{},120)).body;
+ assert.deepEqual([tiny.decision,tiny.failure,tiny.expect],['unknown','d1_query_budget',null]);
+ assert.ok(tiny.d1Queries<=120,'the meter refuses locally before anything beyond the limit is sent');
+ assert.equal(world(t.file),snapT);assert.equal(t.bucket.objects.size,0);
+ // A limit that fits the proof but not all 16 writes: the call stops BEFORE the Film that could pass the limit, loses no effect, claims no completion, and a fresh preflight continues.
+ const g=fresh();const LIMIT=620;
+ const pg=(await call(g.env,{},LIMIT)).body;
+ assert.equal(pg.decision,'eligible');
+ let last=(await call(g.env,applyArgs(pg),LIMIT)).body;
+ const first=last;
+ assert.deepEqual([first.ok,first.outcome,first.stopped],[false,'partial','d1_query_budget']);
+ assert.ok(first.d1Queries<=LIMIT,'never above the limit: '+first.d1Queries);
+ assert.ok(first.counts.applied>=1&&first.counts.applied<16,'partial progress: '+first.counts.applied);
+ assert.equal(first.counts.notAttempted,16-first.counts.applied);
+ assert.equal(COHORT.filter(id=>revision(g.file,id)===1).length,first.counts.applied,'no lost effect: every counted write is a committed revision');
+ assert.deepEqual([first.readback.readable,first.readback.accepted,first.readback.counts.applied],[true,false,first.counts.applied],'the closing acceptance proof still fit, and it does not claim completion');
+ assert.ok(first.items.filter(item=>item.state==='not_attempted').every(item=>item.reason==='d1_query_budget'));
+ let rounds=1;
+ while(!last.ok&&rounds<14){
+  const next=(await call(g.env,{},LIMIT)).body;
+  last=(await call(g.env,applyArgs(next),LIMIT)).body;
+  assert.ok(last.d1Queries<=LIMIT);rounds++;
+ }
+ assert.deepEqual([last.ok,last.readback.accepted,rounds>1],[true,true,true],'the exact 16-id cohort completes through fresh preflights over the recorded intents');
+ for(const id of COHORT)assert.equal(revision(g.file,id),1,id+' written exactly once across the continuations');
+ assert.equal(reconcileReceipts(g.file).filter(row=>row.state==='applied').length,16);
+ assert.equal(keys(g.bucket).filter(isIntent).length,16,'one intent per Film, however many continuations');
+}
+
+// ---- 20. Overlapping calls and attempts in flight: replays are not writes, an in-flight attempt is never a definite no effect, and no fresh intent is derived over it ----
+{
+ // 20a: two calls on the same approved plan both derive the same fresh intents before either has recorded one; the second completes while the first is paused before recording its first intent. One domain
+ // mutation per Film, and the first call claims none of them.
+ const o=fresh();const flo=flaky(o.bucket);const po=await preflight({DB:d1Standin(o.file),BUCKET:flo});
+ let nested=null;
+ flo.flags.beforeIntent=async()=>{nested=(await tool(envOf(o.file,o.bucket),applyArgs(po))).body;};
+ const firstCall=await applyAll({DB:d1Standin(o.file),BUCKET:flo},po);
+ assert.deepEqual([nested.ok,nested.writes,nested.counts.applied],[true,16,16]);
+ assert.deepEqual([firstCall.counts.applied,firstCall.counts.alreadyApplied,firstCall.writes,firstCall.uncertainEffects,firstCall.ok],[0,16,0,0,true],'the replay of an existing effect is not this call\'s write');
+ for(const id of COHORT)assert.equal(revision(o.file,id),1,id+' mutated once');
+ assert.equal(reconcileReceipts(o.file).length,16);assert.equal(keys(o.bucket).filter(isIntent).length,16,'the same intent was recorded idempotently, never twice');
+ // 20b: the same for a restore: a replay of the other call's restore reports alreadyApplied and no write.
+ const id=COHORT[4];
+ const r=fresh();await applyAll(r.env);const rr=await recoverOf(r.env);
+ let nestedRestore=null,firedRestore=false;
+ const overlappedRestore=before(r.file,r.bucket,async statements=>{if(!firedRestore&&statements.some(isReservation)){firedRestore=true;nestedRestore=(await tool(envOf(r.file,r.bucket),restoreArgs(rr,id))).body;}});
+ const firstRestore=(await tool(overlappedRestore,restoreArgs(rr,id))).body;
+ assert.deepEqual([nestedRestore.ok,nestedRestore.writes],[true,1]);
+ assert.deepEqual([firstRestore.ok,firstRestore.alreadyApplied,firstRestore.writes],[true,true,0]);
+ assert.equal(revision(r.file,id),2,'one restore only');
+ // 20c: an attempt that crashed after the reservation (its receipt stays pending): in flight, never a definite no effect, no terminal event, no fresh intent; once the attempt window has passed it is resumed with the SAME identity.
+ const c=fresh();const pc=await preflight(c.env);
+ let dead=false;
+ const crashing=before(c.file,c.bucket,statements=>{if(!dead&&statements.some(isWrite)&&!statements.some(isReservation))dead=true;if(dead)throw new Error('D1_ERROR: the Worker died');});
+ const crashed=await applyAll(crashing,pc);
+ assert.deepEqual([crashed.ok,crashed.stopped,crashed.counts.inFlight,crashed.counts.notApplied,crashed.writes,crashed.uncertainEffects],[false,'in_flight',1,0,null,1]);
+ assert.equal(crashed.items[0].state,'in_flight');
+ assert.equal(locRow(c.file,COHORT[0]),null);assert.equal(revision(c.file,COHORT[0]),0);
+ assert.deepEqual(reconcileReceipts(c.file).map(row=>row.state),['pending'],'the reservation of the dead attempt');
+ const intentKey0=keys(c.bucket).find(isIntent);
+ const events0=keys(c.bucket).filter(key=>isEvent(key));
+ assert.equal(events0.length,1,'only the non-terminal unknown event: no terminal-looking not_applied was appended');
+ assert.equal((await (await c.bucket.get(events0[0])).json()).state,'unknown');
+ const rec=await recoverOf(c.env);
+ assert.deepEqual([rec.items[0].classification.state,rec.items[0].classification.receiptState],['not_applied','pending'],'unchanged row, but the attempt is not over');
+ const view=await preflight(c.env);
+ assert.deepEqual([view.items[0].state,view.decision,view.counts.in_flight,view.counts.eligible],['in_flight','blocked',1,15]);
+ const refused=await tool(c.env,applyArgs(view));
+ assert.deepEqual([refused.status,refused.body.reason,refused.body.writes],[409,'not_eligible',0]);
+ assert.equal(keys(c.bucket).filter(isIntent).length,1,'no fresh intent over the in-flight one');
+ // Past the attempt window the same identity is reconciled and resumed.
+ const later=()=>'2026-11-26T13:00:00.000Z';
+ const atLater=(environment,args)=>X.handleFilmLocalizationRepairTool(environment,args,{now:later});
+ const due=(await atLater(c.env,{})).body;
+ assert.deepEqual([due.items[0].state,due.decision],['recorded','eligible']);
+ const resumed=(await atLater(c.env,applyArgs(due))).body;
+ assert.deepEqual([resumed.ok,resumed.counts.inFlight,resumed.counts.unknown],[true,0,0]);
+ for(const filmId of COHORT)assert.equal(revision(c.file,filmId),1,filmId+' written exactly once');
+ assert.equal(reconcileReceipts(c.file).filter(row=>row.target_id===COHORT[0]).length,1,'the same receipt identity was resumed');
+ assert.equal(keys(c.bucket).filter(isIntent).length,16);
+ assert.ok(keys(c.bucket).includes(intentKey0));
 }
 
 // ---- 18. No migration, table, bucket or flag: the module touches only the existing isolated R2 prefix; the Worker bundle reaches it through the one owner-only MCP tool ----
