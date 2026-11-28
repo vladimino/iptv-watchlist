@@ -1,4 +1,4 @@
-// The id of every request is the CANONICAL record id of the Film (`record.id`, e.g. `film:1RYk`), the one the metadata API and the `film` table use. The programme's `storedId` (`1RYk`) is another id and is NOT used here:
+// The id of every request is the CANONICAL record id of the Film (`record.id`, e.g. `film:Ab1x`), the one the metadata API and the `film` table use. The programme's `storedId` (`Ab1x`) is another id and is NOT used here:
 // the API answers it with `404 not_found`.
 // AIR-635 (card PVU; ADR 0214 decision 9, language-bound per ADR 0224): the owner's view of the per-field provenance of one Film
 // and the manual corrections of the PV3 API (`/api/admin/films/<id>/metadata`). Three layers, all in this file:

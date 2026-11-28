@@ -166,7 +166,7 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  const refreshOff=await post(off.env,{action:'refresh',expectedRevision:await revisionOf(off.env),expectedRows:[{part:'core',source:'tmdb',status:'complete',updatedAt:T,refreshEpoch:0}]});
  assert.equal(refreshOff.body.error,'provenance_off');
  assert.equal((await call(off.env,{id:'film:absent',method:'GET'})).status,404);
- // AIR-635 RCA (production, schema v54, mode off): the page asked for the programme's STORED id (`1RYk`), not the canonical record id (`film:1RYk`), and every read was this 404. The contract is the canonical id.
+ // AIR-635 RCA (production, schema v54, mode off): the page asked for the programme's STORED id (`Ab1x`), not the canonical record id (`film:Ab1x`), and every read was this 404. The contract is the canonical id.
  assert.equal((await call(off.env,{id:'603',method:'GET'})).status,404,'a bare programme id is not a canonical id');
  assert.equal((await call(off.env,{id:'tmdb:603',method:'GET'})).status,404);
  // the full chain (schema v54), mode off, a Film with LEGACY metadata and no provenance row, no history and no enrichment state: a plain 200 with the values and no rank, never an error

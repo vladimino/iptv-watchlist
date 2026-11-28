@@ -114,11 +114,11 @@ for (const button of off.match(/<button[^>]*data-meta-action[^>]*>/g)) assert.ma
 assert.match(api.adminMetaHtml(view({schemaAbsent: true, mode: null, c1: null, history: {rows: [], next: null}})), /Схема provenance ещё не установлена/);
 assert.match(api.adminMetaHtml(view({history: {rows: [], next: null}})), /data-meta-history-empty/);
 assert.equal(api.adminFilmMetadataSection({}), '', 'no record id, no section');
-assert.equal(api.adminFilmMetadataSection({storedId: '1RYk'}), '', 'the programme stored id is not a canonical id');
+assert.equal(api.adminFilmMetadataSection({storedId: 'Ab1x'}), '', 'the programme stored id is not a canonical id');
 // the real shape of a programme film: `id` is the canonical record id, `storedId` the programme's own id. The section carries the canonical one.
-const realRecord = {id: 'film:1RYk', storedId: '1RYk', preferred: 'Гарри Поттер'};
-assert.match(api.adminFilmMetadataSection(realRecord), /data-film-metadata data-film-id="film:1RYk"/);
-assert.doesNotMatch(api.adminFilmMetadataSection(realRecord), /data-film-id="1RYk"|data-film-metadata data-stored-id/);
+const realRecord = {id: 'film:Ab1x', storedId: 'Ab1x', preferred: 'Тестовый фильм'};
+assert.match(api.adminFilmMetadataSection(realRecord), /data-film-metadata data-film-id="film:Ab1x"/);
+assert.doesNotMatch(api.adminFilmMetadataSection(realRecord), /data-film-id="Ab1x"|data-film-metadata data-stored-id/);
 assert.match(api.adminFilmMetadataSection({id: 'film:a b'}), /data-film-id="film:a b"/);
 const escaped = api.adminMetaHtml(view({fields: {...v.fields, synopsis: {value: '<script>alert(1)</script>', blank: false, rank: {name: 'confirmed', value: 2}, row: row()}}}));
 assert.doesNotMatch(escaped, /<script>alert/);
@@ -195,13 +195,13 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   assert.equal(calls.length, 1);
   assert.match(m.body.innerHTML, /data-meta-field="year"/);
 }
-// the real record shape end to end: the request path carries the canonical id (`film%3A1RYk`), never the programme's stored id (`1RYk`)
+// the real record shape end to end: the request path carries the canonical id (`film%3AAb1x`), never the programme's stored id (`Ab1x`)
 {
-  reset(); script = [{status: 200, body: view({filmId: 'film:1RYk'})}];
-  const m = mount('film:1RYk', 'Гарри Поттер');
+  reset(); script = [{status: 200, body: view({filmId: 'film:Ab1x'})}];
+  const m = mount('film:Ab1x', 'Тестовый фильм');
   await m.open(); await settle();
-  assert.equal(calls[0].url, '/api/admin/films/film%3A1RYk/metadata');
-  assert.doesNotMatch(calls[0].url, /\/films\/1RYk\//);
+  assert.equal(calls[0].url, '/api/admin/films/film%3AAb1x/metadata');
+  assert.doesNotMatch(calls[0].url, /\/films\/Ab1x\//);
 }
 // a 404 is an answer: this Film is not in the canonical catalogue. It says so, it is not "reading failed", and it offers no retry that would only repeat it
 {
