@@ -83,7 +83,7 @@ export function loadDiscoveryAuthority(run){
  run(scopedDiscoveryAuthority());
 }
 
-// AIR-648: the shared Film resolver, the FilmAggregateV1 sections and the multi-alias history, scoped into the Worker bundle (DORMANT: no route names them until the owner-approved
+// AIR-648: the shared Film resolver, the FilmAggregateV1 sections, the stage-5 readiness (pure derivation, prediction evidence reader, composition) and the multi-alias history, scoped into the Worker bundle (DORMANT: no route names them until the owner-approved
 // activation). One definition serves the Worker and every test that loads them. All four go through scopedImports, so the AIR-532 check (a name the module imports and uses must be supplied
 // by the preamble) applies to each. The history module loads three plain domain scripts through node:fs/node:vm offline; the Worker already holds those scripts as globals (film-history.js,
 // prediction-versions.js and the LetterboxdFacts scope), so `historyLoader` replaces exactly those declarations with bindings to the same globals and fails the build if the source stops matching.
@@ -105,5 +105,9 @@ export function scopedFilmAggregate(){
  return scoped('src/sha256-sync.js','Sha256Sync')+'\n'
   +scopedImports(resolver,'FilmAggregateResolver','const {sha256Hex}=Sha256Sync;\nconst {database,many,readAuthority}=FilmPersonAuthority;',{extra:exportedClasses(resolver)})+'\n'
   +scopedImports(aggregate,'FilmAggregate','const {sha256Hex}=Sha256Sync;\nconst {CREDIT_SELECTION_SQL,database}=FilmPersonAuthority;\nconst {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization}=LocalizationSources;\nconst {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT}=FilmAggregateResolver;\nconst {COHORT_SQL,MISSING_LID_ADMISSION,predictionEligibility}=PredictionLidOnly;',{extra:exportedClasses(aggregate)})+'\n'
+  +scoped('src/film-readiness.js','FilmReadiness')+'\n'
+  +scopedImports('src/domain/film-dimension-parity.js','FilmDimensionParity','const {isOwnerProjection,resolveLocalization}=LocalizationSources;')+'\n'
+  +scopedImports('src/film-readiness-reader.js','FilmReadinessReader','const {sha256Hex}=Sha256Sync;\nconst {database}=FilmPersonAuthority;\nconst {countedDatabase,fenceOf,row,digestOf,aliases,pointerRow}=FilmAggregate;\nconst {predictionEvidence}=FilmReadiness;\nconst {predictionFacts}=FilmDimensionParity;')+'\n'
+  +scopedImports('src/film-readiness-composition.js','FilmReadinessComposition','const {readFilmAggregate,readSections}=FilmAggregate;\nconst {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET}=FilmAggregateResolver;\nconst {deriveReadiness}=FilmReadiness;\nconst {beginPredictionEvidence,finishPredictionEvidence}=FilmReadinessReader;')+'\n'
   +scopedImports(history,'FilmHistoryAggregate','const {sha256Hex}=Sha256Sync;\nconst {database}=FilmPersonAuthority;\nconst {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET}=FilmAggregateResolver;\nconst {aliases:authorizedAliases,readRatings,countedDatabase}=FilmAggregate;',{transform:historyLoader,extra:exportedClasses(history)});
 }

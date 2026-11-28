@@ -15,6 +15,6 @@ export function loadBundledFilmScopes({build=true}={}){
  const text=fs.readFileSync('dist/server/index.js','utf8');
  const world=vm.createContext({console,TextEncoder,TextDecoder,URL,URLSearchParams,crypto:crypto.webcrypto,structuredClone,Response,Request,Headers,AbortController,setTimeout,clearTimeout});
  const script=text.replace(/^export default /m,'globalThis.__worker=').replace(/^export\s+/gm,'');
- vm.runInContext(script+'\n;globalThis.__scopes={Sha256Sync,FilmAggregateResolver,FilmAggregate,FilmHistoryAggregate};',world,{filename:'dist/server/index.js'});
+ vm.runInContext(script+'\n;globalThis.__scopes={Sha256Sync,FilmAggregateResolver,FilmAggregate,FilmReadiness,FilmDimensionParity,FilmReadinessReader,FilmReadinessComposition,FilmHistoryAggregate};',world,{filename:'dist/server/index.js'});
  return {text,worker:world.__worker,...world.__scopes};
 }

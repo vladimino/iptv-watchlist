@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
+import vm from 'node:vm';
 import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -15,6 +16,7 @@ import {
 } from '../src/film-aggregate.js';
 import {createStatementBudget,REQUEST_STATEMENT_BUDGET,AUTHORIZED_ALIASES_PER_SCHEME} from '../src/film-aggregate-resolver.js';
 import {readFilmReadiness} from '../src/film-readiness-composition.js';
+import {beginPredictionEvidence,finishPredictionEvidence,PREDICTION_EVIDENCE_SQL,PREDICTION_EVIDENCE_STATEMENTS} from '../src/film-readiness-reader.js';
 import {predictionEvidence,authorizedStorageIds} from '../src/film-readiness.js';
 import {predictionFacts} from '../src/domain/film-dimension-parity.js';
 
@@ -590,7 +592,7 @@ function world({lids=['l5'],links=null,records=true}={}){
  const build=fs.readFileSync('build.mjs','utf8');
  assert.ok(build.includes('scopedFilmAggregate()'),'the bundle scopes the aggregate through the one scoped helper');
  for(const name of ['film-readiness','film-readiness-composition'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
- for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'&&f!=='film-readiness-composition.js'))
+ for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'&&f!=='film-readiness-composition.js'&&f!=='film-readiness-reader.js'))
   assert.ok(!/film-aggregate/.test(fs.readFileSync('src/'+name,'utf8')),name+' must not import the dormant aggregate');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the Worker routes no internal film aggregate');
  if(fs.existsSync('dist/server/index.js')){
@@ -1452,6 +1454,298 @@ const bundled=loadBundledFilmScopes();
  const t0=(await title(file)).token.ownerReview;
  marker(file,'d1','held',1);
  assert.notEqual((await title(file)).token.ownerReview,t0,'the marker is covered by the display token');
+}
+
+// AIR-648 stage 5 (ADR 0218 decision 4): predictionReady's P3/P5/P6 evidence READ from the prediction domain inside the request budget. The observation is one capture (statement A) before the
+// sections, the expected context is a second capture (statement B) after every section read, the verdict is the prediction domain's own pure rule (loaded from the real domain scripts),
+// every case runs through the offline module AND the real built scope on the same world, and a move between the two captures leaves P3/P5/P6 unknown.
+{
+ const domain=vm.runInNewContext(['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js'].map(name=>fs.readFileSync(name,'utf8')).join('\n')+'\n;({predictionTransitionCompatibility,profileDeclarationText})',{});
+ const BASE=JSON.parse(fs.readFileSync('src/enrichment.js','utf8').split('\n').find(line=>line.startsWith('const FINGERPRINT_SCHEMA_BASE=')).replace('const FINGERPRINT_SCHEMA_BASE=','').replace(/;\s*$/,''));
+ const TARGET={fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1},STRICT={fingerprint:'strict',prompt:'strict',profile:'strict'};
+ const verdictWith=(modes,digest)=>({pointer,fingerprint,genres,profile})=>domain.predictionTransitionCompatibility(
+  {tasteProfileVersion:pointer.taste_profile_version,tasteProfileHash:pointer.taste_profile_hash,fingerprintHash:pointer.fingerprint_hash,fingerprintSchemaVersion:pointer.fingerprint_schema_version,predictionPromptVersion:pointer.prediction_prompt_version},
+  {fingerprintHash:fingerprint.fingerprint_hash,fingerprintSchemaVersion:fingerprint.schema_version,fingerprintPromptVersion:fingerprint.prompt_version,invalidatedAt:fingerprint.invalidated_at,...(fingerprint.features||{})},
+  {genres:genres??[]},profile,[],TARGET,modes,{vocabulary:BASE,digest});
+ const domainVerdict=verdictWith(STRICT,()=>null);
+ // The SELECTIVE profile rule (ADR 0031 section 3): the verdict reads the Film's genres and the profile lineage (approved, digest-bound change impacts).
+ const SELECTIVE={fingerprint:'strict',prompt:'strict',profile:'selective'};
+ const selectiveVerdict=verdictWith(SELECTIVE,text=>sha256(text));
+ const reader=({registry=()=>'r1',verdict=domainVerdict}={})=>({registryToken:async()=>registry(),verdictOf:async args=>verdict(args)});
+ // The resolution as the resolver hands it to the sections (claims, the CAPPED authorized sets and the overflow list), built from a real aggregate body.
+ const resolutionOf=(body,over={})=>{const claims=body.identity.claims;return {verdict:'found',filmId:body.identity.filmId,token:body.identity.token,claims,authorized:{tmdb_movie:claims.filter(c=>c.scheme==='tmdb').map(c=>c.value).sort(),tmdb_tv:[],letterboxd_lid:claims.filter(c=>c.scheme==='letterboxd').map(c=>c.value).sort()},aliasOverflow:[],...over};};
+ const setProfile=(file,version,hash,generation=1)=>sqlite(file,`DELETE FROM prediction_profile;INSERT INTO prediction_profile (version,profile_hash,active,created_at,r2_key,content_sha256,lineage_json) VALUES (${version},${q(hash)},1,${q(AT)},'enrichment/profile.json',${q('d'.repeat(64))},NULL);UPDATE prediction_domain_authority SET profile_generation=${generation} WHERE id=1;`);
+ const setFingerprint=(file,id,{hash='fh1',schema=1,prompt=1,invalidated=null,features='{}'}={})=>sqlite(file,`INSERT OR REPLACE INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES (${q(id)},${q(hash)},${schema},${prompt},${q(AT)},${q(invalidated)},${q('enrichment/films/'+id+'/fingerprint.json')},${q('e'.repeat(64))},${q(features)})`);
+ const setPointer=(file,id,{version=4,hash='p4',fingerprint='fh1',sha='c'.repeat(64)}={})=>sqlite(file,`INSERT OR REPLACE INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES (${q(id)},${version},${q(hash)},${q(fingerprint)},1,1,3.5,${q('enrichment/films/'+id+'/predictions/x.json')},${q(sha)},${q(AT)},'{"band":"x"}')`);
+ const setLineage=(file,lineage)=>sqlite(file,`UPDATE prediction_profile SET lineage_json=${q(lineage==null?null:typeof lineage==='string'?lineage:JSON.stringify(lineage))} WHERE active=1`);
+ // A profile 4 whose only change over 3 is an approved SELECTIVE impact on the given canonical genres (the approval digest is bound to the declaration, as the real rule demands).
+ const selectiveLineage=values=>{
+  const from={version:3,profileHash:'p3'},to={version:4,profileHash:'p4'};
+  const impact={impactSchemaVersion:1,scope:'selective',from,changedFields:['rules'],selectors:[{kind:'genre',values}]};
+  return [{version:3,profileHash:'p3'},{version:4,profileHash:'p4',changeImpact:{...impact,approval:{approvedBy:'owner',approvedAt:AT,reviewRef:'review-1',declarationSha256:sha256(domain.profileDeclarationText(impact,to))}}}];
+ };
+ const readySelective=(genres,impacted=['horror'])=>{const f=world();setProfile(f,4,'p4');setLineage(f,selectiveLineage(impacted));setFingerprint(f,'l5');setPointer(f,'l5',{version:3,hash:'p3'});metadata(f,'film:tmdb:5',{year:1995,genres});return f;};
+ const ready=()=>{const file=world();setProfile(file,4,'p4');setFingerprint(file,'l5');setPointer(file,'l5');metadata(file,'film:tmdb:5',{year:1995,genres:['Drama']});return file;};
+ const run=async(impl,file,options={})=>{const e=env(file,options.db);const predictionReader=Object.hasOwn(options,'reader')?options.reader:reader();const out=await impl(e,'tmdb_5',{...(predictionReader?{predictionReader}:{}),...(options.budgetLimit?{budgetLimit:options.budgetLimit}:{})});return {out:plain(out),calls:e.calls};};
+ const offlineRead=(e,id,o)=>readFilmReadiness(e,id,o),bundledRead=(e,id,o)=>bundled.FilmReadinessComposition.readFilmReadiness(e,id,o);
+ // Both implementations on the same (read-only) world; equal as JSON; the database unchanged.
+ const both=async(file,options={})=>{
+  const sha=fileSha(file);
+  const a=await run(offlineRead,file,options),b=await run(bundledRead,file,options);
+  assert.deepEqual(b.out,a.out,'the bundled readiness equals the offline readiness');
+  assert.equal(fileSha(file),sha,'the reads wrote nothing');
+  return a;
+ };
+ const verdictOf=result=>{const r=(result.out??result).readiness.predictionReady;return [r.value,r.rule,r.reason];};
+ // A world mutated at the Nth execution of the evidence statement (1 = A, 2 = B), a fresh world per implementation.
+ const movedAt=async(impl,mutate,nth=2,options={})=>{const file=ready();let seen=0;return run(impl,file,{...options,db:{onQuery:text=>{if(text.includes('FROM prediction_profile WHERE active=1')&&++seen===nth)mutate(file);}}});};
+ const movedBoth=async(mutate,nth=2,options={})=>{const a=await movedAt(offlineRead,mutate,nth,options),b=await movedAt(bundledRead,mutate,nth,options);assert.deepEqual(b.out,a.out,'the bundled readiness equals the offline readiness on a moving world');return a;};
+
+ // 1. P6: coherent observation and context, exact profile, compatible by the prediction domain, complete coverage. Two statements of the shared budget, no write.
+ let file=ready();
+ const plainOut=await run(offlineRead,file,{reader:null}),good=await both(file);
+ assert.deepEqual(verdictOf(good.out),[true,'P6',null],'P6 through the real reader and the real domain verdict');
+ assert.equal(good.calls.queries+good.calls.statements,plainOut.calls.queries+plainOut.calls.statements+PREDICTION_EVIDENCE_STATEMENTS,'the evidence costs exactly its two reserved statements of the shared budget');
+ assert.ok(good.calls.queries+good.calls.statements<=REQUEST_STATEMENT_BUDGET);
+ assert.deepEqual([good.out.readiness.displayReady.rule,good.out.readiness.catalogReady.rule],[plainOut.out.readiness.displayReady.rule,plainOut.out.readiness.catalogReady.rule],'the old offline booleans are unchanged');
+ assert.deepEqual(good.out.body,plainOut.out.body,'the aggregate body is unchanged by the reader');
+
+ // 2. Without a reader nothing changes: no evidence, predictionReady stays unknown (never true).
+ assert.deepEqual(verdictOf(plainOut.out).slice(0,2),['unknown','P7']);
+
+ // 3. P3: no fingerprint on any authorized storage id and complete coverage is a proved negative; P4: a fingerprint and no pointer.
+ file=world();setProfile(file,4,'p4');pointer(file,'zzz',3);
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),[false,'P3']);
+ file=ready();sqlite(file,"DELETE FROM prediction_pointer");
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),[false,'P4']);
+
+ // 4. P5: a stale profile (the pointer was made under profile 4, the active one is 5, no lineage) is incompatible by the prediction domain's verdict; a changed fingerprint hash too.
+ file=ready();setProfile(file,5,'p5',2);
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),[false,'P5']);
+ file=ready();setFingerprint(file,'l5',{hash:'fh2'});
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),[false,'P5']);
+ file=ready();setFingerprint(file,'l5',{invalidated:AT});
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),[false,'P5'],'an invalidated fingerprint');
+
+ // 5. Stale profile or fingerprint BEHIND AN UNCHANGED POINTER, moving between the observation and the final capture: the aggregate tokens are the same, the evidence is not certified.
+ for(const [label,mutate,reason] of [
+  ['the active profile moves',f=>setProfile(f,5,'p5',2),'prediction_evidence_profile_changed'],
+  ['the profile generation moves',f=>sqlite(f,"UPDATE prediction_domain_authority SET profile_generation=profile_generation+1 WHERE id=1"),'prediction_evidence_profile_changed'],
+  ['the fingerprint is replaced',f=>setFingerprint(f,'l5',{hash:'fh9'}),'prediction_evidence_fingerprint_changed'],
+  ['the fingerprint is invalidated',f=>setFingerprint(f,'l5',{invalidated:AT}),'prediction_evidence_fingerprint_changed'],
+  ['a fingerprint appears on another alias',f=>setFingerprint(f,'tmdb_5'),'prediction_evidence_fingerprint_changed'],
+ ]){
+  const out=await movedBoth(mutate);
+  assert.deepEqual([out.out.readiness.predictionReady.value,out.out.readiness.predictionReady.rule,out.out.readiness.predictionReady.reason],['unknown','P7',reason],label);
+  assert.equal(out.out.body.predictions.status,'present',label+': the aggregate itself is unchanged');
+ }
+ // The registry token moves between the captures (a deploy since): not certified.
+ let calls=0;
+ const flapping=reader({registry:()=>++calls%2===1?'r1':'r2'}); // each run: the observation reads r1, the final capture r2
+ assert.equal((await both(ready(),{reader:flapping})).out.readiness.predictionReady.reason,'prediction_evidence_profile_changed');
+ calls=0;
+ // A move BEFORE the observation is simply what the observation reads: both captures agree.
+ const early=await movedBoth(f=>setProfile(f,5,'p5',2),1);
+ assert.deepEqual(verdictOf(early.out).slice(0,2),[false,'P5'],'a profile that changed before the observation is the observed profile');
+
+ // 6. Held, not authoritative or unreadable markers: predictions unavailable or no proved fact; never a negative, never a positive.
+ file=ready();sqlite(file,"UPDATE prediction_domain_authority SET writes='held' WHERE id=1");
+ let out=await both(file);
+ assert.equal(out.out.readiness.predictionReady.value,'unknown');
+ file=ready();sqlite(file,"UPDATE prediction_domain_authority SET mode='r2' WHERE id=1");
+ assert.equal((await both(file)).out.readiness.predictionReady.value,'unknown');
+ file=ready();sqlite(file,"DELETE FROM prediction_profile");
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),['unknown','P7'],'no active profile is no proof');
+ file=ready();sqlite(file,"UPDATE prediction_profile SET lineage_json='not json {'");
+ assert.deepEqual(verdictOf(await both(file)).slice(0,2),['unknown','P7'],'an unreadable lineage is no proof');
+
+ // 7. Partial or missing coverage never proves a negative: the fact record of the ratings coverage is missing.
+ file=world({records:false});setProfile(file,4,'p4');setPointer(file,'l5');
+ out=await both(file);
+ assert.equal(out.out.readiness.predictionReady.value,'unknown');
+ file=world({records:false});setProfile(file,4,'p4');
+ assert.notEqual(verdictOf(await both(file))[0],false,'incomplete coverage never states fingerprint_absent');
+
+ // 8. The prediction domain's verdict is unreadable, throws or says something else: unknown (never an error, never incompatible).
+ for(const verdict of [()=>{throw new Error('boom');},()=>({outcome:'mystery'}),()=>null])
+  assert.deepEqual(verdictOf(await both(ready(),{reader:reader({verdict})})).slice(0,2),['unknown','P7']);
+ assert.deepEqual(verdictOf(await both(ready(),{reader:{registryToken:async()=>'r1'}})).slice(0,2),['unknown','P7'],'without a verdictOf no compatibility is proved');
+ assert.deepEqual(verdictOf(await both(ready(),{reader:{registryToken:async()=>{throw new Error('registry');},verdictOf:async()=>({outcome:'current'})}})).slice(0,2),['unknown','P7'],'a failing registry capture is no evidence, not an error');
+
+ // 9. The pointers captured are not the pointers of the body judged (one moved between the aggregate read and the capture): no evidence.
+ let reads=0;
+ const pointerMoved=async impl=>{const f=ready();return run(impl,f,{db:{onQuery:text=>{if(text.includes('FROM prediction_pointer')&&!text.includes('FROM prediction_profile')&&++reads===1)setPointer(f,'l5',{sha:'9'.repeat(64)});}}});};
+ reads=0;const pm=await pointerMoved(offlineRead);reads=0;const pmb=await pointerMoved(bundledRead);
+ assert.deepEqual(pmb.out,pm.out);
+ assert.notEqual(pm.out.readiness.predictionReady.value,true,'a pointer that moved after the aggregate read is not certified');
+
+ // 9b. The check in isolation: both captures agree with each other but not with the body judged (a different content digest, a missing or an extra pointer): no evidence.
+ {
+  const f=ready(),base=await readFilmAggregate(env(f),'tmdb_5');
+  const resolution=resolutionOf(base.body);
+  const judge=async body=>{const budget=createStatementBudget(REQUEST_STATEMENT_BUDGET);const begun=await beginPredictionEvidence(env(f),resolution,budget,reader());return finishPredictionEvidence(env(f),resolution,body,budget,begun,reader());};
+  const same=await judge(base.body);
+  assert.ok(same&&same.evidence&&same.context,'the body\'s own pointers are accepted');
+  const clone=()=>JSON.parse(JSON.stringify(base.body));
+  const other=clone();other.predictions.current[0].contentSha256='9'.repeat(64);
+  assert.equal(await judge(other),null,'a different content digest');
+  const missing=clone();missing.predictions.current=[];
+  assert.equal(await judge(missing),null,'a pointer the body does not list');
+  const extra=clone();extra.predictions.current.push({...extra.predictions.current[0],storageId:'tmdb_5'});
+  assert.equal(await judge(extra),null,'a pointer the capture did not read');
+  const unavailable=clone();unavailable.predictions={status:'unavailable',reason:'generation_moved'};
+  assert.equal(await judge(unavailable),null,'an unavailable predictions section is never evidence');
+  assert.equal(await judge({...clone(),predictions:undefined}),null);
+ }
+
+ // 9c. P1-A (review of PR #1084): EVERY input of the verdict is fenced, not only the profile version. The SELECTIVE rule reads the Film's genres and the profile lineage.
+ {
+  const selective={reader:reader({verdict:selectiveVerdict})};
+  // Real selective cases: the approved impact reaches horror films only.
+  assert.deepEqual(verdictOf(await both(readySelective(['драма']),selective)).slice(0,2),[true,'P6'],'a drama film is not reached by the horror impact: compatible (profile_unaffected)');
+  assert.deepEqual(verdictOf(await both(readySelective(['ужасы']),selective)).slice(0,2),[false,'P5'],'a horror film is reached: impacted, incompatible');
+  assert.deepEqual(verdictOf(await both(readySelective(['драма']),{reader:reader({verdict:domainVerdict})})).slice(0,2),[false,'P5'],'the strict rule judges the same world stale: the selective cases are not an artefact of the fixture');
+  // A genre moves between the captures (the observation judged old genres): never certified, in either direction.
+  for(const [from,to] of [[['драма'],['ужасы']],[['ужасы'],['драма']]]){
+   const make=impl=>{const f=readySelective(from);let seen=0;return run(impl,f,{...selective,db:{onQuery:text=>{if(text.includes('FROM prediction_profile WHERE active=1')&&++seen===2)metadata(f,'film:tmdb:5',{year:1995,genres:to});}}});};
+   const a=await make(offlineRead),b=await make(bundledRead);
+   assert.deepEqual(b.out,a.out);
+   assert.deepEqual(verdictOf(a),['unknown','P7','prediction_evidence_fingerprint_changed'],from+' -> '+to);
+  }
+  // ... including a move BEFORE the display section's first read (after the observation, before the sections).
+  {
+   const make=impl=>{const f=readySelective(['драма']);let first=true;return run(impl,f,{...selective,db:{onQuery:text=>{if(first&&text.includes('FROM owner_review_entry')){first=false;metadata(f,'film:tmdb:5',{year:1995,genres:['ужасы']});}}}});};
+   const a=await make(offlineRead),b=await make(bundledRead);
+   assert.deepEqual(b.out,a.out);
+   assert.deepEqual(verdictOf(a),['unknown','P7','prediction_evidence_fingerprint_changed'],'a genre that changed before the display read');
+  }
+  // The lineage moves at an UNCHANGED version, hash and profile generation (valid JSON, other selectors).
+  {
+   const make=impl=>{const f=readySelective(['драма']);let seen=0;return run(impl,f,{...selective,db:{onQuery:text=>{if(text.includes('FROM prediction_profile WHERE active=1')&&++seen===2)setLineage(f,selectiveLineage(['drama']));}}});};
+   const a=await make(offlineRead),b=await make(bundledRead);
+   assert.deepEqual(b.out,a.out);
+   assert.deepEqual(verdictOf(a),['unknown','P7','prediction_evidence_profile_changed'],'the lineage changed at the same version, hash and generation');
+  }
+  // A lineage that is valid JSON but not an array of plain objects is malformed: no proof. A legacy profile (no lineage, JSON null or an empty chain) stays legitimate.
+  for(const bad of ['{}','"x"','5','[1]','[null]','[[]]','["a"]','{"version":4}']){
+   const f=ready();setLineage(f,bad);
+   assert.deepEqual(verdictOf(await both(f)).slice(0,2),['unknown','P7'],'malformed lineage '+bad);
+  }
+  for(const legacy of [null,'null','[]']){
+   const f=ready();setLineage(f,legacy);
+   assert.deepEqual(verdictOf(await both(f)).slice(0,2),[true,'P6'],'legacy lineage '+String(legacy));
+  }
+ }
+
+  // (the aggregate does not read every verdict input: a verdict input only the capture reads, such as the prediction prompt version, is fenced by A against B)
+ {
+  const out=await movedBoth(f=>sqlite(f,"UPDATE prediction_pointer SET prediction_prompt_version=2 WHERE film_id='l5'"));
+  assert.deepEqual(verdictOf(out),['unknown','P7','prediction_evidence_fingerprint_changed'],'a verdict input that moves between the captures');
+ }
+ // 9d. P1-B: the prediction authority GENERATION and the pointers' whole provenance are bound to A, to B and to the aggregate's own predictions token. A change that the aggregate
+ //     sees in BOTH of its reads but that is gone again before the final capture leaves A == B and the body different: nothing is certified.
+ {
+  const transient=async(impl,change,revert)=>{
+   const f=ready();let aggregateRead=false,seen=0;
+   return run(impl,f,{db:{onQuery:text=>{
+    if(!aggregateRead&&text.includes('FROM prediction_pointer')&&!text.includes('FROM prediction_profile')){aggregateRead=true;change(f);}
+    else if(text.includes('FROM prediction_profile WHERE active=1')&&++seen===2)revert(f);
+   }}});
+  };
+  for(const [label,change,revert] of [
+   ['the R2 key (same content digest)',f=>sqlite(f,"UPDATE prediction_pointer SET r2_key='enrichment/films/l5/predictions/other.json' WHERE film_id='l5'"),f=>sqlite(f,"UPDATE prediction_pointer SET r2_key='enrichment/films/l5/predictions/x.json' WHERE film_id='l5'")],
+   ['the profile version of the pointer',f=>sqlite(f,"UPDATE prediction_pointer SET taste_profile_version=3 WHERE film_id='l5'"),f=>sqlite(f,"UPDATE prediction_pointer SET taste_profile_version=4 WHERE film_id='l5'")],
+   ['the fingerprint hash of the pointer',f=>sqlite(f,"UPDATE prediction_pointer SET fingerprint_hash='fh7' WHERE film_id='l5'"),f=>sqlite(f,"UPDATE prediction_pointer SET fingerprint_hash='fh1' WHERE film_id='l5'")],
+   ['the predicted rating',f=>sqlite(f,"UPDATE prediction_pointer SET predicted_rating=1 WHERE film_id='l5'"),f=>sqlite(f,"UPDATE prediction_pointer SET predicted_rating=3.5 WHERE film_id='l5'")],
+   ['the update time',f=>sqlite(f,"UPDATE prediction_pointer SET updated_at='2026-11-26T10:00:00.000Z' WHERE film_id='l5'"),f=>sqlite(f,`UPDATE prediction_pointer SET updated_at=${q(AT)} WHERE film_id='l5'`)],
+   ['the authority generation',f=>sqlite(f,"UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1"),f=>sqlite(f,"UPDATE prediction_domain_authority SET generation=generation-1 WHERE id=1")],
+   ['the authority generation, moved for good',f=>sqlite(f,"UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1"),()=>{}],
+  ]){
+   const a=await transient(offlineRead,change,revert),b=await transient(bundledRead,change,revert);
+   assert.deepEqual(b.out,a.out,label);
+   assert.notEqual(verdictOf(a)[0],true,label+': not certified');
+   assert.equal(a.out.body.predictions.status==='present'||a.out.body.predictions.status==='unavailable',true,label);
+  }
+  // The same fields, directly against the body (A == B by construction): a body of another generation or another provenance is no evidence; the exact body is.
+  const f=ready(),base=await readFilmAggregate(env(f),'tmdb_5');
+  const judge=async body=>{const resolution=resolutionOf(base.body),budget=createStatementBudget(REQUEST_STATEMENT_BUDGET);const begun=await beginPredictionEvidence(env(f),resolution,budget,reader());return finishPredictionEvidence(env(f),resolution,body,budget,begun,reader());};
+  const clone=()=>JSON.parse(JSON.stringify(base.body));
+  assert.ok((await judge(base.body))?.evidence,'the exact body, token and generation are accepted');
+  for(const [label,mutate] of [
+   ['token generation',b=>{b.predictions.token.generation+=1;}],
+   ['token generation missing',b=>{delete b.predictions.token.generation;}],
+   ['token pointers digest',b=>{b.predictions.token.pointers='sha256:'+'0'.repeat(64);}],
+   ['current r2Key (same digest)',b=>{b.predictions.current[0].body.r2Key='x';}],
+   ['current profile version',b=>{b.predictions.current[0].tasteProfileVersion=99;}],
+   ['current fingerprint hash',b=>{b.predictions.current[0].fingerprintHash='zz';}],
+   ['current rating',b=>{b.predictions.current[0].predictedRating=0.5;}],
+   ['no token',b=>{delete b.predictions.token;}],
+  ]){const b=clone();mutate(b);assert.equal(await judge(b),null,label);}
+ }
+
+ // 9e. P1-C: the read-set is the resolver's own CAPPED authorized set. Exactly the bound is read and certified; one more alias is an overflow: no evidence, no statement, never complete.
+ {
+  const make=n=>{const lids=Array.from({length:n},(_,i)=>'q'+i);const f=world({lids});setProfile(f,4,'p4');setFingerprint(f,'q0');setPointer(f,'q0');metadata(f,'film:tmdb:5',{year:1995,genres:['драма']});return {f,lids};};
+  const evidenceStatements=executed=>executed.filter(text=>text.includes('FROM prediction_profile WHERE active=1'));
+  const at=make(AUTHORIZED_ALIASES_PER_SCHEME),seen=[];
+  const exact=await both(at.f);
+  assert.deepEqual(verdictOf(exact).slice(0,2),[true,'P6'],'exactly the bound: the whole read-set is read and certified');
+  await run(offlineRead,at.f,{db:{onQuery:text=>seen.push(text)}});
+  const statements=evidenceStatements(seen);
+  assert.equal(statements.length,PREDICTION_EVIDENCE_STATEMENTS);
+  for(const lid of at.lids)assert.ok(statements.every(text=>text.includes('"'+lid+'"')),'the bound list names '+lid);
+  assert.ok(statements.every(text=>text.includes('"tmdb_5"')));
+  const over=make(AUTHORIZED_ALIASES_PER_SCHEME+1),seenOver=[];
+  const overOut=await both(over.f);
+  assert.notEqual(verdictOf(overOut)[0],true,'an alias overflow is never certified');
+  await run(offlineRead,over.f,{db:{onQuery:text=>seenOver.push(text)}});
+  assert.equal(evidenceStatements(seenOver).length,0,'no evidence statement past the bound, and no alias beyond the cap is ever bound');
+  assert.equal(overOut.out.body.predictions.reason,'budget_exceeded','the aggregate itself marks the overflow');
+  // The resolver's cap is the reader's cap: beginPredictionEvidence declines on the resolver's own overflow marker whatever the claim list says.
+  const body=(await readFilmAggregate(env(at.f),'tmdb_5')).body;
+  const budget=createStatementBudget(REQUEST_STATEMENT_BUDGET);
+  assert.equal(await beginPredictionEvidence(env(at.f),resolutionOf(body,{aliasOverflow:['letterboxd_lid']}),budget,reader()),null);
+  assert.equal(budget.used+budget.reserved,0);
+  // A TV number is never a storage key: a tmdb_tv overflow does not count.
+  const tv=await beginPredictionEvidence(env(at.f),resolutionOf(body,{aliasOverflow:['tmdb_tv']}),createStatementBudget(REQUEST_STATEMENT_BUDGET),reader());
+  assert.ok(tv,'only the schemes a section reads count');tv.fence.release();
+ }
+
+ // 10. Budget: the evidence is paid from the shared request budget. A budget that cannot reserve its two statements yields no evidence (never an overrun), and the reader
+ //     gives back what it did not spend.
+ const fileBody=(await readFilmAggregate(env(ready()),'tmdb_5')).body;
+ const tight=createStatementBudget(1);
+ assert.equal(await beginPredictionEvidence(env(ready()),resolutionOf(fileBody),tight,reader()),null);
+ assert.equal(tight.used+tight.reserved,0,'nothing is left charged or reserved');
+ const roomy=createStatementBudget(REQUEST_STATEMENT_BUDGET);
+ const begun=await beginPredictionEvidence(env(ready()),resolutionOf(fileBody),roomy,reader());
+ assert.ok(begun&&roomy.used===1&&roomy.reserved===PREDICTION_EVIDENCE_STATEMENTS-1,'the first capture spent one statement and kept one reserved');
+ begun.fence.release();
+ assert.equal(PREDICTION_EVIDENCE_STATEMENTS,2);
+ // No authorized alias: nothing is reserved, nothing is read.
+ const none=createStatementBudget(REQUEST_STATEMENT_BUDGET);
+ assert.equal(await beginPredictionEvidence(env(ready()),{verdict:'found',filmId:'film:tmdb:5',token:{generation:1},claims:[],authorized:{tmdb_movie:[],tmdb_tv:[],letterboxd_lid:[]},aliasOverflow:[]},none,reader()),null);
+ assert.equal(none.used+none.reserved,0);
+
+ // 11. Every statement of the readiness read is a SELECT; nothing is written; no R2 and no network (the proxies throw). The evidence statement is index-served.
+ file=ready();const executed=[],sha=fileSha(file);
+ await run(offlineRead,file,{db:{onQuery:text=>executed.push(text)}});
+ assert.ok(executed.every(text=>/^\s*(WITH|SELECT)/i.test(text)));
+ assert.equal(executed.filter(text=>text.includes('FROM prediction_profile WHERE active=1')).length,PREDICTION_EVIDENCE_STATEMENTS,'exactly the two captures');
+ assert.equal(fileSha(file),sha);
+ const bound=(()=>{let i=0;const values=["'[\"l5\",\"tmdb_5\"]'",'3',"'[\"l5\",\"tmdb_5\"]'",'3',"'film:tmdb:5'"];return PREDICTION_EVIDENCE_SQL.replace(/\?/g,()=>values[i++]);})();
+ const eqp=sqliteSync([file],{input:'EXPLAIN QUERY PLAN '+bound+';',encoding:'utf8'});
+ assert.equal(eqp.status,0,eqp.stderr);
+ const detail=eqp.stdout.split('\n').map(line=>line.replace(/^[\s|`-]+/,'').trim()).filter(Boolean);
+ assert.ok(!detail.some(text=>/^SCAN (prediction_pointer|prediction_fingerprint|film_metadata|prediction_profile)\b/.test(text)),'no full scan of a prediction table\n'+detail.join('\n'));
+ assert.ok(detail.some(text=>/SEARCH prediction_pointer USING (INDEX sqlite_autoindex_prediction_pointer_1|PRIMARY KEY)/.test(text))&&detail.some(text=>/SEARCH prediction_fingerprint USING (INDEX sqlite_autoindex_prediction_fingerprint_1|PRIMARY KEY)/.test(text)),'primary-key searches\n'+detail.join('\n'));
+ assert.ok(detail.some(text=>/prediction_profile_active/.test(text)),'the active profile is read through its partial unique index\n'+detail.join('\n'));
+
+ // 12. Identity verdicts without sections never reach the reader: absent, unverified and invalid requests carry no readiness evidence.
+ for(const id of ['tmdb_999','not a lid!']){
+  const r=await readFilmReadiness(env(ready()),id,{predictionReader:reader()});
+  assert.deepEqual([r.readiness.predictionReady.value,r.readiness.displayReady.value].every(v=>v==='unknown'||v==='not_applicable'),true,id);
+ }
 }
 
 // AIR-648 bundled parity: the SAME worlds read through the real built scope (dist/server/index.js, Worker-like context) and through the offline module give the same JSON bodies, status codes and

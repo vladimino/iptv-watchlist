@@ -8,12 +8,16 @@ import {loadBundledFilmScopes} from './film-aggregate-bundle-scope.mjs';
 import * as offlineResolver from '../src/film-aggregate-resolver.js';
 import * as offlineAggregate from '../src/film-aggregate.js';
 import * as offlineHistory from '../src/film-history-aggregate.js';
+import * as offlineReadiness from '../src/film-readiness.js';
+import * as offlineParity from '../src/domain/film-dimension-parity.js';
+import * as offlineReader from '../src/film-readiness-reader.js';
+import * as offlineComposition from '../src/film-readiness-composition.js';
 
-const {text,worker,Sha256Sync,FilmAggregateResolver,FilmAggregate,FilmHistoryAggregate}=loadBundledFilmScopes();
+const {text,worker,Sha256Sync,FilmAggregateResolver,FilmAggregate,FilmReadiness,FilmDimensionParity,FilmReadinessReader,FilmReadinessComposition,FilmHistoryAggregate}=loadBundledFilmScopes();
 assert.ok(!/from 'node:|require\(|createHash\(/.test(text),'the bundle names no Node-only module or hash API');
 
 // The scope hands over EXACTLY the offline module's exports: nothing dropped (the class FilmAggregateInvalid once was), nothing extra.
-for(const [scope,offline,label] of [[FilmAggregateResolver,offlineResolver,'resolver'],[FilmAggregate,offlineAggregate,'aggregate'],[FilmHistoryAggregate,offlineHistory,'history']]){
+for(const [scope,offline,label] of [[FilmAggregateResolver,offlineResolver,'resolver'],[FilmAggregate,offlineAggregate,'aggregate'],[FilmHistoryAggregate,offlineHistory,'history'],[FilmReadiness,offlineReadiness,'readiness'],[FilmDimensionParity,offlineParity,'dimension parity'],[FilmReadinessReader,offlineReader,'readiness reader'],[FilmReadinessComposition,offlineComposition,'readiness composition']]){
  assert.deepEqual(Object.keys(scope).sort(),Object.keys(offline).sort(),label+' scope exports differ from the offline module');
  for(const name of Object.keys(offline))if(typeof offline[name]!=='function'&&typeof offline[name]!=='object')assert.equal(scope[name],offline[name],label+' '+name);
 }

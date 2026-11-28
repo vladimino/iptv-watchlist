@@ -127,8 +127,9 @@ const d=deriveReadiness(b);
 assert.equal(JSON.stringify(b),frozen);
 assert.equal(d.displayReady.value,true);assert.equal(d.freshness,'unknown');assert.equal(d.provenance.year,'unattributed');assert.equal(d.catalogReady.value,true);
 
-// Dormant and pure: not bundled, no import of D1/R2/network modules.
+// Dormant and pure: no import of D1/R2/network modules (so it is scoped as is). AIR-648 scopes it into the Worker bundle through scopedFilmAggregate() only (build.mjs names no readiness file), unrouted.
 const src=fs.readFileSync('src/film-readiness.js','utf8');
 assert.ok(!/^import\s/m.test(src),'no imports');
-assert.ok(!fs.readFileSync('build.mjs','utf8').includes('src/film-readiness.js'),'stays out of the bundle');
+assert.ok(!fs.readFileSync('build.mjs','utf8').includes('src/film-readiness.js'),'build.mjs names no readiness file: only scopedFilmAggregate() scopes it');
+assert.ok(fs.readFileSync('scripts/bundle-scope.mjs','utf8').includes("scoped('src/film-readiness.js','FilmReadiness')"),'the bundle scopes it, unrouted');
 console.log('film-readiness: ok');
