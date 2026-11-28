@@ -18,7 +18,7 @@ const context = {
     const next = script.shift();
     if (next instanceof Error) throw next;
     if (next.gate) await next.gate; // a response that is held until the test lets it go
-    return {ok: next.status < 400, status: next.status, json: async () => next.body};
+    return {ok: next.status < 400, status: next.status, json: async () => { if (next.nonJson) throw new Error('not json'); return next.body; }};
   },
 };
 vm.createContext(context);
@@ -212,6 +212,66 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   assert.match(m.reading.innerHTML, /нет в каноническом каталоге/);
   assert.doesNotMatch(m.reading.innerHTML, /Не удалось прочитать|data-meta-reload/);
   assert.equal(calls.length, 1);
+}
+// ONLY the typed 404 not_found asserts absence: a 404 that is not JSON, or has another envelope, is a failed read and stays retryable
+for (const odd of [{status: 404, nonJson: true, body: null}, {status: 404, body: {message: 'Not Found'}}, {status: 404, body: {error: 'something_else'}}, {status: 404, body: null}, {status: 404, body: {found: false}}]) {
+  reset(); script = [odd];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.reading.innerHTML, /Не удалось прочитать/, JSON.stringify(odd));
+  assert.match(m.reading.innerHTML, /data-meta-reload/);
+  assert.doesNotMatch(m.reading.innerHTML, /data-meta-notfound|нет в каноническом каталоге/);
+}
+// a successful read followed by the typed absence (a pagination read here): the snapshot is dropped, so no value, history row, action or "Показать ещё" is offered from it
+{
+  reset(); script = [{status: 200, body: view()}];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.body.innerHTML, /data-meta-more/);
+  script = [{status: 404, body: {error: 'not_found'}}];
+  await m.press({'data-meta-more': '2026-11-02T00:00:00.000Z~10'}); await settle();
+  assert.match(m.reading.innerHTML, /data-meta-notfound/);
+  assert.equal(m.body.innerHTML, '', 'the stale snapshot is gone');
+  assert.doesNotMatch(m.body.innerHTML, /data-meta-more|data-meta-action/);
+  const before = calls.length;
+  await m.press({'data-meta-more': 'x'}); await m.press(SET); await settle();
+  assert.equal(calls.length, before, 'nothing is sent or read from the dropped snapshot');
+}
+// the typed absence after a SUCCESSFUL command: the command result is kept, no read is manufactured, no control is offered
+{
+  reset(); script = [{status: 200, body: view()}];
+  const m = mount();
+  await m.open(); await settle();
+  m.inputs.year = node(); m.inputs.year.value = '2001';
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}}, {status: 404, body: {error: 'not_found'}}];
+  await m.press(SET); await settle();
+  assert.match(m.result.textContent, /выполнено/, 'the command result stays what it was');
+  assert.match(m.reading.innerHTML, /data-meta-notfound/);
+  assert.equal(m.body.innerHTML, '');
+  assert.equal(shared().pending, null); assert.equal(shared().flight, null);
+}
+// the typed absence does not discard or rewrite a HELD command: it stays shown with its retry, and the retry is the identical body
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount();
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '1999';
+  script = [new Error('offline')];
+  await a.press(SET); await settle();
+  const heldBody = JSON.stringify(posts()[0]);
+  script = [{status: 404, body: {error: 'not_found'}}];
+  const again = mount(); await settle(); // the held command re-opens the section and reads
+  assert.match(again.reading.innerHTML, /data-meta-notfound/);
+  assert.equal(again.body.innerHTML, '');
+  assert.match(again.pendingBox.innerHTML, /Год = 1999/, 'the held command is still shown');
+  assert.match(again.pendingBox.innerHTML, /data-meta-retry/);
+  assert.equal(shared().pending.command.requestId, JSON.parse(heldBody).requestId);
+  script = [{status: 409, body: {error: 'not_found', outcome: 'rejected'}}, {status: 404, body: {error: 'not_found'}}];
+  await again.press({'data-meta-retry': ''}); await settle();
+  assert.equal(posts().length, 2);
+  assert.equal(JSON.stringify(posts()[1]), heldBody, 'the retry is the identical command');
+  assert.match(again.result.textContent, /Команда не выполнена: фильма нет в каноническом каталоге/);
+  assert.doesNotMatch(again.result.textContent, /не сбой чтения/, 'a refused command is not worded as a read');
 }
 // a server failure is still a failed read with its retry
 {

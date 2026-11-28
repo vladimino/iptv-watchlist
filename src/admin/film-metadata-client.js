@@ -30,6 +30,7 @@ const ADMIN_META_REFUSAL_TEXT = {
   foreign_history: 'Эта запись журнала относится к другому фильму.',
   history_not_found: 'Записи журнала больше нет.',
   not_found: 'Этого фильма нет в каноническом каталоге: происхождение метаданных для него не записывается и не читается. Это не сбой чтения, повтор не нужен.',
+  command_not_found: 'Команда не выполнена: фильма нет в каноническом каталоге.',
   not_in_scope: 'У фильма нет состояния обогащения каталога, обновлять нечего.',
   not_refreshable: 'Ни один источник сейчас нельзя переоткрыть.',
   authority_not_open: 'Запись канонического фильма сейчас закрыта (authority).',
@@ -62,7 +63,9 @@ async function adminReadFilmMetadata(filmId, cursor) {
   catch { return {ok: false, status: 0, error: 'network', body: null}; }
   let payload = null;
   try { payload = await response.json(); } catch { payload = null; }
-  return {ok: response.ok && !!payload && payload.found === true, status: response.status, error: payload && payload.error || (response.ok ? null : 'unavailable'), body: payload};
+  // `absent`: ONLY the API's own typed answer `404 {error: 'not_found'}` says the Film is not in the canonical catalogue. A 404 that is not JSON, or has another envelope (a proxy, an older Worker, an unexpected route), is an unclassified failed read.
+  const absent = response.status === 404 && !!payload && typeof payload === 'object' && payload.error === 'not_found';
+  return {ok: response.ok && !!payload && payload.found === true, absent, status: response.status, error: payload && payload.error || (response.ok ? null : 'unavailable'), body: payload};
 }
 // A network failure is `error: 'network'`; a 503 `storage_unavailable` has `outcome: 'unknown'`. Both keep the requestId for a retry.
 async function adminWriteFilmMetadata(filmId, body) {
@@ -274,7 +277,8 @@ function adminBindFilmMetadata(host) {
   const say = text => { if (!state.dead) result.textContent = text; };
   const render = () => {
     if (state.dead) return;
-    if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!mine(), pendingElsewhere: !!elsewhere(), flight: flying()});
+    if (state.notFound) body.innerHTML = '';
+    else if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!mine(), pendingElsewhere: !!elsewhere(), flight: flying()});
     pendingBox.innerHTML = flying() ? '<p class="muted" data-meta-flight>Идёт отправка команды…</p>' : (mine() ? adminMetaPendingHtml(mine()) : (elsewhere() ? adminMetaPendingHtml(elsewhere(), true) : ''));
     reading.innerHTML = state.notFound ? '<span data-meta-notfound>' + adminMetaEsc(ADMIN_META_REFUSAL_TEXT.not_found) + '</span>' : state.readFailed ? '<span>Не удалось прочитать метаданные. Действия отключены.</span> <button type="button" data-meta-reload>Повторить чтение</button>' : (state.busy && !state.loaded ? '<span>Читаю метаданные…</span>' : '');
   };
@@ -287,8 +291,11 @@ function adminBindFilmMetadata(host) {
     if (state.dead || token !== state.seq) return false; // an answer that is not the latest read, or from a view that left the screen, is dropped
     if (!response.ok) {
       state.stale = true;
-      // a 404 is an answer, not a failed read: this Film is not in the canonical catalogue, so a retry would only repeat it
-      if (response.status === 404) state.notFound = true; else state.readFailed = true;
+      if (response.absent) {
+        // the typed answer: this Film is not in the canonical catalogue. The snapshot of an earlier read is dropped with it, so no stale value, history row or "Показать ещё" stays on offer.
+        // A held command is independent of this read and is kept with its real outcome.
+        state.notFound = true; state.view = null; state.loaded = false;
+      } else state.readFailed = true; // anything else, an unclassified 404 included, is a failed read and stays retryable
       render();
       return false;
     }
@@ -350,7 +357,7 @@ function adminBindFilmMetadata(host) {
     }
     // a definite refusal ends THIS attempt, and only this one
     if (ownsPending()) adminMetaPending = null;
-    say(adminMetaRefusalText(response.error));
+    say(adminMetaRefusalText(response.error === 'not_found' ? 'command_not_found' : response.error));
     const reload = !state.dead && (response.error === 'stale_revision' || response.error === 'stale_rows');
     if (reload) await load(null); else state.stale = false;
     release(); settled(filmId); render();
@@ -376,7 +383,7 @@ function adminBindFilmMetadata(host) {
       return run(() => load(null));
     }
     const more = target.getAttribute('data-meta-more');
-    if (more) return run(() => load(more));
+    if (more) return state.view ? run(() => load(more)) : undefined;
     const action = target.getAttribute('data-meta-action');
     if (!action || !state.view || state.stale || adminMetaPending || flying()) return;
     const field = target.getAttribute('data-field');
