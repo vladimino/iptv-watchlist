@@ -32,9 +32,16 @@ flowchart TD
     worker -.->|current EPG run checkpoint: schema v33 marker d1/open generation 2, rows in D1, no R2 read or write| d1
     chan["EPG Channel policy tables, schema v32 installed, first import done:<br/>the scan does not read them"]
     d1 -.->|"installed: owner-only Channel admin, no scan reader"| chan
+    repair["AIR-664 one-off localization repair:<br/>owner-only MCP tool, 16 fixed Films<br/>(Proposed ADR 0225, dormant)"]
+    repairR2[("R2 film-localization-repair/air-664/:<br/>recovery artifacts only, never Film authority<br/>(Proposed, dormant)")]
+    repair -.->|"1. record intent BEFORE the D1 write (conditional create, full readback)"| repairR2
+    repair -.->|"2. one receipted fenced batch under the approved pins"| d1
+    repair -.->|"3. settle the outcome AFTER (immutable event)"| repairR2
     classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
-    class gate,chan future
+    class gate,chan,repair,repairR2 future
 ```
+
+**One-off Film localization repair (Proposed [ADR 0225](../adr/0225-one-off-localization-repair-checkpoint-in-r2.md), dormant, [AIR-664](https://trello.com/c/Og9XxXfy)).** The three dashed arrows from the `repair` node are not a flow that runs: nothing calls the tool without an owner call, and `apply` and `restore` need a separate operation-specific owner GO. The R2 objects are recovery artifacts only (an immutable intent per Film and immutable, sequence-numbered outcome events, created with a conditional put); canonical D1 stays the Film/Person authority and an R2 event is never proof of a D1 effect: every claim is re-proved from the receipt, the revision and the row. R2 and D1 are not atomic; the receipt and the recorded intent close that gap. The diagram adds no marker, table, bucket or schedule.
 
 Assigned Discovery rows live in the same published-EPG tables as the sealed scan: `published_epg_show` with `basis='discovery'`, under the published `programme_run_id`. They are not a second store and they do not move `published_epg_authority.generation`. The R2 programme objects stay compatibility mirrors of the completed read ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md)). The flowchart above is unchanged.
 
