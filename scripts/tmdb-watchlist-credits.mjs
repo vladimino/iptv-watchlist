@@ -215,7 +215,7 @@ export async function applyPlan({db,plan,now=()=>new Date()}){
  return report;
 }
 
-// The coCredit totals and first pairs exactly as the Worker's /api/d1/persons/review computes them: the route module is loaded
+// The coCredit totals and first pairs exactly as d1PersonReview computes them (its HTTP route /api/d1/persons/review is retired, AIR-689; the function stays for this script): the route module is loaded
 // as the Worker bundle loads it and served through the same adapter.
 export async function coCreditReview(db,limit=10){
  const ctx=vm.createContext({JSON,Promise,Number,String,Math});

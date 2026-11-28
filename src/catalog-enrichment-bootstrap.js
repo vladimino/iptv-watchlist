@@ -22,38 +22,45 @@ export async function readScope(env,scope){
 }
 
 // One page. -> {outcome:'advanced'|'done'|'stopped', reason?, rows, cursor, state}
-export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE}){
+// `pin` ({revision, cutoffAt}, optional) is the configuration the CALLER approved: a page that finds another revision or cutoff stops (`configuration_changed`) instead of adopting it, so an activation keeps its approved envelope on every page.
+// `extra` ({sql, params}, optional) is a further readiness condition of the CALLER (for example the authority and lease an activation asserted): it is part of the fence of EVERY write of the page, so a page whose condition no longer holds writes nothing and the bootstrap stops.
+export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=null,extra=null}){
  if(!ISO.test(String(at))||!Number.isInteger(pageSize)||pageSize<1||pageSize>200)throw failed('film_person_invalid');
  const definition=DEFINITIONS[scope];
  if(!definition)throw failed('catalog_enrichment_bootstrap_scope_unsupported');
  const handle=database(env);
  const row=await readScope(env,scope);
  if(!row||Number(row.activated)!==1||Number(row.enabled)!==1)return {outcome:'stopped',reason:'scope_not_enabled',rows:0,cursor:row?.bootstrap_cursor??null,state:row?.bootstrap_state??'none'};
+ if(pin&&(Number(row.revision)!==pin.revision||(row.cutoff_at??null)!==(pin.cutoffAt??null)))return {outcome:'stopped',reason:'configuration_changed',rows:0,cursor:row.bootstrap_cursor??null,state:row.bootstrap_state};
  if(row.bootstrap_state==='done')return {outcome:'done',rows:0,cursor:row.bootstrap_cursor??null,state:'done'};
  if(definition.cutoff&&!row.cutoff_at)return {outcome:'stopped',reason:'cutoff_missing',rows:0,cursor:row.bootstrap_cursor??null,state:row.bootstrap_state};
  const revision=Number(row.revision),cursor=row.bootstrap_cursor??null;
  const page=await many(handle,`SELECT film_id,tmdb FROM ${definition.table} WHERE (? IS NULL OR film_id>?)${definition.cutoff?' AND verified_at>=?':''} ORDER BY film_id LIMIT ?`,[cursor,cursor,...(definition.cutoff?[row.cutoff_at]:[]),pageSize]);
  const last=page.length?page[page.length-1].film_id:cursor;
  const done=page.length<pageSize;
- const fence="EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope=? AND revision=? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?)";
- const fenceParams=[scope,revision,cursor];
- const statements=page.map(item=>[`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) SELECT 'admitted',?,'rated',?,1,0,'pending','bootstrap:'||?,?,0 WHERE ${fence} ON CONFLICT (kind,subject,source,part) DO NOTHING`,['tmdb:'+item.tmdb,definition.part,scope,at,...fenceParams]]);
+ const fence="EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope=? AND revision=? AND cutoff_at IS ? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?)";
+ const fenceParams=[scope,revision,row.cutoff_at??null,cursor];
+ const readiness=extra?` AND (${extra.sql})`:'',readinessParams=extra?extra.params:[];
+ const statements=page.map(item=>[`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) SELECT 'admitted',?,'rated',?,1,0,'pending','bootstrap:'||?,?,0 WHERE ${fence}${readiness} ON CONFLICT (kind,subject,source,part) DO NOTHING`,['tmdb:'+item.tmdb,definition.part,scope,at,...fenceParams,...readinessParams]]);
  // the cursor advance is the LAST statement, with the same fence: it moves only when the page was read at the current revision and cursor
- statements.push([`UPDATE catalog_enrichment_scope SET bootstrap_cursor=?,bootstrap_state=?,updated_at=? WHERE scope=? AND revision=? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?`,[last,done?'done':'running',at,scope,revision,cursor]]);
+ statements.push([`UPDATE catalog_enrichment_scope SET bootstrap_cursor=?,bootstrap_state=?,updated_at=? WHERE scope=? AND revision=? AND cutoff_at IS ? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?${readiness}`,[last,done?'done':'running',at,scope,revision,row.cutoff_at??null,cursor,...readinessParams]]);
  await handle.batch(statements.map(([sql,params])=>handle.prepare(sql).bind(...params)));
  const after=await readScope(env,scope);
- const moved=(after?.bootstrap_cursor??null)===(last??null)&&after?.bootstrap_state===(done?'done':'running')&&Number(after?.revision)===revision;
- if(!moved)return {outcome:'stopped',reason:Number(after?.revision)!==revision?'revision_moved':'cursor_moved',rows:0,cursor:after?.bootstrap_cursor??null,state:after?.bootstrap_state??'none'};
+ // the page committed when the cursor and state moved to where this page put them; a revision that moved AFTER that commit stops the next page but does not make the written rows disappear, so they are still reported
+ const advanced=(after?.bootstrap_cursor??null)===(last??null)&&after?.bootstrap_state===(done?'done':'running');
+ const unchanged=Number(after?.revision)===revision;
+ if(!advanced||!unchanged)return {outcome:'stopped',reason:!unchanged?'revision_moved':'cursor_moved',rows:advanced?page.length:0,cursor:after?.bootstrap_cursor??null,state:after?.bootstrap_state??'none'};
  return {outcome:done?'done':'advanced',rows:page.length,cursor:last,state:done?'done':'running'};
 }
 
 // Runs pages until done, stopped or `maxPages`; resumable from the stored cursor. -> {outcome, pages, rows, cursor, state, reason?}
-export async function runBootstrap(env,{scope,at,pageSize=BOOTSTRAP_PAGE,maxPages=BOOTSTRAP_MAX_PAGES}){
+export async function runBootstrap(env,{scope,at,pageSize=BOOTSTRAP_PAGE,maxPages=BOOTSTRAP_MAX_PAGES,pin=null,extra=null}){
  let pages=0,rows=0,last={outcome:'advanced',cursor:null,state:'none'};
  while(pages<maxPages){
-  last=await bootstrapPage(env,{scope,at,pageSize});
+  last=await bootstrapPage(env,{scope,at,pageSize,pin,extra});
+  rows+=last.rows;
   if(last.outcome==='stopped')break;
-  pages++;rows+=last.rows;
+  pages++;
   if(last.outcome==='done')break;
  }
  return {outcome:last.outcome,pages,rows,cursor:last.cursor,state:last.state,...(last.reason?{reason:last.reason}:{})};
