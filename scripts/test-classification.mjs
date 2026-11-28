@@ -426,6 +426,9 @@ export const FILES={
  "migration-0055-ratings-view-fact-key-index.mjs": {
   "suite": "core"
  },
+ "letterboxd-claim-cohort-preflight-production.mjs": {
+  "suite": "core"
+ },
  "film-metadata-provenance.mjs": {
   "suite": "core"
  },

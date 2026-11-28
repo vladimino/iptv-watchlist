@@ -104,6 +104,20 @@ Synthetic example (fake values; the shapes are real). Request: `{"mode":"dry_run
 
 The planner reads the Ratings projection with `alias_id=? OR alias_id=? OR fact_key=?`. Before migration `0055` the `fact_key` term had no index and the statement scanned `ratings_view`; the AIR-652 offline evidence recorded that as a live-run blocker (and it remains the dated historical record). Migration `0055` adds the index ([runbook](ratings-view-fact-key-index-0055-apply.md)); it was **applied to production on 28 Nov 2026** ([evidence](../evidence/d1-migration/air-653-0055-apply-2026-11-28.md)); the former scan is gone and the live read is index-served. The private bounded capture is the requirement of the **AIR-653 historical cohort** (the bridge-only prediction keys of AIR-652), because the unchanged planner is unbounded on a live database; it is not a cancellation of the published-programme operator contract below or of its permitted ordinary use (its `dry_run` and, with its own owner GO, its `apply`). The AIR-653 promotion keeps its own plan, frozen cohort and owner GO.
 
+## Bounded cohort preflight for the AIR-653 historical keys (read-only)
+
+`scripts/letterboxd-claim-cohort-preflight-production.mjs` runs the AIR-652 design against production D1 and writes nothing: the capture of exactly the planner's inputs through the AIR-647 counted database (single `SELECT` statements, charged to **one** shared statement and row budget before each statement, over indexed predicates only), the **unchanged** planner on a private sqlite snapshot of the captured rows, and a second capture plus a repeated discovery that fence movement (any difference is `unknown`, no digest). The transport refuses every request that is not one `SELECT` or `WITH ... SELECT` and stops on any answer that reports a write; the identity (uuid and name) of the production target is read first. It makes no Letterboxd or TMDB request and sets no flag, Task or lease. Tests: `tests/letterboxd-claim-cohort-preflight-production.mjs` (offline, stub transport) and `tests/prediction-alias-bridge-cohort.mjs` (the design, now importing the same module `scripts/letterboxd-claim-cohort-preflight.mjs`).
+
+```bash
+set -a; . ~/.config/iptv/d1-backfill.env; set +a
+NODE_USE_ENV_PROXY=1 node scripts/letterboxd-claim-cohort-preflight-production.mjs --out <private file outside the repository> [--archive <sha256>]...
+```
+
+- The printed report holds counts per class and reason, the separate key and distinct-Film counts, the reserved and actual work, the digests and the transport totals; never a lid, movie, key or Film id. The exact `eligible_in_scope` pairs go only to `--out` (mode 600, refused inside the repository) and stay outside GitHub and Trello.
+- `--archive` is the owner-private witness scope (the sha256 of the inferred-import archive of the AIR-559 audit; repeatable). Without a valid scope a planner `pass` is reported as `unknown / witness_scope_missing`, never as eligible.
+- The caps are the AIR-652 defaults (300 statements, 6,000 rows reserved, 2,000 pointer rows per discovery pass, 64 candidates); a flag may change one only up to a fixed ceiling (2,000 statements, 60,000 rows, 20,000 pointer rows, 512 candidates). A cap reached is `unknown` with `coverage: incomplete`, never a partial cohort.
+- `eligible_in_scope` is a planner `pass` plus a negative witness inside the stated scope. It is **not** production eligibility and **not** a GO: a promotion keeps its own L3 plan, frozen cohort, fresh re-proof at write time and owner GO.
+
 ## When this applies
 
 A published programme lid has no trusted `letterboxd` claim in `film_external_id`, so `POST /api/started` answers `404 Unknown film`, while the Ratings projection ties that lid to one TMDB movie whose canonical Film exists. The cohort is whatever a fresh preflight finds; a number seen earlier is only a baseline.
