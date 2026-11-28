@@ -419,6 +419,10 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "migration-head.mjs": {
+  "suite": "core",
+  "note": "Helper, not a test: the head version of the migration manifest, so full-chain fixtures do not pin a literal version."
+ },
  "migration-0055-ratings-view-fact-key-index.mjs": {
   "suite": "core"
  },
