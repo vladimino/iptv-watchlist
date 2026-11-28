@@ -36,7 +36,7 @@ One human is therefore stored once per role and once per source. Watchlist Films
 - each `kind: name` alias;
 - a `reviewed` or `provisional` localization.
 
-These are the names the D1 review queue (`GET /api/d1/persons/review`) uses. A value held back by reviewed precedence is not an accepted name.
+These are the names the D1 review queue (`d1PersonReview`; its HTTP route `GET /api/d1/persons/review` is retired, [retired views](../api/d1-catalog.md#retired-views)) uses. A value held back by reviewed precedence is not an accepted name.
 
 Names compare after `personFold`, the folding of the admin query library and of AIR-126. It strips Latin diacritics, reads `ё` as `е`, folds case in both alphabets and turns punctuation into spaces. The D1 queue compares with SQLite `lower()`, which folds ASCII only, so the contract finds the same matches and a few more (see the evidence).
 

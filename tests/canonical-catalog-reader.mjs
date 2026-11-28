@@ -218,7 +218,7 @@ const ctx=vm.createContext({Response,Request,URL,JSON,Promise,Number,String,Math
 vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);
 vm.runInContext(scopedReplacing(READER_FILE,'CanonicalCatalogReader',IMPORT),ctx);
 vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+scopePersonIdentity(['src/domain/canonical-person.js','src/domain/person-identity-projection.js'])+'\n'+fs.readFileSync(D1_FILE,'utf8')+'\nglobalThis.route=catalogD1Route;',ctx);
-const T0='2026-10-29T00:00:00.000Z',PATHS=['status','persons','persons/director/michael-mann','persons/director/michael-mann/identity','persons/actor/solo/identity','films/tmdb:1','films/tmdb:9'];
+const T0='2026-10-29T00:00:00.000Z',PATHS=['status','persons/director/michael-mann/identity','persons/actor/solo/identity','nothing'],RETIRED=['persons','persons/review','persons/director/michael-mann','films/tmdb:1','films/tmdb:9','persons/actor/%zz'];
 const answers={};
 for(const state of STATES){
  const file=database(state);
@@ -228,6 +228,7 @@ for(const state of STATES){
  const get=async(p,method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,text:await res.text()};};
  answers[state]={};
  for(const p of PATHS)answers[state][p]=await get(p);
+ for(const p of RETIRED){answers[state][p]=await get(p);for(const method of ['HEAD','POST'])answers[state][p+'#'+method]=await get(p,method);}
  answers[state].post=await get('status','POST');
  assert.equal(touched,0,state+': no R2 access');
  if(state==='open'){
@@ -275,9 +276,11 @@ for(const state of ['legacy','r2','prepared','held','unknown-row','unknown-table
  assert.equal(res.status,200);assert.equal((await res.json()).authoritative,false,'stand-in: not authoritative');
 }
 for(const p of ['status','persons/director/michael-mann/identity','persons/actor/solo/identity'])assert.equal(body('open',p).authoritative,true,'open '+p);
+assert.deepEqual(Object.keys(body('open','status').authority),['state','generation']);assert.equal(body('open','status').authority.state,'open','AIR-690: status names the marker state it was served under');assert.equal(typeof body('open','status').authority.generation,'number');assert.equal(body('open','status').projector,undefined,'the retired projector block is not part of the status');
 assert.equal(body('open','persons/director/michael-mann/identity').bounded,true,'the namesake cap takes the bounded path');assert.equal(body('open','persons/actor/solo/identity').bounded,false,'a lone person takes the complete path');
-assert.equal(answers.open['films/tmdb:9'].status,404);
-assert.equal(body('open','persons').authoritative,undefined,'a view that never carried the flag does not gain one');
+assert.equal(answers.open.nothing.status,404);
+// AIR-689 (ADR 0223): a retired view answers its typed 410 in every marker state (refused or not), before the gate, and never touches R2.
+for(const state of STATES)for(const p of RETIRED){assert.equal(answers[state][p].status,410,state+' '+p);assert.deepEqual(body(state,p),{error:'gone',reason:'d1_operator_view_retired'},state+' '+p);for(const method of ['HEAD','POST'])assert.equal(answers[state][p+'#'+method].status,405,state+' '+method+' '+p+': HEAD and other methods keep the 405');}
 
 }
 

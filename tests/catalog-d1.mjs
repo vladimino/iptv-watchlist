@@ -53,35 +53,32 @@ const get=async(p,env={DB,FILM_PERSON_DB_OPTIONAL:'standin'},method='GET')=>{con
 // status
 let r=await get('status');
 assert.equal(r.status,200);
-assert.deepEqual({...r.body},{source:'d1',authoritative:false,films:3,persons:8,credits:5,candidates:0,predictions:1,ratings:1,lastImport:T,schemaVersion:3,projector:{mode:null,retired:true,schema:false,schemaVersion:3,projectionTables:[]}});
-// persons: search by original name, by localized name, role filter, keyset paging
-r=await get('persons?q=Pacino');assert.deepEqual(r.body.items.map(x=>x.id),['person:actor/al-pacino','person:tmdb_actor/555']);assert.equal(r.body.items[0].localName,'Аль Пачино');assert.equal(r.body.items[0].films,1);
-r=await get('persons?q='+encodeURIComponent('Пачино'));assert.deepEqual(r.body.items.map(x=>x.id),['person:actor/al-pacino']);
-r=await get('persons?role=director');assert.deepEqual(r.body.items.map(x=>x.id),['person:director/michael-mann','person:tmdb_director/1032']);assert.equal(r.body.items[0].films,3);
-r=await get('persons?source=tmdb');assert.deepEqual(r.body.items.map(x=>[x.id,x.source,x.key]),[['person:tmdb_actor/1032','tmdb','1032'],['person:tmdb_actor/555','tmdb','555'],['person:tmdb_director/1032','tmdb','1032']]);
-r=await get('persons?source=letterboxd&role=director');assert.deepEqual(r.body.items.map(x=>x.id),['person:director/michael-mann']);
-r=await get('persons?limit=2');assert.equal(r.body.items.length,2);assert.equal(r.body.nextCursor,r.body.items[1].id);
-const second=await get('persons?limit=2&cursor='+encodeURIComponent(r.body.nextCursor));assert.ok(second.body.items.every(x=>x.id>r.body.nextCursor));
-const all=await get('persons?limit=100');assert.equal(all.body.items.length,8);assert.equal(all.body.nextCursor,null);
-// person detail: filmography with localized title, year, prediction, rating, watchlist flag; the same slug under the other role
-r=await get('persons/director/michael-mann');
-assert.equal(r.status,200);assert.equal(r.body.name,'Michael Mann');assert.equal(r.body.key,'michael-mann');assert.equal(r.body.source,'letterboxd');
-assert.deepEqual(r.body.sameSlug,['person:actor/michael-mann'],'the TMDB id 1032 is another source, not the same key');
-assert.deepEqual(r.body.coCredited,[{id:'person:tmdb_director/1032',films:1}],'same name, same role, same Film: the provable cross-source match');
-assert.deepEqual(r.body.nameOnlyOtherSource,['person:tmdb_actor/1032'],'a name alone stays a candidate');
-assert.deepEqual(r.body.films.map(f=>[f.id,f.title,f.year,f.predicted,f.rating,f.inWatchlist]),[['film:tmdb:2','Collateral',2004,null,null,true],['film:tmdb:1','Схватка',1995,4.5,4,false],['film:tmdb:3','Ronin',null,null,null,false]]);
-r=await get('persons/actor/al-pacino');assert.deepEqual(r.body.externalIds,[{scheme:'letterboxd-role',value:'actor/al-pacino',trusted:false,conflicting:false}]);
-assert.equal((await get('persons/actor/nobody')).status,404);
-r=await get('persons/tmdb_director/1032');assert.equal(r.body.source,'tmdb');assert.deepEqual(r.body.sameSlug,['person:tmdb_actor/1032']);assert.deepEqual(r.body.coCredited,[{id:'person:director/michael-mann',films:1}]);assert.deepEqual(r.body.nameOnlyOtherSource,[]);assert.deepEqual(r.body.films.map(f=>f.id),['film:tmdb:3']);
-// film detail: credits with names, genres, ids; a retired id answers with its redirect
-r=await get('films/tmdb:1');
-assert.equal(r.body.title,'Схватка');assert.equal(r.body.originalTitle,'Heat');assert.deepEqual(r.body.genres,['crime']);
-assert.deepEqual(r.body.credits.map(c=>[c.id,c.role,c.localName]),[['person:director/michael-mann','director','Майкл Манн'],['person:actor/al-pacino','actor','Аль Пачино']]);
-assert.equal(r.body.prediction.predicted,4.5);assert.equal(r.body.rating.rating,4);assert.deepEqual(r.body.externalIds,[{scheme:'tmdb',value:'1',trusted:true,conflicting:false}]);
-assert.deepEqual((await get('films/old')).body,{redirect:'film:tmdb:1'});
-assert.equal((await get('films/tmdb:9')).status,404);
+assert.deepEqual(Object.keys(r.body),['source','authoritative','authority','schemaVersion','films','persons','credits'],'AIR-690: the narrowed Film/Person status carries no ratings, predictions, candidates, lastImport or projector');
+assert.deepEqual({...r.body,authority:{...r.body.authority}},{source:'d1',authoritative:false,authority:{state:'legacy',generation:r.body.authority.generation},schemaVersion:3,films:3,persons:8,credits:5});
+// AIR-689 (ADR 0223): the four operator views are retired with a typed 410 decided on the raw path, before the marker gate and before any storage access.
+const GONE={error:'gone',reason:'d1_operator_view_retired'};
+const retiredPaths=['persons','persons?q=Pacino&limit=2','persons/review','persons/review?limit=5','persons/director/michael-mann','persons/actor/al-pacino','persons/tmdb_director/1032','persons/tmdb_actor/555','films/tmdb:1','films/old','films/tmdb:9','films/tmdb_1','persons/actor/identity','persons/actor/%E0%A4%A','persons/actor/%zz','films/%E0%A4%A','films/%'];
+for(const path of retiredPaths){r=await get(path);assert.equal(r.status,410,path);assert.deepEqual({...r.body},GONE,path);}
+// No storage IO for a retired path: a binding that throws on any use, a missing binding, and a held or unreadable marker all still answer 410 (a retained path is gated as before).
+let storageTouches=0;
+const trapped=new Proxy({},{get(){storageTouches++;throw new Error('storage touched');}});
+for(const env of [{DB:trapped},{},{DB:trapped,BUCKET:trapped},{DB}]){for(const path of retiredPaths){r=await get(path,env);assert.equal(r.status,410,path);assert.deepEqual({...r.body},GONE,path);}}
+assert.equal(storageTouches,0,'a retired path touches no storage');
+const gate503=await get('persons/actor/al-pacino/identity',{DB:trapped});
+assert.equal(gate503.status,503,'a retained path stays behind the authority gate');
+assert.ok(storageTouches>0,'the control: the retained path does read through the gate');
+// HEAD and other methods keep 405; retired paths are not a method bypass.
+for(const method of ['HEAD','POST','PUT','DELETE','PATCH']){for(const path of ['persons','persons/review','persons/director/michael-mann','films/tmdb:1']){assert.equal((await get(path,{DB},method)).status,405,method+' '+path);}}
+// Unknown paths are not retired: 404 when the gates admit the request, 503 when the gate refuses. Only the exact shapes are matched.
+for(const path of ['persons/','films','films/','films/a/b','persons/writer/x','persons/actor','persons/actor/','persons/review/','persons/review/extra','persons/actor/al-pacino/other','persons/actor/a/b/identity','nothing','']){r=await get(path);assert.equal(r.status,404,path);assert.deepEqual({...r.body},{error:'Not found'},path);}
+assert.equal((await get('films/tmdb:1',{DB:trapped,FILM_PERSON_DB_OPTIONAL:undefined})).status,410);
+assert.equal((await get('nothing',{DB:trapped})).status,503,'an unknown path keeps the 503 of a refused gate');
+// The retained routes are not shadowed: status and identity (also for a person named like a route word) still answer.
+assert.equal((await get('status')).status,200);
+assert.equal((await get('persons/actor/review/identity')).status,404,'identity of an unknown person is still 404, not 410');
+assert.equal((await get('persons/director/michael-mann/identity')).status,200);
 // review queues
-r=await get('persons/review');
+r={body:JSON.parse(JSON.stringify(await vm.runInContext('d1PersonReview',ctx)(DB,{})))};// the function the credits script loads through vm; its HTTP route is retired
 assert.deepEqual({...r.body.totals},{crossRole:2,sharedName:2,sameName:1,coCredit:1},'one key under two roles is crossRole only');
 assert.deepEqual(r.body.crossRole.map(x=>[x.human,x.ids.sort()]),[['letterboxd:michael-mann',['person:actor/michael-mann','person:director/michael-mann']],['tmdb:1032',['person:tmdb_actor/1032','person:tmdb_director/1032']]]);
 assert.deepEqual(r.body.coCredit,[{letterboxd:'person:director/michael-mann',tmdb:'person:tmdb_director/1032',role:'director',name:'Майкл Манн',films:1}]);
@@ -120,7 +117,7 @@ assert.equal(r.body.reference.reviews.some(review=>review.reason==='same_name'),
 assert.deepEqual(r.body.films.actor.watchlist,[],'a shared name adds no film');
 assert.deepEqual(r.body.films.actor.catalog,[]);
 assert.equal(sqlite('select count(*) from person'),peopleBefore,'an identity read writes nothing');
-assert.equal((await get('persons/director/michael-mann')).body.name,'Michael Mann','the filmography route is unchanged');
+assert.equal((await get('persons/director/michael-mann')).status,410,'the filmography route is retired');
 // A retired movie id does not verify a film. A trusted TV id does, and it joins only the shared role.
 sqlite(`
 INSERT INTO film VALUES('film:tmdb:9',1,'tmdb:9','Retired','${T}'),('film:tv:1',1,'tmdb_tv:9687','The Odyssey','${T}'),('film:tmdb:8',1,'tmdb:8','Collision','${T}');
@@ -255,8 +252,43 @@ assert.ok(watched.stats.nameRows<=41,`namesake reads returned ${watched.stats.na
 assert.equal(countTable('person'),before.person+2+401+2+41+2);
 assert.equal(countTable('film'),before.film+801+1+1);
 assert.equal(countTable('film_person_credit'),before.credit+802+403+2);
+// AIR-690: status counts are unique Films, person role records and credit rows. Alias rows, redirects, legacy prediction/rating rows and the import receipt never move them.
+{
+ const before=(await get('status')).body;
+ sqlite(`INSERT INTO film_redirect VALUES('film:old2','film:tmdb:2','${T}'),('film:old3','film:tmdb:3','${T}');INSERT INTO film_external_id VALUES('film:tmdb:2','tmdb','2',1,0,NULL),('film:tmdb:3','tmdb','3',1,0,NULL);INSERT INTO prediction_current(film_id,taste_profile_version,predicted_rating,updated_at) VALUES('film:tmdb:2',1,3.5,'${T}'),('film:tmdb:3',1,2.5,'${T}');INSERT INTO actual_rating VALUES('film:tmdb:2',3.0,'letterboxd','${T}'),('film:tmdb:3',2.0,'letterboxd','${T}');`);
+ const after=(await get('status')).body;
+ assert.deepEqual(after,before,'legacy tables, aliases and redirects do not move the Film/Person counts');
+ assert.equal(after.films,Number(JSON.parse(sqlite('SELECT count(*) n FROM film;',true))[0].n));
+ assert.equal(after.persons,Number(JSON.parse(sqlite('SELECT count(*) n FROM person;',true))[0].n));
+ assert.equal(after.credits,Number(JSON.parse(sqlite('SELECT count(*) n FROM film_person_credit;',true))[0].n));
+ assert.notEqual(after.films,Number(JSON.parse(sqlite('SELECT count(*) n FROM film_redirect;',true))[0].n)+Number(JSON.parse(sqlite('SELECT count(*) n FROM film_external_id;',true))[0].n),'the unit is a Film, not an alias row');
+ assert.equal((await get('status',{DB,FILM_PERSON_DB_OPTIONAL:'standin'},'HEAD')).status,405,'HEAD keeps 405');
+ assert.equal((await get('status',{DB,FILM_PERSON_DB_OPTIONAL:'standin'},'PUT')).status,405);
+}
 // guards
 assert.equal((await get('status',{DB},'POST')).status,405);
 assert.equal((await get('status',{})).status,503);
 assert.equal((await get('nope')).status,404);
-console.log('Catalog D1 views: read-only source, status, person search/paging/role, filmography with same-slug link, film credits and redirect, TMDB persons and source filter, co-credit evidence vs name-only candidates, four review queues, method/binding/404 guards passed');
+// AIR-689 review P1: the owner-review overlay is a separate authority gate behind the Film/Person gate. The REAL src/owner-review-d1.js overlay (instrumented only to count calls) runs here with an admitted Film/Person
+// stand-in and an owner-review domain that refuses (no marker tables, no owner-review stand-in flag): a retired GET is a 410 and never reaches the overlay; an unknown GET keeps the typed 503 owner_review_unavailable
+// (the overlay refuses even a 404); a retained GET stays gated by it. With the owner-review stand-in admitted the same paths answer 404/200, so the 503 above is the overlay and nothing else.
+{
+ vm.runInContext(scoped('src/owner-review-d1.js','OwnerReviewReal'),ctx);
+ const realOverlay=vm.runInContext('OwnerReviewReal.overlayCatalogResponse',ctx);
+ let overlayCalls=0;
+ ctx.OwnerReview={overlayCatalogResponse:(env,response)=>{overlayCalls++;return realOverlay(env,response);}};
+ const refusing={DB,FILM_PERSON_DB_OPTIONAL:'standin'},admitted={DB,FILM_PERSON_DB_OPTIONAL:'standin',OWNER_REVIEW_DB_OPTIONAL:'standin'};
+ const OWNER_503={error:'storage_unavailable',reason:'owner_review_unavailable'};
+ for(const path of ['persons','persons/review','persons/director/michael-mann','films/tmdb:1','films/%E0%A4%A','persons/actor/%zz']){
+  for(const env of [refusing,admitted]){const before=overlayCalls;r=await get(path,env);assert.equal(r.status,410,path);assert.deepEqual({...r.body},GONE,path);assert.equal(overlayCalls,before,'a retired GET never calls the owner-review overlay: '+path);}
+ }
+ overlayCalls=0;
+ r=await get('nothing',refusing);assert.equal(r.status,503,'an unknown GET keeps the typed owner-review refusal');assert.deepEqual({...r.body},OWNER_503);assert.equal(overlayCalls,1);
+ for(const path of ['status','persons/director/michael-mann/identity']){const before=overlayCalls;r=await get(path,refusing);assert.equal(r.status,503,path);assert.deepEqual({...r.body},OWNER_503,path);assert.equal(overlayCalls,before+1,'a retained GET is still gated by the overlay: '+path);}
+ r=await get('nothing',admitted);assert.equal(r.status,404);assert.deepEqual({...r.body},{error:'Not found'});
+ assert.equal((await get('status',admitted)).status,200);
+ assert.equal((await get('persons/director/michael-mann/identity',admitted)).status,200);
+ for(const method of ['HEAD','POST'])assert.equal((await get('persons/review',admitted,method)).status,405,method+' keeps the existing 405 with the overlay admitted');
+ delete ctx.OwnerReview;
+}
+console.log('Catalog D1 views: read-only source, status, retired persons/films/review views answer a typed 410 before the gates and without storage IO, 405/404/503 unchanged, review queues still computed by d1PersonReview, identity and status retained');
