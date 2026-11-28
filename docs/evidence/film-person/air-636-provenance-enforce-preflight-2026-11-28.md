@@ -15,6 +15,8 @@
 | Other provenance tables | `film_metadata_field`, `film_metadata_history`, `film_metadata_owner_command`: 0 rows each | nothing written at `off` |
 | Feature flags | the registry read shows no provenance flag | the mode is the D1 control row |
 | Authority marker | `film_person_authority`: `mode = d1`, `cutover = open`, `generation = 2` | read at about 07:15 UTC |
+| EPG orchestration mode and lease | `epg_orchestration_document`: key `mode` = `cloudflare` (epoch 1, `completedAt` 2026-11-08T12:44:04Z, revision 2); key `lease` `released: true`, `releasedAt` 2026-11-27T16:06:06Z, `kind` `executor` | read at about 07:25 UTC. By `externalGate` in `src/epg-orchestration.js`, mode `cloudflare` answers the external HTTP/MCP metadata path with HTTP 409 `external_writer_fenced`; this is a code reading plus the live mode, not a request that was sent |
+| Projector window | `projector_window` id 1: `state = idle`, `owner` null, `expires_at = 0` | read at about 07:25 UTC |
 | Receipts | `canonical_write_receipt`: 4325 rows, 0 in `pending`, `failed` or `unknown` | read at about 06:50 UTC; the newest update was at 06:44:42 UTC, so receipts were still being written by other work |
 | Producer chain (control rows only) | newest `canonical_producer_chain` row `owner_state = complete`, lease expired 2026-11-27 17:29 UTC; newest `canonical_producer_run` `pass_state = passed`, `n_failed = 0`, `open_at_completion = 0` | these are **terminal control rows, not proof that no instance is live** |
 | Discovery executor status | `epg_pipeline_status`: executor `phase: stopped`, `liveness: complete`, programme run complete | a status report, not an instance inventory |
@@ -23,10 +25,10 @@
 
 ## Not established (open, not implied)
 
-- **Compatible deployment by commit ancestry.** The four ancestry checks of the runbook (PV1 `d5a1fe0`, PV3 `855d68e`, PV2 `4ce0074`, AIR-693 `2b13828`) were not run against the deployed commit, and the deployment was tied to its CI run by timing, not by the Version ID in the job log. Earlier today there were four deployments (01:16, 01:30, 06:28, 06:59 UTC); whether all are compatible, and so the date `T0` of the unbroken compatible run, was not computed. No eligibility time `T0 + B` is claimed.
+- **Pinned deployment, commit and guard check.** The ancestry checks (PV1 `d5a1fe0`, PV3 `855d68e`, PV2 `4ce0074`, AIR-693 `2b13828`) and the guard check on the deployed commit (the control-row assertion at commit, and a diff of the writer files since `2b13828`) were **not** run, and the deployment was tied to its CI run by timing, not by the Version ID in the job log. The runbook keeps the literal ADR 0214 rule, so a pin and `T_pin + B` would be computed for one exact deployment; none is claimed here, and the next merge to `main` replaces the candidate.
 - **Workflow instance inventory.** The six-status paginated listing for `iptv-epg`, `iptv-producer` and `iptv-catalog-enrichment` was **not read**. "No running instance" is therefore not established; only the terminal control rows above were seen.
 - **Wall-time bound.** Derived in the runbook (`B = 3,910 s` from the documented platform default step configuration, which the code does not enforce); not measured here.
-- **Authority and projector detail.** Not read: a held projector window, any recorded running owner operation, the ADR 0211 control generation (C1 has no control row), and Worker invocation logs for old-version writer invocations.
+- **Remaining authority and invocation coverage.** Not read: any recorded running owner operation, the ADR 0211 control generation (C1 has no control row), and invocation logs, which in any case cannot prove absence (they may lack version metadata). Coverage of in-flight writers is therefore **not established**; it fails closed in the runbook.
 - **`GET /api/admin/settings`.** No Access login was made; the `provenance` block was not read, and in any case it is a retained newest-500-tick aggregate, not an interval proof.
 - The prediction runner shows scheduled runs ending `interrupted` / `lease_expired`; a separate pipeline that is not a provenance prerequisite, noted only.
 
