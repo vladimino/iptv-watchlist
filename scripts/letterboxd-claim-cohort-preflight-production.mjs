@@ -46,7 +46,7 @@ export function parseArgs(argv){
   else if(flag==='--rows'){out.caps.rows=number(flag,value,CAP_CEILINGS.rows);i++;}
   else if(flag==='--pointer-inspect'){out.caps.pointerInspect=number(flag,value,CAP_CEILINGS.pointerInspect);i++;}
   else if(flag==='--candidates'){out.caps.candidates=number(flag,value,CAP_CEILINGS.candidates);i++;}
-  else throw new UsageError('usage: unknown option '+flag);
+  else throw new UsageError('usage: unknown option');
  }
  if(!out.out)throw new UsageError('usage: --out <private file outside the repository> is required');
  if(out.allArchives&&out.archives.length)throw new UsageError('usage: --witness-all-archives and --archive are mutually exclusive');
@@ -72,7 +72,7 @@ export function writePrivate(destination,text){
  const flags=fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|(fs.constants.O_NOFOLLOW||0);
  let fd;
  try{fd=fs.openSync(destination,flags,0o600);}catch{throw new ControlledError('private_output_unavailable');}
- try{fs.fchmodSync(fd,0o600);fs.writeSync(fd,text);}
+ try{fs.fchmodSync(fd,0o600);fs.writeFileSync(fd,text);}
  catch{throw new ControlledError('private_output_unavailable');}
  finally{fs.closeSync(fd);}
 }

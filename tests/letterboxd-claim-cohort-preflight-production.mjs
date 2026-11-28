@@ -26,7 +26,7 @@ assert.throws(()=>parseArgs(argv('--out','x','--archive','nothex')),/64-hex/);
 assert.throws(()=>parseArgs(argv('--out','x','--statements','0')),/1 to/);
 assert.throws(()=>parseArgs(argv('--out','x','--statements',String(CAP_CEILINGS.statements+1))),/1 to/,'a cap above its ceiling is refused');
 assert.throws(()=>parseArgs(argv('--out','x','--rows','1.5')),/integer/);
-assert.throws(()=>parseArgs(argv('--out','x','--unknown','1')),/unknown option/);
+assert.throws(()=>parseArgs(argv('--out','x','--secret-token-ABC','1')),error=>error instanceof UsageError&&error.message==='usage: unknown option'&&!error.message.includes('ABC'),'an unknown option is reported with a fixed message, never echoed');
 const parsed=parseArgs(argv('--out','/tmp/x.json','--archive',HEX,'--archive','b'.repeat(64),'--statements','400','--pointer-inspect','3000'));
 assert.deepEqual([parsed.out,parsed.archives.length,parsed.caps],['/tmp/x.json',2,{statements:400,pointerInspect:3000}]);
 assert.throws(()=>privatePath('docs/evidence/x.json'),/outside the repository/,'a relative path inside the repository is refused');

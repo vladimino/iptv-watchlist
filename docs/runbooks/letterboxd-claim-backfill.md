@@ -120,6 +120,27 @@ NODE_USE_ENV_PROXY=1 node scripts/letterboxd-claim-cohort-preflight-production.m
 - **What a result is.** `eligible_in_scope` is a planner `pass` plus a negative witness inside the stated scope. It is **not** production eligibility and **not** a GO. A complete capture is a capture decision, not an eligibility decision. The published-programme operator below derives only `published_epg_member` candidates and caps a call at 12 pairs, so its pins do not authorize a historical pointer cohort; a promotion of that cohort uses the existing ADR 0184 writer with an owner-approved exact allowlist, a full re-proof at write time and its own L3 GO.
 - First dated capture: [AIR-653 evidence](../evidence/film-person/air-653-cohort-preflight-2026-11-28.md).
 
+## Historical cohort operator for the AIR-653 pointer keys (dormant; its apply needs its own owner L3 GO)
+
+`scripts/letterboxd-claim-historical-production.mjs` writes the trusted `letterboxd` claims of the historical bridge-only pointer cohort through the **existing** ADR 0184 writer (`applyLetterboxdClaim`: the fenced `film_external_ids` unit in `addOnly` mode, receipt, revision compare-and-swap and write-time guards). It is not the published-programme operator above (that one derives only `published_epg_member` candidates and caps a call at 12 pairs, so its pins do not authorize this cohort), it discovers nothing and it widens no admission and renames no key. The pairs come only from the owner's **private allowlist**: the `eligible` list of the private file that the bounded capture wrote (`letterboxd-claim-cohort-preflight-production.mjs`), outside the repository. Outputs carry counts, reasons, digests and generations, never a lid, movie or Film id.
+
+```bash
+set -a; . ~/.config/iptv/d1-backfill.env; set +a
+# dry_run (default, read-only)
+NODE_USE_ENV_PROXY=1 node scripts/letterboxd-claim-historical-production.mjs --allowlist <private file>
+# apply (after the owner's GO on the pins of that dry_run)
+NODE_USE_ENV_PROXY=1 node scripts/letterboxd-claim-historical-production.mjs --allowlist <private file> --apply --confirm-go --request-id <id> \
+  --expected-film-person-generation <g> --expected-ratings-generation <g> --expected-count <n> --expected-digest <sha256>
+```
+
+- **dry_run** validates the allowlist (a regular file outside the repository, one pair per lid and per movie, 1 to 12 pairs), reads the Film/Person and Ratings markers, verifies the two required indexes, proves every pair again with the unchanged planner **and** the all-archives witness (any admission row of the movie, under any lid and archive, blocks) and prints `decision` (`eligible`, `already_current`, `unsafe`, `unknown`), counts, blockers and the four pins: the Film/Person generation, the Ratings generation, the count and the digest of the sorted `lid:tmdb` lines (the same digest the capture reports as `candidateDigest`).
+- **apply** needs `--confirm-go`, a request id and all four pins; it derives everything again and refuses with zero writes on a decision other than `eligible` or on any differing pin, checks the frozen markers once more before the first write and before every pair, and writes one pair after another. Inside each fenced batch the writer asserts its own guards **plus** the frozen Film/Person generation, the frozen Ratings generation and the absence of any admission row of that movie. It stops at the first pair that is not proved: no retry, no attempt on the rest. A repeat of the same request finds the claims stored and writes nothing.
+- **Readback** inside the apply answer: the reader that answered `404 Unknown film` (`catalogStartedFilm`) finds each proved pair, a fresh proof of every pair says `already`, the markers did not move, and only `film_external_id` grew, by the number of claims written (`film_alias`, `ratings_view` and `started_mark` did not move). Outcome `complete` only when all of it holds; anything else is `partial` and is settled by a new dry run, never by repeating the apply.
+- **Cap and window.** At most 12 pairs per run (the writer's own unit cap): a larger cohort is several runs, each with its own allowlist file, pins and request id, under the owner's GO. Run it between Ratings Sync slots: the Ratings generation moves with every natural Ratings write, and a moved pin refuses the run with zero writes.
+- **Exit codes:** 0 dry run or `complete`; 2 invalid input; 3 nothing written; 4 `partial`; 5 write state unknown; 1 other failure. Every apply answer carries the tracked `writeState`.
+- **Rollback.** A claim written by mistake is corrected case by case after a separate owner decision (ADR 0192); a code revert does not remove it. Nothing here writes a Started mark, Event, alias, rating or Film.
+- Tests: `tests/letterboxd-claim-historical-production.mjs` (offline, the real writer and planner over a sqlite world).
+
 ## When this applies
 
 A published programme lid has no trusted `letterboxd` claim in `film_external_id`, so `POST /api/started` answers `404 Unknown film`, while the Ratings projection ties that lid to one TMDB movie whose canonical Film exists. The cohort is whatever a fresh preflight finds; a number seen earlier is only a baseline.

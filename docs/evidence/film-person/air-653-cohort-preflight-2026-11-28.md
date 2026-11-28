@@ -34,3 +34,21 @@ The AIR-652 capture and its oracle (the unchanged claim planner on a private sql
 ## Next
 
 A fresh bounded capture with the corrected tool and a proven witness scope (a named archive digest, or the explicit conservative all-archives mode, which treats any admission of the movie as blocking or unknown), then, only for a proven cohort, an executable plan on the existing ADR 0184 writer with a full re-proof at write time and a separate owner GO; zero eligible is no operation.
+
+## Second capture, with the corrected tool and the all-archives witness (28 Nov 2026 10:31:40-10:32:09 UTC)
+
+Run from `main` `b545b4d` (the corrected tool of PR #1078, delivered: post-merge CI/CD run 46135186644, the three test jobs and `Deploy to Cloudflare` success at 10:30 UTC), read-only, with `--witness-all-archives` and a fresh private output file outside the repository (mode 600). The two required indexes were verified from `sqlite_master` before any other read, so no index is listed as a blocker; the two standing limitations (the unbounded planner, evaluated only on the private snapshot; the witness is current state) are reported.
+
+| Fact | Value |
+| --- | --- |
+| Decision | `complete`; the read set did not move between the two passes |
+| Scope | `all_archives` (the witness set is every admission of the movie across all Films and archives; the same lid and movie blocks; an admission under another lid stays `unknown`) |
+| Classes | `eligible_in_scope / planner_pass_and_negative_witness_all_archives` **15 of 15**; ineligible 0; unknown 0 |
+| Cohort | 15 keys on 15 distinct Films (`bridge_resolved` 15, unresolved owners 0); bridge-only 4, dual 11, differing 5; 410 pointer keys excluded as already claimed |
+| Witness | no `film_rated_admission` row for any of the 15 movies (the section digest is the digest of the empty list) |
+| Work | 99 statements (of 300), 4,991 rows reserved (of 6,000), 850 pointer rows over both discoveries; 100 requests, 5,540 rows read as reported by D1, **0 rows written** |
+| Digests | read set `052beb7dc02fa7e91e71c41e6d8ee4982b459f6ba0f8eccdc487bc99044610d5`; candidate digest of the 15 sorted `lid:tmdb` lines `8e49a99594ce9cf5740304272bd80fb4f6eb5a8b9968ec02d73340c9bb993653`; sections: markers `ce623a64…`, documents `e1eaa729…`, claims `0e556edd…`, owner `e55b5c7a…`, views `bb153365…`, witness `4f53cda1…`, pointers `9464a0b3…` |
+
+Against the 08:57 capture the claims, owner, views and witness digests are the same; the markers, documents and pointers digests differ because the stores moved naturally in between (the Ratings generation and documents after the 09:30 UTC Sync slot; the prediction pointers). That is movement between two runs, not inside one; it means nothing of either snapshot can be used by a writer without a fresh proof at write time.
+
+**What this still is not.** `eligible_in_scope` is a planner `pass` plus the absence of any admission row of the movie in the current state; a deleted admission row and an inferred link that never had one are not seen. It is not production eligibility and not a GO, and the allowlist exists only in the private file. The published-programme backfill operator does not cover this cohort; the historical operator (`scripts/letterboxd-claim-historical-production.mjs`, [runbook](../../runbooks/letterboxd-claim-backfill.md#historical-cohort-operator-for-the-air-653-pointer-keys-dormant-its-apply-needs-its-own-owner-l3-go)) re-proves every pair at write time and needs its own owner L3 GO.
