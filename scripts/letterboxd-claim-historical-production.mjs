@@ -7,24 +7,29 @@
 // cohort), a cohort discovery (the pairs come from the owner's PRIVATE allowlist, the output of the bounded capture), an admission change or a key renaming. The repository and every output hold
 // counts, reasons, digests and generations, never a lid, movie id or Film id.
 //
-// PROOF IS BOUNDED AND STRICT. dry_run reuses the accepted bounded capture (`preflight` of letterboxd-claim-cohort-preflight.mjs, on exactly the given pairs, the all-archives witness, one shared
-// budget, the unchanged planner only on a private snapshot, a second pass that fences movement); the two required indexes are verified by their exact definitions. Every read of this operator
-// is STRICT (a REST answer without its result array is an error, never an empty table), so an unreadable row can never become a negative proof: it is `unknown` and nothing is written.
-// The live planner runs only inside the writer, at write time, for one pair at a time; before each pair the link-index document is measured against the AIR-647 caps, and the run is at most
-// LETTERBOXD_CLAIM_UNIT_CAP pairs, so the writer's live reads per run are bounded by (pairs x the writer's planner passes x that capped document), not by the size of the store.
+// EVERY READ IS STRICT AND BOUNDED AT THE READ. All reads of this operator, of the writer and of the readback go through one operator-scoped binding (`boundedBinding`) over the strict REST binding
+// (a REST answer without its result array is an error, never an empty table): a document read of the planner is replaced by the accepted ATOMIC bounded document statement of the capture (parts,
+// bytes and etag measured and the body joined in ONE statement, so a document that grew after any earlier measurement is rejected before its body is materialized); every other read is capped at
+// the capture's list cap plus one row and an overflow is an error; the statements, rows and bytes of the whole execution (dry run or apply, capture, writer, readback) are charged to one explicit
+// budget derived from the pair count and the AIR-647 document caps, and reported. dry_run reuses the accepted bounded capture on exactly the given pairs (the all-archives witness, one shared budget, the
+// unchanged planner only on a private snapshot, a second pass that fences movement; both required indexes verified by their exact definitions). The live planner runs only inside the writer at write time,
+// one pair at a time, behind this binding; at most LETTERBOXD_CLAIM_UNIT_CAP pairs per run.
 //
-// APPROVAL FENCE. The approved pins (Film/Person generation, schema version, owner-review generation and writes, the Ratings generation, and per pair the absence of any admission row of the movie)
-// are bound as `approvedPins` of the existing receipt protocol: they are asserted in the RESERVATION of the receipt and in the claim's batch, not only in the latter. A change of any of them before
-// the reservation refuses the pair before a receipt exists. Any receipt of this origin for these Films that is not applied (a prior attempt) makes the cohort `unsafe`: a partial or unknown outcome
-// is never retried or replayed by this operator; recovery is a separately approved decision with a new dry run.
+// APPROVAL FENCE AND NO REPLAY. The approved pins (Film/Person generation, schema version, owner-review generation and writes) are bound as `approvedPins` of the existing receipt protocol with four
+// per-pair conditions asserted ATOMICALLY in the receipt's RESERVATION and in the claim's batch: the frozen Ratings generation, the absence of any admission row of the movie, the captured Film still
+// owning the movie as its trusted claim, and no OTHER unresolved receipt of this origin on that Film. The call also carries the captured Film (`expectedFilmId`: a fresh proof that names another Film is
+// refused before anything is reserved) and `noReplay` (an id that already has an unsettled receipt is never replayed, settled or retried: it is refused before anything is read or written for it). A prior
+// non-applied receipt of this origin on these Films makes the cohort `unsafe` at dry run; a partial or unknown outcome is never retried by this operator, and recovery is a separately approved decision with a new
+// dry run. No registered reconciliation path replays these receipts (the reconcilers are origin-scoped and none registers `film_external_ids` for this origin).
 //
-// dry_run (default, read-only): prints the decision and the seven pins of an apply: Film/Person generation, Ratings generation, schema version, owner-review generation, owner-review writes,
-// count and the digest of the sorted `lid:tmdb` lines (the capture's `candidateDigest`).
-// apply (`--apply --confirm-go --request-id <id>` plus the seven `--expected-*` pins): derives everything again, refuses with zero writes on any difference, checks the frozen markers before the first
-// write and before every pair, writes ONE pair after another and stops at the first that is not proved. Then a STRICT readback of every pair (see `verifyPair`); any unreadable proof is `unverified`,
+// dry_run (default, read-only): prints the decision and the seven pins of an apply: Film/Person generation, Ratings generation, schema version, owner-review generation, owner-review writes, count and the
+// digest of the sorted `lid:tmdb` lines (the capture's `candidateDigest`).
+// apply (`--apply --confirm-go --request-id <id>` plus the seven `--expected-*` pins): derives everything again, refuses with zero writes on any difference, checks the frozen markers before the first write and
+// before every pair, writes ONE pair after another and stops at the first that is not proved. Then a STRICT readback of every pair (`verifyPair`, `targetState`); any unreadable or failed proof is `unverified`,
 // never `complete`; the final marker fence runs AFTER all reads.
-// WRITES ARE TWO KINDS, reported separately: claim rows (`claimsWritten`) and receipt rows (`receipts`): a pair refused inside the claim batch can still leave its reserved receipt.
-// At most LETTERBOXD_CLAIM_UNIT_CAP pairs per run (the writer's own unit cap); a larger cohort is several runs, each with its own allowlist file, pins and request id under the owner's GO.
+// WRITES ARE TWO KINDS, reported separately: claim rows and receipt rows (`receipts.created`): a pair refused inside the claim batch can still leave its reserved receipt, so a rolled-back claim batch is not
+// zero database writes. `writerReportedWritten` is what the writer answered; `claimsVerifiedWritten` is what the readback confirmed (null when the readback is incomplete, never inferred from a lost reply). The
+// tracked write state latches uncertainty: a later successful write never hides an earlier unknown one.
 // Run it between Ratings Sync slots: the Ratings generation moves with every natural Ratings write, and a moved pin refuses the run with zero writes.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,9 +39,9 @@ import {cohortDigest} from '../src/letterboxd-claim-backfill.js';
 import {catalogStartedFilm} from '../src/canonical-catalog-reader.js';
 import {FILM_EXTERNAL_IDS_OPERATION,filmExternalIdsDigest} from '../src/canonical-film-external-ids-producer.js';
 import {producerRequestId} from '../src/canonical-producer-adapters.js';
-import {LINK_DOCUMENT_MAX_PARTS,LINK_DOCUMENT_MAX_BYTES} from '../src/film-aggregate.js';
+import {LINK_DOCUMENT_MAX_PARTS,LINK_DOCUMENT_MAX_BYTES,FACT_RECORD_MAX_PARTS,FACT_RECORD_MAX_BYTES} from '../src/film-aggregate.js';
 import {database,many,one,readAuthority} from '../src/film-person-authority.js';
-import {preflight,DEFAULT_CAPS} from './letterboxd-claim-cohort-preflight.mjs';
+import {preflight,DEFAULT_CAPS,BOUNDED_DOCUMENTS_SQL} from './letterboxd-claim-cohort-preflight.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const HISTORICAL_MAX=LETTERBOXD_CLAIM_UNIT_CAP;
@@ -45,12 +50,80 @@ const LID=/^[A-Za-z0-9_-]{1,80}$/;
 const TMDB=/^[1-9]\d{0,11}$/;
 const HEX64=/^[0-9a-f]{64}$/;
 const LINKS_KEY='letterboxd/facts/links.json';
+const FACT_KEY=/^letterboxd\/facts\/films\/[A-Za-z0-9_-]{1,80}\.json$/;
 const ALL_ARCHIVES={invariant:'diary_first_lb_record_with_inferred_import_admission',allArchives:true};
-const COUNT_TABLES=['film_external_id','film_alias','ratings_view','started_mark'];
+const RECEIPT_HISTORY_MAX=20;
 export const PIN_NAMES=['filmPersonGeneration','ratingsGeneration','schemaVersion','ownerReviewGeneration','ownerReviewWrites','count','digest'];
 
 export class HistoricalStop extends Error{constructor(reason,details={}){super(reason);this.name='HistoricalStop';this.reason=reason;this.details=details;}}
+export class ReadStop extends Error{constructor(code){super(code);this.name='ReadStop';this.code=code;}}
 const controlled=value=>typeof value==='string'&&/^[a-z0-9_:.-]{1,80}$/.test(value)?value:'unclassified';
+
+// ---- the explicit read budget and the bounded binding ------------------------------------------------------------------------------------------------
+// Limits derived from what one run can legitimately read, not product caps: the statements measured for a whole apply (about 145 per pair plus the capture, twice) with a margin; rows and bytes from the
+// per-statement row cap and the AIR-647 caps of the two documents the planner reads (three planner passes per pair: the proof, the write-time re-plan and the readback).
+export const READ_ROWS_MAX=DEFAULT_CAPS.list;
+export const readLimits=pairs=>({statements:1000+250*pairs,rows:20000+1000*pairs,bytes:4*1024*1024+pairs*3*(LINK_DOCUMENT_MAX_BYTES+FACT_RECORD_MAX_BYTES)});
+export function newReadBudget(pairs){
+ const limits=readLimits(pairs),used={statements:0,rows:0,bytes:0};
+ const take=(name,amount)=>{used[name]+=amount;if(used[name]>limits[name])throw new ReadStop('read_budget_exhausted');};
+ return {limits,used,statement:amount=>take('statements',amount),rows:amount=>take('rows',amount),bytes:amount=>take('bytes',amount),report:()=>({statements:used.statements,rows:used.rows,bytes:used.bytes,limits})};
+}
+const BOUND=Symbol.for('iptv.historical.bounded');
+const PART_SQL='SELECT part, body, etag FROM ratings_document WHERE key=? ORDER BY part';
+const LIMIT_TAIL=/\blimit\s+(?:\?|\d+)\s*;?\s*$/i;
+// The planner's document read, replaced by the accepted atomic statement (see BOUNDED_DOCUMENTS_SQL): over the caps the statement itself returns no body, so nothing oversized is ever materialized.
+async function readDocumentParts(inner,budget,key){
+ const link=key===LINKS_KEY;
+ if(!link&&!FACT_KEY.test(String(key)))throw new ReadStop('read_unbounded_document_key');
+ const maxParts=link?LINK_DOCUMENT_MAX_PARTS:FACT_RECORD_MAX_PARTS,maxBytes=link?LINK_DOCUMENT_MAX_BYTES:FACT_RECORD_MAX_BYTES;
+ const rows=(await inner.prepare(BOUNDED_DOCUMENTS_SQL).bind(JSON.stringify([key]),maxParts,maxBytes).all()).results;
+ if(!Array.isArray(rows))throw new ReadStop('read_malformed');
+ if(!rows.length)return [];
+ const head=rows[0];
+ if(Number(head.parts)>maxParts||Number(head.bytes)>maxBytes)throw new ReadStop('read_over_cap');
+ if(Number(head.etags)!==1||rows.length!==Number(head.parts)||rows.some((item,index)=>item.part==null||Number(item.part)!==index||item.body==null))throw new ReadStop('read_malformed');
+ budget.rows(rows.length);budget.bytes(JSON.stringify(rows).length);
+ return rows.map(item=>({part:Number(item.part),body:item.body,etag:item.etag}));
+}
+export function boundedBinding(inner,budget){
+ if(inner&&inner[BOUND])return inner;
+ const read=async(sql,params,mode)=>{
+  budget.statement(1);
+  if(sql===PART_SQL)return readDocumentParts(inner,budget,params[0]);
+  const cap=READ_ROWS_MAX+1;
+  let text=sql,bind=params;
+  if(sql!==BOUNDED_DOCUMENTS_SQL&&!LIMIT_TAIL.test(sql)){text=sql.replace(/;?\s*$/,'')+' LIMIT ?';bind=[...params,mode==='first'?1:cap];}
+  const rows=(await inner.prepare(text).bind(...bind).all()).results;
+  if(!Array.isArray(rows))throw new ReadStop('read_malformed');
+  if(mode==='all'&&sql!==BOUNDED_DOCUMENTS_SQL&&rows.length>cap)throw new ReadStop('read_over_cap');
+  budget.rows(rows.length);budget.bytes(JSON.stringify(rows).length);
+  return rows;
+ };
+ return {
+  [BOUND]:true,budget,
+  batch:async statements=>{budget.statement(statements.length);return inner.batch(statements);},
+  prepare(sql){
+   const text=String(sql),isRead=/^\s*(?:with|select)\b/i.test(text);
+   return {bind(...params){
+    if(!isRead){const bound=inner.prepare(text).bind(...params);return {text:bound.text,first:()=>bound.first(),all:()=>bound.all(),run:()=>{budget.statement(1);return bound.run();}};}
+    return {
+     get text(){return inner.prepare(text).bind(...params).text;},
+     async first(){return (await read(text,params,'first'))[0]??null;},
+     async all(){return {results:await read(text,params,'all')};},
+     run:async()=>{throw new ReadStop('read_cannot_run');},
+    };
+   }};
+  },
+ };
+}
+// Wraps the caller's env once (idempotent): everything below reads through it and is charged to ONE budget.
+export function withBounds(env,pairs){
+ const db=database(env);
+ if(db&&db[BOUND])return {env,budget:db.budget};
+ const budget=newReadBudget(pairs);
+ return {env:{...env,DB:boundedBinding(db,budget)},budget};
+}
 
 // STRICT reads: a REST answer without its result array is an error (D1Error), never an empty result. Writes and batches go through the published binding unchanged (one tracked REST request per statement
 // or batch, `retries: 0`). Exported for the tests of the real REST fault paths.
@@ -71,6 +144,14 @@ export async function strictBinding(adapter){
   },
  };
 }
+// The tracked write state LATCHES uncertainty: `trackProductionWrites` records the last attempt only, so a later successful write (a receipt settlement) would hide an earlier unknown one.
+export async function trackWrites(adapter,ctx){
+ const {trackProductionWrites}=await import('./published-epg-production.mjs');
+ const tracked=trackProductionWrites(adapter,ctx);
+ const guarded=run=>async(...args)=>{try{return await run(...args);}catch(error){ctx.everUncertain=true;throw error;}};
+ return {...tracked,run:guarded(tracked.run),executeRendered:guarded(tracked.executeRendered)};
+}
+export const writeStateOf=ctx=>ctx?.everUncertain?'unknown':(ctx?.writeState??'none');
 
 // The allowlist: the private result of the bounded capture (`{eligible:[{lid,tmdb}]}`) or a bare list. Pure and strict: one pair per lid and per movie, 1 to HISTORICAL_MAX pairs.
 export function parseAllowlist(text){
@@ -89,7 +170,7 @@ export function parseAllowlist(text){
  return pairs.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
 }
 
-// The authorities of the frozen snapshot, read as one record (strict reads; a missing row is a missing authority, never a default).
+// The authorities of the frozen snapshot, read as one record (strict, bounded reads; a missing row is a missing authority, never a default).
 async function readMarkers(env,db){
  const gate=await readAuthority(env);
  const ratings=await one(db,'SELECT mode,cutover,generation FROM ratings_domain_authority WHERE id=1');
@@ -103,24 +184,34 @@ async function readMarkers(env,db){
  };
 }
 const sameMarkers=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
-// The approved pins of one pair, for the receipt protocol (see approvedPinsOf in src/canonical-mutations.js): the fixed Film/Person, schema and owner-review pins plus two extra conditions asserted in the SAME
-// batches: the frozen Ratings generation and the conservative all-archives witness (any admission row of this movie, under any lid and archive, refuses).
-const pinsOf=(markers,movie)=>({
+// The request id and content digest the writer derives for one pair (origin, operation, event, target, content): the same values the receipt is verified against.
+async function receiptIdentity({pair,filmId,event}){
+ const digest=await filmExternalIdsDigest({id:filmId,schemes:['letterboxd'],addOnly:true,externalIds:claimExternalIds(pair)});
+ const requestId=await producerRequestId({origin:LETTERBOXD_CLAIM_ORIGIN,operation:FILM_EXTERNAL_IDS_OPERATION,event,target:{kind:'film',id:filmId},digest});
+ return {digest,requestId};
+}
+// The approved pins of one pair, for the receipt protocol (see approvedPinsOf in src/canonical-mutations.js): the fixed Film/Person, schema and owner-review pins plus four conditions asserted in the SAME
+// batches (the receipt's reservation and the claim's batch): the frozen Ratings generation; the conservative all-archives witness (any admission row of this movie refuses); the captured Film still owning the
+// movie as its trusted claim; and no OTHER unresolved receipt of this origin on that Film (an atomic no-prior-attempt condition: the pair's own receipt is excluded by its id).
+const pinsOf=(markers,{movie,filmId,requestId})=>({
  filmPersonGeneration:markers.filmPerson.generation,schemaVersion:markers.schema.version,ownerReviewGeneration:markers.ownerReview.generation,ownerReviewWrites:markers.ownerReview.writes,
  guards:[
   {sql:"EXISTS (SELECT 1 FROM ratings_domain_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)",params:[markers.ratings.generation]},
   {sql:'NOT EXISTS (SELECT 1 FROM film_rated_admission WHERE tmdb=?)',params:[movie]},
+  {sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0)",params:[filmId,movie]},
+  {sql:"NOT EXISTS (SELECT 1 FROM canonical_write_receipt WHERE target_kind='film' AND target_id=? AND origin=? AND state<>'applied' AND request_id<>?)",params:[filmId,LETTERBOXD_CLAIM_ORIGIN,requestId]},
  ],
 });
 const pinValues=(markers,count,digest)=>({filmPersonGeneration:markers.filmPerson.generation,ratingsGeneration:markers.ratings.generation,schemaVersion:markers.schema.version,ownerReviewGeneration:markers.ownerReview.generation,ownerReviewWrites:markers.ownerReview.writes,count,digest});
 
-// Read-only, bounded, strict. {decision:'eligible'|'already_current'|'unsafe'|'unknown', counts, blockers:[{reason,count}], markers, expect, results, work}. `results` and `markers` stay inside the trusted process.
-export async function inspect(env,pairs){
+// Read-only, bounded, strict. {decision:'eligible'|'already_current'|'unsafe'|'unknown', counts, blockers:[{reason,count}], markers, expect, results, work, reads}. `results` and `markers` stay inside the trusted process.
+export async function inspect(rawEnv,pairs){
+ const {env,budget}=withBounds(rawEnv,pairs.length);
  const db=database(env);
  const out={decision:'unsafe',counts:{pairs:pairs.length,would_write:0,already:0,refused:0,unknown:0,duplicate:0},blockers:[],markers:null,expect:null,results:[],work:null};
  const reasons={};
  const bump=reason=>{reasons[reason]=(reasons[reason]||0)+1;};
- const done=decision=>{out.decision=decision;out.blockers=Object.keys(reasons).sort().map(reason=>({reason,count:reasons[reason]}));return out;};
+ const done=decision=>{out.decision=decision;out.blockers=Object.keys(reasons).sort().map(reason=>({reason,count:reasons[reason]}));out.reads=budget.report();return out;};
  if(!db){bump('film_person_unavailable');return done('unknown');}
  let markers;
  try{markers=await readMarkers(env,db);}
@@ -144,9 +235,9 @@ export async function inspect(env,pairs){
  const filmIds=out.results.map(item=>item.filmId).filter(Boolean);
  if(filmIds.length){
   let prior;
-  try{prior=await many(db,"SELECT request_id,state FROM canonical_write_receipt WHERE target_kind='film' AND target_id IN (SELECT value FROM json_each(?)) AND origin=? AND state<>'applied' LIMIT ?",[JSON.stringify(filmIds),LETTERBOXD_CLAIM_ORIGIN,pairs.length*4+1]);}
+  try{prior=await many(db,"SELECT request_id,state FROM canonical_write_receipt WHERE target_kind='film' AND target_id IN (SELECT value FROM json_each(?)) AND origin=? AND state<>'applied' LIMIT ?",[JSON.stringify(filmIds),LETTERBOXD_CLAIM_ORIGIN,READ_ROWS_MAX+1]);}
   catch(error){bump(controlled(error?.code||'film_person_unavailable'));return done('unknown');}
-  if(prior.length)for(let at=0;at<prior.length;at++)bump('prior_receipt_unresolved');
+  for(let at=0;at<prior.length;at++)bump('prior_receipt_unresolved');
  }
  out.expect=pinValues(markers,pairs.length,await cohortDigest(pairs));
  // The snapshot must still be the one read at the start; a moved marker makes every pin stale.
@@ -159,27 +250,37 @@ export async function inspect(env,pairs){
  return done('unsafe');
 }
 
-const publicView=inspected=>({decision:inspected.decision,counts:inspected.counts,blockers:inspected.blockers,markers:inspected.markers,expect:inspected.expect,work:inspected.work});
+const publicView=inspected=>({decision:inspected.decision,counts:inspected.counts,blockers:inspected.blockers,markers:inspected.markers,expect:inspected.expect,work:inspected.work,reads:inspected.reads});
 
-// Per-target and per-table state around the run. Counts are a coarse tripwire; the exact evidence is the per-target state and the per-pair verification below.
-async function sideState(db,filmIds){
- const tables={};
- for(const table of COUNT_TABLES){
-  const present=await one(db,"SELECT 1 AS x FROM sqlite_master WHERE type='table' AND name=?",[table]);
-  tables[table]=present?Number((await one(db,'SELECT COUNT(*) AS n FROM '+table))?.n):'absent';
- }
- const revisions={},receipts={};
- for(const id of filmIds){
-  revisions[id]=Number((await one(db,"SELECT revision FROM canonical_revision WHERE kind='film' AND id=?",[id]))?.revision??0);
-  receipts[id]=(await many(db,"SELECT state FROM canonical_write_receipt WHERE target_kind='film' AND target_id=? AND origin=? LIMIT 20",[id,LETTERBOXD_CLAIM_ORIGIN])).map(row=>row.state).sort().join(',');
- }
- return {tables,revisions,receipts};
+// SCOPED evidence around one pair (indexed, bounded reads only): the Film's revision, its receipts of this origin (history overflow is an error), its row, its external ids, its aliases, the pair's projection rows
+// and its started marks (an absent table is proved absent before and after). No table-wide count is read or claimed as evidence.
+async function targetState(db,pair,filmId){
+ const receiptRows=await many(db,'SELECT request_id,state FROM canonical_write_receipt WHERE target_kind=\'film\' AND target_id=? AND origin=? ORDER BY request_id LIMIT ?',[filmId,LETTERBOXD_CLAIM_ORIGIN,RECEIPT_HISTORY_MAX+1]);
+ if(receiptRows.length>RECEIPT_HISTORY_MAX)throw new ReadStop('read_over_cap');
+ const startedPresent=await one(db,"SELECT 1 AS x FROM sqlite_master WHERE type='table' AND name='started_mark'");
+ const stamp=rows=>JSON.stringify(rows);
+ return {
+  revision:Number((await one(db,"SELECT revision FROM canonical_revision WHERE kind='film' AND id=?",[filmId]))?.revision??0),
+  receiptIds:receiptRows.map(row=>row.request_id),receiptStates:receiptRows.map(row=>row.state),
+  film:stamp(await one(db,'SELECT contract_version,canonical_identity,original_title FROM film WHERE id=?',[filmId])),
+  externalIds:(await many(db,'SELECT scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=?',[filmId])).map(row=>row.scheme+':'+row.value+':'+row.trusted+':'+row.conflicting).sort(),
+  aliases:stamp(await many(db,'SELECT kind,value FROM film_alias WHERE film_id=? ORDER BY kind,value',[filmId])),
+  view:stamp(await many(db,'SELECT alias_id,fact_key,watched,actual_rating,watchlist,rating_known FROM ratings_view WHERE alias_id IN (?,?) ORDER BY alias_id',[pair.lid,'tmdb_'+pair.tmdb])),
+  started:startedPresent?stamp(await many(db,'SELECT id,started,rev FROM started_mark WHERE id IN (?,?,?) ORDER BY id',[pair.lid,filmId,'tmdb_'+pair.tmdb])):'absent',
+ };
+}
+// Exactly the effects of the existing writer on one target: for a written pair its revision plus one, one more receipt (applied) and the one new external id; for any other pair nothing.
+function effectsExact(before,after,{wrote,pair}){
+ const claim='letterboxd:'+pair.lid+':1:0';
+ const newReceipts=after.receiptIds.filter(id=>!before.receiptIds.includes(id));
+ const receiptsOk=wrote?newReceipts.length===1&&after.receiptIds.length===before.receiptIds.length+1&&after.receiptStates[after.receiptIds.indexOf(newReceipts[0])]==='applied':JSON.stringify(after.receiptIds)===JSON.stringify(before.receiptIds)&&JSON.stringify(after.receiptStates)===JSON.stringify(before.receiptStates);
+ const idsOk=JSON.stringify(after.externalIds)===JSON.stringify(wrote?[...before.externalIds,claim].sort():before.externalIds);
+ return after.revision===before.revision+(wrote?1:0)&&receiptsOk&&idsOk&&after.film===before.film&&after.aliases===before.aliases&&after.view===before.view&&after.started===before.started;
 }
 
-// The STRICT readback of one pair. Every field is read from the store; a throw is not a pass (the caller reports `unverified`). For a pair this run WROTE the exact applied receipt is checked too: the request id
-// the writer derives from (origin, operation, event, target, content digest), the operation, origin, target, the content digest, state `applied` and the applied revision (the Film's revision before the run plus one, equal to its
-// revision now).
-async function verifyPair(env,db,{pair,filmId,revisionBefore,written,event,at}){
+// The STRICT readback of one pair. Every field is read from the store through the bounded binding; a throw is not a pass (the caller reports `unverified`). For a pair this run WROTE the exact applied receipt is checked
+// too: the request id and content digest the writer derives, the operation, origin, target, state `applied` and the applied revision (the Film's revision before the run plus one, equal to its revision now).
+async function verifyPair(env,db,{pair,filmId,revisionBefore,written,event}){
  const checks={claim:false,receipt:written?false:null,reader:false,reproof:false};
  const claims=await many(db,"SELECT film_id,trusted,conflicting,provenance_json FROM film_external_id WHERE scheme='letterboxd' AND value=? LIMIT 3",[pair.lid]);
  if(claims.length===1){
@@ -187,11 +288,10 @@ async function verifyPair(env,db,{pair,filmId,revisionBefore,written,event,at}){
   checks.claim=claims[0].film_id===filmId&&claims[0].trusted===1&&claims[0].conflicting===0&&provenance?.source==='ratings_alias_bridge'&&String(provenance?.tmdb)===pair.tmdb&&provenance?.adr==='0184';
  }
  if(written){
-  const content=await filmExternalIdsDigest({id:filmId,at,schemes:['letterboxd'],addOnly:true,externalIds:claimExternalIds({lid:pair.lid,tmdb:pair.tmdb})});
-  const requestId=await producerRequestId({origin:LETTERBOXD_CLAIM_ORIGIN,operation:FILM_EXTERNAL_IDS_OPERATION,event,target:{kind:'film',id:filmId},digest:content});
+  const {digest,requestId}=await receiptIdentity({pair,filmId,event});
   const receipt=await one(db,'SELECT request_id,operation,origin,target_kind,target_id,content_digest,state,applied_revision,error_class FROM canonical_write_receipt WHERE request_id=?',[requestId]);
   const revisionNow=Number((await one(db,"SELECT revision FROM canonical_revision WHERE kind='film' AND id=?",[filmId]))?.revision??-1);
-  checks.receipt=!!receipt&&receipt.operation===FILM_EXTERNAL_IDS_OPERATION&&receipt.origin===LETTERBOXD_CLAIM_ORIGIN&&receipt.target_kind==='film'&&receipt.target_id===filmId&&receipt.content_digest===content&&receipt.state==='applied'&&receipt.error_class==null&&Number(receipt.applied_revision)===revisionBefore+1&&revisionNow===revisionBefore+1;
+  checks.receipt=!!receipt&&receipt.operation===FILM_EXTERNAL_IDS_OPERATION&&receipt.origin===LETTERBOXD_CLAIM_ORIGIN&&receipt.target_kind==='film'&&receipt.target_id===filmId&&receipt.content_digest===digest&&receipt.state==='applied'&&receipt.error_class==null&&Number(receipt.applied_revision)===revisionBefore+1&&revisionNow===revisionBefore+1;
  }
  const found=await catalogStartedFilm(env,pair.lid);
  checks.reader=found?.state==='found'&&found.film?.filmId===filmId&&String(found.film?.tmdb)===pair.tmdb;
@@ -200,15 +300,9 @@ async function verifyPair(env,db,{pair,filmId,revisionBefore,written,event,at}){
  return checks;
 }
 
-// The link-index document measured against the AIR-647 caps BEFORE each pair's live planner reads: strict, one statement.
-export async function linkIndexWithinCaps(db){
- const row=await one(db,'SELECT COUNT(*) AS parts,COALESCE(SUM(length(CAST(body AS BLOB))),0) AS bytes FROM ratings_document WHERE key=?',[LINKS_KEY]);
- return !!row&&Number(row.parts)>=1&&Number(row.parts)<=LINK_DOCUMENT_MAX_PARTS&&Number(row.bytes)<=LINK_DOCUMENT_MAX_BYTES;
-}
-
 // The one apply. `expected` carries the seven pins. Returns {mode:'apply', outcome:'complete'|'partial'|'unverified'|'refused', ...}; never a pair, a lid or a movie.
-export async function applyHistorical(env,pairs,{expected={},confirmGo=false,requestId,now}={}){
- const refuse=(reason,extra={})=>({mode:'apply',outcome:'refused',reason,claimsWritten:0,receipts:{created:0},...extra});
+export async function applyHistorical(rawEnv,pairs,{expected={},confirmGo=false,requestId,now}={}){
+ const refuse=(reason,extra={})=>({mode:'apply',outcome:'refused',reason,writerReportedWritten:0,claimsVerifiedWritten:0,receipts:{created:0},...extra});
  if(confirmGo!==true)return refuse('confirm_required');
  if(typeof requestId!=='string'||!REQUEST_ID.test(requestId))return refuse('invalid_request_id');
  const generation=value=>Number.isInteger(value)&&value>=0;
@@ -217,6 +311,7 @@ export async function applyHistorical(env,pairs,{expected={},confirmGo=false,req
  if(!['open','held'].includes(expected.ownerReviewWrites))return refuse('invalid_expected_owner_review_writes');
  if(!Number.isInteger(expected.count)||expected.count<1||expected.count>HISTORICAL_MAX)return refuse('invalid_expected_count');
  if(typeof expected.digest!=='string'||!HEX64.test(expected.digest))return refuse('invalid_expected_digest');
+ const {env,budget}=withBounds(rawEnv,pairs.length);
  const db=database(env);
  const first=await inspect(env,pairs);
  if(first.decision!=='eligible')return refuse('not_eligible',publicView(first));
@@ -226,21 +321,23 @@ export async function applyHistorical(env,pairs,{expected={},confirmGo=false,req
  const holds=async()=>{try{return sameMarkers(frozen,await readMarkers(env,db));}catch{return false;}};
  if(!(await holds()))return refuse('state_moved',publicView(first));
  const filmIds=first.results.map(item=>item.filmId);
- let before;
- try{before=await sideState(db,filmIds);}catch(error){return refuse(controlled(error?.code||'film_person_unavailable'));}
  const event='historical:'+requestId+':'+first.expect.digest.slice(0,16);
  const at=(typeof now==='function'?now:()=>now||new Date().toISOString())();
  const clock=()=>at;
+ let before;
+ try{before=[];for(const [index,pair] of pairs.entries())before.push(await targetState(db,pair,filmIds[index]));}
+ catch(error){return refuse(controlled(error?.code||'film_person_unavailable'));}
+ const identities=[];
+ for(const [index,pair] of pairs.entries())identities.push(await receiptIdentity({pair,filmId:filmIds[index],event}));
  const counts={written:0,already:0,refused:0,unknown:0,deferred:0,failed:0,notAttempted:0};
  const states=[];let stopped=null;
  for(const [index,pair] of pairs.entries()){
   if(stopped){counts.notAttempted++;states.push('not_attempted');continue;}
   try{
    if(!(await holds())){stopped='state_moved';counts.notAttempted++;states.push('not_attempted');continue;}
-   if(!(await linkIndexWithinCaps(db))){stopped='link_index_over_caps';counts.notAttempted++;states.push('not_attempted');continue;}
   }catch{stopped='fence_unreadable';counts.notAttempted++;states.push('not_attempted');continue;}
   try{
-   const result=await applyLetterboxdClaim(env,{event,lid:pair.lid,tmdb:pair.tmdb,now:clock,approvedPins:pinsOf(frozen,pair.tmdb)});
+   const result=await applyLetterboxdClaim(env,{event,lid:pair.lid,tmdb:pair.tmdb,now:clock,expectedFilmId:filmIds[index],noReplay:true,approvedPins:pinsOf(frozen,{movie:pair.tmdb,filmId:filmIds[index],requestId:identities[index].requestId})});
    const state=['written','already','refused','unknown'].includes(result.state)?result.state:'deferred';
    counts[state]++;states.push(state);
    if(state!=='written'&&state!=='already')stopped='previous_pair_not_proved';
@@ -251,33 +348,29 @@ export async function applyHistorical(env,pairs,{expected={},confirmGo=false,req
  const verified=[];
  for(const [index,pair] of pairs.entries()){
   if(states[index]!=='written'&&states[index]!=='already')continue;
-  try{verified.push({index,checks:await verifyPair(env,db,{pair,filmId:filmIds[index],revisionBefore:before.revisions[filmIds[index]],written:states[index]==='written',event,at})});}
+  try{verified.push({index,checks:await verifyPair(env,db,{pair,filmId:filmIds[index],revisionBefore:before[index].revision,written:states[index]==='written',event})});}
   catch{readback='incomplete';}
  }
- let after=null;
- try{after=await sideState(db,filmIds);}catch{readback='incomplete';}
+ const after=[];
+ try{for(const [index,pair] of pairs.entries())after.push(await targetState(db,pair,filmIds[index]));}catch{readback='incomplete';}
  let markersHold=false;
  try{markersHold=await holds();}catch{readback='incomplete';}
  const proved=counts.written+counts.already;
- const allChecks=verified.length===proved&&verified.every(item=>Object.values(item.checks).every(value=>value===null||value===true));
+ // A vacuous pass is no pass: at least one pair must have been proved, every proved pair must have been verified, and every check of every verified pair must hold.
+ const allChecks=proved>0&&verified.length===proved&&verified.every(item=>Object.values(item.checks).every(value=>value===null||value===true));
  let collateral=null;
- if(after){
-  const tableDelta={};
-  for(const table of COUNT_TABLES)tableDelta[table]=typeof before.tables[table]==='number'&&typeof after.tables[table]==='number'?after.tables[table]-before.tables[table]:before.tables[table]===after.tables[table]?0:null;
-  // Exactly the effects of the existing writer, per target Film: for a written pair its revision +1 and one applied receipt; for every other Film of the run nothing.
-  const targetsExact=pairs.every((pair,index)=>{
-   const id=filmIds[index],wrote=states[index]==='written';
-   const revisionOk=after.revisions[id]===before.revisions[id]+(wrote?1:0);
-   const receiptsOk=wrote?after.receipts[id].split(',').filter(Boolean).length===before.receipts[id].split(',').filter(Boolean).length+1&&after.receipts[id].includes('applied'):after.receipts[id]===before.receipts[id];
-   return revisionOk&&receiptsOk;
-  });
-  collateral={tableDelta,targetsExact,receiptsCreated:pairs.reduce((sum,pair,index)=>sum+(after.receipts[filmIds[index]].split(',').filter(Boolean).length-before.receipts[filmIds[index]].split(',').filter(Boolean).length),0)};
-  collateral.exact=targetsExact&&tableDelta.film_external_id===counts.written&&tableDelta.film_alias===0&&tableDelta.ratings_view===0&&tableDelta.started_mark===0;
+ if(after.length===pairs.length){
+  const exact=pairs.every((pair,index)=>effectsExact(before[index],after[index],{wrote:states[index]==='written',pair}));
+  const receiptsCreated=pairs.reduce((sum,pair,index)=>sum+(after[index].receiptIds.length-before[index].receiptIds.length),0);
+  collateral={scope:'per-target',exact,receiptsCreated};
  }
  const complete=readback==='complete'&&proved===pairs.length&&allChecks&&markersHold&&collateral?.exact===true;
  // `partial`: the run stopped before every pair was proved. `unverified`: every pair was proved by the writer, but the readback is not fully clean (an unreadable read, a failed check, a moved marker, an inexact effect).
  const outcome=complete?'complete':proved===pairs.length?'unverified':'partial';
- return {mode:'apply',outcome,claimsWritten:counts.written,receipts:{created:collateral?.receiptsCreated??null},requestId,digest:first.expect.digest,counts,readback:{status:readback,verified:verified.length,expected:proved,checks:{claim:verified.every(item=>item.checks.claim),receipt:verified.every(item=>item.checks.receipt!==false),reader:verified.every(item=>item.checks.reader),reproof:verified.every(item=>item.checks.reproof)},markersHold,collateral},markers:frozen};
+ const claimsVerifiedWritten=readback==='complete'?verified.filter(item=>states[item.index]==='written'&&item.checks.claim===true&&item.checks.receipt===true).length:null;
+ return {mode:'apply',outcome,writerReportedWritten:counts.written,claimsVerifiedWritten,receipts:{created:collateral?.receiptsCreated??null},requestId,digest:first.expect.digest,counts,
+  readback:{status:readback,verified:verified.length,expected:proved,checks:verified.length&&proved>0?{claim:verified.every(item=>item.checks.claim),receipt:verified.every(item=>item.checks.receipt!==false),reader:verified.every(item=>item.checks.reader),reproof:verified.every(item=>item.checks.reproof)}:null,markersHold,collateral},
+  reads:budget.report(),markers:frozen};
 }
 
 export async function dryRun(env,pairs){
@@ -309,9 +402,9 @@ function parseArgs(argv){
 
 async function openProductionBinding(env,fetchImpl){
  const {createD1Adapter}=await import('./d1-backfill.mjs');
- const {productionTarget,trackProductionWrites,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,OperatorStop}=await import('./published-epg-production.mjs');
+ const {productionTarget,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,OperatorStop}=await import('./published-epg-production.mjs');
  const ctx={writeState:'none'};
- const adapter=trackProductionWrites(createD1Adapter({target:productionTarget(env),databaseId:PRODUCTION_DATABASE_ID,fetchImpl,retries:0}),ctx);
+ const adapter=await trackWrites(createD1Adapter({target:productionTarget(env),databaseId:PRODUCTION_DATABASE_ID,fetchImpl,retries:0}),ctx);
  const described=await adapter.describe();
  if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
  return {binding:await strictBinding(adapter),ctx};
@@ -328,13 +421,13 @@ export async function main({argv=process.argv,env=process.env,fetchImpl=globalTh
   ctx=opened.ctx;
   const target={DB:opened.binding};
   const out=options.apply?await applyHistorical(target,pairs,options):await dryRun(target,pairs);
-  if(options.apply)out.writeState=ctx?.writeState??null;
+  if(options.apply)out.writeState=writeStateOf(ctx);
   print(JSON.stringify(out,null,1));
   if(out.mode!=='apply'||out.outcome==='complete')return EXIT.ok;
   if(out.outcome==='refused')return EXIT.notWritten;
-  return out.outcome==='unverified'||ctx?.writeState==='unknown'?EXIT.unknown:EXIT.partial;
+  return out.outcome==='unverified'||writeStateOf(ctx)==='unknown'?EXIT.unknown:EXIT.partial;
  }catch(error){
-  const state=ctx?.writeState??'none';
+  const state=writeStateOf(ctx);
   print(JSON.stringify({error:controlled(error?.reason||error?.code),writeState:state,next:state==='none'?null:'run dry_run to read back; never repeat apply'}));
   if(state==='none')return error instanceof HistoricalStop?EXIT.input:Number.isInteger(error?.exit)?error.exit:EXIT.failed;
   return state==='committed'?EXIT.partial:state==='unknown'?EXIT.unknown:EXIT.failed;

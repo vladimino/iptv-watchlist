@@ -17,7 +17,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {cohortDigest} from '../src/letterboxd-claim-backfill.js';
 import {catalogStartedFilm} from '../src/canonical-catalog-reader.js';
 import {PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME} from '../scripts/published-epg-production.mjs';
-import {HISTORICAL_MAX,HistoricalStop,PIN_NAMES,parseAllowlist,readAllowlistFile,strictBinding,linkIndexWithinCaps,inspect,dryRun,applyHistorical,main,EXIT} from '../scripts/letterboxd-claim-historical-production.mjs';
+import {HISTORICAL_MAX,HistoricalStop,PIN_NAMES,parseAllowlist,readAllowlistFile,strictBinding,trackWrites,writeStateOf,boundedBinding,newReadBudget,ReadStop,inspect,dryRun,applyHistorical,main,EXIT} from '../scripts/letterboxd-claim-historical-production.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-hist-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -122,7 +122,7 @@ await refused('a pair with no fact record',file=>sqlite(file,"DELETE FROM rating
  const file=world(),before=dump(file),env=envOf(file);
  const pins=(await dryRun(env,PAIRS)).expect;
  const good={expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-1'};
- const refusedWith=async(over,expectReason)=>{const out=await applyHistorical(env,PAIRS,{...good,...over});assert.deepEqual([out.outcome,out.claimsWritten,out.reason],['refused',0,expectReason]);assert.equal(dump(file),before,expectReason+': nothing written');return out;};
+ const refusedWith=async(over,expectReason)=>{const out=await applyHistorical(env,PAIRS,{...good,...over});assert.deepEqual([out.outcome,out.writerReportedWritten,out.reason],['refused',0,expectReason]);assert.equal(dump(file),before,expectReason+': nothing written');return out;};
  await refusedWith({confirmGo:false},'confirm_required');
  await refusedWith({confirmGo:undefined},'confirm_required');
  await refusedWith({requestId:'short'},'invalid_request_id');
@@ -149,13 +149,13 @@ await refused('a pair with no fact record',file=>sqlite(file,"DELETE FROM rating
  const pins=(await dryRun(env,PAIRS)).expect;
  const revisionsBefore=rows(file,"SELECT id,revision FROM canonical_revision WHERE kind='film' ORDER BY id");
  const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-2'});
- assert.deepEqual([out.outcome,out.claimsWritten],['complete',4],JSON.stringify(out));
+ assert.deepEqual([out.outcome,out.writerReportedWritten],['complete',4],JSON.stringify(out));
  assert.deepEqual(out.counts,{written:4,already:0,refused:0,unknown:0,deferred:0,failed:0,notAttempted:0});
  assert.equal(out.receipts.created,4,'receipt rows are reported as their own kind of write');
  assert.deepEqual([out.readback.status,out.readback.verified,out.readback.expected,out.readback.markersHold],['complete',4,4,true]);
  assert.deepEqual(out.readback.checks,{claim:true,receipt:true,reader:true,reproof:true});
- assert.equal(out.readback.collateral.exact,true);assert.equal(out.readback.collateral.targetsExact,true);
- assert.deepEqual(out.readback.collateral.tableDelta,{film_external_id:4,film_alias:0,ratings_view:0,started_mark:out.readback.collateral.tableDelta.started_mark});
+ assert.deepEqual([out.readback.collateral.scope,out.readback.collateral.exact,out.readback.collateral.receiptsCreated],['per-target',true,4]);
+ assert.equal(out.claimsVerifiedWritten,4);assert.ok(out.reads.statements>0&&out.reads.statements<=out.reads.limits.statements,'reads are accounted under one budget');
  assert.ok(NO_NAMES(JSON.stringify(out)),'the apply output names no lid, movie or Film id');
  const claims=trusted(file);
  assert.equal(claims.length,4);
@@ -172,7 +172,7 @@ await refused('a pair with no fact record',file=>sqlite(file,"DELETE FROM rating
  // A repeat finds nothing missing: no longer eligible, zero writes, the claims unchanged.
  const again=dump(file);
  const repeat=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-2'});
- assert.deepEqual([repeat.outcome,repeat.claimsWritten,repeat.reason],['refused',0,'not_eligible']);
+ assert.deepEqual([repeat.outcome,repeat.writerReportedWritten,repeat.reason],['refused',0,'not_eligible']);
  assert.equal(dump(file),again,'a repeat writes nothing');
  assert.equal((await dryRun(env,PAIRS)).decision,'already_current');
 }
@@ -193,7 +193,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-5a'});
   assert.equal(hit,true,name+': the hostile change ran just before the reservation');
   assert.equal(out.outcome,'partial',name);
-  assert.deepEqual([out.claimsWritten,out.receipts.created,trusted(file).length,receipts(file).length],[0,0,0,0],name+': no claim and no receipt: the reservation itself asserted the approved pins');
+  assert.deepEqual([out.writerReportedWritten,out.receipts.created,trusted(file).length,receipts(file).length],[0,0,0,0],name+': no claim and no receipt: the reservation itself asserted the approved pins');
   assert.equal(out.counts.notAttempted,LIDS.length-1,name+': the rest is not attempted');
  }
  // (b) A witness that appears AFTER the reservation is refused inside the claim batch: the reserved receipt stays, the claim does not. Reported as two kinds of write.
@@ -204,7 +204,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   const pins=(await dryRun(env,PAIRS)).expect;
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-5b'});
   assert.equal(out.outcome,'partial');
-  assert.deepEqual([out.claimsWritten,trusted(file).length],[0,0],'no claim');
+  assert.deepEqual([out.writerReportedWritten,trusted(file).length],[0,0],'no claim');
   assert.equal(out.receipts.created,1,'the reserved receipt of the refused pair is reported: the claim batch rolled back, the receipt did not');
   assert.equal(receipts(file).length,1);assert.notEqual(receipts(file)[0].state,'applied');
   assert.equal(out.counts.notAttempted,LIDS.length-1);
@@ -219,7 +219,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   const dry=await dryRun(env,PAIRS);
   assert.deepEqual([dry.decision,dry.blockers.map(item=>item.reason)],['unsafe',['prior_receipt_unresolved']],'a prior unresolved receipt makes the cohort unsafe; recovery is a separate decision');
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-5c'});
-  assert.deepEqual([out.outcome,out.reason,out.claimsWritten],['refused','not_eligible',0]);
+  assert.deepEqual([out.outcome,out.reason,out.writerReportedWritten],['refused','not_eligible',0]);
   assert.equal(batches,0,'no batch was sent: neither a retry nor a new attempt');
   assert.equal(receipts(file).length,1,'the prior receipt is untouched');
  }
@@ -242,7 +242,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   const env={DB:db};
   const pins=(await dryRun({DB:d1Standin(file)},PAIRS)).expect;
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-6a'});
-  assert.equal(out.claimsWritten,4,name+': the writes happened');
+  assert.equal(out.writerReportedWritten,4,name+': the writes happened');
   assert.notEqual(out.outcome,'complete',name);
   assert.equal(out.outcome,'unverified',name);
   assert.equal(out.readback.status,'incomplete',name);
@@ -253,7 +253,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   const env={DB:phase(file,async text=>{if(!moved&&/FROM ratings_document/.test(text)){moved=true;sqlite(file,'UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1');}})};
   const pins=(await dryRun({DB:d1Standin(file)},PAIRS)).expect;
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-6b'});
-  assert.equal(out.claimsWritten,4);assert.equal(out.readback.markersHold,false);assert.equal(out.outcome,'unverified','a marker moved during the final reproof is not complete');
+  assert.equal(out.writerReportedWritten,4);assert.equal(out.readback.markersHold,false);assert.equal(out.outcome,'unverified','a marker moved during the final reproof is not complete');
  }
  for(const [name,tamper] of [
   ['a claim that names another Film',file=>{sqlite(file,"PRAGMA foreign_keys=OFF;UPDATE film_external_id SET film_id='film:tmdb:2' WHERE scheme='letterboxd' AND value='H001'");}],
@@ -265,7 +265,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   const env={DB:phase(file,async()=>{if(!done){done=true;tamper(file);}})};
   const pins=(await dryRun({DB:d1Standin(file)},PAIRS)).expect;
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-6c'});
-  assert.equal(out.claimsWritten,4,name);
+  assert.equal(out.writerReportedWritten,4,name);
   assert.notEqual(out.outcome,'complete',name+': never complete on a wrong target or receipt');
   assert.equal(out.outcome,'unverified',name);
  }
@@ -274,21 +274,35 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
 // ---- 6b. the link-index document is measured against the AIR-647 caps before each pair's live planner reads ------------------------------------------------
 {
  const {LINK_DOCUMENT_MAX_PARTS,LINK_DOCUMENT_MAX_BYTES}=await import('../src/film-aggregate.js');
- const db=d1Standin(world());
- assert.equal(await linkIndexWithinCaps(db),true,'a normal document is within the caps');
+ const bounded=file=>boundedBinding(d1Standin(file),newReadBudget(4));
+ const readLinks=file=>bounded(file).prepare('SELECT part, body, etag FROM ratings_document WHERE key=? ORDER BY part').bind('letterboxd/facts/links.json').all();
+ assert.ok((await readLinks(world())).results.length>0,'a normal document is read');
  const parts=world();
  for(let part=1;part<=LINK_DOCUMENT_MAX_PARTS;part++)sqlite(parts,"INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('letterboxd/facts/links.json',"+part+",'x','"+'e'.repeat(64)+"',"+q(U)+")");
- assert.equal(await linkIndexWithinCaps(d1Standin(parts)),false,'more parts than the cap');
+ await assert.rejects(readLinks(parts),error=>error instanceof ReadStop,'more parts than the cap');
  const big=world();
  sqlite(big,"UPDATE ratings_document SET body=body||replace(hex(zeroblob("+(LINK_DOCUMENT_MAX_BYTES+10)+")),'00','a') WHERE key='letterboxd/facts/links.json'");
- assert.equal(await linkIndexWithinCaps(d1Standin(big)),false,'more bytes than the cap');
+ await assert.rejects(readLinks(big),error=>error instanceof ReadStop,'more bytes than the cap');
  const absent=world();sqlite(absent,"DELETE FROM ratings_document WHERE key='letterboxd/facts/links.json'");
- assert.equal(await linkIndexWithinCaps(d1Standin(absent)),false,'an absent document is not within the caps (it proves nothing)');
+ assert.equal((await readLinks(absent)).results.length,0,'an absent document reads empty (the planner then refuses)');
+ await assert.rejects(bounded(world()).prepare('SELECT part, body, etag FROM ratings_document WHERE key=? ORDER BY part').bind('other/key').all(),error=>error instanceof ReadStop,'unbounded key refused');
+ const tiny=boundedBinding(d1Standin(world()),{statement(){throw new ReadStop('read_budget_exhausted');},rows(){},bytes(){}});
+ await assert.rejects(tiny.prepare('SELECT 1 AS x').bind().all(),error=>error.code==='read_budget_exhausted','shared budget exhaustion stops');
  // A document that grew past the caps after the dry run is refused by the apply before any write (the bounded capture inside the derivation reads it with the same caps).
  const grown=world();const pins=(await dryRun(envOf(grown),PAIRS)).expect;
  sqlite(grown,"UPDATE ratings_document SET body=body||replace(hex(zeroblob("+(LINK_DOCUMENT_MAX_BYTES+10)+")),'00','a') WHERE key='letterboxd/facts/links.json'");
  const out=await applyHistorical(envOf(grown),PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-6d'});
- assert.deepEqual([out.outcome,out.claimsWritten],['refused',0]);assert.equal(trusted(grown).length,0);
+ assert.deepEqual([out.outcome,out.writerReportedWritten],['refused',0]);assert.equal(trusted(grown).length,0);
+}
+
+// ---- 6c. the write state latches uncertainty -------------------------------------------------------------------------------------------------------------
+{
+ assert.equal(writeStateOf({writeState:'committed'}),'committed');assert.equal(writeStateOf({writeState:'committed',everUncertain:true}),'unknown');assert.equal(writeStateOf(null),'none');
+ const ctx={writeState:'none'};
+ const fake={run:async()=>{throw new Error('lost');},executeRendered:async()=>({}),describe:async()=>({})};
+ const tracked=await trackWrites(fake,ctx);
+ await assert.rejects(tracked.run('UPDATE x SET y=1',[]));
+ assert.equal(writeStateOf(ctx),'unknown','a failed write attempt latches unknown');
 }
 
 // ---- 7. the REAL REST binding: strict reads, lost reply, malformed answers ------------------------------------------------------------------------------
@@ -328,7 +342,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
   assert.equal(pins.count,4);
   assert.equal(writes(wire).length,0,'the dry run sent no write');
   const out=await applyHistorical(env,PAIRS,{expected:pinArgs(pins),confirmGo:true,requestId:'hist-request-7a'});
-  assert.deepEqual([out.outcome,out.claimsWritten,out.receipts.created],['complete',4,4],JSON.stringify(out.readback)+JSON.stringify(out.counts));
+  assert.deepEqual([out.outcome,out.writerReportedWritten,out.receipts.created],['complete',4,4],JSON.stringify(out.readback)+JSON.stringify(out.counts));
   assert.equal(trusted(file).length,4);
  }
  // A malformed answer (no result array) to a read is an error, never an empty table: unknown, and no write request is sent.
@@ -383,7 +397,7 @@ const claiming=statements=>statements.some(item=>/INSERT INTO film_external_id/i
  assert.equal(opened,0,'an input error is reported before any connection is opened');
  const pins=dry.expect;
  assert.equal(await run('--allowlist',allow,'--apply','--confirm-go','--request-id','hist-cli-001','--expected-film-person-generation',String(pins.filmPersonGeneration),'--expected-ratings-generation',String(pins.ratingsGeneration),'--expected-schema-version',String(pins.schemaVersion),'--expected-owner-review-generation',String(pins.ownerReviewGeneration),'--expected-owner-review-writes',pins.ownerReviewWrites,'--expected-count','4','--expected-digest',pins.digest),EXIT.ok);
- const applied=JSON.parse(printed.at(-1));assert.deepEqual([applied.outcome,applied.claimsWritten,applied.writeState],['complete',4,'none']);assert.ok(NO_NAMES(printed.at(-1)));
+ const applied=JSON.parse(printed.at(-1));assert.deepEqual([applied.outcome,applied.writerReportedWritten,applied.writeState],['complete',4,'none']);assert.ok(NO_NAMES(printed.at(-1)));
  assert.equal(trusted(file).length,4);
 }
 

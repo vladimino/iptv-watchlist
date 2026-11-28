@@ -175,7 +175,8 @@ export function filmExternalIdsOperation({replan,now=()=>new Date().toISOString(
 //   {state:'noop', receipt:false}                                    the stored ids already equal the source in the owned schemes: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
 // `approvedPins` (AIR-653, optional, never content: the digest and the request id are the same with or without it): the authority pins an operation froze at its approval; the receipt's RESERVATION and the domain batch assert them in the same batches.
-export async function applyFilmExternalIds(env,{origin,event,input,replan,now,policy=RETRY_POLICY,approvedPins=null}={}){
+// `noReplay` (AIR-653, optional): an owner-run operation never replays or retries an existing unsettled receipt of the same id (see receiptedWrite).
+export async function applyFilmExternalIds(env,{origin,event,input,replan,now,policy=RETRY_POLICY,approvedPins=null,noReplay=false}={}){
  const route=await writerRoute(env);
  if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await filmExternalIdsDigest(input);
@@ -186,7 +187,7 @@ export async function applyFilmExternalIds(env,{origin,event,input,replan,now,po
  if(plan.absent)return {state:'absent',receipt:false,requestId};
  if(plan.noop)return {state:'noop',receipt:false,requestId};
  const hooks=filmExternalIdsOperation({replan:replan||(async()=>input),now:clock});
- const outcome=await receiptedWrite(env,{requestId,operation:FILM_EXTERNAL_IDS_OPERATION,origin,target,expectedRevision:plan.revision,digest,now:clock,policy,...(approvedPins?{approvedPins}:{})},{
+ const outcome=await receiptedWrite(env,{requestId,operation:FILM_EXTERNAL_IDS_OPERATION,origin,target,expectedRevision:plan.revision,digest,now:clock,policy,...(approvedPins?{approvedPins}:{}),...(noReplay?{noReplay:true}:{})},{
   atomic:true,
   readback:hooks.readback,
   revalidate:hooks.revalidate,
