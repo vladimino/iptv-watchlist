@@ -145,11 +145,103 @@ const set = (env, to, expectRevision, extra = {}) => Op.execute('set', {binding:
   const racing = {prepare: s => racy.db.prepare(s), batch: async b => {sql(racy.file, `UPDATE upstream_coordination SET revision = 2 WHERE id = 1`); return racy.db.batch(b);}};
   const race = await stop(Op.execute('set', {binding: racing, now: NOW, ctx: ctx(), params: {mode: 'observe', expectRevision: 1, operatorSha256: SHA}}), 'write_uncertain');
   assert.equal(race.details.problems.includes('mode'), true); assert.deepEqual(mode(racy.file), {mode: 'off', revision: 2, updated_at: NOW}, 'the guarded UPDATE changed nothing');
-  // a cooldown row that changes during the window is caught by the readback digest
-  const dirty = open();
-  const writing = {prepare: s => dirty.db.prepare(s), batch: async b => {const r = await dirty.db.batch(b); sql(dirty.file, `INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('tmdb', ${NOW + 1000}, 'rate_limited', NULL, 'x', ${NOW})`); return r;}};
-  const bad = await stop(Op.execute('set', {binding: writing, now: NOW, ctx: ctx(), params: {mode: 'observe', expectRevision: 0, operatorSha256: SHA}}), 'write_uncertain');
-  assert.equal(bad.details.problems.includes('cooldown_rows_changed'), true);
+  // the control row disagrees after a successful batch (another writer moved the mode or the written time): write_uncertain, judged from the control row alone
+  for (const [label, tamper] of [['updated_at', `UPDATE upstream_coordination SET updated_at = ${NOW + 1} WHERE id = 1`], ['revision', 'UPDATE upstream_coordination SET revision = revision + 1 WHERE id = 1']]) {
+    const tampered = open();
+    const writing = {prepare: s => tampered.db.prepare(s), batch: async b => {const r = await tampered.db.batch(b); sql(tampered.file, tamper); return r;}};
+    const bad = await stop(Op.execute('set', {binding: writing, now: NOW, ctx: ctx(), params: {mode: 'observe', expectRevision: 0, operatorSha256: SHA}}), 'write_uncertain');
+    assert.equal(bad.details.problems.includes(label), true, label);
+  }
+}
+
+// ===== 6b. concurrent NATURAL cooldown writes are legal and are not evidence about the mode write (review P1-C) =====
+{
+  const natural = (file, scope, untilMs, by = 'natural') => sql(file, `INSERT INTO upstream_cooldown (scope, until_at, reason, retry_after_s, set_by, updated_at) VALUES ('${scope}', ${untilMs}, 'rate_limited', NULL, '${by}', ${NOW}) ON CONFLICT(scope) DO UPDATE SET until_at = MAX(until_at, excluded.until_at), updated_at = excluded.updated_at`);
+  // activation: the instant the mode becomes observe a caller of the next run writes a cooldown. The single guarded statement still committed and the control row reads back exactly.
+  const env = open();
+  natural(env.file, 'wikidata', NOW + 30_000, 'seed');
+  const racing = {prepare: s => env.db.prepare(s), batch: async b => {const r = await env.db.batch(b); natural(env.file, 'tmdb', NOW + 90_000); natural(env.file, 'wikidata', NOW + 120_000); return r;}};
+  states.length = 0;
+  const activated = await Op.execute('set', {binding: racing, now: NOW, ctx: ctx(), params: {mode: 'observe', expectRevision: 0, operatorSha256: SHA}});
+  assert.equal(activated.writeState, 'committed'); assert.equal(states.at(-1), 'committed');
+  assert.deepEqual(mode(env.file), {mode: 'observe', revision: 1, updated_at: NOW});
+  assert.deepEqual(activated.cooldownObservations, {changed: true, added: ['tmdb'], extended: ['wikidata']}, 'reported on their own, as observations');
+  assert.equal(activated.after.cooldowns.length, 2);
+  // rollback: a run that cached `observe` may still write after the mode is off
+  const rolling = {prepare: s => env.db.prepare(s), batch: async b => {const r = await env.db.batch(b); natural(env.file, 'letterboxd', NOW + 60_000, 'in-flight run'); return r;}};
+  const rolledBack = await Op.execute('set', {binding: rolling, now: NOW, ctx: ctx(), params: {mode: 'off', expectRevision: 1, operatorSha256: SHA}});
+  assert.equal(rolledBack.writeState, 'committed'); assert.deepEqual(mode(env.file), {mode: 'off', revision: 2, updated_at: NOW});
+  assert.deepEqual(rolledBack.cooldownObservations, {changed: true, added: ['letterboxd'], extended: []});
+  // no concurrent write: nothing is reported
+  const quiet = open();
+  assert.deepEqual((await set(quiet, 'observe', 0)).cooldownObservations, {changed: false, added: [], extended: []});
+  // a real CAS mismatch with a concurrent cooldown write is still write_uncertain: the control row decides, the cooldown never excuses it
+  const racy = open();
+  sql(racy.file, `INSERT INTO upstream_coordination (id, mode, revision, updated_at) VALUES (1, 'off', 1, ${NOW})`);
+  const mismatch = {prepare: s => racy.db.prepare(s), batch: async b => {sql(racy.file, 'UPDATE upstream_coordination SET revision = 2 WHERE id = 1'); natural(racy.file, 'tmdb', NOW + 1000); return racy.db.batch(b);}};
+  const err = await stop(Op.execute('set', {binding: mismatch, now: NOW, ctx: ctx(), params: {mode: 'observe', expectRevision: 1, operatorSha256: SHA}}), 'write_uncertain');
+  assert.equal(err.details.problems.includes('mode'), true); assert.equal(err.details.cooldownObservations.added[0], 'tmdb');
+  // the observation helper itself: a shortened or missing row is an anomaly (the triggers make it impossible), listed and never a verdict
+  const row = (scope, untilAt) => ({scope, untilAt});
+  assert.deepEqual(Op.cooldownObservations({cooldowns: [row('tmdb', 5), row('wikidata', 5)], digest: 'a'}, {cooldowns: [row('tmdb', 4)], digest: 'b'}), {changed: true, added: [], extended: [], anomalies: ['shortened:tmdb', 'missing:wikidata']});
+}
+
+// ===== 6c. the production reads are strict (review P1-C): a malformed answer stops the status and the set BEFORE any write =====
+{
+  const {PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID} = await import('../scripts/published-epg-production.mjs');
+  const {createD1Adapter} = await import('../scripts/d1-backfill.mjs');
+  const {sqliteSync} = await import('./sqlite-session.mjs');
+  const adapterTarget = {accountId: 'a'.repeat(32), apiToken: 't', endpoint: 'https://example.test/client/v4', maxBatchStatements: 2000, maxBatchBytes: 8388608};
+  const answer = body => async () => ({ok: true, status: 200, json: async () => body});
+  const strict = body => createD1Adapter({target: adapterTarget, databaseId: 'd', fetchImpl: answer(body), retries: 0}).allStrict('SELECT 1 AS n');
+  assert.deepEqual(await strict({success: true, result: [{success: true, results: [{n: 1}]}]}), [{n: 1}]);
+  assert.deepEqual(await strict({success: true, result: [{success: true, results: []}]}), [], 'a real empty answer is an answer');
+  for (const bad of [{success: true, result: []}, {success: true, result: [{success: true}]}, {success: true}]) await assert.rejects(() => strict(bad), e => e.kind === 'statement', JSON.stringify(bad));
+
+  const env = open();
+  const calls = [];
+  const lite = (input, json) => sqliteSync([...(json ? ['-json'] : []), '-bail', env.file], {input: 'PRAGMA foreign_keys=ON;\n' + input, encoding: 'utf8', maxBuffer: 1 << 26});
+  const makeFetch = (malformed = () => false) => async (url, init) => {
+    calls.push({url: String(url), method: init.method, body: init.body});
+    const reply = (body, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => body});
+    if (String(url).endsWith('/time_travel/bookmark')) return reply({success: true, result: {bookmark: 'bookmark-' + calls.length}});
+    if (init.method === 'GET') return reply({success: true, result: {uuid: PRODUCTION_DATABASE_ID, name: 'iptv'}});
+    const body = JSON.parse(init.body);
+    if (body.batch) {
+      const result = lite('BEGIN;\n' + body.batch.map(item => item.sql).join('\n') + '\nCOMMIT;');
+      if (result.status !== 0) return reply({success: false, errors: [{message: String(result.stderr).trim()}]}, 400);
+      return reply({success: true, result: body.batch.map(() => ({success: true, results: [], meta: {rows_written: 1}}))});
+    }
+    const text = String(body.sql);
+    if (malformed(text)) return reply({success: true, result: [{success: true}]});
+    const result = lite(text, true);
+    if (result.status !== 0) return reply({success: false, errors: [{message: String(result.stderr).trim()}]}, 400);
+    const out = String(result.stdout).trim();
+    return reply({success: true, result: [{success: true, results: out ? JSON.parse(out) : [], meta: {rows_written: 0}}]});
+  };
+  const procEnv = {D1_BACKFILL_ACCOUNT_ID: PRODUCTION_ACCOUNT_ID, D1_BACKFILL_API_TOKEN: 'SECRET-TOKEN-VALUE', NODE_USE_ENV_PROXY: ''};
+  const run = (args, fetchImpl) => Op.runUpstreamCooldownModeProduction({argv: ['node', 'x', ...args], env: procEnv, fetchImpl, now: () => NOW});
+  const setArgs = ['--set', '--target', 'iptv', '--confirm', 'set', '--mode', 'observe', '--expect-revision', '0', '--operator-sha256', SHA];
+  // the real composition works end to end: describe, strict reads, bookmark, one batch, readback
+  const ok = await run(['--status', '--target', 'iptv'], makeFetch());
+  assert.equal(ok.exit, 0, JSON.stringify(ok.result).slice(0, 300)); assert.equal(ok.result.mode, 'off');
+  for (const pattern of [/FROM upstream_coordination/, /FROM upstream_cooldown/, /schema_contract/, /sqlite_master/]) {
+    calls.length = 0;
+    const bad = await run(['--status', '--target', 'iptv'], makeFetch(text => pattern.test(text)));
+    assert.equal(bad.exit, 3, String(pattern)); assert.equal(bad.result.reason, 'unknown_state', String(pattern));
+    assert.equal(JSON.stringify(bad).includes('SECRET-TOKEN-VALUE'), false);
+    calls.length = 0;
+    const refused = await run(setArgs, makeFetch(text => pattern.test(text)));
+    assert.equal(refused.exit, 3, String(pattern)); assert.equal(refused.result.reason, 'unknown_state'); assert.equal(refused.result.writeState, 'none');
+    assert.equal(calls.some(call => call.method === 'POST' && String(call.body).includes('"batch"')), false, 'nothing was written after a malformed read: ' + pattern);
+    assert.equal(mode(env.file), null, 'the mode row is untouched');
+  }
+  calls.length = 0;
+  const applied = await run(setArgs, makeFetch());
+  assert.equal(applied.exit, 0, JSON.stringify(applied.result).slice(0, 400)); assert.equal(applied.result.writeState, 'committed');
+  assert.equal(calls.filter(call => call.method === 'POST' && String(call.body).includes('"batch"')).length, 1, 'one batch');
+  assert.ok(applied.result.bookmarkBefore && applied.result.bookmarkAfter);
+  assert.equal(mode(env.file).mode, 'observe');
 }
 
 // ===== 7. the source of the operator writes nothing else =====
@@ -190,10 +282,10 @@ const set = (env, to, expectRevision, extra = {}) => Op.execute('set', {binding:
     assert.equal(row.lower <= n && n <= row.upper, true, `${caller}: ${row.lower} <= ${n} <= ${row.upper}`);
     assert.equal(row.inconsistent, undefined);
   }
-  assert.equal(report.rows.find(r => r.caller === 'discovery' && r.decision === 'would_skip').runs, 6);
+  assert.equal(report.rows.find(r => r.caller === 'discovery' && r.decision === 'would_skip').streams, 6);
   const written = report.rows.find(r => r.decision === 'written');
   assert.deepEqual([written.caller, written.scope, written.lower, written.upper, written.cooldownSecondsLogged], ['letterboxd_scan', 'letterboxd', 1, 1, {rate_limited: 60}]);
-  assert.deepEqual(report.flags, ['malformed_lines']);
+  assert.deepEqual(report.flags, ['malformed_lines']); assert.equal(report.evidence.status, 'insufficient');
   assert.equal(Report.markdown(report).includes('| tmdb | discovery | would_skip |'), true);
 }
 
@@ -203,15 +295,63 @@ const set = (env, to, expectRevision, extra = {}) => Op.execute('set', {binding:
   // two runs: one stopped at 1 (1 decision), one logged 1,2,4 (4..7 decisions)
   const report = Report.aggregate([line('would_skip', 1), line('would_skip', 1), line('would_skip', 2), line('would_skip', 4)]);
   const row = report.rows[0];
-  assert.deepEqual([row.runs, row.lower, row.upper, row.lines], [2, 5, 8, 4]);
+  assert.deepEqual([row.streams, row.lower, row.upper, row.lines], [2, 5, 8, 4]);
   assert.deepEqual(report.flags, []);
+  assert.deepEqual([report.evidence.status, report.evidence.completenessProven, report.evidence.uc3Eligible, report.limits], ['conditional', false, false, ['completeness_unproven', 'identity_unverified']], 'plain lines: conditional, never complete, never a UC3 GO');
   assert.deepEqual(Report.aggregate([line('skipped', 1)]).flags, ['actual_skips'], 'an actual skip in observe is a defect');
   assert.deepEqual(Report.aggregate([line('write_failed', 1)]).flags, ['write_failed']);
   assert.deepEqual(Report.aggregate([line('would_skip', 2)]).flags, ['inconsistent_export'], 'a run that logged 2 without 1 is an incomplete export');
   assert.deepEqual(Report.aggregate([line('would_skip', 3)]).flags, ['inconsistent_export']);
-  assert.deepEqual(Report.aggregate([]).flags, []);
+  assert.deepEqual(Report.aggregate([]).flags, ['no_events']);
   assert.throws(() => Report.parseArgs(['node', 'x', '--bogus']));
   const run = spawnSync(process.execPath, ['scripts/upstream-cooldown-evidence-report.mjs', '--format', 'json'], {input: line('would_skip', 1) + '\n', encoding: 'utf8'});
   assert.equal(run.status, 0); assert.equal(JSON.parse(run.stdout).totals.would_skip.lower, 1);
+}
+
+// ===== 10. evidence completeness: what the arithmetic cannot establish (review P1-B) =====
+{
+  const event = (decision, count, extra = {}) => ({event: 'upstream_cooldown', decision, caller: 'c', scope: 'tmdb', count, ...extra});
+  const wrap = (body, id, at) => JSON.stringify({source: body, timestamp: at, $metadata: {id}});
+  // empty input is NO evidence, not a zero
+  const none = Report.aggregate([]);
+  assert.deepEqual([none.evidence.status, none.flags, none.totals.would_skip.upper], ['none', ['no_events'], 0]);
+  assert.equal(Report.aggregate(['unrelated line', '']).evidence.status, 'none');
+  assert.match(Report.markdown(none), /NO EVIDENCE: no upstream_cooldown event was found\. This is not a zero count/);
+  // a truncated query: the number of events reached the query limit
+  const many = Array.from({length: 5}, (_, i) => wrap(event('would_skip', 1), 'id-' + i, 1000 + i));
+  assert.deepEqual(Report.aggregate(many, {queryLimit: 5}).flags, ['possibly_truncated']);
+  assert.deepEqual(Report.aggregate(many, {queryLimit: 6}).flags, []);
+  assert.equal(Report.aggregate(many, {queryLimit: 5}).evidence.status, 'insufficient');
+  // structured events are de-duplicated by id: an overlapping export never counts a decision twice
+  const dup = Report.aggregate([wrap(event('would_skip', 1), 'x', 1), wrap(event('would_skip', 1), 'x', 1), wrap(event('would_skip', 1), 'y', 2)]);
+  assert.deepEqual([dup.events, dup.duplicateEvents, dup.rows[0].streams, dup.flags, dup.limits], [2, 1, 2, ['duplicate_events'], ['completeness_unproven']]);
+  assert.equal(dup.evidence.status, 'insufficient');
+  // plain lines carry no identity: a repeated line is legitimate (two streams) and cannot be told from an overlap
+  const plain = JSON.stringify(event('would_skip', 1));
+  assert.deepEqual([Report.aggregate([plain, plain]).rows[0].streams, Report.aggregate([plain, plain]).limits.includes('identity_unverified')], [2, true]);
+  // the same file twice, and two files whose event ids or time windows overlap
+  const a = [wrap(event('would_skip', 1), 'a1', Date.parse('2026-11-29T10:00:00Z')), wrap(event('would_skip', 2), 'a2', Date.parse('2026-11-29T10:30:00Z'))].join('\n');
+  const b = [wrap(event('would_skip', 1), 'b1', Date.parse('2026-11-29T10:20:00Z'))].join('\n');
+  const c = [wrap(event('would_skip', 1), 'c1', Date.parse('2026-11-29T11:00:00Z'))].join('\n');
+  assert.equal(Report.aggregateFiles([{name: 'a', text: a}, {name: 'a2', text: a}]).flags.includes('duplicate_files'), true);
+  const overlapping = Report.aggregateFiles([{name: 'a', text: a}, {name: 'b', text: b}]);
+  assert.equal(overlapping.flags.includes('overlapping_exports'), true, 'b starts inside a\'s window'); assert.equal(overlapping.evidence.status, 'insufficient');
+  const disjoint = Report.aggregateFiles([{name: 'a', text: a}, {name: 'c', text: c}]);
+  assert.deepEqual([disjoint.flags, disjoint.evidence.status, disjoint.files.length], [[], 'conditional', 2]);
+  assert.match(Report.markdown(disjoint), /Export windows: a 2026-11-29T10:00:00\.000Z \.\. 2026-11-29T10:30:00\.000Z; c /);
+  // what NO check can see: an entire missing stream or a missing tail pass every test and stay CONDITIONAL, never complete (documented limit of the arithmetic)
+  const truth = [event('would_skip', 1), event('would_skip', 2), event('would_skip', 4), event('would_skip', 1)];
+  const lost = Report.aggregate(truth.slice(0, 3).map(JSON.stringify)); // the second stream and the tail of nothing are missing
+  assert.deepEqual([lost.flags, lost.evidence.status, lost.evidence.completenessProven, lost.evidence.uc3Eligible], [[], 'conditional', false, false]);
+  assert.equal(lost.rows[0].streams < Report.aggregate(truth.map(JSON.stringify)).rows[0].streams, true, 'the loss is real and invisible to the flags');
+  assert.match(Report.markdown(lost), /CONDITIONAL: .* This report is not a UC3 GO\./);
+  // the CLI: several files, a limit, JSON
+  const dir = fs.mkdtempSync('/tmp/claude-0/cooldown-report-');
+  fs.writeFileSync(dir + '/a.ndjson', a); fs.writeFileSync(dir + '/b.ndjson', b);
+  const cli = spawnSync(process.execPath, ['scripts/upstream-cooldown-evidence-report.mjs', '--format', 'json', '--query-limit', '2', dir + '/a.ndjson', dir + '/b.ndjson'], {encoding: 'utf8'});
+  assert.equal(cli.status, 0); const parsedCli = JSON.parse(cli.stdout);
+  assert.equal(parsedCli.flags.includes('overlapping_exports'), true); assert.equal(parsedCli.flags.includes('possibly_truncated'), true);
+  assert.throws(() => Report.parseArgs(['node', 'x', '--query-limit', '0']));
+  fs.rmSync(dir, {recursive: true});
 }
 console.log('upstream-cooldown-mode-production: ok');

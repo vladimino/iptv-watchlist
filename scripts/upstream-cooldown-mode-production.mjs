@@ -11,7 +11,11 @@
 //              and the decision of each transition. Counts and codes only; no request is made to any upstream.
 //   --set      --target iptv --mode observe|off --expect-revision <n> --confirm set --operator-sha256 <64 hex>
 //              `--expect-revision` is the revision `--status` printed (0 for an absent row). Re-reads the whole state, requires the exact predecessor mode and revision, sends ONE
-//              atomic D1 batch, then reads back the mode, the revision (+1), the unchanged cooldown rows and the unchanged schema version.
+//              atomic D1 batch, then reads back the control row EXACTLY (mode, revision +1, the written `updated_at`, one row) and the unchanged schema version.
+//              Natural callers are never stopped and no quiet window is taken: the moment the mode becomes `observe` a caller may legally write a cooldown, and after a rollback a run that
+//              cached `observe` may still write until it ends. Cooldown rows that changed meanwhile are reported SEPARATELY as `cooldownObservations` (concurrent natural writes); they are not
+//              evidence about the mode write, which is judged only from its own outcome and the control row. Every control-state read is strict (a response without a result array is an
+//              error, never an empty table).
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -86,18 +90,35 @@ export function writeSql(state,mode,nowMs){
 }
 
 // What the independent readback must show after the write.
-export function readbackProblems(after,before,mode){
+// Judged ONLY from the control row and the schema version: a cooldown that a natural caller wrote meanwhile is a separate observation (`cooldownObservations`), never a reason to doubt the write.
+export function readbackProblems(after,before,mode,nowMs){
  const problems=[];
  if(after.mode!==mode)problems.push('mode');
  if(after.rowRevision!==revisionOf(before)+1)problems.push('revision');
+ if(after.rowUpdatedAt!==nowMs)problems.push('updated_at');
  if(after.rows!==1)problems.push('rows');
  if(after.schemaVersion!==before.schemaVersion)problems.push('schema_version');
- if(after.digest!==before.digest)problems.push('cooldown_rows_changed');
  return problems;
 }
 
 const view=(state,now)=>({schemaVersion:state.schemaVersion,tables:state.tables,mode:effectiveMode(state),modeRow:state.rows===1?{mode:state.mode,revision:state.rowRevision,updatedAt:state.rowUpdatedAt===null?null:new Date(state.rowUpdatedAt).toISOString()}:null,
  cooldowns:state.cooldowns.map(row=>({scope:row.scope,reason:row.reason,setBy:row.setBy,untilAt:new Date(row.untilAt).toISOString(),active:row.untilAt>now,remainingS:row.untilAt>now?Math.ceil((row.untilAt-now)/1000):0})),cooldownDigest:state.digest});
+
+// The cooldown rows that moved between two reads, reported as observations of natural callers. A cooldown is only ever added or extended (triggers refuse a shortening and any delete), so
+// anything else is listed as an anomaly for the owner to read; none of it decides the outcome of the mode write.
+export function cooldownObservations(before,after){
+ const was=new Map(before.cooldowns.map(row=>[row.scope,row]));
+ const added=[],extended=[],anomalies=[];
+ for(const row of after.cooldowns){
+  const prior=was.get(row.scope);
+  if(!prior)added.push(row.scope);
+  else if(row.untilAt>prior.untilAt)extended.push(row.scope);
+  else if(row.untilAt<prior.untilAt)anomalies.push('shortened:'+row.scope);
+  was.delete(row.scope);
+ }
+ for(const scope of was.keys())anomalies.push('missing:'+scope);
+ return {changed:before.digest!==after.digest,added,extended,...(anomalies.length?{anomalies}:{})};
+}
 
 export async function execute(command,{binding,now,ctx={},params={}}){
  const clock=typeof now==='function'?now():now;
@@ -123,10 +144,11 @@ export async function execute(command,{binding,now,ctx={},params={}}){
  }
  let after;
  try{after=await readState(binding,{now:clock});}catch{throw new OperatorStop('write_uncertain',3,{reason:'readback_unreadable'});}
- const problems=readbackProblems(after,state,mode);
- if(problems.length)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',problems,after:view(after,clock)});
+ const problems=readbackProblems(after,state,mode,clock);
+ const cooldownObservation=cooldownObservations(state,after);
+ if(problems.length)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',problems,after:view(after,clock),cooldownObservations:cooldownObservation});
  if(ctx.track)ctx.track('committed');
- return {operation:'set',writes:true,writeState:'committed',operatorSha256:operatorSha256(),mode,statements:1,before:view(state,clock),after:view(after,clock)};
+ return {operation:'set',writes:true,writeState:'committed',operatorSha256:operatorSha256(),mode,statements:1,before:view(state,clock),after:view(after,clock),cooldownObservations:cooldownObservation};
 }
 
 // ---- CLI -----------------------------------------------------------------------------------------------------------------
@@ -157,6 +179,14 @@ export function parseArgs(argv){
  return {command,params:{mode:parsed.mode,expectRevision:Number(parsed.expectRevision),operatorSha256:parsed.operatorSha256}};
 }
 
+// The production reads are strict: `createPublishedBinding` reads through `adapter.all`, which turns a response without a result array into [] and would let a malformed mode answer pass
+// for an absent (`off`) row or a malformed cooldown answer for an empty table. Every read here goes through the adapter's `allStrict` (the AIR-603 mechanism) and a malformed answer is an error
+// before anything is written. The write path (`batch`) stays the published binding's.
+export const strictBinding=(binding,adapter)=>({...binding,prepare:sql=>({bind:(...params)=>{
+ if(params.length)throw new OperatorStop('usage',2,{reason:'operator_binds_no_parameters'});
+ return {text:sql,async all(){return {results:await adapter.allStrict(sql,[])};},async first(){return (await adapter.allStrict(sql,[]))[0]??null;}};
+}})});
+
 export async function runUpstreamCooldownModeProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),deps=null}={}){
  const ctx={writeState:'none',bookmark:null};
  const track=state=>{ctx.writeState=state;};
@@ -171,7 +201,7 @@ export async function runUpstreamCooldownModeProduction({argv=process.argv,env=p
    const adapter=trackProductionWrites(createD1Adapter({target:adapterTarget,databaseId:PRODUCTION_DATABASE_ID,fetchImpl,retries:0}),{writeState:'none'});
    const described=await adapter.describe();
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
-   binding=createPublishedBinding(adapter);
+   binding=strictBinding(createPublishedBinding(adapter),adapter);
    // A Time Travel bookmark before the write is the recovery point; no restore without a separate GO. The rollback of this value is the `observe -> off` transition, not a restore.
    if(parsed.command==='set')ctx.bookmark=await readBookmark(adapterTarget,fetchImpl);
   }
