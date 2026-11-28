@@ -163,8 +163,8 @@ const scopeRow=file=>rows(file,"SELECT bootstrap_state,bootstrap_cursor,revision
 // dormant: nothing in the Worker or any other module imports the bootstrap
 {
  const importers=[];
- for(const name of fs.readdirSync('src'))if(name.endsWith('.js')&&name!=='catalog-enrichment-bootstrap.js'&&fs.readFileSync('src/'+name,'utf8').includes('catalog-enrichment-bootstrap'))importers.push(name);
- assert.deepEqual(importers,[],'the bootstrap is reachable only from AIR-607\'s operation, not from the Worker');
+ for(const name of fs.readdirSync('src'))if(name.endsWith('.js')&&name!=='catalog-enrichment-bootstrap.js'&&name!=='catalog-enrichment-activation.js'&&fs.readFileSync('src/'+name,'utf8').includes('catalog-enrichment-bootstrap'))importers.push(name);
+ assert.deepEqual(importers,[],'the bootstrap is reachable only from AIR-607\'s activation operation (which tests/catalog-enrichment-activation.mjs proves is itself not imported), not from the Worker');
  assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/catalog-enrichment-bootstrap/);
 }
 console.log('catalog enrichment bootstrap: ok');
