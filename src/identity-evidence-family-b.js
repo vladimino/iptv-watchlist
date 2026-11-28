@@ -21,14 +21,15 @@
 // ambiguous is reported, never read as "no history". A record whose membership cannot be proven is `cohort_unprovable`: excluded and reported, never guessed. `readFamilyBSources` fences its D1
 // acquisition with the Discovery authority generation read before and after the paged reads (every Discovery write moves it); an incoherent one makes `dryRunFamilyB` refuse a manifest.
 //
-// THE DEPENDENCY RULE. The ER commit-time assertion pins ONE source row per record. A row is staged only when every input it consumes is pinned by its own source:
-//   - an assign linked to its history row: the history row alone (`ownerIdentity.effect`, `tmdbId`, `requestId`, `at` are guarded; its revision is the `source_order`);
-//   - an action with no linked history row: its intent alone (`command`, `issued.confirmedAt`, the receipt association, and a revoke's nested `revokes.*` are guarded), order unknown;
-//   - an R2 action: the whole object, pinned by its ETag.
-// An owner reject or revoke LINKED to its history row consumes two rows (the intent for the movie and the time, the history row for the order), and the scoped withdrawal of a
-// replacement consumes the superseded intent as well: one source cannot express that, so they are NOT staged. They are counted as unresolved (`ownerActionsUnbound`,
-// `ownerWithdrawalsUnbound`), `coverage.complete` is false, and the chronology is neither dropped silently nor guessed. The narrow ER contract gap and its minimal correction are in the
-// manifest import runbook.
+// THE DEPENDENCY RULE. A staged row's source pins what the row consumes, in the same atomic chunk (ER, ADR 0215 decision 7 and its `requires` amendment: a D1 source may name up to
+// three more rows it depends on, each asserted by its own statement in the same batch):
+//   - an owner action linked to its history row: the intent is the source (`command`, `issued.confirmedAt`, the receipt association, a revoke's nested `revokes.*`, a replacement's
+//     `supersedes`) and the history row is REQUIRED (its revision is the `source_order`, an assign's `ownerIdentity` its time);
+//   - a replacement also requires the superseded intent (its effect, key and movie), for the scoped withdrawal it yields; when that intent is not in the source the WHOLE action is unresolved;
+//   - an owner action whose receipt hash no owner history row carries (genuinely history-less): its intent alone, order unknown;
+//   - an owner assign recorded in a history row that no intent names: that row alone (`ownerIdentity.*`, its revision);
+//   - b1 / b2 / a history-less decision: the row and every payload field the mapping reads; an R2 action: the whole object, pinned by its ETag.
+// The receipt-to-payload hash association itself cannot be asserted (ER has no SQL hash): the pinned fields stand for it.
 import {decisionEvidenceInput,decisionHash} from './discovery-authority.js';
 import {planOwnerEvidence} from './discovery-owner-evidence.js';
 import {normalizeEvidence} from './identity-evidence.js';
@@ -113,7 +114,7 @@ async function linkOf(intent,candidates){
  return {status:item.member==='in'?'linked':item.member==='late'?'late':'unprovable',item};
 }
 // The guard of an unlinked intent: exactly the fields the mapping consumes, nested references included (a revoke's `revokes.*`), and the receipt association that made it unlinked.
-function intentSource(row,intent){
+function intentSource(row,intent,requires=[]){
  const value=(object,path)=>{const v=path.split('.').reduce((current,part)=>plain(current)?current[part]:undefined,object);const n=v===undefined?null:v;return scalarOf(n)?n:undefined;};
  const guard={state:row.state,kind:row.kind,observation_key:row.observation_key,'receipt_json#$.decisionHash':value(intent.receipt,'decisionHash'),'command_json#$.effect':value(intent.command,'effect'),
   'command_json#$.tmdbId':value(intent.command,'tmdbId'),'issued_json#$.confirmedAt':value(intent.issued,'confirmedAt')};
@@ -123,16 +124,28 @@ function intentSource(row,intent){
   guard['command_json#$.revokes.tmdbId']=value(intent.command,'revokes.tmdbId');
  }
  if(Object.values(guard).includes(undefined))return null;
- return {table:'discovery_intent',key:{idempotency_key:row.idempotency_key},guard};
+ // `requires` (the ER amendment, ADR 0215 decision 7): the other rows this action consumes, each pinned in the same chunk batch. Absent when the intent is the only row consumed.
+ return {table:'discovery_intent',key:{idempotency_key:row.idempotency_key},guard,...(requires.length?{requires}:{})};
 }
+// The linked history row an action consumes (its revision is the `source_order`; for an assign its `ownerIdentity` is the time): pinned by key, writer, written_at and every identity field
+// of the payload that is a scalar. ER has no SQL hash, so the receipt-to-payload hash association itself cannot be asserted: a change to a payload field the mapping does not read is
+// not detected, and is harmless to the staged row.
+const LINK_GUARD_PATHS=Object.freeze(['status','tmdbId','ownerIdentity.effect','ownerIdentity.tmdbId','ownerIdentity.requestId','ownerIdentity.at','revokedOwnerAssign.tmdbId','revokedOwnerAssign.requestId','revokedOwnerAssign.revokedBy','revokedOwnerAssign.at']);
+const linkedHistoryRequire=item=>{const guard=payloadGuard('payload_json',item.payload,LINK_GUARD_PATHS);return guard&&{table:'discovery_decision_history',key:historyKey(item.row),guard:{...historyBase(item.row),...guard}};};
+// The superseded intent a replacement's scoped withdrawal consumes (its effect, key and movie).
+const supersededRequire=(row,intent)=>{
+ const value=(object,path)=>{const v=path.split('.').reduce((current,part)=>plain(current)?current[part]:undefined,object);const n=v===undefined?null:v;return scalarOf(n)?n:undefined;};
+ const guard={state:row.state,kind:row.kind,observation_key:row.observation_key,'command_json#$.effect':value(intent.command,'effect'),'command_json#$.tmdbId':value(intent.command,'tmdbId')};
+ return Object.values(guard).includes(undefined)?null:{table:'discovery_intent',key:{idempotency_key:row.idempotency_key},guard};
+};
 // The raw rows of one owner action, from the live planner (E2c). `at` is the recorded time (a valid instant) or null (unknown): the planner runs with a placeholder where the time is
-// unknown and the rows are then given the known value or null, so a placeholder is never stored. A replacement's scoped withdrawal is NOT planned here (it consumes the superseded
-// intent, which no single source pins); the caller counts it. Returns {rows} or {none}.
-async function ownerRows({intent,key,next,at,order}){
+// unknown and the rows are then given the known value or null, so a placeholder is never stored. A replacement yields its own row AND the scoped withdrawal of the superseded intent
+// (E2c: same root, time and order). Returns {rows} or {none}.
+async function ownerRows({intent,key,next,at,order,superseded=null}){
  const time=at||PLACEHOLDER_TIME;
- const planning={...intent,command:{...intent.command,supersedes:null},issued:{...(plain(intent.issued)?intent.issued:{}),confirmedAt:time}};
+ const planning={...intent,issued:{...(plain(intent.issued)?intent.issued:{}),confirmedAt:time}};
  const planNext=next&&plain(next.ownerIdentity)?{...next,ownerIdentity:{...next.ownerIdentity,at:time}}:next;
- const plan=await planOwnerEvidence({intent:planning,superseded:null,key,next:planNext,revision:order??1});
+ const plan=await planOwnerEvidence({intent:planning,superseded,key,next:planNext,revision:order??1});
  if(!plan.eligible)return {none:'not_an_owner_statement'};
  if(plan.plans===null)return {none:'unplannable'};
  const rows=plan.plans.map(item=>({...rawOf(item.row),sourceOrder:order??null,observedAt:at||null}));
@@ -201,8 +214,8 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  const disp={history:new Map(),decisions:new Map(),intents:new Map(),r2:new Map()};
  const noRow=new Map(),unrecordable=new Map(),unknownWriters=new Map(),writerStatus=new Map();
  const late={history:[],intents:[],r2:[]};
- const c={timeUnknown:0,rowsMapped:0,b4:{actions:0,rows:0,linkedAssigns:0,historyOnlyAssigns:0,unlinked:0,orderUnknown:0,timeUnknown:0,ownerHistoryRows:0},b5:{eligible:0,rows:0,timeUnknown:0}};
- const unresolved={ownerActionsUnbound:new Map(),ownerWithdrawalsUnbound:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0};
+ const c={timeUnknown:0,rowsMapped:0,b4:{actions:0,rows:0,linked:0,linkedAssigns:0,historyOnlyAssigns:0,unlinked:0,orderUnknown:0,timeUnknown:0,ownerHistoryRows:0},b5:{eligible:0,rows:0,timeUnknown:0}};
+ const unresolved={replacementSupersededMissing:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0};
  const addPair=mapped=>{
   const pair=mapped.input.subject.value+'|'+mapped.input.object.value;
   if(mapped.source==='tmdb_detail')pairs.b1.add(pair);else{const set=pairs.b2.get(mapped.source)||new Set();set.add(pair);pairs.b2.set(mapped.source,set);}
@@ -245,8 +258,9 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
 
  // b4: the owner actions. The link between an intent and its history row is one of: none (no owner-writer row of the observation carries the receipt's hash: a genuinely history-less
  // action), linked (exactly one, in the cohort), late, unprovable, or ambiguous. Only `none` may be staged from the intent alone; every other status is reported, never read as "absent".
+ const intentById=new Map(intents.map(row=>[row.idempotency_key,intentOf(row)])),rowById=new Map(intents.map(row=>[row.idempotency_key,row]));
  for(const row of intents){
-  const intent=intentOf(row);
+  const intent=intentById.get(row.idempotency_key);
   if(!KIND_EFFECT[row.kind]||row.state!=='receipt'){bump(disp.intents,'not_selected');continue;}
   if(!plain(intent.command)){bump(disp.intents,'unrecordable');bump(unrecordable,'intent_unreadable');continue;}
   const effect=KIND_EFFECT[row.kind];
@@ -263,28 +277,37 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
    const issuedAt=instantOf(intent.issued?.confirmedAt);
    if(issuedAt!==null&&later(issuedAt)){bump(disp.intents,'late');late.intents.push({idempotencyKey:row.idempotency_key,observationKey:row.observation_key,via:'issued_after_cohort'});continue;}
   }
+  // A replacement also yields the scoped withdrawal of the superseded intent: the superseded intent must be in the source and be an assign or a reject of this observation, otherwise the
+  // withdrawal cannot be named and the WHOLE action stays unresolved (a replacement lacking its withdrawal is never imported and read as settled).
   const supersedes=intent.command.supersedes!==undefined&&intent.command.supersedes!==null;
-  // A linked reject or revoke consumes two source rows: not expressible by one source, so not staged and reported (never guessed, never silently dropped).
-  if(link.status==='linked'&&effect!=='assign'){bump(disp.intents,'unbound:'+effect);bump(unresolved.ownerActionsUnbound,effect);if(supersedes)unresolved.ownerWithdrawalsUnbound++;continue;}
-  let result,source;
+  let superseded=null,supersededRow=null;
+  if(supersedes){
+   superseded=intentById.get(intent.command.supersedes.requestId)||null;
+   supersededRow=superseded?rowById.get(superseded.idempotencyKey):null;
+   if(!superseded||!plain(superseded.command)||(superseded.kind!=='identity_assign'&&superseded.kind!=='identity_reject')||superseded.observationKey!==row.observation_key){
+    bump(disp.intents,'replacement_superseded_missing');unresolved.replacementSupersededMissing++;continue;
+   }
+  }
+  const requires=[];
+  if(link.status==='linked'){const required=linkedHistoryRequire(link.item);if(!required){bump(disp.intents,'guard_unsupported');bump(unrecordable,'guard_unsupported');continue;}requires.push(required);}
+  if(supersedes){const required=supersededRequire(supersededRow,superseded);if(!required){bump(disp.intents,'guard_unsupported');bump(unrecordable,'guard_unsupported');continue;}requires.push(required);}
+  let result;
   if(link.status==='linked'){
-   // A linked assign: everything it consumes is in its history row (`ownerIdentity`), which is its source; its revision is the source order.
+   // Linked to its history row: the history row is REQUIRED (its revision is the `source_order`; for an assign its `ownerIdentity` is the time), the intent is the source. The planner reads
+   // the real intent, so an intent whose movie or key disagrees with the history row's `ownerIdentity` is unplannable, not staged.
    const identity=link.item.payload.ownerIdentity;
-   if(!plain(identity)||identity.effect!=='assign'||identity.requestId!==row.idempotency_key||identity.tmdbId===undefined||identity.tmdbId===null){bump(disp.intents,'unplannable');bump(unrecordable,'owner_unplannable');continue;}
-   const synthetic={kind:'identity_assign',idempotencyKey:identity.requestId,observationKey:row.observation_key,command:{effect:'assign',tmdbId:identity.tmdbId},issued:null};
-   result=await ownerRows({intent:synthetic,key:row.observation_key,next:link.item.payload,at:instantOf(identity.at),order:Number(link.item.row.revision)});
-   source=ownerHistorySource(link.item.row,link.item.payload);
-   if(result.rows){c.b4.linkedAssigns++;if(result.rows.some(input=>input.observedAt===null))c.b4.timeUnknown++;}
+   const at=effect==='assign'?instantOf(identity?.at):instantOf(intent.issued?.confirmedAt);
+   result=await ownerRows({intent,key:row.observation_key,next:effect==='assign'?link.item.payload:null,at,order:Number(link.item.row.revision),superseded});
+   if(result.rows){c.b4.linked++;if(effect==='assign')c.b4.linkedAssigns++;if(result.rows.some(input=>input.observedAt===null))c.b4.timeUnknown++;}
   }else{
    // Genuinely history-less: the intent is the only source, the order is unknown. An assign has no recorded time then (its time is `ownerIdentity.at`), never inferred.
    const at=effect==='assign'?null:instantOf(intent.issued?.confirmedAt);
-   result=await ownerRows({intent,key:row.observation_key,next:effect==='assign'?{ownerIdentity:{effect:'assign',requestId:row.idempotency_key,tmdbId:intent.command.tmdbId,at:PLACEHOLDER_TIME}}:null,at,order:null});
-   source=intentSource(row,intent);
+   result=await ownerRows({intent,key:row.observation_key,next:effect==='assign'?{ownerIdentity:{effect:'assign',requestId:row.idempotency_key,tmdbId:intent.command.tmdbId,at:PLACEHOLDER_TIME}}:null,at,order:null,superseded});
    if(result.rows){c.b4.unlinked++;c.b4.orderUnknown++;if(!at)c.b4.timeUnknown++;}
   }
   if(!result.rows){bump(disp.intents,result.none==='unrecordable'?'unrecordable':'unplannable');bump(unrecordable,'owner_'+result.none);continue;}
+  const source=intentSource(row,intent,requires);
   if(!source){bump(disp.intents,'guard_unsupported');bump(unrecordable,'guard_unsupported');continue;}
-  if(supersedes)unresolved.ownerWithdrawalsUnbound++;
   records.push({source,rows:result.rows.map(evidence=>({evidence}))});c.b4.rows+=result.rows.length;c.rowsMapped+=result.rows.length;bump(disp.intents,'mapped');
  }
  // Owner-writer history rows in the cohort that no intent receipt named. An assign is fully recorded in its own history row (`ownerIdentity`) and is staged from it; any other owner statement
@@ -343,9 +366,9 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
 
  const counts=sources.counts||{};
  const reconciled={history:sum(disp.history)===history.length,decisions:sum(disp.decisions)===decisions.length,intents:sum(disp.intents)===intents.length,r2:sum(disp.r2)===r2Objects.length};
- const unresolvedOut={ownerActionsUnbound:obj(unresolved.ownerActionsUnbound),ownerWithdrawalsUnbound:unresolved.ownerWithdrawalsUnbound,cohortUnprovable:unresolved.cohortUnprovable,
+ const unresolvedOut={replacementSupersededMissing:unresolved.replacementSupersededMissing,cohortUnprovable:unresolved.cohortUnprovable,
   linkAmbiguous:unresolved.linkAmbiguous,linkUnprovable:unresolved.linkUnprovable,unlinkedOwnerHistory:unresolved.unlinkedOwnerHistory,r2NotInFrozenListing:unresolved.r2NotInFrozenListing,unrecordable:obj(unrecordable)};
- const unresolvedCount=sum(unresolved.ownerActionsUnbound)+unresolved.ownerWithdrawalsUnbound+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+sum(unrecordable);
+ const unresolvedCount=unresolved.replacementSupersededMissing+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+sum(unrecordable);
  const complete=acquisition.established&&r2Acquisition.established&&unresolvedCount===0&&Object.values(reconciled).every(Boolean);
  const coverage={family:FAMILY,cohortAt:cohortAt??null,
   // Three different things, never one: `complete` (every eligible proposition staged, both acquisitions established), `unresolved` (eligible but not staged), `excluded` (a deliberate no-row by

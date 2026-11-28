@@ -10,7 +10,8 @@
 // - `loadManifest`: stages the manifest into the immutable staging tables of the run (idempotent: a lost response is answered by resending, a chunk is atomic), reads it back and
 //   recomputes the digest. `sealRun`: the atomic seal, then a second readback. Any difference abandons (stops) the run. `loadAndSealManifest` runs both.
 // - `importRun`: claims the lease, and per chunk runs ONE D1 batch that asserts the run, the live lease of this attempt, the next chunk number, and every staged source record's
-//   guard fields (a changed or deleted listed record fails the chunk as `source_moved`), inserts FROM THE STAGING ROWS (never from caller values) with
+//   guard fields (a changed or deleted listed record fails the chunk as `source_moved`; a D1 source may also name up to MAX_REQUIRES further rows it depends on, carried inside its guard
+//   object under `$requires`, covered by the digest and asserted by their own statements in the same batch: the amendment of ADR 0215 decision 7, a source without `requires` is unchanged), inserts FROM THE STAGING ROWS (never from caller values) with
 //   `ON CONFLICT (evidence_key) DO NOTHING`, asserts that every staged key now has the staged semantic identity (a different one is a collision), and appends the create-only
 //   receipt whose four counts (inserted, already_imported, live_covered, reconstructed_equivalent) are computed in the batch and must add up to the staged keys. A lost response
 //   is settled by the receipt; a resumed attempt takes a new lease and a chunk sent under a stale lease fails the receipt's fence. R2 sources are re-read by ETag before their chunk.
@@ -23,6 +24,10 @@ export const IMPORT_SCHEMA=44;
 export const FAMILIES=Object.freeze(['a','b','c']);
 export const MAX_SOURCES_PER_CHUNK=50;
 export const MAX_ROWS_PER_CHUNK=200;
+// AIR-622 (ADR 0215 decision 7 amendment): a D1 source record may name up to this many ADDITIONAL rows it depends on, each pinned like the source itself and asserted in the SAME chunk batch.
+export const MAX_REQUIRES=3;
+export const REQUIRES_KEY='$requires';
+export const MAX_GUARD_JSON=4000;
 export const OUTCOMES=Object.freeze(['inserted','already_imported','live_covered','reconstructed_equivalent']);
 export const MANIFEST_VERSION=1;
 // The frozen R2 objects that may be imported at all (ADR 0215 decision 7, step 6). Anything else is excluded and reported.
@@ -78,18 +83,45 @@ function guardField(table,name){
  if(path!==undefined&&(!column.endsWith('_json')||!JSON_PATH.test(path)))throw invalid('guard_path');
  return {column,path:path===undefined?null:path};
 }
-// The canonical form of a D1 source: its key columns (all of them) and its guard fields (at least one).
-function d1Source(input){
- if(!plain(input)||typeof input.table!=='string'||!GUARD_TABLES[input.table])throw invalid('source_table');
+// The canonical form of one pinned D1 row: its key columns (all of them) and its guard fields (at least one, at most 40), all scalar.
+function pinnedRow(input,reason){
+ if(!plain(input)||typeof input.table!=='string'||!GUARD_TABLES[input.table])throw invalid(reason||'source_table');
+ // A required row is a plain pinned row: it carries no `requires` of its own (no chains, one level, bounded).
+ if(reason==='requires_table'&&plain(input.guard)&&input.guard[REQUIRES_KEY]!==undefined)throw invalid('requires_nested');
  const spec=GUARD_TABLES[input.table];
  if(!plain(input.key)||Object.keys(input.key).sort().join()!==[...spec.key].sort().join())throw invalid('source_key');
  const key={};
  for(const column of spec.key){const value=scalar(input.key[column],'source_key');if(value===null)throw invalid('source_key');key[column]=value;}
- if(!plain(input.guard)||!Object.keys(input.guard).length||Object.keys(input.guard).length>40)throw invalid('guard');
+ const names=Object.keys(plain(input.guard)?input.guard:{}).filter(name=>name!==REQUIRES_KEY);
+ if(!names.length||names.length>40)throw invalid('guard');
  const guard={};
- for(const name of Object.keys(input.guard).sort()){guardField(input.table,name);guard[name]=scalar(input.guard[name],'guard_value');}
- return {kind:'d1_row',table:input.table,key,guard};
+ for(const name of names.sort()){guardField(input.table,name);guard[name]=scalar(input.guard[name],'guard_value');}
+ return {table:input.table,key,guard};
 }
+// The canonical form of a D1 source: a pinned row plus, optionally, the rows it DEPENDS ON (`requires`, at most MAX_REQUIRES, each a pinned row of the same closed allowlist, none equal to the
+// source or to another). `requires` may be given beside the guard (`requires: [...]`) or already canonical inside it (`guard.$requires`, how the manifest and the staging carry it, so the
+// existing guard_json column holds it with no new storage). A source WITHOUT requires is byte-for-byte what it has always been: same canonical JSON, same digest, same token.
+function d1Source(input){
+ const base=pinnedRow(input);
+ const given=input.requires!==undefined?input.requires:input.guard[REQUIRES_KEY];
+ if(input.requires!==undefined&&input.guard[REQUIRES_KEY]!==undefined)throw invalid('requires_twice');
+ const source={kind:'d1_row',...base};
+ if(given!==undefined){
+  if(!Array.isArray(given)||!given.length||given.length>MAX_REQUIRES)throw invalid('requires');
+  for(const item of given)if(!plain(item)||Object.keys(item).sort().join()!=='guard,key,table')throw invalid('requires');
+  const required=given.map(item=>pinnedRow(item,'requires_table')).sort((a,b)=>compareText(canonicalJson(a),canonicalJson(b)));
+  const seen=new Set([canonicalJson({table:base.table,key:base.key})]);
+  for(const item of required){
+   const id=canonicalJson({table:item.table,key:item.key});
+   if(seen.has(id))throw invalid('requires_duplicate');
+   seen.add(id);
+  }
+  source.guard={...source.guard,[REQUIRES_KEY]:required};
+ }
+ if(canonicalJson(source.guard).length>MAX_GUARD_JSON)throw invalid('guard_size');
+ return source;
+}
+const compareText=(a,b)=>a<b?-1:a>b?1:0;
 // An R2 source is a LOGICAL record inside a PHYSICAL object: `key` and `etag` name the frozen object (the guard, re-read before every submission of a chunk that uses it) and
 // `record` the durable record inside it (for example one legacy admission), so one object yields many distinct source records that stage across bounded chunks.
 function r2Source(input){
@@ -107,19 +139,31 @@ export async function sourceToken(source){
  throw invalid('source');
 }
 
-// The assertion a chunk makes for one staged D1 source record: it exists with exactly its staged key and guard fields (field equality; `IS` so NULL equals NULL).
-export function guardCondition(source){
- const spec=GUARD_TABLES[source?.table];
- if(source?.kind!=='d1_row'||!spec)throw invalid('source');
+// The assertion for one pinned D1 row: it exists with exactly its key and guard fields (field equality; `IS` so NULL equals NULL).
+function rowCondition({table,key,guard}){
+ const spec=GUARD_TABLES[table];
+ if(!spec)throw invalid('source');
  const clauses=[],params=[];
- for(const column of spec.key){clauses.push(column+'=?');params.push(source.key[column]);}
- for(const name of Object.keys(source.guard).sort()){
-  const {column,path}=guardField(source.table,name);
+ for(const column of spec.key){clauses.push(column+'=?');params.push(key[column]);}
+ for(const name of Object.keys(guard).filter(field=>field!==REQUIRES_KEY).sort()){
+  const {column,path}=guardField(table,name);
   clauses.push((path===null?column:'json_extract('+column+',?)')+' IS ?');
   if(path!==null)params.push(path);
-  params.push(source.guard[name]);
+  params.push(guard[name]);
  }
- return {sql:'EXISTS (SELECT 1 FROM '+source.table+' WHERE '+clauses.join(' AND ')+')',params};
+ return {sql:'EXISTS (SELECT 1 FROM '+table+' WHERE '+clauses.join(' AND ')+')',params};
+}
+// The assertion a chunk makes for one staged D1 source record: it exists with exactly its staged key and guard fields.
+export function guardCondition(source){
+ if(source?.kind!=='d1_row'||!GUARD_TABLES[source?.table])throw invalid('source');
+ return rowCondition(source);
+}
+// The assertions for the rows a source record DEPENDS ON (the amendment): one per required row, each its own statement in the same atomic chunk batch (so a bind or statement bound is
+// never shared), none for a source without `requires`.
+export function requiredConditions(source){
+ if(source?.kind!=='d1_row'||!GUARD_TABLES[source?.table])throw invalid('source');
+ const required=source.guard?.[REQUIRES_KEY];
+ return Array.isArray(required)?required.map(rowCondition):[];
 }
 
 // ---- the manifest ----
@@ -517,6 +561,7 @@ export function chunkStatements({run,chunk,attempt,at}){
   if(source.kind!=='d1_row')continue;
   const condition=guardCondition(source);
   push(assertSql(condition.sql),condition.params);
+  for(const required of requiredConditions(source))push(assertSql(required.sql),required.params);
  }
  push(LEDGER_INSERT,[requestId,at,run.runId,chunk.chunkNo]);
  push(assertSql(IDENTITY_ASSERT),[run.runId,chunk.chunkNo]);
@@ -554,6 +599,7 @@ async function diagnose(env,db,run,chunk,fence,error){
   if(source.kind!=='d1_row')continue;
   const condition=guardCondition(source);
   if(!await one(db,'SELECT 1 AS ok WHERE '+condition.sql,condition.params))await stopWith(env,db,current,'source_moved',now,fence);
+  for(const required of requiredConditions(source))if(!await one(db,'SELECT 1 AS ok WHERE '+required.sql,required.params))await stopWith(env,db,current,'source_moved',now,fence);
  }
  const clash=await one(db,'SELECT 1 AS clash FROM identity_evidence_import_row AS s WHERE s.run_id=? AND s.chunk_no=? AND NOT EXISTS (SELECT 1 FROM film_identity_evidence AS l WHERE l.evidence_key=s.evidence_key AND '+SAME_IDENTITY
   +') AND EXISTS (SELECT 1 FROM film_identity_evidence AS x WHERE x.evidence_key=s.evidence_key) LIMIT 1',[run.runId,chunk.chunkNo]);

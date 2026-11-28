@@ -4,7 +4,7 @@
 // Covered (ADR 0215 Table 4, decision 7): the mapping of b1 and b2 through the LIVE E2a function (same evidence key as a live row, time from `checkedAt`), b3 / b6 / b7 as counts, b4
 // through the LIVE E2c planner (chronology by the history revision, unknown order and time left unknown, a recorded proposition kept when its time is invalid), b5 (terminal R2 records
 // only, real shape), THE COHORT (a late history row is not re-imported through its decision, an owner action linked to a late row is late, R2 `finishedAt`, an unprovable record), the
-// coherent acquisition (a generation that moves, a held authority, a backdated record), THE DEPENDENCY RULE (what a record's source pins, and what cannot be staged and is reported),
+// coherent acquisition (a generation that moves, a held authority, a backdated record), THE DEPENDENCY RULE (what a record's source pins and requires: a linked action's history row, a replacement's superseded intent), and what cannot be staged and is reported),
 // commit-time guards (every pinned field mutated or deleted after staging fails ITS chunk as `source_moved`, with zero ledger rows and zero receipts), reconciled counts, a
 // deterministic manifest, a dry run that writes nothing, and the import of the family on sqlite (four counts, replay).
 import assert from 'node:assert/strict';
@@ -139,14 +139,14 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  assert.equal(manifestRows(result.manifest).every(row=>row.route==='discovery_scan'&&row.polarity==='asserts'),true);
 }
 
-// ===== 4. b4: owner actions through the LIVE E2c planner; what one source can pin is staged, the rest is reported =====
+// ===== 4. b4: owner actions through the LIVE E2c planner; the source pins the intent and REQUIRES the linked history row (ER `requires`) =====
 {
  const assignPayload=assignDecision('111','intent-assign');
  const rejectPayload=rejectDecision('222','intent-reject');
  const history=[hist(1,1,'resolver_chunk',verified({tmdbId:100})),hist(1,2,'discovery_identity_correct',assignPayload),hist(2,1,'discovery_identity_correct',rejectPayload)];
  const intents=[
-  intentRow('intent-assign','identity_assign',OBS(1),{command:{effect:'assign',tmdbId:'111',basis:'owner check'},receipt:await applied(assignPayload)}),           // linked: staged from its history row
-  intentRow('intent-reject','identity_reject',OBS(2),{command:{effect:'reject',tmdbId:'222',basis:'owner check'},receipt:await applied(rejectPayload)}),          // linked reject: two source rows, unresolved
+  intentRow('intent-assign','identity_assign',OBS(1),{command:{effect:'assign',tmdbId:'111',basis:'owner check'},receipt:await applied(assignPayload)}),           // linked: the intent, requiring its history row
+  intentRow('intent-reject','identity_reject',OBS(2),{command:{effect:'reject',tmdbId:'222',basis:'owner check'},receipt:await applied(rejectPayload)}),          // linked reject: the intent, requiring its history row for the order
   intentRow('intent-reject-2','identity_reject',OBS(3),{command:{effect:'reject',tmdbId:'333'},receipt:{state:'applied',decisionHash:'f'.repeat(64)}}),             // unlinked: staged from its intent
   intentRow('intent-revoke','identity_revoke',OBS(4),{command:{effect:'revoke',revokes:{requestId:'intent-assign-4',effect:'assign',tmdbId:'444'}},receipt:{state:'applied',decisionHash:'e'.repeat(64)}}),
   intentRow('intent-assign-5','identity_assign',OBS(5),{command:{effect:'assign',tmdbId:'555'},receipt:{state:'applied',decisionHash:'d'.repeat(64)}}),               // unlinked assign: no recorded time
@@ -154,14 +154,19 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  const result=await plan(sourcesOf({history,intents}));
  const owner=manifestRows(result.manifest).filter(row=>row.route==='owner_action');
  const byRoot=Object.fromEntries(owner.map(row=>[row.sourceRoot,row]));
- // The linked assign: asserts, root = the intent key, time = ownerIdentity.at, source_order = the revision of its history row (2), the live key, sourced from the history row.
+ // The linked assign: asserts, root = the intent key, time = ownerIdentity.at, source_order = the revision of its history row (2), the live key.
  const assign=byRoot['intent-assign'];
  assert.equal(assign.polarity,'asserts');assert.equal(assign.observedAt,ASSIGN_AT);assert.equal(assign.sourceOrder,2);
  assert.equal(assign.key,await ownerRowKey({key:OBS(1),effect:'assign',tmdbId:'111',requestId:'intent-assign'}),'the live key');
- assert.equal(assign.reconstructedFrom.startsWith('d1:discovery_decision_history:'),true);
- // The linked reject consumes two rows (the intent for the movie and the time, the history row for the order): not staged, reported, never imported with a guessed order.
- assert.equal(byRoot['intent-reject'],undefined);
- assert.deepEqual(result.coverage.unresolved.ownerActionsUnbound,{reject:1});assert.equal(result.coverage.dispositions.intents['unbound:reject'],1);
+ assert.equal(assign.reconstructedFrom.startsWith('d1:discovery_intent:'),true,'the intent is the source; the history row is required');
+ // The linked reject consumes two rows (the intent for the movie and the time, the history row for the order): staged with its chronology, the history row pinned as a required row.
+ const linkedReject=byRoot['intent-reject'];
+ assert.equal(linkedReject.polarity,'refutes');assert.equal(linkedReject.observedAt,at(-1800000));assert.equal(linkedReject.sourceOrder,1,'the history revision of the very write');
+ assert.equal(linkedReject.key,await ownerRowKey({key:OBS(2),effect:'reject',tmdbId:'222',requestId:'intent-reject'}),'the live key');
+ const linkedSources=result.manifest.chunks.flatMap(chunk=>chunk.sources).filter(source=>source.table==='discovery_intent'&&source.guard['$requires']);
+ assert.equal(linkedSources.length,2,'the two linked actions require their history rows');
+ assert.deepEqual(linkedSources.map(source=>source.guard['$requires'].map(item=>item.table)),[['discovery_decision_history'],['discovery_decision_history']]);
+ assert.equal(result.coverage.unresolved.replacementSupersededMissing,0);assert.equal(result.coverage.unresolvedCount,0);
  // An unlinked reject: its intent is its only source; movie and time come from the intent, the order is unknown.
  const reject=byRoot['intent-reject-2'];
  assert.equal(reject.polarity,'refutes');assert.equal(reject.observedAt,at(-1800000));assert.equal(reject.sourceOrder,null);
@@ -174,14 +179,14 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  // An unlinked assign: no history row, no recorded time (its time is ownerIdentity.at, never inferred), order unknown.
  assert.equal(byRoot['intent-assign-5'].observedAt,null);assert.equal(byRoot['intent-assign-5'].sourceOrder,null);
  const b4=result.coverage.counts.b4;
- assert.equal(b4.actions,5);assert.equal(b4.linkedAssigns,1);assert.equal(b4.unlinked,3);assert.equal(b4.orderUnknown,3);assert.equal(b4.timeUnknown,1);
- assert.equal(result.coverage.complete,false,'an unresolved owner action is never presented as complete coverage');
+ assert.equal(b4.actions,5);assert.equal(b4.linked,2);assert.equal(b4.linkedAssigns,1);assert.equal(b4.unlinked,3);assert.equal(b4.orderUnknown,3);assert.equal(b4.timeUnknown,1);
+ assert.equal(result.coverage.complete,false,'no R2 acquisition: complete needs both acquisitions');
  assert.equal(reconciled(result.coverage),true);
  // The owner history rows are never read as E2a decisions: the assign payload carries identitySource 'owner'.
  assert.equal(manifestRows(result.manifest).filter(row=>row.route==='discovery_scan').length,1);
 }
 
-// ===== 4b. a replacement: its own row is staged, its scoped withdrawal (which reads the superseded intent) is reported =====
+// ===== 4b. a replacement: its own row AND the scoped withdrawal of the superseded intent, the superseded intent REQUIRED by the source =====
 {
  const firstPayload=assignDecision('100','intent-1',at(-9000000)),secondPayload=assignDecision('200','intent-2',at(-8000000));
  const history=[hist(1,1,'discovery_identity_correct',firstPayload),hist(1,2,'discovery_identity_correct',secondPayload)];
@@ -191,12 +196,25 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  ];
  const result=await plan(sourcesOf({history,intents}));
  const owner=manifestRows(result.manifest).filter(row=>row.route==='owner_action');
- assert.equal(owner.length,2,'intent-1 and intent-2; the scoped withdrawal of intent-1 consumes a second intent and is not staged');
- assert.equal(owner.find(row=>row.sourceRoot==='intent-2').sourceOrder,2);
- assert.equal(result.coverage.unresolved.ownerWithdrawalsUnbound,1);assert.equal(result.coverage.complete,false);
+ assert.equal(owner.length,3,'intent-1, intent-2 and the scoped withdrawal of intent-1');
+ const first=owner.find(row=>row.sourceRoot==='intent-1');
+ const withdrawal=owner.find(row=>row.sourceRoot==='intent-2'&&row.polarity==='refutes');
+ assert.equal(withdrawal.objectValue,'100');assert.equal(withdrawal.scopeEvidenceKey,first.key,'it names the exact key of the superseded row');
+ assert.equal(withdrawal.sourceOrder,2,'the withdrawal shares the order of the replacing write');assert.equal(withdrawal.observedAt,at(-8000000));
+ assert.equal(withdrawal.key,await evidenceKeyOf(normalizeEvidence({origin:'live',subject:{kind:'discovery_observation',value:OBS(1)},relation:'candidate_for',object:{kind:'tmdb_movie',value:'100'},polarity:'refutes',route:'owner_action',method:'owner_statement',sourceRoot:'intent-2',scopeEvidenceKey:first.key,observedAt:at(-8000000),sourceOrder:2})),'the live key of the withdrawal');
+ const replacing=result.manifest.chunks.flatMap(chunk=>chunk.sources).find(source=>source.key.idempotency_key==='intent-2');
+ assert.deepEqual(replacing.guard['$requires'].map(item=>item.table).sort(),['discovery_decision_history','discovery_intent'],'the history row and the superseded intent are both required');
+ assert.equal(result.coverage.unresolved.replacementSupersededMissing,0);assert.equal(result.coverage.unresolvedCount,0);
  // Chronology is the history revision, not the clock: reversing the input and the history order changes nothing.
  const reversed=await plan(sourcesOf({history:[...history].reverse(),intents:[...intents].reverse()}));
  assert.equal(reversed.digest,result.digest);
+ // A replacement whose superseded intent is not in the source: the WHOLE action is unresolved, never a replacement without its withdrawal read as settled.
+ const missing=await plan(sourcesOf({history,intents:[intents[1]]}));
+ assert.equal(missing.coverage.dispositions.intents.replacement_superseded_missing,1);assert.equal(missing.coverage.unresolved.replacementSupersededMissing,1);
+ assert.equal(manifestRows(missing.manifest).filter(row=>row.sourceRoot==='intent-2').length,0);assert.equal(missing.coverage.complete,false);
+ // A superseded intent of ANOTHER observation is not a valid target (E2c requires the same observation): the whole action is unresolved.
+ const other=await plan(sourcesOf({history,intents:[intentRow('intent-1','identity_assign',OBS(2),{command:{effect:'assign',tmdbId:'100'},receipt:{state:'applied',decisionHash:'1'.repeat(64)}}),intents[1]]}));
+ assert.equal(other.coverage.dispositions.intents.replacement_superseded_missing,1);
 }
 
 // ===== 4c. an unknown time does not drop a recorded proposition; a placeholder is never stored =====
@@ -499,6 +517,76 @@ const mutation=async(name,seed,change)=>{
  await mutation('history-only assign ownerIdentity.requestId',seedOrphan,"UPDATE discovery_decision_history SET payload_json=json_set(payload_json,'$.ownerIdentity.requestId','other')");
  await mutation('decision hash',seedDecision,"UPDATE discovery_decision SET decision_hash='"+'0'.repeat(64)+"'");
  await mutation('decision deleted',seedDecision,'DELETE FROM discovery_decision');
+}
+
+// ===== 9b. the rows an owner action REQUIRES: a linked reject or revoke (its history row) and a replacement (its history row and the superseded intent) =====
+{
+ const rejectPayload=rejectDecision('222','intent-reject');
+ const seedLinkedReject=async file=>{insertHistory(file,hist(2,1,'discovery_identity_correct',rejectPayload));insertIntent(file,intentRow('intent-reject','identity_reject',OBS(2),{command:{effect:'reject',tmdbId:'222'},receipt:await applied(rejectPayload)}));};
+ await mutation('linked reject: history deleted',seedLinkedReject,'DELETE FROM discovery_decision_history');
+ await mutation('linked reject: history writer',seedLinkedReject,"UPDATE discovery_decision_history SET writer='owner'");
+ await mutation('linked reject: history written_at',seedLinkedReject,"UPDATE discovery_decision_history SET written_at='2026-01-01T00:00:00.000Z'");
+ await mutation('linked reject: history status',seedLinkedReject,"UPDATE discovery_decision_history SET payload_json=json_set(payload_json,'$.status','verified')");
+ await mutation('linked reject: history renumbered',seedLinkedReject,'UPDATE discovery_decision_history SET revision=7');
+ await mutation('linked reject: intent movie',seedLinkedReject,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.tmdbId','999')");
+ await mutation('linked reject: intent confirmedAt',seedLinkedReject,"UPDATE discovery_intent SET issued_json=json_set(issued_json,'$.confirmedAt','2026-01-01T00:00:00.000Z')");
+ await mutation('linked reject: intent receipt',seedLinkedReject,"UPDATE discovery_intent SET receipt_json=json_set(receipt_json,'$.decisionHash','"+'0'.repeat(64)+"')");
+ await mutation('linked reject: intent deleted',seedLinkedReject,'DELETE FROM discovery_intent');
+ // A linked revoke: the nested revokes.* are pinned on the intent, the history row (its revision) is required.
+ const revokePayload=appliedRevokeDecision(assignDecision('444','intent-assign-4'),{effect:'revoke',revokes:{requestId:'intent-assign-4',effect:'assign',tmdbId:'444'}},{at:at(-900000),requestId:'intent-revoke'});
+ const seedLinkedRevoke=async file=>{insertHistory(file,hist(4,1,'discovery_identity_revoke',revokePayload));insertIntent(file,intentRow('intent-revoke','identity_revoke',OBS(4),{command:{effect:'revoke',revokes:{requestId:'intent-assign-4',effect:'assign',tmdbId:'444'}},receipt:await applied(revokePayload)}));};
+ await mutation('linked revoke: history deleted',seedLinkedRevoke,'DELETE FROM discovery_decision_history');
+ await mutation('linked revoke: history revokedOwnerAssign.revokedBy',seedLinkedRevoke,"UPDATE discovery_decision_history SET payload_json=json_set(payload_json,'$.revokedOwnerAssign.revokedBy','other')");
+ await mutation('linked revoke: revokes.tmdbId',seedLinkedRevoke,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.revokes.tmdbId','999')");
+ await mutation('linked revoke: revokes.requestId',seedLinkedRevoke,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.revokes.requestId','other')");
+ // A linked assign is now the intent (source) requiring its history row: the intent fields it consumes are pinned too.
+ const assignPayload=assignDecision('111','intent-assign');
+ const seedLinkedAssign=async file=>{insertHistory(file,hist(1,1,'discovery_identity_correct',assignPayload));insertIntent(file,intentRow('intent-assign','identity_assign',OBS(1),{command:{effect:'assign',tmdbId:'111'},receipt:await applied(assignPayload)}));};
+ await mutation('linked assign: intent movie',seedLinkedAssign,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.tmdbId','999')");
+ await mutation('linked assign: intent deleted',seedLinkedAssign,'DELETE FROM discovery_intent');
+ // A replacement: the replacing intent is the source; its history row AND the superseded intent are required.
+ const firstPayload=assignDecision('100','intent-1',at(-9000000)),secondPayload=assignDecision('200','intent-2',at(-8000000));
+ const seedReplacement=async file=>{
+  insertHistory(file,hist(1,1,'discovery_identity_correct',firstPayload));insertHistory(file,hist(1,2,'discovery_identity_correct',secondPayload));
+  insertIntent(file,intentRow('intent-1','identity_assign',OBS(1),{command:{effect:'assign',tmdbId:'100'},receipt:await applied(firstPayload)}));
+  insertIntent(file,intentRow('intent-2','identity_assign',OBS(1),{command:{effect:'assign',tmdbId:'200',supersedes:{requestId:'intent-1',decisionHash:await decisionHash(firstPayload)}},receipt:await applied(secondPayload)}));
+ };
+ await mutation('replacement: superseded intent deleted',seedReplacement,"DELETE FROM discovery_intent WHERE idempotency_key='intent-1'");
+ await mutation('replacement: superseded intent movie',seedReplacement,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.tmdbId','999') WHERE idempotency_key='intent-1'");
+ await mutation('replacement: superseded intent effect',seedReplacement,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.effect','reject') WHERE idempotency_key='intent-1'");
+ await mutation('replacement: superseded intent kind',seedReplacement,"UPDATE discovery_intent SET kind='identity_reject' WHERE idempotency_key='intent-1'");
+ await mutation('replacement: replacing history deleted',seedReplacement,'DELETE FROM discovery_decision_history WHERE revision=2');
+ await mutation('replacement: replacing history ownerIdentity.at',seedReplacement,"UPDATE discovery_decision_history SET payload_json=json_set(payload_json,'$.ownerIdentity.at','2026-01-01T00:00:00.000Z') WHERE revision=2");
+ await mutation('replacement: replacing intent movie',seedReplacement,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.tmdbId','999') WHERE idempotency_key='intent-2'");
+}
+
+// ===== 9c. same-key parity with live rows: a live row of the same key and identity is covered; one with another chronology is a collision =====
+{
+ const rejectPayload=rejectDecision('222','intent-reject');
+ const seed=async file=>{insertHistory(file,hist(2,1,'discovery_identity_correct',rejectPayload));insertIntent(file,intentRow('intent-reject','identity_reject',OBS(2),{command:{effect:'reject',tmdbId:'222'},receipt:await applied(rejectPayload)}));};
+ const live=async (file,order)=>{
+  const keyOf=await ownerRowKey({key:OBS(2),effect:'reject',tmdbId:'222',requestId:'intent-reject'});
+  ok(file,"INSERT INTO film_identity_evidence (evidence_key,film_id,subject_kind,subject_value,relation,object_kind,object_value,polarity,route,method,source_root,observed_at,origin,request_id,recorded_at,source_order) VALUES ('"+keyOf+"',NULL,'discovery_observation',"+lit(OBS(2))+",'candidate_for','tmdb_movie','222','refutes','owner_action','owner_statement','intent-reject','"+at(-1800000)+"','live','live-request','"+at(-1700000)+"',"+order+")");
+  return keyOf;
+ };
+ for(const [name,order] of [['a live row of the same key and the same chronology',1],['a live row of the same key with another chronology',9]]){
+  const file=copy();await seed(file);await live(file,order);
+  const sources=await readFamilyBSources(d1Standin(file));
+  const result=await dryRunFamilyB({runId:'run-p',cohortAt:cohortOf(sources),sources,planManifest});
+  const row=manifestRows(result.manifest)[0];
+  assert.equal(row.sourceOrder,1,name+': the reconstruction carries the history revision');
+  const env=envOf(file);
+  await loadAndSealManifest(env,{manifest:result.manifest,approvedDigest:result.digest,now:at(1000)});
+  await activate(env);
+  if(order===1){
+   const done=await importRun(env,{runId:'run-p',approvedDigest:result.digest,owner:'operator-a',now:at(2000)});
+   assert.equal(done.state,'complete');assert.equal(done.totals.liveCovered,1,name);assert.equal(done.totals.inserted,0);
+   assert.equal(one(file,"SELECT origin FROM film_identity_evidence"),'live','the live row is kept as it was');
+  }else{
+   await assert.rejects(()=>importRun(env,{runId:'run-p',approvedDigest:result.digest,owner:'operator-a',now:at(2000)}),code('identity_evidence_import_collision'),name);
+   assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),1,'a collision writes nothing');
+  }
+ }
 }
 
 // ===== 10. dormant: nothing in the Worker imports the module, it never imports the import path, and it contains no write =====
