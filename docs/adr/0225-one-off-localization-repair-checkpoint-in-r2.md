@@ -1,9 +1,10 @@
 # ADR 0225: The one-off repair of 16 stale Film localization rows keeps its recovery checkpoint in the existing private R2 bucket
 
-**Status:** Proposed
+**Status:** Accepted
 **Original decision date:** 2026-11-27 (storage direction, option A)
-**Recorded at:** 2026-11-27
-**Approval source:** [Product Owner Concept Review decision, 2026-11-27](https://trello.com/c/Og9XxXfy#comment-6b0a0e03f249388ec3491999): «Утверждаю вариант A: существующий R2 для AIR-664». This approves the storage direction only. The final ADR disposition (`Accepted` or `Rejected`) is still owed under the [ADR merge gate](../process/agent-workflow.md#adr-merge-gate); until it is recorded here and in the registry this record is `Proposed` and the PR that carries it must not merge.
+**Final decision date:** 2026-11-28 (option A)
+**Recorded at:** 2026-11-28
+**Approval source:** [Product Owner final decision, 2026-11-28](https://github.com/vladimino/iptv-watchlist/pull/1058#issuecomment-7231682588): «Утверждаю ADR 0225. Переводи в Accepted и доводи до деплоя. Production GO отдельно.» Option A (existing private R2) is accepted; the dormant implementation may be delivered. Production apply, restore and cleanup require separate authorization.
 **Related work:** [AIR-664](https://trello.com/c/Og9XxXfy), [AIR-663](https://trello.com/c/UP10l6Js) (reconciler), [AIR-683](https://trello.com/c/VJYgJuOW) ([cohort evidence](../evidence/film-person/air-683-localization-cohort-diagnosis-2026-11-26.md)); [Coordinator review](https://trello.com/c/Og9XxXfy#comment-6b0a07131f26129b79a9b89f)
 **Supersedes:** None. Applies [ADR 0218](0218-film-lifecycle-dimensions-revision.md) decision 3 stage 4 (unchanged).
 **Superseded by:** None
@@ -48,7 +49,7 @@ Confirmed facts: no route, MCP tool, Workflow or script reached the reconciler's
 
 - **Original decision:** [owner decision](https://trello.com/c/Og9XxXfy#comment-6b0a0e03f249388ec3491999) and [Coordinator review](https://trello.com/c/Og9XxXfy#comment-6b0a07131f26129b79a9b89f).
 - **Cohort:** [AIR-683 evidence](../evidence/film-person/air-683-localization-cohort-diagnosis-2026-11-26.md).
-- **Implementation:** `src/film-localization-repair.js`, the optional `extraGuards` of `resumeLocalizationReconcile`, `tests/film-localization-repair.mjs` (real SQLite fixtures plus an in-memory R2 bucket); delivery PR to be linked at merge.
+- **Implementation:** `src/film-localization-repair.js`, the optional `approvedPins` of `resumeLocalizationReconcile`, `tests/film-localization-repair.mjs` (real SQLite fixtures plus an in-memory R2 bucket); [delivery PR #1058](https://github.com/vladimino/iptv-watchlist/pull/1058).
 - **Dated verification:** offline fixtures only; no production operation has run.
 - **Uncertainty:** real R2 conditional-put behaviour under timeout is covered by the fixture's readback rule, not by a production observation; the live cohort may have changed since the census, which the preflight re-derives.
 

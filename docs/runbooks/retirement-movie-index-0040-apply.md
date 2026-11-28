@@ -1,6 +1,6 @@
 # Retirement ledger movie index, migration 0040: prerequisites, window, readback and forward-only rollback (the apply needs its own owner GO)
 
-**Status:** prepared on 25 Nov 2026 under [AIR-667](https://trello.com/c/SbV827kN). The file is in the repository and **not applied**; a deploy applies nothing. Whether it has been applied is read live (`schema_contract`, `PRAGMA index_list`) and from a dated evidence page, never from this paragraph. **This runbook authorizes no operation.**
+**Update 28 Nov 2026:** 0040 applied to production D1 `iptv` within the AIR-603 window ([evidence](../evidence/d1-migration/air-603-window-apply-2026-11-28.md)); the status text that follows describes the preparation and is kept as history. **Status:** prepared on 25 Nov 2026 under [AIR-667](https://trello.com/c/SbV827kN). The file is in the repository and **not applied**; a deploy applies nothing. Whether it has been applied is read live (`schema_contract`, `PRAGMA index_list`) and from a dated evidence page, never from this paragraph. **This runbook authorizes no operation.**
 
 ## Why
 

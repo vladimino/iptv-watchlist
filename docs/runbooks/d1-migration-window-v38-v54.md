@@ -1,6 +1,6 @@
 # D1 migration window v38 to v47 (checkpoint A) and v54 (checkpoint B): one manifest, one operator, readback per file (the apply needs one exact owner L3 GO)
 
-**Status:** prepared on 27 Nov 2026 under [AIR-603](https://trello.com/c/wc7pHJTB) (owner decision of 27 Nov 2026: AIR-603 is the single coordination point of the shared window, AIR-275 first, the global catalog second). Operator, manifest and tests are in the repository and **not applied**. The last dated observation of production was schema 38; it is **not** a fresh readback. The present schema, markers, leases and the deployed commit are read live (`--status`, authorized read-only sources), never from this page. **This runbook authorizes no production operation.** Time of the window: not assigned.
+**Status:** prepared on 27 Nov 2026 under [AIR-603](https://trello.com/c/wc7pHJTB); **applied to production D1 `iptv` on 28 Nov 2026, schema 38 to 54, under the owner L3 GO** ([evidence](../evidence/d1-migration/air-603-window-apply-2026-11-28.md)). The procedure below remains the contract of the operator; it authorizes no further operation, and a new window needs its own exact GO. The present schema, markers and leases are read live (`--status`), never from this page.
 
 ## What it is
 

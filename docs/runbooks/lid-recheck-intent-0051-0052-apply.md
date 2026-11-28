@@ -1,6 +1,6 @@
 # Lid re-check intent and attach writer, migrations 0051 and 0052: prerequisites, window, readback, activation and forward-only rollback (each apply and the activation need their own owner GO)
 
-**Status:** prepared on 27 Nov 2026 under [AIR-675](https://trello.com/c/8k4DjDpv) (step 6 of [ADR 0217](../adr/0217-source-independent-film-admission.md), step 7b of its delivery graph). Both files are in the repository and **not applied**; a deploy applies nothing and activates nothing. Whether they have been applied, and the state of the writer, are read live (`schema_contract`, `sqlite_master`, `identity_evidence_writer`), never from this paragraph.
+**Update 28 Nov 2026:** 0051 and 0052 applied to production D1 `iptv` within the AIR-603 window ([evidence](../evidence/d1-migration/air-603-window-apply-2026-11-28.md)); the status text that follows describes the preparation and is kept as history. **Status:** prepared on 27 Nov 2026 under [AIR-675](https://trello.com/c/8k4DjDpv) (step 6 of [ADR 0217](../adr/0217-source-independent-film-admission.md), step 7b of its delivery graph). Both files are in the repository and **not applied**; a deploy applies nothing and activates nothing. Whether they have been applied, and the state of the writer, are read live (`schema_contract`, `sqlite_master`, `identity_evidence_writer`), never from this paragraph.
 
 ## Why
 

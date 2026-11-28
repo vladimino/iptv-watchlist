@@ -619,8 +619,11 @@ function eventPresentationStatus(event){
     if(status==='failed'||status==='stalled')return 'error';
     if(status==='waiting'||status==='blocked')return 'warning';
     if(event.incomplete===true||!int(event.checked)||!int(event.added)||event.queueUnreadable===true)return 'warning';
+    // AIR-695: a `running` hour with 0 new films AND 0 observations processed (and no empty queue) is the card titled «полезного прогресса за час нет»: a warning, never a success.
+    // The same predicate as that title; processed observations without new films stay a success.
+    if(status==='running'&&event.queueEmpty!==true&&event.added===0&&event.checked===0)return 'warning';
     // The badge is the result of THIS hourly report (it was formed and published, counters read, nothing incomplete or unreadable), not of the Workflow, which
-    // may still be running (`running`). «Nothing new» is not a warning. A missing or unrecognised status is confirmed by nothing else: no result.
+    // may still be running (`running`). Processed observations without new films, or an empty queue, are not a warning. A missing or unrecognised status is confirmed by nothing else: no result.
     return status==='idle'||status==='empty'||status==='running'?'success':null;
    }
    if(event.kind==='report_failed')return status==='failed'||status==='stalled'?'error':'warning';

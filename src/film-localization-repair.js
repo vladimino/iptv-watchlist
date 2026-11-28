@@ -1,4 +1,4 @@
-// AIR-664 (ADR 0225, Proposed). The ONE-OFF, owner-only operation that repairs the 16 Film localization rows the AIR-683 census found stale. It is the body of the MCP tool `film_localization_repair`,
+// AIR-664 (ADR 0225, Accepted). The ONE-OFF, owner-only operation that repairs the 16 Film localization rows the AIR-683 census found stale. It is the body of the MCP tool `film_localization_repair`,
 // reached only through the existing owner-only MCP gate (Cloudflare Access plus the signed JWT). It adds no route, binding, migration, table, bucket, Cron, Task, Workflow, queue or batch API.
 // - FIXED COHORT: the 16 Film ids are a constant of this module. The caller supplies no Film id (restore takes one id and refuses any that is not in the constant), no key, no SQL, no intent body.
 // - NO NEW RESOLVER OR WRITER: every Film goes through the delivered AIR-663 exact-intent path: `readReconcileIntent` (read only), `resumeLocalizationReconcile` (record BEFORE the write, one receipted atomic
