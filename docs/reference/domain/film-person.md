@@ -397,7 +397,7 @@ A reinstatement is a new intent with a new `asserts` row. A partial group is a s
 
 Current limits that stay true meanwhile:
 
-- [`GET /api/d1/films/<id>`](../api/d1-catalog.md) reads schema v1 `actual_rating` and `prediction_current`. It is not the authoritative personal or prediction view of a Film.
+- `GET /api/d1/films/<id>`, which read schema v1 `actual_rating` and `prediction_current`, is retired and answers a typed `410` ([retired views](../api/d1-catalog.md#retired-views), ADR 0223). The legacy tables are unchanged and are not the authoritative personal or prediction view of a Film.
 - [`GET /api/d1/status`](../api/d1-catalog.md#d1-status-contract) (AIR-690) reports only the Film/Person schema version, marker state and generation, and the counts of Films, person role records and credits. It carries no ratings, prediction, Discovery or projector figure; those domains keep their own status contracts.
 - [`GET /api/enrichment/history?filmId=`](../api/film-history.md) bridges at most one trusted lid per Film.
 - Some historical prediction keys are reachable only through the ratings link and have no trusted canonical claim. ADR 0216 treats them as candidate aliases: they make a section `partial`, never `none`, and are never attributed until the ADR 0184 writer materializes a canonical claim for them.
