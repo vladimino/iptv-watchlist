@@ -117,7 +117,13 @@ async function linkOf(intent,candidates){
 function intentSource(row,intent,requires=[]){
  const value=(object,path)=>{const v=path.split('.').reduce((current,part)=>plain(current)?current[part]:undefined,object);const n=v===undefined?null:v;return scalarOf(n)?n:undefined;};
  const guard={state:row.state,kind:row.kind,observation_key:row.observation_key,'receipt_json#$.decisionHash':value(intent.receipt,'decisionHash'),'command_json#$.effect':value(intent.command,'effect'),
-  'command_json#$.tmdbId':value(intent.command,'tmdbId'),'issued_json#$.confirmedAt':value(intent.issued,'confirmedAt')};
+  'command_json#$.tmdbId':value(intent.command,'tmdbId'),'issued_json#$.confirmedAt':value(intent.issued,'confirmedAt'),
+  'receipt_json#$.state':value(intent.receipt,'state'),expected_hash:row.expected_hash==null?null:row.expected_hash};
+ if(KIND_EFFECT[row.kind]!=='revoke'){
+  // The replacement edge: which intent this one supersedes (null when it supersedes none) and the hash it was bound to. A change of the edge moves the source.
+  guard['command_json#$.supersedes.requestId']=value(intent.command,'supersedes.requestId');
+  guard['command_json#$.supersedes.decisionHash']=value(intent.command,'supersedes.decisionHash');
+ }
  if(KIND_EFFECT[row.kind]==='revoke'){
   guard['command_json#$.revokes.requestId']=value(intent.command,'revokes.requestId');
   guard['command_json#$.revokes.effect']=value(intent.command,'revokes.effect');
@@ -198,10 +204,15 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  const cohortMs=cohortAt===undefined?null:Date.parse(cohortAt);
  const acquisition=sources.acquisition===undefined?{established:false,reason:'not_provided'}:{...sources.acquisition,established:sources.acquisition.coherent===true};
  const frozen=sources.r2Acquisition;
- const r2Acquisition=!plain(frozen)?{established:false,reason:'not_provided'}:{established:frozen.complete===true&&Number.isFinite(Date.parse(frozen.listedAt)),reason:frozen.complete===true?null:'listing_incomplete',listedAt:frozen.listedAt??null,objects:Array.isArray(frozen.objects)?frozen.objects.length:0};
+ // The frozen R2 listing is the exact set the operator listed: it must be an array of {key, etag} with unique string keys, complete, and carry a valid `listedAt`. An absent or invalid
+ // listing is NOT an empty one; an empty valid listing is.
+ const listingProblem=!plain(frozen)?'not_provided':frozen.complete!==true?'listing_incomplete':!Number.isFinite(Date.parse(frozen.listedAt))?'listed_at_invalid':!Array.isArray(frozen.objects)?'objects_invalid'
+  :frozen.objects.some(item=>!plain(item)||typeof item.key!=='string'||!item.key||typeof item.etag!=='string'||!item.etag)?'objects_malformed'
+  :new Set(frozen.objects.map(item=>item.key)).size!==frozen.objects.length?'objects_duplicate':null;
+ const r2Acquisition=listingProblem?{established:false,reason:listingProblem}:{established:true,reason:null,listedAt:frozen.listedAt,objects:frozen.objects.length};
  const d1Covers=acquisition.established===true&&cohortMs!==null&&Number.isFinite(Date.parse(acquisition.acquiredAt))&&Date.parse(acquisition.acquiredAt)<=cohortMs;
  const r2Covers=r2Acquisition.established===true&&cohortMs!==null&&Date.parse(frozen.listedAt)<=cohortMs;
- const listed=new Map((plain(frozen)&&Array.isArray(frozen.objects)?frozen.objects:[]).map(item=>[item?.key,item?.etag]));
+ const listed=new Map(listingProblem?[]:frozen.objects.map(item=>[item.key,item.etag]));
  const later=value=>cohortMs!==null&&Date.parse(value)>cohortMs;
  // The timed membership of an append-only D1 row or an R2 record: a valid time decides; no valid time is proven only by the source's own acquisition.
  const timed=(value,covers)=>{const time=instantOf(value);if(time!==null)return later(time)?'late':'in';return covers?'in':'unprovable';};
@@ -215,7 +226,7 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  const noRow=new Map(),unrecordable=new Map(),unknownWriters=new Map(),writerStatus=new Map();
  const late={history:[],intents:[],r2:[]};
  const c={timeUnknown:0,rowsMapped:0,b4:{actions:0,rows:0,linked:0,linkedAssigns:0,historyOnlyAssigns:0,unlinked:0,orderUnknown:0,timeUnknown:0,ownerHistoryRows:0},b5:{eligible:0,rows:0,timeUnknown:0}};
- const unresolved={replacementSupersededMissing:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0};
+ const unresolved={replacementSupersededMissing:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0,r2ListedNotRead:0};
  const addPair=mapped=>{
   const pair=mapped.input.subject.value+'|'+mapped.input.object.value;
   if(mapped.source==='tmdb_detail')pairs.b1.add(pair);else{const set=pairs.b2.get(mapped.source)||new Set();set.add(pair);pairs.b2.set(mapped.source,set);}
@@ -265,6 +276,8 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   if(!plain(intent.command)){bump(disp.intents,'unrecordable');bump(unrecordable,'intent_unreadable');continue;}
   const effect=KIND_EFFECT[row.kind];
   c.b4.actions++;
+  // A receipt that is absent or has no hash cannot be linked or pinned: reported, never read as a history-less action.
+  if(!plain(intent.receipt)||typeof intent.receipt.decisionHash!=='string'||!intent.receipt.decisionHash){bump(disp.intents,'unrecordable');bump(unrecordable,'receipt_unreadable');continue;}
   const link=await linkOf(intent,owner.get(row.observation_key)||[]);
   // Every history row the receipt could name is accounted for by this action: an ambiguous link settles none of them as an independent statement.
   for(const matched of link.items||(link.item?[link.item]:[]))matched.used=true;
@@ -351,7 +364,7 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  for(const object of r2Objects){
   const parsed=r2Action(object);
   if(!parsed.intent){bump(disp.r2,'ineligible:'+parsed.none);continue;}
-  if(listed.size&&listed.get(object.key)!==object.etag){bump(disp.r2,'not_in_frozen_listing');unresolved.r2NotInFrozenListing++;continue;}
+  if(!r2Acquisition.established||listed.get(object.key)!==object.etag){bump(disp.r2,'not_in_frozen_listing');unresolved.r2NotInFrozenListing++;continue;}
   const member=timed(parsed.finishedAt,r2Covers);
   if(member==='unprovable'){bump(disp.r2,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
   if(member==='late'){bump(disp.r2,'late');late.r2.push({key:object.key,finishedAt:parsed.finishedAt});continue;}
@@ -364,11 +377,14 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   bump(disp.r2,'mapped');
  }
 
+ // The other direction: an object the frozen listing names that was not read (an injected empty read, a missing object) leaves the source unproven.
+ const readKeys=new Set(r2Objects.map(object=>object.key));
+ for(const key of listed.keys())if(!readKeys.has(key)){unresolved.r2ListedNotRead++;}
  const counts=sources.counts||{};
  const reconciled={history:sum(disp.history)===history.length,decisions:sum(disp.decisions)===decisions.length,intents:sum(disp.intents)===intents.length,r2:sum(disp.r2)===r2Objects.length};
  const unresolvedOut={replacementSupersededMissing:unresolved.replacementSupersededMissing,cohortUnprovable:unresolved.cohortUnprovable,
-  linkAmbiguous:unresolved.linkAmbiguous,linkUnprovable:unresolved.linkUnprovable,unlinkedOwnerHistory:unresolved.unlinkedOwnerHistory,r2NotInFrozenListing:unresolved.r2NotInFrozenListing,unrecordable:obj(unrecordable)};
- const unresolvedCount=unresolved.replacementSupersededMissing+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+sum(unrecordable);
+  linkAmbiguous:unresolved.linkAmbiguous,linkUnprovable:unresolved.linkUnprovable,unlinkedOwnerHistory:unresolved.unlinkedOwnerHistory,r2NotInFrozenListing:unresolved.r2NotInFrozenListing,r2ListedNotRead:unresolved.r2ListedNotRead,unrecordable:obj(unrecordable)};
+ const unresolvedCount=unresolved.replacementSupersededMissing+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+unresolved.r2ListedNotRead+sum(unrecordable);
  const complete=acquisition.established&&r2Acquisition.established&&unresolvedCount===0&&Object.values(reconciled).every(Boolean);
  const coverage={family:FAMILY,cohortAt:cohortAt??null,
   // Three different things, never one: `complete` (every eligible proposition staged, both acquisitions established), `unresolved` (eligible but not staged), `excluded` (a deliberate no-row by
