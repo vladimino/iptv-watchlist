@@ -1268,6 +1268,9 @@ export const FILES={
  "identity-evidence-import.mjs": {
   "suite": "core"
  },
+ "identity-evidence-claim-history.mjs": {
+  "suite": "core"
+ },
  "identity-evidence-writer.mjs": {
   "suite": "core"
  },
