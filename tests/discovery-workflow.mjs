@@ -343,7 +343,7 @@ assert.equal(quarantined.reason,'recovery_exhausted');assert.equal(creates.lengt
 // 11. The production entry stays inert: no flag, no Workflow schedule, cron may reconcile but does not run a chunk.
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
 assert.equal(wrangler.main,'dist/server/workflow-entry.js');
-assert.deepEqual(wrangler.triggers.crons,['0 * * * *','1-59/2 * * * *','24 3 * * *','30 * * * *'],'the hourly cron, the AIR-534 Discovery-only fast cron, the AIR-543 daily poster cron (ADR 0179) and the AIR-571 Letterboxd Sync cron (ADR 0186)');
+assert.deepEqual(wrangler.triggers.crons,['0 * * * *','1-59/2 * * * *','24 3 * * *','30 * * * *','11-59/15 * * * *'],'the hourly cron, the AIR-534 Discovery-only fast cron, the AIR-543 daily poster cron (ADR 0179), the AIR-571 Letterboxd Sync cron (ADR 0186) and the AIR-607 Catalog Enrichment reconcile cron (ADR 0219)');
 assert.equal(wrangler.vars.DISCOVERY_EXECUTOR,undefined);
 assert.equal(JSON.stringify(wrangler).includes('schedules'),false);
 assert.equal(wrangler.workflows[0].binding,'DISCOVERY_WORKFLOW');

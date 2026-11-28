@@ -501,6 +501,9 @@ export const FILES={
  "catalog-enrichment-activation.mjs": {
   "suite": "core"
  },
+ "catalog-enrichment-activation-production.mjs": {
+  "suite": "core"
+ },
  "upstream-cooldown.mjs": {
   "suite": "core"
  },

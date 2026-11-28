@@ -30,10 +30,10 @@ export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=nu
  if(!definition)throw failed('catalog_enrichment_bootstrap_scope_unsupported');
  const handle=database(env);
  const row=await readScope(env,scope);
- if(!row||Number(row.activated)!==1||Number(row.enabled)!==1)return {outcome:'stopped',reason:'scope_not_enabled',rows:0,cursor:row?.bootstrap_cursor??null,state:row?.bootstrap_state??'none'};
- if(pin&&(Number(row.revision)!==pin.revision||(row.cutoff_at??null)!==(pin.cutoffAt??null)))return {outcome:'stopped',reason:'configuration_changed',rows:0,cursor:row.bootstrap_cursor??null,state:row.bootstrap_state};
- if(row.bootstrap_state==='done')return {outcome:'done',rows:0,cursor:row.bootstrap_cursor??null,state:'done'};
- if(definition.cutoff&&!row.cutoff_at)return {outcome:'stopped',reason:'cutoff_missing',rows:0,cursor:row.bootstrap_cursor??null,state:row.bootstrap_state};
+ if(!row||Number(row.activated)!==1||Number(row.enabled)!==1)return {outcome:'stopped',reason:'scope_not_enabled',committed:false,rows:0,cursor:row?.bootstrap_cursor??null,state:row?.bootstrap_state??'none'};
+ if(pin&&(Number(row.revision)!==pin.revision||(row.cutoff_at??null)!==(pin.cutoffAt??null)))return {outcome:'stopped',reason:'configuration_changed',committed:false,rows:0,cursor:row.bootstrap_cursor??null,state:row.bootstrap_state};
+ if(row.bootstrap_state==='done')return {outcome:'done',committed:false,rows:0,cursor:row.bootstrap_cursor??null,state:'done'};
+ if(definition.cutoff&&!row.cutoff_at)return {outcome:'stopped',reason:'cutoff_missing',committed:false,rows:0,cursor:row.bootstrap_cursor??null,state:row.bootstrap_state};
  const revision=Number(row.revision),cursor=row.bootstrap_cursor??null;
  const page=await many(handle,`SELECT film_id,tmdb FROM ${definition.table} WHERE (? IS NULL OR film_id>?)${definition.cutoff?' AND verified_at>=?':''} ORDER BY film_id LIMIT ?`,[cursor,cursor,...(definition.cutoff?[row.cutoff_at]:[]),pageSize]);
  const last=page.length?page[page.length-1].film_id:cursor;
@@ -49,21 +49,24 @@ export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=nu
  // the page committed when the cursor and state moved to where this page put them; a revision that moved AFTER that commit stops the next page but does not make the written rows disappear, so they are still reported
  const advanced=(after?.bootstrap_cursor??null)===(last??null)&&after?.bootstrap_state===(done?'done':'running');
  const unchanged=Number(after?.revision)===revision;
- if(!advanced||!unchanged)return {outcome:'stopped',reason:!unchanged?'revision_moved':'cursor_moved',rows:advanced?page.length:0,cursor:after?.bootstrap_cursor??null,state:after?.bootstrap_state??'none'};
- return {outcome:done?'done':'advanced',rows:page.length,cursor:last,state:done?'done':'running'};
+ // `committed`: this page's commit changed the scope's cursor or state (a zero-row final page that marks the bootstrap done is a change too), distinct from the number of admission rows it processed
+ const committed=advanced&&((last??null)!==(cursor??null)||(done?'done':'running')!==row.bootstrap_state);
+ if(!advanced||!unchanged)return {outcome:'stopped',reason:!unchanged?'revision_moved':'cursor_moved',committed,rows:advanced?page.length:0,cursor:after?.bootstrap_cursor??null,state:after?.bootstrap_state??'none'};
+ return {outcome:done?'done':'advanced',committed,rows:page.length,cursor:last,state:done?'done':'running'};
 }
 
 // Runs pages until done, stopped or `maxPages`; resumable from the stored cursor. -> {outcome, pages, rows, cursor, state, reason?}
 export async function runBootstrap(env,{scope,at,pageSize=BOOTSTRAP_PAGE,maxPages=BOOTSTRAP_MAX_PAGES,pin=null,extra=null}){
- let pages=0,rows=0,last={outcome:'advanced',cursor:null,state:'none'};
+ let pages=0,rows=0,committed=0,last={outcome:'advanced',cursor:null,state:'none'};
  while(pages<maxPages){
   last=await bootstrapPage(env,{scope,at,pageSize,pin,extra});
   rows+=last.rows;
+  if(last.committed)committed++;
   if(last.outcome==='stopped')break;
   pages++;
   if(last.outcome==='done')break;
  }
- return {outcome:last.outcome,pages,rows,cursor:last.cursor,state:last.state,...(last.reason?{reason:last.reason}:{})};
+ return {outcome:last.outcome,pages,rows,committed,cursor:last.cursor,state:last.state,...(last.reason?{reason:last.reason}:{})};
 }
 
 // The re-enable of a scope re-runs its idempotent bootstrap (decision 3): reset the state and the cursor under the scope's revision, which also raises it (a configuration change). It enables or activates nothing.
