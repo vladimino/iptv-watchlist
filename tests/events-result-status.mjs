@@ -61,7 +61,7 @@ const table = [
   [{type: 'enrichment', stage: 'blocked', reason: 'model_unavailable', queueSchemaVersion: 6}, 'error', 'legacy blocked by a systemic error'],
   [{type: 'enrichment', stage: 'interrupted', stopReason: 'lease_expired', queueSchemaVersion: 6}, 'interrupted', 'legacy interrupted run'],
   // Discovery
-  [{type: 'discovery', kind: 'hour', status: 'idle', checked: 0, added: 0}, 'success', 'nothing new is not a warning'],
+  [{type: 'discovery', kind: 'hour', status: 'idle', checked: 0, added: 0}, 'success', 'idle needs no progress: a complete idle report is a success'],
   [{type: 'discovery', kind: 'hour', status: 'empty', checked: 3, added: 1}, 'success', 'hour report'],
   [{type: 'discovery', kind: 'hour', status: 'running', checked: 3, added: 1}, 'success', 'running, clean report with results: the report is published'],
   [{type: 'discovery', kind: 'hour', status: 'running', checked: 588, added: 39, remaining: 6155}, 'success', 'running, the production shape of 20 Nov 18:00 Madrid (39 found, 6155 left)'],
@@ -192,6 +192,16 @@ const runningHour = JSON.stringify({type: 'discovery', kind: 'hour', status: 'ru
 assert.equal(run(`eventMatchesFilters(${runningHour},'discovery','success')`), true, 'result=success + «Находки» shows the running hour report');
 assert.equal(run(`eventMatchesFilters(${runningHour},'all','warning')`), false);
 assert.match(run(`eventStatusBadgeHTML(${runningHour})`), /event-status-success/);
+// Historical 27 Nov 06:00 Madrid shape: running, 0 found, 0 processed, remainder unknown.
+const noProgressHour = JSON.stringify({type: 'discovery', kind: 'hour', status: 'running', checked: 0, added: 0, remaining: null, queueEmpty: false});
+const noFilmsHour = JSON.stringify({type: 'discovery', kind: 'hour', status: 'running', checked: 5, added: 0, remaining: 40});
+assert.equal(run(`eventMatchesFilters(${noProgressHour},'discovery','warning')`), true, 'no useful progress is listed under warnings');
+assert.equal(run(`eventMatchesFilters(${noProgressHour},'discovery','success')`), false, 'and not under successes');
+assert.equal(run(`eventMatchesFilters(${noFilmsHour},'discovery','success')`), true, 'processed observations without new films stay a success');
+assert.equal(run(`eventMatchesFilters(${noFilmsHour},'discovery','warning')`), false);
+assert.match(run(`eventStatusBadgeHTML(${noProgressHour})`), /event-status-warning/);
+assert.doesNotMatch(run(`eventStatusBadgeHTML(${noProgressHour})`), /event-status-success/);
+assert.match(run(`eventStatusBadgeHTML(${noFilmsHour})`), /event-status-success/);
 assert.equal(run("eventMatchesResult({type:'epg'},'nonsense')"), true, 'an unknown result id never hides events');
 
 // The automatic search counts matches of BOTH axes: ten skipped events (warning) are not ten «error» matches of the prediction type.

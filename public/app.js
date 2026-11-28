@@ -623,7 +623,7 @@ function eventPresentationStatus(event){
     // The same predicate as that title; processed observations without new films stay a success.
     if(status==='running'&&event.queueEmpty!==true&&event.added===0&&event.checked===0)return 'warning';
     // The badge is the result of THIS hourly report (it was formed and published, counters read, nothing incomplete or unreadable), not of the Workflow, which
-    // may still be running (`running`). «Nothing new» is not a warning. A missing or unrecognised status is confirmed by nothing else: no result.
+    // may still be running (`running`). Processed observations without new films, or an empty queue, are not a warning. A missing or unrecognised status is confirmed by nothing else: no result.
     return status==='idle'||status==='empty'||status==='running'?'success':null;
    }
    if(event.kind==='report_failed')return status==='failed'||status==='stalled'?'error':'warning';
