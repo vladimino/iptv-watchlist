@@ -60,7 +60,7 @@ Observe natural evidence only, through authorized read-only sources: the Worker 
 
 **Windows and coverage.**
 - Cover the evidence window with **consecutive, non-overlapping** timeframes (the logs are kept at most 7 days; export before they expire) and give each its own file. Pass the files together so the tool can see overlap and duplicate files.
-- Pass `--query-limit` equal to the query's `limit`: an export that reaches the limit is flagged `possibly_truncated` and must be split into smaller windows.
+- Pass `--query-limit` equal to the query's `limit`. The limit belongs to **one query**, so it is checked **per file**: a file whose returned records (non-blank lines, before de-duplication, non-matching records included) reach the limit is flagged `possibly_truncated` and must be split into smaller consecutive windows. Splitting clears the flag; the number of files or their sum never raises it, and the decision accounting stays global over all files. Two empty exports are not duplicates of each other: they simply carry no evidence (`no_events`).
 - Correlate the export with the **natural run history** of the same window: for each caller that ran (cron, Workflow instances, run records, `run.upstreamCooldown` counters of metadata sync and EPG localization), check that its coordinators appear in the export, and list every caller/run that is **not in the logs** as a gap. A scope with no natural 429/challenge/403 in the window has no cooldown to observe; say so instead of presenting zero decisions as proof.
 
 ```bash

@@ -2,6 +2,8 @@
 // (scripts/upstream-cooldown-evidence-report.mjs). Offline only: a sqlite D1 stand-in over the real migration chain, no production database, no network.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {migrated, sql} from './prediction-d1-flow-lib.mjs';
 import {d1Standin} from './d1-standin.mjs';
@@ -338,20 +340,41 @@ const set = (env, to, expectRevision, extra = {}) => Op.execute('set', {binding:
   assert.equal(overlapping.flags.includes('overlapping_exports'), true, 'b starts inside a\'s window'); assert.equal(overlapping.evidence.status, 'insufficient');
   const disjoint = Report.aggregateFiles([{name: 'a', text: a}, {name: 'c', text: c}]);
   assert.deepEqual([disjoint.flags, disjoint.evidence.status, disjoint.files.length], [[], 'conditional', 2]);
-  assert.match(Report.markdown(disjoint), /Export windows: a 2026-11-29T10:00:00\.000Z \.\. 2026-11-29T10:30:00\.000Z; c /);
+  assert.match(Report.markdown(disjoint), /Exports: a 2 records, 2 events, 2026-11-29T10:00:00\.000Z \.\. 2026-11-29T10:30:00\.000Z; c 1 records, 1 events/);
   // what NO check can see: an entire missing stream or a missing tail pass every test and stay CONDITIONAL, never complete (documented limit of the arithmetic)
   const truth = [event('would_skip', 1), event('would_skip', 2), event('would_skip', 4), event('would_skip', 1)];
   const lost = Report.aggregate(truth.slice(0, 3).map(JSON.stringify)); // the second stream and the tail of nothing are missing
   assert.deepEqual([lost.flags, lost.evidence.status, lost.evidence.completenessProven, lost.evidence.uc3Eligible], [[], 'conditional', false, false]);
   assert.equal(lost.rows[0].streams < Report.aggregate(truth.map(JSON.stringify)).rows[0].streams, true, 'the loss is real and invisible to the flags');
   assert.match(Report.markdown(lost), /CONDITIONAL: .* This report is not a UC3 GO\./);
-  // the CLI: several files, a limit, JSON
-  const dir = fs.mkdtempSync('/tmp/claude-0/cooldown-report-');
-  fs.writeFileSync(dir + '/a.ndjson', a); fs.writeFileSync(dir + '/b.ndjson', b);
-  const cli = spawnSync(process.execPath, ['scripts/upstream-cooldown-evidence-report.mjs', '--format', 'json', '--query-limit', '2', dir + '/a.ndjson', dir + '/b.ndjson'], {encoding: 'utf8'});
-  assert.equal(cli.status, 0); const parsedCli = JSON.parse(cli.stdout);
-  assert.equal(parsedCli.flags.includes('overlapping_exports'), true); assert.equal(parsedCli.flags.includes('possibly_truncated'), true);
-  assert.throws(() => Report.parseArgs(['node', 'x', '--query-limit', '0']));
-  fs.rmSync(dir, {recursive: true});
+  // the truncation limit belongs to ONE query (review round 2): each file is checked on its own, the decision accounting stays global
+  const batch = (prefix, n, base) => Array.from({length: n}, (_, i) => wrap(event('would_skip', 1), prefix + i, base + i * 60_000)).join('\n');
+  const first = {name: 'first', text: batch('p', 3, Date.parse('2026-11-29T08:00:00Z'))};
+  const second = {name: 'second', text: batch('q', 3, Date.parse('2026-11-29T09:00:00Z'))};
+  const belowLimit = Report.aggregateFiles([first, second], {queryLimit: 5});
+  assert.deepEqual([belowLimit.events, belowLimit.flags, belowLimit.evidence.status], [6, [], 'conditional'], 'two disjoint below-limit files whose sum exceeds the limit are NOT truncated');
+  assert.equal(belowLimit.rows[0].streams, 6, 'the combined accounting stays global');
+  const atLimit = Report.aggregateFiles([first, {name: 'full', text: batch('r', 5, Date.parse('2026-11-29T10:00:00Z'))}], {queryLimit: 5});
+  assert.deepEqual([atLimit.flags, atLimit.evidence.status], [['possibly_truncated'], 'insufficient'], 'one file that reaches its own limit is');
+  // returned records count before de-duplication and include non-matching records; blank lines do not count
+  const noisy = {name: 'noisy', text: [batch('s', 3, Date.parse('2026-11-29T11:00:00Z')), 'a returned record that is not an event', '', '   '].join('\n')};
+  assert.equal(Report.aggregateFiles([noisy], {queryLimit: 5}).files[0].records, 4, 'three events and one other record; the two blank lines do not count');
+  assert.deepEqual([Report.aggregateFiles([noisy], {queryLimit: 5}).flags, Report.aggregateFiles([noisy], {queryLimit: 4}).flags], [[], ['possibly_truncated']], 'four returned records reach a limit of 4, not of 5');
+  // separate EMPTY exports hash alike but are not duplicate evidence: the honest status stays "no evidence"
+  const empties = Report.aggregateFiles([{name: 'e1', text: ''}, {name: 'e2', text: ''}, {name: 'e3', text: '\n'}]);
+  assert.deepEqual([empties.flags, empties.evidence.status], [['no_events'], 'none']);
+  // a non-empty duplicate still is one
+  assert.equal(Report.aggregateFiles([first, {name: 'again', text: first.text}]).flags.includes('duplicate_files'), true);
+  // the CLI: several files, a per-file limit, JSON, in a portable temp directory
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cooldown-report-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'a.ndjson'), a); fs.writeFileSync(path.join(dir, 'b.ndjson'), b);
+    const cli = spawnSync(process.execPath, ['scripts/upstream-cooldown-evidence-report.mjs', '--format', 'json', '--query-limit', '2', path.join(dir, 'a.ndjson'), path.join(dir, 'b.ndjson')], {encoding: 'utf8'});
+    assert.equal(cli.status, 0); const parsedCli = JSON.parse(cli.stdout);
+    assert.equal(parsedCli.flags.includes('overlapping_exports'), true); assert.equal(parsedCli.flags.includes('possibly_truncated'), true, 'a.ndjson holds 2 records and reaches the limit of 2');
+    const roomy = spawnSync(process.execPath, ['scripts/upstream-cooldown-evidence-report.mjs', '--format', 'json', '--query-limit', '3', path.join(dir, 'a.ndjson'), path.join(dir, 'b.ndjson')], {encoding: 'utf8'});
+    assert.equal(JSON.parse(roomy.stdout).flags.includes('possibly_truncated'), false, 'a (2) and b (1) are each below 3 although together they are 3');
+    assert.throws(() => Report.parseArgs(['node', 'x', '--query-limit', '0']));
+  } finally {fs.rmSync(dir, {recursive: true, force: true});}
 }
 console.log('upstream-cooldown-mode-production: ok');

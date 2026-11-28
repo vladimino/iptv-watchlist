@@ -56,12 +56,15 @@ export function parseLine(line){
  return valid(event)?{event,id:null,at:null}:null;
 }
 
+// `queryLimit` is the limit of the ONE query that produced `lines`: the export is flagged `possibly_truncated` when the records it returned (non-blank lines, de-duplication and non-matching
+// records included) reach that limit. Several exports are checked one by one in `aggregateFiles`, never as a sum.
 export function aggregate(lines,{queryLimit=null}={}){
  const keys=new Map();
  const seen=new Set();
- let events=0,ignored=0,malformed=0,duplicates=0,unidentified=0;
+ let events=0,ignored=0,malformed=0,duplicates=0,unidentified=0,records=0;
  for(const line of lines){
   const text=String(line);
+  if(text.trim())records++;
   if(!text.includes('upstream_cooldown')){ignored++;continue;}
   const parsed=parseLine(text);
   if(!parsed){malformed++;continue;}
@@ -109,36 +112,46 @@ export function aggregate(lines,{queryLimit=null}={}){
  if(rows.some(row=>row.inconsistent||row.invalidCounts))flags.push('inconsistent_export');
  if(malformed>0)flags.push('malformed_lines');
  if(duplicates>0)flags.push('duplicate_events');
- if(Number.isInteger(queryLimit)&&queryLimit>0&&events+duplicates+malformed>=queryLimit)flags.push('possibly_truncated');
+ if(Number.isInteger(queryLimit)&&queryLimit>0&&records>=queryLimit)flags.push('possibly_truncated');
  // Conditions this script cannot verify, whatever it found.
  const limits=['completeness_unproven'];
  if(unidentified>0)limits.push('identity_unverified');
  const status=events===0?'none':flags.length?'insufficient':'conditional';
- return {events,ignoredLines:ignored,malformedLines:malformed,duplicateEvents:duplicates,unidentifiedEvents:unidentified,rows,byScope,totals,flags,limits,evidence:{status,completenessProven:false,uc3Eligible:false}};
+ return {records,events,ignoredLines:ignored,malformedLines:malformed,duplicateEvents:duplicates,unidentifiedEvents:unidentified,rows,byScope,totals,flags,limits,evidence:{status,completenessProven:false,uc3Eligible:false}};
 }
 
 // Several exports at once: the same file twice or an event id in two files means the windows overlap; the files' time ranges are reported when their events carry timestamps.
 export function aggregateFiles(files,{queryLimit=null}={}){
- const digests=new Map(),ids=new Map(),ranges=[];
+ const digests=new Map(),ids=new Map(),ranges=[],info=[];
  const extra=[];
  for(const file of files){
-  const digest=createHash('sha256').update(file.text).digest('hex');
-  if(digests.has(digest))extra.push('duplicate_files');else digests.set(digest,file.name);
-  let min=Infinity,max=-Infinity;
-  for(const line of file.text.split('\n')){
+  const lines=file.text.split('\n');
+  const records=lines.filter(line=>line.trim()).length;
+  let events=0,min=Infinity,max=-Infinity;
+  for(const line of lines){
    const parsed=parseLine(line);
    if(!parsed)continue;
+   events++;
    if(parsed.id!==null){if(ids.has(parsed.id)&&ids.get(parsed.id)!==file.name)extra.push('overlapping_exports');else ids.set(parsed.id,file.name);}
    if(parsed.at!==null){min=Math.min(min,parsed.at);max=Math.max(max,parsed.at);}
   }
-  if(min!==Infinity)ranges.push({name:file.name,from:new Date(min).toISOString(),to:new Date(max).toISOString(),fromMs:min,toMs:max});
+  // The same CONTENT twice is a duplicate export; two empty exports are not (they hash alike and prove nothing, which `no_events` already says).
+  if(events>0){
+   const digest=createHash('sha256').update(file.text).digest('hex');
+   if(digests.has(digest))extra.push('duplicate_files');else digests.set(digest,file.name);
+  }
+  // Each export is one query with its own limit: only an individual file that reaches it is possibly truncated.
+  if(Number.isInteger(queryLimit)&&queryLimit>0&&records>=queryLimit)extra.push('possibly_truncated');
+  info.push({name:file.name,records,events,...(min!==Infinity?{from:new Date(min).toISOString(),to:new Date(max).toISOString()}:{})});
+  if(min!==Infinity)ranges.push({name:file.name,fromMs:min,toMs:max});
  }
  ranges.sort((a,b)=>a.fromMs-b.fromMs);
  for(let i=1;i<ranges.length;i++)if(ranges[i].fromMs<=ranges[i-1].toMs)extra.push('overlapping_exports');
- const report=aggregate(files.flatMap(file=>file.text.split('\n')),{queryLimit});
+ // The decision accounting stays global over every export.
+ const report=aggregate(files.flatMap(file=>file.text.split('\n')));
  for(const flag of new Set(extra))if(!report.flags.includes(flag))report.flags.push(flag);
  if(extra.length&&report.evidence.status==='conditional')report.evidence.status='insufficient';
- report.files=ranges.map(({name,from,to})=>({name,from,to}));
+ report.files=info;
  return report;
 }
 
@@ -155,7 +168,7 @@ export function markdown(report){
  out.push(`Flags: ${report.flags.length?report.flags.join(', '):'none'}. Limits: ${report.limits.join(', ')}.`);
  const note={none:'NO EVIDENCE: no upstream_cooldown event was found. This is not a zero count and not evidence that nothing happened.',insufficient:'INSUFFICIENT: a defect was found (see the flags); read nothing as complete.',conditional:'CONDITIONAL: observed counts and bounds that hold only for a complete export; completeness is not proven. This report is not a UC3 GO.'}[report.evidence.status];
  out.push(`Evidence status: ${report.evidence.status}. ${note}`);
- if(report.files?.length)out.push('Export windows: '+report.files.map(file=>`${file.name} ${file.from} .. ${file.to}`).join('; ')+'.');
+ if(report.files?.length)out.push('Exports: '+report.files.map(file=>`${file.name} ${file.records} records, ${file.events} events${file.from?`, ${file.from} .. ${file.to}`:''}`).join('; ')+'.');
  return out.join('\n')+'\n';
 }
 
