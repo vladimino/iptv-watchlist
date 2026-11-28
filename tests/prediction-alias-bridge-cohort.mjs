@@ -65,7 +65,7 @@ const digestOf=value=>sha(JSON.stringify(value));
 const envOf=(file,options)=>({DB:d1Standin(file,options)});
 
 // The preflight (bounded capture, offline oracle, classification) lives in scripts/letterboxd-claim-cohort-preflight.mjs, so the same code can run against a read-only D1 binding (AIR-653).
-import {preflight,materialize,guardDuplicates,multiplicity,WITNESS_INVARIANT,DEFAULT_CAPS,LIVE_BLOCKERS,BOUNDED_DOCUMENTS_SQL} from '../scripts/letterboxd-claim-cohort-preflight.mjs';
+import {preflight,materialize,guardDuplicates,multiplicity,WITNESS_INVARIANT,DEFAULT_CAPS,LIMITATIONS,REQUIRED_INDEXES,BOUNDED_DOCUMENTS_SQL} from '../scripts/letterboxd-claim-cohort-preflight.mjs';
 
 // ======================= the synthetic cohort (15 keys) =======================
 const INFERRED_ARCHIVE='a'.repeat(64);
@@ -140,11 +140,50 @@ const before=dump(file);
  // Over the 13 bridge-resolved keys, by resolved ownership: a redirected owner (BR10), a retired one (BR11) and a movie with no Film (BR15) are UNRESOLVED OWNERS, a weaker metric reported as such.
  assert.deepEqual(out.multiplicity,{keys:13,distinct_films:10,bridge_only:4,dual:6,differing:4,unresolved_owner:3});
  assert.equal(dump(file),before,'the preflight writes nothing: 17 tables unchanged');
- assert.deepEqual(out.liveBlockers,LIVE_BLOCKERS);
+ assert.deepEqual(out.liveBlockers,[],'both indexes are verified present, so no index is listed as a blocker');
+ assert.deepEqual(out.limitations,LIMITATIONS,'the unbounded planner and the current-state witness stay listed as limitations');
  assert.equal((await preflight(envOf(file),{scope:SCOPE})).candidateDigest,out.candidateDigest,'repeatable on an unchanged read-set');
  // The report counts BOTH passes and the repeated discovery against ONE budget.
  assert.ok(out.work.statements>0&&out.work.statements<=DEFAULT_CAPS.statements&&out.work.rowsReserved<=DEFAULT_CAPS.rows);
  if(process.env.AIR652_REPORT)console.log('15-key fixture work',JSON.stringify(out.work));
+}
+
+// ---- 1b. AIR-653: the witness scope (named, explicit all-archives, missing or invalid) and the verified index predicates ----
+{
+ const ALL={invariant:WITNESS_INVARIANT,allArchives:true};
+ const ELIGIBLE_ALL={state:'eligible_in_scope',reason:'planner_pass_and_negative_witness_all_archives'};
+ const named=await preflight(envOf(file),{scope:SCOPE}),all=await preflight(envOf(file),{scope:ALL});
+ assert.deepEqual([all.decision,all.reason],['complete',null]);
+ // The same classes as the named scope on this fixture: the admission row of BR04 and BR05 (same archive) blocks BR04; the planner refuses BR05 itself; the three eligible keys stay eligible.
+ assert.deepEqual(Object.fromEntries(all.results.map(item=>[item.lid,{state:item.state,reason:item.reason}])),Object.fromEntries(Object.entries(CASES).map(([lid,value])=>[lid,value===ELIGIBLE?ELIGIBLE_ALL:value])));
+ assert.deepEqual([all.scope,named.scope],[{mode:'all_archives'},{mode:'named',archives:[INFERRED_ARCHIVE]}],'the scope is reported');
+ assert.notEqual(all.readSetDigest,named.readSetDigest,'the scope is bound into the proof: a different scope is a different token');
+ assert.equal(all.readSetDigest,(await preflight(envOf(file),{scope:ALL})).readSetDigest,'repeatable under the same scope');
+ // A positive witness outside a NAMED scope is invisible to it (the verdict is relative to the stated scope) and blocks in the all-archives mode.
+ const other=world();run(other,"UPDATE film_rated_admission SET archive_sha256="+q('b'.repeat(64))+" WHERE source_code='BR04'");
+ assert.deepEqual(stateOf(await preflight(envOf(other),{scope:SCOPE}),'BR04'),ELIGIBLE,'a named scope does not see an admission of another archive');
+ assert.deepEqual(stateOf(await preflight(envOf(other),{scope:ALL}),'BR04'),{state:'ineligible',reason:'inferred_admission_witness'},'the all-archives mode never ignores a positive witness');
+ // An admission of the movie under ANOTHER lid is never ignored in the all-archives mode.
+ const otherLid=world();run(otherLid,"UPDATE film_rated_admission SET source_code='OTHERLID' WHERE source_code='BR04'");
+ assert.deepEqual(stateOf(await preflight(envOf(otherLid),{scope:ALL}),'BR04'),{state:'unknown',reason:'witness_movie_admitted_other_lid'});
+ // A missing or invalid scope proves nothing: every planner pass is unknown, nothing is eligible, the candidate digest is the empty cohort.
+ for(const [name,bad] of [['no scope',null],['empty object',{}],['allArchives false',{invariant:WITNESS_INVARIANT,allArchives:false}],['both shapes at once',{invariant:WITNESS_INVARIANT,allArchives:true,archives:[INFERRED_ARCHIVE]}],['empty archive list',{invariant:WITNESS_INVARIANT,archives:[]}],['a malformed digest',{invariant:WITNESS_INVARIANT,archives:['nothex']}],['another invariant',{invariant:'other',allArchives:true}]]){
+  const out=await preflight(envOf(file),{scope:bad});
+  assert.equal(out.decision,'complete',name);
+  assert.deepEqual([out.counts.eligible_in_scope||0,out.results.filter(item=>item.reason==='witness_scope_missing').length],[0,4],name+': the four planner passes (BR01-BR04) are unknown, not eligible');
+  assert.equal(out.candidateDigest,await cohortDigest([]),name);assert.equal(out.scope,null,name);
+ }
+ // Movement: an admission row inserted between the two passes is `read_set_moved` under the all-archives scope too.
+ const moving=world();
+ const moved=await preflight(envOf(moving),{scope:ALL,hooks:{afterClassify:async()=>run(moving,"INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ("+q(FID(1))+",'1','BR01',"+q('c'.repeat(64))+",'T',2000,'rk','tmdb_1','2026-11-01T00:00:00.000Z','rq1',"+q(U)+")")}});
+ assert.deepEqual([moved.decision,moved.reason,moved.candidateDigest],['unknown','read_set_moved',null]);assert.ok(moved.moved.includes('witness'));
+ // The two indexes are verified before any other read: a missing one stops the run, names itself as the blocker and nothing but the predicate check ran.
+ for(const name of ['ratings_view_fact_key','tmdb_retirement_decision_movie']){
+  const f=world();run(f,'DROP INDEX '+name);
+  const out=await preflight(envOf(f),{scope:SCOPE});
+  assert.deepEqual([out.decision,out.reason,out.missing,out.work.statements,out.candidateDigest],['unknown','required_index_missing',[name],1,null],name);
+  assert.deepEqual(out.liveBlockers,[REQUIRED_INDEXES[name]],name+': the missing index is the blocker of THIS run');
+ }
 }
 
 // ---- 2. DIFFERENTIAL: the planner over the private snapshot answers exactly what it answers over the live fixture, so the token binds the exact consumed data ----
@@ -299,7 +338,7 @@ const bulk=({candidates=true,noise=0}={})=>{
  assert.match(plan("SELECT * FROM tmdb_retirement_decision WHERE movie_id IN (SELECT value FROM json_each('[\"1\"]')) LIMIT 5"),/SEARCH/);
  assert.match(plan("SELECT * FROM ratings_view WHERE alias_id IN (SELECT value FROM json_each('[\"a\"]')) LIMIT 5"),/SEARCH/);
  assert.match(plan("SELECT * FROM ratings_view WHERE fact_key IN (SELECT value FROM json_each('[\"a\"]')) LIMIT 5"),/SEARCH ratings_view USING INDEX ratings_view_fact_key/,'with 0055 the fact_key predicate is an index SEARCH');
- assert.ok(out.liveBlockers.some(item=>item.startsWith('ratings_view_fact_key_index_0055')),'the production apply of 0055 stays a live-run prerequisite');
+ assert.deepEqual(out.liveBlockers,[],'with 0055 and 0040 present nothing is a live blocker; the limitations stay');
 }
 
 // ---- 7. documents: the atomic parts/bytes statement refuses an oversized link or record part and a replacement after the measure ----

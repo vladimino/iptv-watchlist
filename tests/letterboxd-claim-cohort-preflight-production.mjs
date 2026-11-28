@@ -10,8 +10,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-import {PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME} from '../scripts/published-epg-production.mjs';
-import {parseArgs,privatePath,readOnlyTransport,sanitize,run,CAP_CEILINGS} from '../scripts/letterboxd-claim-cohort-preflight-production.mjs';
+import {PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,OperatorStop} from '../scripts/published-epg-production.mjs';
+import {D1Error} from '../scripts/d1-backfill.mjs';
+import {parseArgs,privatePath,writePrivate,readOnlyTransport,sanitize,run,describeError,controlled,UsageError,ControlledError,CAP_CEILINGS} from '../scripts/letterboxd-claim-cohort-preflight-production.mjs';
 
 const HEX='a'.repeat(64);
 const argv=(...rest)=>['node','script',...rest];
@@ -30,7 +31,11 @@ const parsed=parseArgs(argv('--out','/tmp/x.json','--archive',HEX,'--archive','b
 assert.deepEqual([parsed.out,parsed.archives.length,parsed.caps],['/tmp/x.json',2,{statements:400,pointerInspect:3000}]);
 assert.throws(()=>privatePath('docs/evidence/x.json'),/outside the repository/,'a relative path inside the repository is refused');
 assert.throws(()=>privatePath(path.resolve('scripts/x.json')),/outside the repository/);
-assert.equal(privatePath(path.join(root,'x.json')),path.join(root,'x.json'));
+assert.equal(privatePath(path.join(root,'x.json')),path.join(fs.realpathSync(root),'x.json'));
+assert.throws(()=>privatePath(path.join(root,'missing-dir','x.json')),/parent directory/,'the parent must exist');
+assert.deepEqual([parseArgs(argv('--out','/tmp/x.json','--witness-all-archives')).allArchives,parseArgs(argv('--out','/tmp/x.json')).allArchives],[true,false]);
+assert.throws(()=>parseArgs(argv('--out','/tmp/x.json','--witness-all-archives','--archive',HEX)),/mutually exclusive/);
+assert.ok(new UsageError('x') instanceof Error);
 
 // ---- 2. the transport guard --------------------------------------------------------------------------------------------------------------------------
 const answered=[];
@@ -49,6 +54,68 @@ await assert.rejects(()=>guarded('https://example.invalid/x',{method:'POST',body
 assert.equal(answered.length,before,'a refused statement never reaches the network');
 const writer=readOnlyTransport(async()=>new Response(JSON.stringify({success:true,result:[{success:true,results:[],meta:{rows_written:2,changed_db:true}}]}),{status:200}),{requests:0,rowsRead:0,rowsWritten:0});
 await assert.rejects(()=>writer('https://example.invalid/x',{method:'POST',body:JSON.stringify({sql:'SELECT 1'})}),/unexpected_write_reported/,'an answer that reports a write stops the run');
+
+// ---- 2b. the private output on real filesystem paths ------------------------------------------------------------------------------------------------
+{
+ const dir=path.join(root,'fs');fs.mkdirSync(dir);
+ // An existing file (even a permissive one) is refused, never truncated or reused.
+ const existing=path.join(dir,'old.json');fs.writeFileSync(existing,'OLD',{mode:0o644});
+ assert.throws(()=>privatePath(existing),/must not exist yet/);
+ assert.throws(()=>writePrivate(existing,'NEW'),error=>error instanceof ControlledError&&error.code==='private_output_unavailable','exclusive creation refuses an existing file');
+ assert.equal(fs.readFileSync(existing,'utf8'),'OLD','the existing file is untouched');assert.equal(fs.statSync(existing).mode&0o777,0o644,'its permissions are not changed');
+ // A destination that is a symlink (to anything) is refused, and is never followed.
+ const target=path.join(dir,'target.txt');fs.writeFileSync(target,'TARGET');
+ const link=path.join(dir,'link.json');fs.symlinkSync(target,link);
+ assert.throws(()=>privatePath(link),/must not exist yet/);
+ assert.throws(()=>writePrivate(link,'LEAK'),error=>error instanceof ControlledError,'no-follow creation refuses a link');
+ assert.equal(fs.readFileSync(target,'utf8'),'TARGET','nothing was written through the link');
+ const dangling=path.join(dir,'dangling.json');fs.symlinkSync(path.join(dir,'nowhere'),dangling);
+ assert.throws(()=>privatePath(dangling),/must not exist yet/,'a dangling link counts as existing');
+ assert.throws(()=>writePrivate(dangling,'LEAK'),error=>error instanceof ControlledError);assert.ok(!fs.existsSync(path.join(dir,'nowhere')),'a dangling link is not created through');
+ // A directory symlink that points INTO the repository is the repository.
+ const alias=path.join(dir,'repo-alias');fs.symlinkSync(path.resolve('docs'),alias);
+ assert.throws(()=>privatePath(path.join(alias,'leak.json')),/outside the repository/,'a symlinked parent that resolves into the repository is refused');
+ // A fresh path is created exclusively with mode 600, regardless of the umask.
+ const previous=process.umask(0);
+ try{const fresh=path.join(dir,'fresh.json');assert.equal(privatePath(fresh),fresh);writePrivate(fresh,'{"ok":true}');assert.equal(fs.statSync(fresh).mode&0o777,0o600);assert.equal(fs.readFileSync(fresh,'utf8'),'{"ok":true}');}
+ finally{process.umask(previous);}
+}
+
+// ---- 2c. errors and details never leave the process ---------------------------------------------------------------------------------------------------
+{
+ const secret='AAA1 tmdb-77 Bearer sk-secret SELECT * FROM film';
+ assert.equal(describeError(new Error(secret)),'unexpected_error');
+ assert.equal(describeError(new TypeError(secret)),'unexpected_error');
+ assert.equal(describeError(new D1Error('request',secret)),'d1_request');
+ assert.equal(describeError(new D1Error(secret,secret)),'d1_unclassified','an unexpected kind is not echoed');
+ assert.equal(describeError(new OperatorStop('configuration')),'operator_configuration');
+ assert.equal(describeError(new ControlledError('target_identity_mismatch')),'target_identity_mismatch');
+ assert.equal(describeError(new UsageError('usage: --out is required')),'usage: --out is required');
+ assert.equal(controlled(secret),'unclassified');assert.equal(controlled('row_cap:claims'),'row_cap:claims');
+ const env2={D1_BACKFILL_ACCOUNT_ID:PRODUCTION_ACCOUNT_ID,D1_BACKFILL_API_TOKEN:'dummy-not-a-credential'};
+ // A transport that fails with a message carrying a synthetic id: the run rejects, and the only text a caller can print is the controlled code.
+ const thrown=await run({argv:argv('--out',path.join(fs.realpathSync(root),'fs','e1.json')),env:env2,fetchImpl:async()=>{throw new Error(secret);},log:()=>{}}).then(()=>null,error=>error);
+ assert.ok(thrown);assert.ok(!describeError(thrown).includes('AAA1')&&!describeError(thrown).includes('sk-secret'));
+ // The sanitizer never forwards a raw detail or an arbitrary reason.
+ const report=sanitize({decision:'unknown',reason:secret,coverage:'unreadable',detail:secret,moved:['witness',secret],results:[{lid:'AAA1',movie:'77',state:'unknown',reason:secret}],work:{},liveBlockers:[],limitations:[],scope:null},{});
+ const text=JSON.stringify(report);
+ assert.ok(!text.includes('AAA1')&&!text.includes('sk-secret')&&!text.includes('tmdb-77')&&!text.includes('detail'),'the sanitized report carries none of it');
+ assert.deepEqual([report.reason,report.moved],['unclassified',['witness','unclassified']]);
+ // A non-empty private output through an injected preflight result: the file holds the exact result (and the raw detail), the log holds only the sanitized report.
+ const out2=path.join(fs.realpathSync(root),'fs','nonempty.json');
+ const logged2=[];
+ const rep=await run({argv:argv('--out',out2,'--witness-all-archives'),env:env2,fetchImpl:async(url,init={})=>new Response(JSON.stringify({success:true,result:{uuid:PRODUCTION_DATABASE_ID,name:PRODUCTION_DATABASE_NAME}}),{status:200}),log:t=>logged2.push(t),
+  preflightImpl:async()=>({decision:'complete',reason:null,counts:{eligible_in_scope:1},sources:{},results:[{lid:'AAA1',movie:'77',source:'bridge_resolved',state:'eligible_in_scope',reason:'planner_pass_and_negative_witness_all_archives'}],readSetDigest:'d'.repeat(64),candidateDigest:'e'.repeat(64),detail:secret,liveBlockers:[],limitations:[],work:{statements:1}})});
+ const priv=JSON.parse(fs.readFileSync(out2,'utf8'));
+ assert.deepEqual(priv.eligible,[{lid:'AAA1',tmdb:'77'}]);assert.equal(priv.detail,secret,'the raw detail is kept only in the private file');
+ assert.equal(fs.statSync(out2).mode&0o777,0o600);
+ assert.ok(!logged2.join('').includes('AAA1')&&!logged2.join('').includes('sk-secret'),'the log carries neither the pair nor the detail');
+ assert.deepEqual(rep.witnessScope,{invariant:'diary_first_lb_record_with_inferred_import_admission',mode:'all_archives',archives:0});
+ // A second run to the same path is refused before any request.
+ let requests=0;
+ await assert.rejects(()=>run({argv:argv('--out',out2,'--witness-all-archives'),env:env2,fetchImpl:async()=>{requests++;return new Response('{}');},log:()=>{}}),/must not exist yet/);
+ assert.equal(requests,0);
+}
 
 // ---- 3. a full run over a stub transport: the empty cohort of a clean database -------------------------------------------------------------------------
 // The same seeding as the AIR-652 fixture: Film/Person open at generation 2, the receipt baseline, the ratings domain d1/open.
@@ -91,8 +158,9 @@ assert.equal(logged.length,1);
 const privateFile=JSON.parse(fs.readFileSync(out,'utf8'));
 assert.deepEqual([privateFile.eligible,privateFile.results],[[],[]]);
 assert.equal(fs.statSync(out).mode&0o777,0o600,'the private file is mode 600');
-assert.equal(report.witnessScope.archives,1);
-assert.deepEqual(report.liveBlockers.filter(item=>item.startsWith('ratings_view_fact_key_index_0055')).length,1,'the 0055 prerequisite stays listed until its readback is recorded in the evidence');
+assert.deepEqual([report.witnessScope.mode,report.witnessScope.archives],['named',1]);
+assert.deepEqual(report.liveBlockers,[],'the stub world carries both indexes, so none is listed as a blocker');
+assert.ok(report.limitations.length>=1,'the standing limitations are reported');
 
 // A wrong database identity stops the run before any statement.
 wire.length=0;
@@ -103,7 +171,7 @@ wire.length=0;
 await assert.rejects(()=>run({argv:argv('--out','docs/leak.json'),env,fetchImpl:stub({uuid:PRODUCTION_DATABASE_ID,name:PRODUCTION_DATABASE_NAME}),log:()=>{}}),/outside the repository/);
 assert.equal(wire.length,0);
 // The sanitizer never carries the result list.
-const sanitized=sanitize({decision:'complete',results:[{lid:'AAA1',movie:'1',state:'unknown',reason:'x'}],work:{},liveBlockers:[]},{archives:[]});
+const sanitized=sanitize({decision:'complete',results:[{lid:'AAA1',movie:'1',state:'unknown',reason:'x'}],work:{},liveBlockers:[]},{});
 assert.ok(!JSON.stringify(sanitized).includes('AAA1'),'the sanitized report has no lid');
 assert.deepEqual(sanitized.byClassAndReason,{'unknown / x':1});
 

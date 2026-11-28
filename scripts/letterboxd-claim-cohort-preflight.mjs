@@ -39,14 +39,25 @@ export const WITNESS_INVARIANT='diary_first_lb_record_with_inferred_import_admis
 // The planner's documented limit: a pair linked by the inferred import before AIR-559 on a record that already held facts (in practice a Diary-first `lb-<lid>` record) carries neither durable mark. The one pair DETECTED by the AIR-559
 // audit was marked on 24 Nov 2026 and the planner now refuses it; whether another exists is unknown. The witness is the admission row of the inferred-import archive for the same lid and movie. A scope is VALID only when it names the
 // invariant and a non-empty set of well-formed archive digests; anything else is missing evidence, not absence of the pair.
-const scopeValid=scope=>!!scope&&scope.invariant===WITNESS_INVARIANT&&Array.isArray(scope.archives)&&scope.archives.length>0&&scope.archives.every(item=>typeof item==='string'&&HEX64.test(item));
+// Two valid shapes, never both: a NAMED scope (the invariant and a non-empty set of well-formed archive digests) or the explicit conservative ALL-ARCHIVES scope (the invariant and `allArchives: true`, no archive list).
+const namedScope=scope=>!!scope&&scope.invariant===WITNESS_INVARIANT&&scope.allArchives===undefined&&Array.isArray(scope.archives)&&scope.archives.length>0&&scope.archives.every(item=>typeof item==='string'&&HEX64.test(item));
+const allArchivesScope=scope=>!!scope&&scope.invariant===WITNESS_INVARIANT&&scope.allArchives===true&&scope.archives===undefined;
+const scopeValid=scope=>namedScope(scope)||allArchivesScope(scope);
+// The scope as it is bound into the proof: a changed scope is a different token.
+export const scopeDescriptor=scope=>namedScope(scope)?{mode:'named',archives:[...scope.archives].sort()}:allArchivesScope(scope)?{mode:'all_archives'}:null;
 const NEGATIVE_NOT_PROVED=new Set(['ratings_link_inferred','ratings_link_unverified']);
 export const DEFAULT_CAPS={pointerPage:50,pointerInspect:2000,candidates:64,statements:300,rows:6000,chunk:10,list:64};
 // Predicates that CANNOT yet be captured within a bound. They are reported with every answer and make a live run a blocker, not a risk to accept.
-export const LIVE_BLOCKERS=Object.freeze([
- 'ratings_view_fact_key_index_0055: the planner corroborates the projection by fact_key; the index is migration 0055 (AIR-653) and its production apply and readback are a prerequisite (without it the predicate is a scan whose size is not capped; AIR-627 saw such a predicate time out).',
- 'tmdb_retirement_decision_movie_index: the ledger is read by movie_id; the index is migration 0040 and its production apply and readback are a prerequisite (AIR-667 / AIR-648). A superseding decision is assumed to name the same movie id, as the resolver does (supersedes_seq has no index).',
- 'planner_unbounded_on_live: the unchanged planner re-reads the link index and records for every key and has no caps; it may be evaluated only on a private snapshot, never against production.',
+// The two indexes the bounded reads rely on are VERIFIED from sqlite_master before any other read (one counted statement); a missing one stops the run as `required_index_missing` and is listed
+// as a live blocker of THAT run. They are no longer printed as blockers on a target where they exist.
+export const REQUIRED_INDEXES=Object.freeze({
+ ratings_view_fact_key:'ratings_view_fact_key (migration 0055): the planner and the capture read the projection by fact_key; without the index that predicate is a scan whose size is not capped (AIR-627 saw such a predicate time out).',
+ tmdb_retirement_decision_movie:'tmdb_retirement_decision_movie (migration 0040): the ledger is read by movie_id; a superseding decision is assumed to name the same movie id, as the resolver does (supersedes_seq has no index).',
+});
+// Limits that remain on every run: they are not blockers of a bounded capture, and a complete capture is not an eligibility proof.
+export const LIMITATIONS=Object.freeze([
+ 'planner_unbounded_on_live: the unchanged planner re-reads the link index and records for every key and has no caps; it is evaluated only on a private snapshot, never against production.',
+ 'witness_is_current_state: a negative witness is the absence of an admission row now; a deleted admission row or an inferred link that never had one is not seen.',
 ]);
 // tmdb-spelled storage keys form ONE contiguous range of the pointer primary key ('tmdb_' ... 'tmdb`'), so the two exclusive ranges around it are the only rows a lid scan has to read.
 const RANGES=[{lo:'',hi:'tmdb_'},{lo:'tmdb_￿',hi:'￿'}];
@@ -199,6 +210,12 @@ function classifyPlan(plan,{lid,movie},witness,scope){
  if(plan.already)return {state:'already',reason:'already_current'};
  if(!scopeValid(scope))return {state:'unknown',reason:'witness_scope_missing'};
  // The witness is looked up by movie (the unique admission index) and compared by lid and archive, across every Film, so a canonical merge that moved the row is still seen.
+ if(allArchivesScope(scope)){
+  // Conservative: the witness set is every admission of the movie across all Films and archives. The same pair blocks; an admission of the movie under ANOTHER lid is never ignored, it stays unknown.
+  if(witness.some(row=>String(row.tmdb)===movie&&row.source_code===lid))return {state:'ineligible',reason:'inferred_admission_witness'};
+  if(witness.some(row=>String(row.tmdb)===movie))return {state:'unknown',reason:'witness_movie_admitted_other_lid'};
+  return {state:'eligible_in_scope',reason:'planner_pass_and_negative_witness_all_archives'};
+ }
  const positive=witness.some(row=>String(row.tmdb)===movie&&row.source_code===lid&&scope.archives.includes(row.archive_sha256));
  return positive?{state:'ineligible',reason:'inferred_admission_witness'}:{state:'eligible_in_scope',reason:'planner_pass_and_negative_witness_in_scope'};
 }
@@ -230,13 +247,16 @@ export function multiplicity(subjects,raw){
  out.distinct_films=films.size;
  return out;
 }
-const unknown=(reason,extra={})=>({decision:'unknown',reason,candidateDigest:null,readSetDigest:null,results:[],liveBlockers:LIVE_BLOCKERS,...extra});
+const unknown=(reason,extra={})=>({decision:'unknown',reason,candidateDigest:null,readSetDigest:null,results:[],liveBlockers:[],limitations:LIMITATIONS,...extra});
 // hooks (tests only): a concurrent writer injected at a precise point. `afterDiscovery`, `afterFirstCapture` (empty cohort), `afterIndex` (between the index and the rest of the capture), `afterClassify` (between the two passes).
 export async function preflight(env,{scope=null,caps={},hooks={}}={}){
  const c={...DEFAULT_CAPS,...caps},budget=newBudget(c),cdb=countedDatabase(env.DB,budget.statements),work={pointerRows:0};
  const report=body=>({...body,work:{statements:budget.statements.used,rowsReserved:budget.rows,pointerRows:work.pointerRows}});
  const hook=async name=>{if(hooks[name])await hooks[name]();};
  try{
+  const present=await readRows(cdb,budget,'index_predicates',"SELECT name FROM sqlite_master WHERE type='index' AND name IN ('ratings_view_fact_key','tmdb_retirement_decision_movie') LIMIT ?",[],Object.keys(REQUIRED_INDEXES).length);
+  const missing=Object.keys(REQUIRED_INDEXES).filter(name=>!present.some(row=>row.name===name));
+  if(missing.length)return report(unknown('required_index_missing',{missing,liveBlockers:missing.map(name=>REQUIRED_INDEXES[name])}));
   const found=await discover(cdb,budget,c,work);
   await hook('afterDiscovery');
   if(!found.candidates.length){
@@ -250,7 +270,7 @@ export async function preflight(env,{scope=null,caps={},hooks={}}={}){
    if(gate)return report(unknown(gate.code||'authority_unreadable'));
    const ratings=a1.markers.ratings_domain_authority[0];
    if(!ratings||ratings.mode!=='d1'||ratings.cutover!=='open')return report(unknown('ratings_not_authoritative'));
-   return report({decision:'complete',reason:null,counts:{},sources:{direct_excluded:found.direct,bridge_resolved:0,bridge_unresolved:0},results:[],candidateDigest:await cohortDigest([]),readSetDigest:tokenOf({markers:a1.markers},[]).token,liveBlockers:LIVE_BLOCKERS});
+   return report({decision:'complete',reason:null,counts:{},sources:{direct_excluded:found.direct,bridge_resolved:0,bridge_unresolved:0},results:[],candidateDigest:await cohortDigest([]),readSetDigest:tokenOf({markers:a1.markers},{lids:[],scope:scopeDescriptor(scope)}).token,liveBlockers:[],limitations:LIMITATIONS});
   }
   const pass=async subjectsIn=>{
    const a=await captureA(cdb,budget,c,{withIndex:true});
@@ -275,7 +295,7 @@ export async function preflight(env,{scope=null,caps={},hooks={}}={}){
   // Revalidation: a second capture of the same subjects and a repeated discovery, charged to the SAME budget. Any difference in any section is `unknown`.
   const second=await pass(first.subjects);
   const again=await discover(cdb,budget,c,work);
-  const one=tokenOf(sectionsOne,first.subjects.map(item=>item.lid)),two=tokenOf(sections(second.a,second.b),second.subjects.map(item=>item.lid));
+  const one=tokenOf(sectionsOne,{lids:first.subjects.map(item=>item.lid),scope:scopeDescriptor(scope)}),two=tokenOf(sections(second.a,second.b),{lids:second.subjects.map(item=>item.lid),scope:scopeDescriptor(scope)});
   const moved=Object.keys(one.digests).filter(name=>one.digests[name]!==two.digests[name]);
   if(again.candidates.join('\n')!==found.candidates.join('\n'))moved.push('candidate_set');
   if(moved.length)return report(unknown('read_set_moved',{moved}));
@@ -283,7 +303,7 @@ export async function preflight(env,{scope=null,caps={},hooks={}}={}){
   const counts={};for(const item of guarded)counts[item.state]=(counts[item.state]||0)+1;
   const sources={direct_excluded:found.direct,bridge_resolved:guarded.filter(item=>item.source==='bridge_resolved').length,bridge_unresolved:guarded.filter(item=>item.source==='bridge_unresolved').length};
   const eligible=guarded.filter(item=>item.state==='eligible_in_scope').map(item=>({lid:item.lid,tmdb:item.movie}));
-  return report({decision:'complete',reason:null,counts,sources,results:guarded,multiplicity:multiplicity(first.subjects.filter(item=>item.source==='bridge_resolved'),first.b),readSetDigest:one.token,sectionDigests:one.digests,candidateDigest:await cohortDigest(eligible),liveBlockers:LIVE_BLOCKERS,snapshot:first});
+  return report({decision:'complete',reason:null,counts,sources,results:guarded,multiplicity:multiplicity(first.subjects.filter(item=>item.source==='bridge_resolved'),first.b),readSetDigest:one.token,sectionDigests:one.digests,scope:scopeDescriptor(scope),candidateDigest:await cohortDigest(eligible),liveBlockers:[],limitations:LIMITATIONS,snapshot:first});
  }catch(error){
   if(error instanceof Incomplete)return report(unknown(error.reason,{coverage:'incomplete'}));
   return report(unknown(error?.code||'read_set_unreadable',{coverage:'unreadable',detail:String(error?.message||error).slice(0,200)}));
