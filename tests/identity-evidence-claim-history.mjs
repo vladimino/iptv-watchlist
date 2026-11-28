@@ -30,7 +30,7 @@ const baseData=()=>({
  tvClaims:FILMS.map(item=>tvClaimRow(item)),
  retiredMovieClaims:FILMS.map(item=>({film_id:'film:'+item.lid,scheme:'tmdb',value:item.movie,trusted:0,conflicting:0,provenance_json:'{"status":"retired"}'})),
  tmdbClaimsOnOtherFilms:[{film_id:'film:AbCd',scheme:'tmdb',value:'12345',trusted:1,conflicting:0,provenance_json:null},{film_id:'film:EfGh',scheme:'tmdb',value:'67890',trusted:1,conflicting:0,provenance_json:null}],
- letterboxdClaimsOnOtherFilms:[{film_id:'film:tmdb:99',scheme:'letterboxd',value:'xY12',trusted:1,conflicting:0,provenance_json:'{"source":"ratings_alias_bridge"}'}],
+ letterboxdClaimsOnOtherFilms:[{film_id:'film:tmdb:99',scheme:'letterboxd',value:'xY12',trusted:1,conflicting:0,provenance_json:'{"source":"ratings_alias_bridge","tmdb":"99"}'}],
  counts:{c1_tmdb:10,c1_letterboxd:5,c6_slug:5,c7_receipts:30,c8_redirects:2}
 });
 const COHORT='2026-11-28T08:00:00.000Z';
@@ -44,13 +44,13 @@ const dry=async(data,runId='e3c-test-1')=>{const {records,report}=await extractC
  assert.equal(plan.report.counts.rows,8);
  assert.match(plan.digest,/^[0-9a-f]{64}$/);
  assert.equal(report.families.c4.retire,4);assert.equal(report.families.c4.rows,4);assert.equal(report.families.c5.attributed,4);assert.deepEqual(report.families.c5.unattributable,[]);
- assert.deepEqual(report.families.c4.dateOnly,[1,2,3,4],'a date-only confirmation is read as midnight UTC and reported');
+ assert.deepEqual(report.families.c4.precision,[1,2,3,4].map(seq=>({seq,confirmationAt:'2026-10-30',precision:'date'})),'a date-only confirmation keeps its date and precision in the report');
  const rows=plan.manifest.chunks.flatMap(chunk=>chunk.rows);
  const sameWork=rows.filter(row=>row.relation==='same_work'),applied=rows.filter(row=>row.relation==='film_has_id');
  assert.equal(sameWork.length,4);assert.equal(applied.length,4);
  for(const [index,row] of sameWork.entries()){
   assert.equal(row.subjectKind,'tmdb_movie');assert.equal(row.objectKind,'tmdb_tv');assert.equal(row.polarity,'asserts');assert.equal(row.route,'owner_action');assert.equal(row.method,'owner_statement');
-  assert.equal(row.sourceOrder,index+1,'source_order is the decision seq');assert.equal(row.observedAt,'2026-10-30T00:00:00.000Z');assert.equal(row.sourceRoot,'r2-import:abc'+(index+1)+':film:'+FILMS[index].lid);
+  assert.equal(row.sourceOrder,index+1,'source_order is the decision seq');assert.equal(row.observedAt,null,'a date is never a known instant');assert.equal(row.sourceRoot,'r2-import:abc'+(index+1)+':film:'+FILMS[index].lid);
   assert.equal(row.filmId,'film:'+FILMS[index].lid);
  }
  for(const row of applied){assert.equal(row.subjectKind,'film');assert.equal(row.objectKind,'tmdb_tv');assert.equal(row.observedAt,null,'application time is not recorded');assert.equal(row.sourceOrder,null,'application order is not recorded');}
@@ -78,6 +78,8 @@ const dry=async(data,runId='e3c-test-1')=>{const {records,report}=await extractC
 // 3. c5: a TV claim is attributed only on an exact provenance match with exactly one retire decision.
 {
  for(const [name,mutate] of [
+  ['source',row=>({...row,provenance_json:JSON.stringify({...JSON.parse(row.provenance_json),source:'other_source'})})],
+  ['no source',row=>({...row,provenance_json:JSON.stringify((({source,...rest})=>rest)(JSON.parse(row.provenance_json)))})],
   ['link',row=>({...row,provenance_json:JSON.stringify({...JSON.parse(row.provenance_json),link:'tv/1'})})],
   ['url',row=>({...row,provenance_json:JSON.stringify({...JSON.parse(row.provenance_json),url:'https://letterboxd.com/film/other/'})})],
   ['checkedAt',row=>({...row,provenance_json:JSON.stringify({...JSON.parse(row.provenance_json),checkedAt:'2026-10-31T00:00:00Z'})})],
@@ -95,6 +97,12 @@ const dry=async(data,runId='e3c-test-1')=>{const {records,report}=await extractC
  const ambiguous=baseData();ambiguous.decisions.push(decisionRow(5,FILMS[0],{request_id:'req-second'}));
  const {report}=await dry(ambiguous);
  assert.equal(report.families.c5.unattributable.length,1);assert.equal(report.families.c5.unattributable[0].reason,'ambiguous_decisions');
+ // Missing fields on both sides are no proof: undefined equal to undefined never attributes.
+ const missing=baseData();
+ missing.decisions[0]=decisionRow(1,FILMS[0],{evidence_json:JSON.stringify({movieStatus:404})});
+ missing.tvClaims[0]=tvClaimRow(FILMS[0],{provenance_json:JSON.stringify({source:'letterboxd_tmdb_link',confirmation:CONFIRMATION})});
+ const gap=await dry(missing);
+ assert.equal(gap.report.families.c5.attributed,3);assert.equal(gap.report.families.c5.unattributable[0].filmId,'film:1IUo');
  // Untrusted or conflicting TV claims are not counted as applications.
  const untrusted=baseData();untrusted.tvClaims[1]=tvClaimRow(FILMS[1],{trusted:0});
  assert.equal((await dry(untrusted)).report.families.c5.trustedTv,3);
@@ -111,7 +119,7 @@ const dry=async(data,runId='e3c-test-1')=>{const {records,report}=await extractC
  assert.ok(retire&&withdrawal);
  assert.equal(withdrawal.polarity,'refutes');assert.equal(withdrawal.scopeEvidenceKey,retire.key,'it names exactly the retire row');assert.equal(withdrawal.sourceOrder,5);assert.equal(withdrawal.observedAt,'2026-11-02T09:30:00.000Z');
  assert.equal(plan.report.counts.rows,9);assert.equal(records.length,9);
- assert.deepEqual(report.families.c4.dateOnly,[1,2,3,4],'an instant confirmation is not date-only');
+ assert.deepEqual(report.families.c4.precision.filter(item=>item.seq===5),[{seq:5,confirmationAt:'2026-11-02T09:30:00Z',precision:'instant'}],'an instant confirmation stays an instant');
  // The retire key is deterministic: it is the key the ledger formula gives the same row.
  const expected=await evidenceKeyOf(normalizeEvidence({subject:{kind:'tmdb_movie',value:'17266'},relation:'same_work',object:{kind:'tmdb_tv',value:'9687'},polarity:'asserts',route:'owner_action',method:'owner_statement',
   sourceRoot:'r2-import:abc1:film:1IUo',origin:'reconstruction',reconstructionRun:'x',reconstructedFrom:'y'}));
@@ -124,6 +132,19 @@ const dry=async(data,runId='e3c-test-1')=>{const {records,report}=await extractC
   const result=await dry(bad);
   assert.equal(result.report.families.c4.restoreUnresolved.length,1,name);assert.equal(result.report.families.c4.restoreUnresolved[0].seq,6,name);assert.equal(result.plan.report.counts.rows,9,name);
  }
+}
+
+// 4b. The census keeps different populations apart: c2 null provenance vs non-null, c3 verified bridge shape vs unknown origin, c9 retired, none yields a row.
+{
+ const data=baseData();
+ data.tmdbClaimsOnOtherFilms.push({film_id:'film:IjKl',scheme:'tmdb',value:'5',trusted:1,conflicting:0,provenance_json:'{"source":"discovery"}'});
+ data.letterboxdClaimsOnOtherFilms.push({film_id:'film:tmdb:7',scheme:'letterboxd',value:'Q1',trusted:1,conflicting:0,provenance_json:'{"source":"ratings_alias_bridge","tmdb":"8"}'},{film_id:'film:tmdb:9',scheme:'letterboxd',value:'Q2',trusted:1,conflicting:0,provenance_json:null});
+ const {report,plan}=await dry(data);
+ assert.equal(report.families.c2.count,2,'only null provenance is c2');assert.equal(report.families.c2.nonNullProvenance,1);assert.deepEqual(report.families.c2.nonNullFilms,[{filmId:'film:IjKl',value:'5',source:'discovery'}]);
+ assert.equal(report.families.c3.count,3);assert.equal(report.families.c3.verifiedBridge,1,'ratings_alias_bridge whose tmdb is the Film own minting id');assert.equal(report.families.c3.unknownOrigin,2);
+ assert.deepEqual(report.families.c3.claims.map(item=>item.shape),['verified_bridge','unknown_origin','unknown_origin']);
+ assert.deepEqual(report.families.c9,{status:'retired_by_migration_0054',read:false,rows:0});
+ assert.equal(plan.report.counts.rows,8,'none of them yields a row');
 }
 
 // 5. c3: a reviewer's found causal root is listed for review and never mapped to a row.
@@ -156,14 +177,14 @@ const dry=async(data,runId='e3c-test-1')=>{const {records,report}=await extractC
  run(['-bail',file],files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
  const lit=value=>value===null?'NULL':"'"+String(value).replace(/'/g,"''")+"'";
  const claims=[['film:tmdb:1','tmdb','1',1],['film:tmdb:2','tmdb','2',1],['film:AbCd','tmdb','3',1],['film:AbCd','letterboxd','AbCd',1],['film:tmdb:2','letterboxd','Zz99',1],['film:AbCd','letterboxd_slug','a-slug',0],
-  ['film:1IUo','tmdb','17266',0],['film:1IUo','tmdb_tv','9687',1]];
+  ['film:1IUo','tmdb','17266',0],['film:1IUo','tmdb_tv','9687',1],['film:lb:Mm11','letterboxd','Mm11',1]];
  run(['-bail',file],'PRAGMA foreign_keys=OFF;\n'+claims.map(([film,scheme,value,trusted])=>'INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('+[lit(film),lit(scheme),lit(value),trusted,0,'NULL'].join(',')+');').join('\n'));
  const read=sql=>{const out=run(['-json','-bail',file],sql+';');return out?JSON.parse(out):[];};
  for(const [name,sql] of Object.entries(CLAIM_HISTORY_READS))assert.match(sql,/^SELECT /,name+' is a plain SELECT'),assert.ok(!/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|PRAGMA|REPLACE)\b/i.test(sql),name+' writes nothing');
  const counts=read(CLAIM_HISTORY_READS.counts)[0];
- assert.deepEqual([counts.c1_tmdb,counts.c1_letterboxd,counts.c6_slug,counts.c7_receipts,counts.c8_redirects],[2,1,1,0,0]);
+ assert.deepEqual([counts.c1_tmdb,counts.c1_letterboxd,counts.c6_slug,counts.c7_receipts,counts.c8_redirects],[2,2,1,0,0],'film:lb:<lid> (ADR 0217) is a minting id too');
  assert.deepEqual(read(CLAIM_HISTORY_READS.tmdbClaimsOnOtherFilms).map(row=>row.film_id+'/'+row.value),['film:AbCd/3'],'only the trusted tmdb on a Film not minted from it');
- assert.deepEqual(read(CLAIM_HISTORY_READS.letterboxdClaimsOnOtherFilms).map(row=>row.film_id+'/'+row.value),['film:tmdb:2/Zz99']);
+ assert.deepEqual(read(CLAIM_HISTORY_READS.letterboxdClaimsOnOtherFilms).map(row=>row.film_id+'/'+row.value),['film:tmdb:2/Zz99'],'film:lb:<lid> is not a claim-unit candidate');
  assert.deepEqual(read(CLAIM_HISTORY_READS.tvClaims).map(row=>row.value),['9687']);
  assert.deepEqual(read(CLAIM_HISTORY_READS.retiredMovieClaims).map(row=>row.value),['17266']);
  assert.deepEqual(read(CLAIM_HISTORY_READS.decisions),[]);

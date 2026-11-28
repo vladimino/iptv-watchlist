@@ -5,17 +5,20 @@
 // manifest digest, the staging, the seal and the chunks stay the operators of card ER, run only under their own gates.
 //
 // The mapping (ADR 0215 Table 5, family c):
-// - c1 trusted minting ids (`film:tmdb:<n>` holding tmdb `<n>`, `film:<lid>` holding letterboxd `<lid>`): no row (decision 3), counted only.
-// - c2 trusted `tmdb` on a Film not minted from it, null provenance: no row (method and route not recorded), reported by count and by Film.
-// - c3 trusted `letterboxd` on a Film not minted from it (the claim unit): no row (choice 0215-8b = C), each reported `bridge_root_unavailable`. A root is never derived from a
-//   receipt or from a matching `same_work` row. `causalRoots` (a reviewer's explicit finding) is only LISTED for review (`review_required`): it never yields a row here.
-// - c4 `tmdb_retirement_decision`: a `retire` is `same_work(tmdb_movie, tmdb_tv)` (asserts, owner_action, owner_statement, root = request id, time = `confirmation.at`,
-//   `source_order` = `seq`); a `restore` is the scoped withdrawal (refutes) of the retire its `supersedes_seq` names, `scope_evidence_key` = that row's key. A restore whose target is
-//   not a retire of the same Film and ids in this cohort is reported `restore_unresolved` and yields no row.
-// - c5 trusted `tmdb_tv` claims: `film_has_id(film, tmdb_tv)` only when the claim's provenance matches exactly ONE `retire` decision field by field (film, lid, TV id, link, letterboxd
-//   URL, link check time, confirmation); the application time and order are not recorded, so `observedAt` and `sourceOrder` stay null. Otherwise `unattributable`, no row.
-//   The untrusted retired `tmdb` rows give no row.
-// - c6 slug, c7 receipts, c8 redirects, c9 the empty 0001 tables: no row, counted only.
+// - c1 trusted minting ids (`film:tmdb:<n>` holding tmdb `<n>`, `film:<lid>` and, under ADR 0217, `film:lb:<lid>` holding letterboxd `<lid>`): no row (decision 3), counted only.
+// - c2 trusted `tmdb` on a Film not minted from it with NULL provenance: no row (method and route not recorded), reported by count and by Film. The same claims with non-null
+//   provenance are reported separately (`nonNullProvenance`) and never mapped.
+// - c3 trusted `letterboxd` on a Film not minted from it: no row (choice 0215-8b = C), each reported `bridge_root_unavailable`. The report separates the verified bridge shape
+//   (`ratings_alias_bridge` provenance whose `tmdb` is the Film's own minting id) from claims of unknown origin; both stay report-only. A root is never derived from a receipt or a
+//   matching `same_work` row. `causalRoots` (a reviewer's explicit finding) is only LISTED for review: it never yields a row here.
+// - c4 `tmdb_retirement_decision`: a `retire` is `same_work(tmdb_movie, tmdb_tv)` (asserts, owner_action, owner_statement, root = request id, `source_order` = `seq`). `observed_at` is
+//   `confirmation.at` only when that is a full instant; a date-only `at` keeps its date and precision in the report (the guard holds the whole `confirmation_json`) and the time stays
+//   unknown, no midnight is invented. A `restore` is the scoped withdrawal (refutes) of the retire its `supersedes_seq` names, `scope_evidence_key` = that row's key; a restore whose
+//   target is not a matching retire in this cohort is reported `restoreUnresolved` and yields no row.
+// - c5 trusted `tmdb_tv` claims: `film_has_id(film, tmdb_tv)` only when the claim's provenance matches exactly ONE `retire` decision field by field (film, lid, TV id, provenance
+//   `source` `letterboxd_tmdb_link`, link, letterboxd URL, link check time, confirmation); every compared field must be present on both sides (two missing values are no proof). The
+//   application time and order are not recorded, so `observedAt` and `sourceOrder` stay null. Otherwise `unattributable`, no row. The untrusted retired `tmdb` rows give no row.
+// - c6 slug, c7 receipts, c8 redirects: no row, counted only. c9 (the 0001 assertion tables) is retired by migration 0054 and is not read.
 // Counts are the audit of ADR 0215 and are refreshed by the dry run; nothing here assumes them.
 import {evidenceKeyOf,normalizeEvidence} from './identity-evidence.js';
 
@@ -29,21 +32,22 @@ export const CLAIM_HISTORY_READS=Object.freeze({
  tvClaims:"SELECT film_id,scheme,value,trusted,conflicting,provenance_json FROM film_external_id WHERE scheme='tmdb_tv' ORDER BY film_id,value",
  retiredMovieClaims:"SELECT film_id,scheme,value,trusted,conflicting,provenance_json FROM film_external_id WHERE scheme='tmdb' AND trusted=0 ORDER BY film_id,value",
  tmdbClaimsOnOtherFilms:"SELECT film_id,scheme,value,trusted,conflicting,provenance_json FROM film_external_id WHERE scheme='tmdb' AND trusted=1 AND film_id<>'film:tmdb:'||value ORDER BY film_id,value",
- letterboxdClaimsOnOtherFilms:"SELECT film_id,scheme,value,trusted,conflicting,provenance_json FROM film_external_id WHERE scheme='letterboxd' AND trusted=1 AND film_id<>'film:'||value ORDER BY film_id,value",
- counts:"SELECT (SELECT COUNT(*) FROM film_external_id WHERE scheme='tmdb' AND trusted=1 AND film_id='film:tmdb:'||value) AS c1_tmdb,(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd' AND trusted=1 AND film_id='film:'||value) AS c1_letterboxd,(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd_slug') AS c6_slug,(SELECT COUNT(*) FROM canonical_write_receipt) AS c7_receipts,(SELECT COUNT(*) FROM film_redirect) AS c8_redirects"
+ letterboxdClaimsOnOtherFilms:"SELECT film_id,scheme,value,trusted,conflicting,provenance_json FROM film_external_id WHERE scheme='letterboxd' AND trusted=1 AND film_id<>'film:'||value AND film_id<>'film:lb:'||value ORDER BY film_id,value",
+ counts:"SELECT (SELECT COUNT(*) FROM film_external_id WHERE scheme='tmdb' AND trusted=1 AND film_id='film:tmdb:'||value) AS c1_tmdb,(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd' AND trusted=1 AND (film_id='film:'||value OR film_id='film:lb:'||value)) AS c1_letterboxd,(SELECT COUNT(*) FROM film_external_id WHERE scheme='letterboxd_slug') AS c6_slug,(SELECT COUNT(*) FROM canonical_write_receipt) AS c7_receipts,(SELECT COUNT(*) FROM film_redirect) AS c8_redirects"
 });
 
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const text=value=>typeof value==='string'||typeof value==='number'?String(value):null;
 function parse(value){if(plain(value)||Array.isArray(value))return value;if(typeof value!=='string')return null;try{return JSON.parse(value);}catch{return null;}}
 const stable=value=>JSON.stringify(value,(key,item)=>plain(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a<b?-1:a>b?1:0)):item);
-// `confirmation.at` is a date (`2026-10-30`) or an instant. A date is read as midnight UTC and reported (`date_only`): the time of day is not recorded.
+// `confirmation.at` is a date (`2026-10-30`) or an instant. Only an instant becomes `observed_at`; a date keeps its original value and precision in the report, and the row's time
+// stays unknown: no midnight is invented.
 function instantOf(value){
  const at=text(value);
- if(at===null)return {observedAt:null,dateOnly:false};
- if(/^\d{4}-\d{2}-\d{2}$/.test(at)&&Number.isFinite(Date.parse(at+'T00:00:00.000Z')))return {observedAt:at+'T00:00:00.000Z',dateOnly:true};
+ if(at===null)return {observedAt:null,precision:'missing',original:null};
+ if(/^\d{4}-\d{2}-\d{2}$/.test(at)&&Number.isFinite(Date.parse(at+'T00:00:00.000Z')))return {observedAt:null,precision:'date',original:at};
  const ms=/^\d{4}-\d{2}-\d{2}T/.test(at)?Date.parse(at):NaN;
- return Number.isFinite(ms)?{observedAt:new Date(ms).toISOString(),dateOnly:false}:{observedAt:null,dateOnly:false};
+ return Number.isFinite(ms)?{observedAt:new Date(ms).toISOString(),precision:'instant',original:at}:{observedAt:null,precision:'unparsed',original:at};
 }
 // The reconstruction placeholders only make the key computable; the key of a rooted row does not depend on them (ADR 0213 decision 4).
 const keyOf=input=>evidenceKeyOf(normalizeEvidence({...input,origin:'reconstruction',reconstructionRun:'key-probe',reconstructedFrom:'key-probe'}));
@@ -60,11 +64,15 @@ const claimSource=row=>({kind:'d1_row',table:'film_external_id',key:{film_id:row
 
 const retireProposition=decision=>({subject:{kind:'tmdb_movie',value:decision.movieId},relation:'same_work',object:{kind:'tmdb_tv',value:decision.tvId},route:'owner_action',method:'owner_statement',sourceRoot:decision.requestId});
 
-// The provenance an applied retirement leaves on the trusted TV claim, field by field (the exact shape of `tmdbTvProvenance`).
+// The provenance an applied retirement leaves on the trusted TV claim (the exact shape of `tmdbTvProvenance`, `src/domain/tmdb-tv-identity.js`): `{source:'letterboxd_tmdb_link',url,link,checkedAt,confirmation}`.
+export const TMDB_TV_LINK_SOURCE='letterboxd_tmdb_link';
+const present=value=>typeof value==='string'&&value!=='';
 function attributes(decision,claim){
  const provenance=parse(claim.provenance_json);
- if(!plain(provenance)||!decision.evidence||!decision.confirmation)return false;
- return claim.film_id===decision.filmId&&decision.lid!==null&&decision.filmId==='film:'+decision.lid&&String(claim.value)===decision.tvId
+ if(!plain(provenance)||!decision.evidence||!decision.confirmation||!plain(provenance.confirmation))return false;
+ // Every compared field must exist on BOTH sides: two missing values are not a match.
+ if(![provenance.source,provenance.link,provenance.url,provenance.checkedAt,decision.evidence.link,decision.evidence.letterboxdUrl,decision.evidence.linkCheckedAt].every(present))return false;
+ return claim.film_id===decision.filmId&&decision.lid!==null&&decision.filmId==='film:'+decision.lid&&String(claim.value)===decision.tvId&&provenance.source===TMDB_TV_LINK_SOURCE
   &&provenance.link===decision.evidence.link&&provenance.url===decision.evidence.letterboxdUrl&&provenance.checkedAt===decision.evidence.linkCheckedAt&&stable(provenance.confirmation)===stable(decision.confirmation);
 }
 
@@ -72,9 +80,9 @@ function attributes(decision,claim){
 // [{filmId,value,source}] for claims of c3 (listed for review, never mapped). Returns `{records, report}`: `records` feed `planManifest({family:'c',…})` as they are.
 export async function extractClaimHistory({decisions=[],tvClaims=[],retiredMovieClaims=[],tmdbClaimsOnOtherFilms=[],letterboxdClaimsOnOtherFilms=[],counts={},causalRoots=[]}={}){
  const report={
-  families:{c1:{tmdb:counts.c1_tmdb??null,letterboxd:counts.c1_letterboxd??null,rows:0},c2:{count:0,films:[],rows:0},c3:{count:0,claims:[],rows:0,reason:'bridge_root_unavailable',reviewRequired:[]},
-   c4:{decisions:0,retire:0,restore:0,restoreUnresolved:[],dateOnly:[],rows:0},c5:{trustedTv:0,attributed:0,unattributable:[],rows:0},c6:{count:counts.c6_slug??null,rows:0},c7:{count:counts.c7_receipts??null,rows:0},
-   c8:{count:counts.c8_redirects??null,rows:0},c9:{tables:'not read; the 0001 assertion tables are empty by the audit, refreshed by the dry run when read',rows:0}},
+  families:{c1:{tmdb:counts.c1_tmdb??null,letterboxd:counts.c1_letterboxd??null,rows:0},c2:{count:0,films:[],nonNullProvenance:0,nonNullFilms:[],rows:0},c3:{count:0,verifiedBridge:0,unknownOrigin:0,claims:[],rows:0,reason:'bridge_root_unavailable',reviewRequired:[]},
+   c4:{decisions:0,retire:0,restore:0,restoreUnresolved:[],precision:[],rows:0},c5:{trustedTv:0,attributed:0,unattributable:[],rows:0},c6:{count:counts.c6_slug??null,rows:0},c7:{count:counts.c7_receipts??null,rows:0},
+   c8:{count:counts.c8_redirects??null,rows:0},c9:{status:'retired_by_migration_0054',read:false,rows:0}},
   retiredMovieUntrusted:retiredMovieClaims.filter(row=>Number(row.trusted)===0).length,notEligible:[]
  };
  const records=[];
@@ -86,7 +94,7 @@ export async function extractClaimHistory({decisions=[],tvClaims=[],retiredMovie
   const usable=decision.movieId!==null&&decision.tvId!==null&&decision.confirmation!==null&&Number.isSafeInteger(decision.seq)&&decision.seq>=1;
   if(!usable){report.notEligible.push({seq:decision.seq,reason:'decision_incomplete'});continue;}
   const time=instantOf(decision.confirmation.at);
-  if(time.dateOnly)report.families.c4.dateOnly.push(decision.seq);
+  report.families.c4.precision.push({seq:decision.seq,confirmationAt:time.original,precision:time.precision});
   if(decision.kind==='retire'){
    report.families.c4.retire+=1;
    const evidence={...retireProposition(decision),polarity:'asserts',observedAt:time.observedAt,sourceOrder:decision.seq};
@@ -119,14 +127,18 @@ export async function extractClaimHistory({decisions=[],tvClaims=[],retiredMovie
  // c2 and c3: counted and listed, never mapped.
  for(const row of tmdbClaimsOnOtherFilms){
   if(Number(row.trusted)!==1)continue;
-  report.families.c2.count+=1;report.families.c2.films.push({filmId:row.film_id,value:String(row.value),provenance:row.provenance_json===null||row.provenance_json===undefined?'null':'present'});
+  if(row.provenance_json===null||row.provenance_json===undefined){report.families.c2.count+=1;report.families.c2.films.push({filmId:row.film_id,value:String(row.value)});}
+  else{const given=parse(row.provenance_json);report.families.c2.nonNullProvenance+=1;report.families.c2.nonNullFilms.push({filmId:row.film_id,value:String(row.value),source:plain(given)&&typeof given.source==='string'?given.source:null});}
  }
  const roots=new Map((Array.isArray(causalRoots)?causalRoots:[]).filter(item=>plain(item)&&typeof item.filmId==='string').map(item=>[item.filmId+'|'+String(item.value),item]));
  for(const row of letterboxdClaimsOnOtherFilms){
   if(Number(row.trusted)!==1)continue;
   const provenance=parse(row.provenance_json);
   report.families.c3.count+=1;
-  report.families.c3.claims.push({filmId:row.film_id,value:String(row.value),source:plain(provenance)&&typeof provenance.source==='string'?provenance.source:null,reason:'bridge_root_unavailable'});
+  // The verified bridge shape: alias-bridge provenance whose `tmdb` is the minting id of the very Film that holds the claim. Anything else is of unknown origin. Both stay report-only.
+  const bridge=plain(provenance)&&provenance.source==='ratings_alias_bridge'&&present(String(provenance.tmdb??''))&&row.film_id==='film:tmdb:'+provenance.tmdb;
+  if(bridge)report.families.c3.verifiedBridge+=1;else report.families.c3.unknownOrigin+=1;
+  report.families.c3.claims.push({filmId:row.film_id,value:String(row.value),source:plain(provenance)&&typeof provenance.source==='string'?provenance.source:null,shape:bridge?'verified_bridge':'unknown_origin',reason:'bridge_root_unavailable'});
   const found=roots.get(row.film_id+'|'+String(row.value));
   if(found)report.families.c3.reviewRequired.push({filmId:row.film_id,value:String(row.value),source:found.source??null,note:'a causal record was found by review: surfaced for explicit review, never imported by this run'});
  }
