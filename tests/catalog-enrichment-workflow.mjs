@@ -101,7 +101,7 @@ const deps=(fetchImpl,extra={})=>({tools:{},fetchImpl,clock,...extra});
  assert.deepEqual([out.reconciled,out.mode],[true,'created']);assert.equal(w.created.length,1,'a lost kick is recovered');
  assert.equal(W.CRON,'11-59/15 * * * *');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
- assert.ok(!wrangler.includes(W.CRON),'the reconcile cron is delivered by the activation change, not by a deploy');
+ assert.equal(wrangler.split(W.CRON).length-1,1,'the reconcile cron (AIR-607) is declared exactly once, beside the four existing triggers, which stay');
 }
 
 // ---- the run reaches the Events Log with per-source counts; the reconcile delivers what a crashed instance left ----

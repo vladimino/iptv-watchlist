@@ -428,6 +428,6 @@ for(const upTo of [Infinity,47]){
  for(const name of fs.readdirSync('src'))if(name.endsWith('.js')&&name!=='catalog-enrichment-activation.js'&&fs.readFileSync('src/'+name,'utf8').includes('catalog-enrichment-activation'))importers.push(name);
  assert.deepEqual(importers,[],'the activation is reachable only from the owner\'s production operation');
  assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/catalog-enrichment-activation/);
- assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/11-59\/15/,'the reconcile cron is a separate versioned configuration change');
+ assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*", "11-59\/15 \* \* \* \*"\]/,'the reconcile cron is declared once, beside the four existing triggers');
 }
 console.log('catalog enrichment activation: ok');

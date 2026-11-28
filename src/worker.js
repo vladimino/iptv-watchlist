@@ -2803,7 +2803,7 @@ export default {
 // AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; it creates instances only while the admission gate passes.
 // AIR-588 (ADR 0204): the hourly tick also runs the Prediction ordering writer, which rebuilds the queue only for ordering drift of its own generation and only while no start or commit holds the runner lease.
 async scheduled(controller,env,execution){const at=controller.scheduledTime||Date.now();
-// AIR-605: the Catalog Enrichment reconcile cron (dormant: the expression is not in wrangler.jsonc; the activation change delivers it, never a deploy). It wakes the drainer only while the control is active and work is runnable.
+// AIR-605/AIR-607: the Catalog Enrichment reconcile cron (declared in wrangler.jsonc by AIR-607, delivered before the activation; inert while the control is not active). It wakes the drainer only while the control is active and work is runnable.
 if(typeof CatalogEnrichmentRunner!=='undefined'&&controller.cron===CatalogEnrichmentRunner.CRON){execution.waitUntil(Promise.resolve().then(()=>CatalogEnrichmentRunner.reconcile(env,{})).catch(()=>{}));return;}
 // AIR-534 (ADR 0174): the Discovery-only fast cron reconciles the Workflow and nothing else: no hourly report, no EPG, Ratings or Monitor.
 if(typeof CatalogPosterWeekly!=='undefined'&&controller.cron===CatalogPosterWeekly.CRON){execution.waitUntil(Promise.resolve().then(()=>CatalogPosterWeekly.run(env,{now:at})).catch(()=>{}));return;}

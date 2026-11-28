@@ -30,7 +30,7 @@ let databases=0;
  assert.equal(Policy.EPG_SCHEDULE.hour,17);assert.equal(Policy.EPG_SCHEDULE.minute,0);
  assert.deepEqual(plain(Policy.EPG_SCHEDULE),plain(MonitorPolicyModule.EPG_SCHEDULE),'one EPG due time for the executor and the monitor');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
- assert.match(wrangler,/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*"\]/,'the hourly minute-0 expression (the owner-approved AIR-348 change; it was 37 * * * *), the Discovery-only fast cron of AIR-534 (ADR 0174) and the daily poster cron of AIR-543 (ADR 0179)');
+ assert.match(wrangler,/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*", "11-59\/15 \* \* \* \*"\]/,'the hourly minute-0 expression (the owner-approved AIR-348 change; it was 37 * * * *), the Discovery-only fast cron of AIR-534 (ADR 0174) the daily poster cron of AIR-543 (ADR 0179) and the Catalog Enrichment reconcile cron of AIR-607 (ADR 0219)');
  assert.match(wrangler,/"binding": "EPG_WORKFLOW"[\s\S]*"class_name": "EpgWorkflow"/);
  const build=fs.readFileSync('build.mjs','utf8');
  assert.match(build,/src\/epg-orchestration\.js/);assert.match(build,/export class EpgWorkflow extends WorkflowEntrypoint/);assert.match(build,/runEpgWorkflow/);
