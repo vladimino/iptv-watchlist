@@ -1,6 +1,6 @@
 // AIR-665 / ADR 0218 (Accepted) decision 4, delivery graph stage 5: derived Film readiness over the FilmAggregateV1 body (ADR 0216, AIR-647).
 // DORMANT and PURE: no D1 statement, no R2, no network, no write, no import of the Worker. It takes the aggregate body that AIR-647 already produces and
-// answers displayReady / catalogReady / predictionReady. Not in the Worker bundle (build.mjs does not name it); no consumer is switched.
+// answers displayReady / catalogReady / predictionReady. Scoped into the Worker bundle with the rest of the aggregate (AIR-648, scopedFilmAggregate()) but unrouted: no consumer is switched.
 // Every predicate returns exactly one {value, rule, reason}: value is true, false, 'unknown' or 'not_applicable'; the rules are evaluated in order and the
 // FIRST match wins, so the cases are exhaustive and mutually exclusive. `false` is stated only when the authoritative section proves the negative.
 // Readiness is never an eligibility or existence gate (ADR 0218, ADR 0154); freshness and provenance are reported beside it and never required by it.

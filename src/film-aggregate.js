@@ -408,7 +408,7 @@ function personalSection(ratings,set){
 // ---- predictions (decision 5: prediction_pointer of the authorized storage ids; never prediction_current) ----
 const PREDICTION_SQL="SELECT (SELECT json_object('rows',COUNT(*),'mode',MAX(mode),'generation',MAX(generation)) FROM prediction_domain_authority WHERE id=1) AS marker,"
  +'(SELECT json_group_array(json_array(film_id,predicted_rating,content_sha256,updated_at,r2_key,taste_profile_version,fingerprint_hash,display_json)) FROM prediction_pointer WHERE film_id IN (SELECT value FROM json_each(?))) AS pointers';
-const pointerRow=r=>({storageId:String(r[0]),predictedRating:r[1]==null?null:Number(r[1]),contentSha256:String(r[2]),updatedAt:r[3],body:{r2Key:String(r[4]),contentSha256:String(r[2])},tasteProfileVersion:r[5]==null?null:Number(r[5]),fingerprintHash:r[6]??null,display:(()=>{try{return JSON.parse(r[7]);}catch{return null;}})()});
+export const pointerRow=r=>({storageId:String(r[0]),predictedRating:r[1]==null?null:Number(r[1]),contentSha256:String(r[2]),updatedAt:r[3],body:{r2Key:String(r[4]),contentSha256:String(r[2])},tasteProfileVersion:r[5]==null?null:Number(r[5]),fingerprintHash:r[6]??null,display:(()=>{try{return JSON.parse(r[7]);}catch{return null;}})()});
 async function predictionsSection(db,fence,set,coverage){
  const params=[JSON.stringify(set.storageIds)];
  const readNow=async()=>{const r=await row(db,PREDICTION_SQL,params);return {marker:json(r.marker),current:list(r.pointers).map(pointerRow).sort((a,b)=>a.storageId<b.storageId?-1:1)};};
