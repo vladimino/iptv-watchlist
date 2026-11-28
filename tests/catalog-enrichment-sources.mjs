@@ -161,6 +161,14 @@ const movie=(over={})=>({id:603,release_date:'1999-03-30',runtime:136,overview:'
  assert.equal((await X.fetchWikidata(env,{tmdbId:'603',fetchImpl:fetchOf([['https://query',json(200,{})]])})).reason,'unexpected_document');
  const impl=q([]);await X.fetchWikidata(env,{tmdbId:'603',fetchImpl:impl});
  assert.ok(decodeURIComponent(impl.calls[0]).includes('wdt:P4947 "603"'),'keyed by the TMDB id (P4947)');
+ // AIR-696: the request names its client (Wikimedia User-Agent policy) and still asks for SPARQL JSON
+ let seen=null;
+ await X.fetchWikidata(env,{tmdbId:'603',fetchImpl:async(url,init)=>{seen=init.headers;return json(200,{results:{bindings:[]}});}});
+ assert.equal(seen['user-agent'],X.WIKIDATA_USER_AGENT);assert.match(seen['user-agent'],/^WatchlistAirtime\/\d/);
+ assert.equal(seen.accept,'application/sparql-results+json');
+ // a 403 stays a transport outcome (no failure, no fabricated title)
+ const forbidden=await X.fetchWikidata(env,{tmdbId:'603',fetchImpl:fetchOf([['https://query',res(403)]])});
+ assert.deepEqual([forbidden.status,forbidden.reason],['transport','forbidden']);assert.equal(forbidden.title,undefined);
 }
 // ---- Letterboxd ----
 // The injected page tools: a toy of the Worker's scoped parseFilm over synthetic pages.
