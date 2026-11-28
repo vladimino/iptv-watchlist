@@ -1118,6 +1118,8 @@ export const FILES={
  },
  "film-localization-reconciler.mjs": {
   "suite": "core"
+ }, "film-localization-repair.mjs": {
+  "suite": "core"
  },
  "film-person-gate-reuse.mjs": {
   "suite": "core"

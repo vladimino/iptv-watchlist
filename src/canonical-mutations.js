@@ -105,7 +105,7 @@ async function commit(env,gate,statements,entities,tail=[]){
 }
 
 // The pieces the other fenced writers of the canonical domain reuse (the localization source writer); not a second API.
-export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,bindProducerFence,bindLetterboxdFence,letterboxdEpochMoved,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
+export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,bindProducerFence,bindLetterboxdFence,bindApprovedPins,approvedPinsOf,letterboxdEpochMoved,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
 
 // AIR-599 / ADR 0207 decision 4b: ONLY the Letterboxd producer fence (kind `letterboxd`, the Sync epoch) is bound by the writers that did not bind a producer fence before
 // (the rated admission and the receipt transitions). Any other fence kind on the env is left alone there, so no other producer's batches change.
@@ -122,8 +122,22 @@ async function letterboxdEpochMoved(db,gate){
  try{const row=await one(db,"SELECT 1 AS ok FROM letterboxd_sync_mode WHERE id=1 AND mode='cloudflare' AND epoch=?",[fence.epoch]);return !row;}catch{return false;}
 }
 const RESERVATION_SQL=/^\(EXISTS \(SELECT 1 FROM ratings_document WHERE key=\? AND instr\(body,\?\)>0\) OR EXISTS \(SELECT 1 FROM ratings_document a JOIN ratings_document b /;
+// AIR-664: the authority pins an OPERATION froze at its approval (Film/Person generation, schema contract version, owner-review generation and writes). The operation binds them with bindApprovedPins and the
+// fixed statements below are asserted in the SAME batch as every statement the gate heads: the marker generation the writer read fresh proves no approved generation. The caller supplies values, never SQL.
+const APPROVED_WRITES=['open','held'];
+function approvedPinsOf(pins){
+ if(!pins||typeof pins!=='object'||Array.isArray(pins)||!Number.isInteger(pins.filmPersonGeneration)||pins.filmPersonGeneration<0||!Number.isInteger(pins.schemaVersion)||pins.schemaVersion<1||!Number.isInteger(pins.ownerReviewGeneration)||pins.ownerReviewGeneration<0||!APPROVED_WRITES.includes(pins.ownerReviewWrites))throw failed('film_person_invalid');
+ return Object.freeze({filmPersonGeneration:pins.filmPersonGeneration,schemaVersion:pins.schemaVersion,ownerReviewGeneration:pins.ownerReviewGeneration,ownerReviewWrites:pins.ownerReviewWrites});
+}
+function bindApprovedPins(gate,pins){gate.approvedPins=approvedPinsOf(pins);return gate;}
+const approvedPinStatements=pins=>[
+ [assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)"),[pins.filmPersonGeneration]],
+ [assertSql('EXISTS (SELECT 1 FROM schema_contract WHERE id=1 AND version=?)'),[pins.schemaVersion]],
+ [assertSql("EXISTS (SELECT 1 FROM owner_review_authority WHERE id=1 AND mode='d1' AND generation=? AND writes=?)"),[pins.ownerReviewGeneration,pins.ownerReviewWrites]],
+];
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
+ if(gate.approvedPins)out.push(...approvedPinStatements(approvedPinsOf(gate.approvedPins)));
  if(gate.producerFence)out.push(...fenceStatements(gate.producerFence));
  if(gate.effectGuard){
   const guard=gate.effectGuard;

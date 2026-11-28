@@ -444,12 +444,16 @@ const lossy=file=>{const db=d1Standin(file),real=db.batch.bind(db);let armed=tru
   for(const file of walk(dir))if(!file.endsWith('src/film-localization-reconciler.js')&&/\.(js|mjs|yml|yaml|json|html)$/.test(file)&&fs.readFileSync(file,'utf8').includes('film-localization-reconciler.js'))importers.push(file);
  }
  // AIR-666: the dormant stage-6 retirement reuses the reconciler's counted D1 binding (`countedEnv`) instead of a second copy; it is itself imported by nothing (its own test).
- assert.deepEqual(importers.map(file=>file.replace(/\\/g,'/')),['src/film-dimension-retirement.js'],'no Worker, route, MCP tool, Workflow, cron, script or workflow imports the reconciler, except the dormant retirement that reuses its D1 query counter');
- // AIR-683: the build bundles the module, but the ONLY entry the Worker calls is the read-only diagnosis (the owner-only MCP tool); no mutation entry is referenced outside this module and its tests.
+ // AIR-664: the one-off operation module is the only other importer; it takes the exact-intent entries and never the replanning pass.
+ assert.deepEqual(importers.map(file=>file.replace(/\\/g,'/')).sort(),['src/film-dimension-retirement.js','src/film-localization-repair.js'],'no Worker, route, MCP tool, Workflow, cron, script or workflow imports the reconciler, except the dormant retirement that reuses its D1 query counter and the AIR-664 one-off operation');
+ const repairImport=fs.readFileSync('src/film-localization-repair.js','utf8').match(/import \{([^}]*)\} from '\.\/film-localization-reconciler\.js'/);
+ assert.deepEqual(repairImport[1].split(',').map(name=>name.trim()).sort(),['checkIntent','countedEnv','proveAppliedLocalizationNow','proveRecoveryNow','readReconcileIntent','recoverLocalizationReconcile','recoverRestoreLocalization','restoreLocalizationReconcile','resumeLocalizationReconcile'],'the AIR-664 operation reaches the exact-intent entries only, never applyLocalizationReconcile');
+ assert.ok(!/applyLocalizationReconcile/.test(fs.readFileSync('src/film-localization-repair.js','utf8').replace(/\/\/.*$/gm,'')),'the replanning pass is not referenced by code of the operation');
+ // AIR-683: the build bundles the module, but the ONLY entry the Worker calls DIRECTLY is the read-only diagnosis (the owner-only MCP tool); the mutation entries are reached only through the AIR-664 operation module (asserted above).
  assert.ok(fs.readFileSync('build.mjs','utf8').includes('film-localization-reconciler.js'),'the build bundles the module for the read-only diagnosis');
  const workerCalls=[];
  for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='film-localization-reconciler.js'))for(const match of fs.readFileSync('src/'+file,'utf8').matchAll(/FilmLocalizationReconciler\.([A-Za-z]+)/g))workerCalls.push(file+':'+match[1]);
- assert.deepEqual(workerCalls,['mcp.js:diagnoseLocalizationCohort'],'the Worker reaches only the read-only diagnosis');
+ assert.deepEqual(workerCalls,['mcp.js:diagnoseLocalizationCohort'],'the Worker calls only the read-only diagnosis directly');
  const spec=R.filmLocalizationReconcileOperation();
  assert.equal(spec.atomic,true);
  const {OPERATION_KINDS}=await load('canonical-receipts.js');
