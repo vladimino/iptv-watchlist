@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {migrated} from './prediction-d1-flow-lib.mjs';
+import {migrationHead} from './migration-head.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const M55=fs.readFileSync('migrations/0055_ratings_view_fact_key_index.sql','utf8');
@@ -62,7 +63,7 @@ exec(v54,`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3
  WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1500)
  INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) SELECT 'lid'||i,'tmdb-'||i,1,3.5,0,1,'${AT}' FROM n;
  INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('rival7','tmdb-7',NULL,NULL,0,0,'${AT}');
- INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('lid2000','tmdb-9',NULL,NULL,0,0,'${AT}');`);
+ INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('lid2000','tmdb-2000',NULL,NULL,0,0,'${AT}');`);
 const ROWS=Number(rows(v54,'SELECT COUNT(*) AS n FROM ratings_view')[0].n);
 assert.equal(ROWS,4502);
 
@@ -73,8 +74,10 @@ assert.equal(version(after),55);
 assert.deepEqual(objects(after),[...objects(before),'index:'+INDEX].sort(),'exactly the one index is new');
 refuse(copyOf(after,'again'),'a second apply on version 55');
 assert.equal(version(migrated(54)),54,'the chain through 0054 ends at version 54');
-assert.equal(version(migrated()),55,'the full chain ends at version 55 (0055, AIR-653)');
-assert.ok(objects(migrated()).includes('index:'+INDEX),'the full chain carries the index');
+assert.equal(version(migrated(55)),55,'the chain through 0055 ends at version 55');
+assert.ok(objects(migrated(55)).includes('index:'+INDEX),'the chain through 0055 carries the index');
+assert.equal(version(migrated()),migrationHead(),'the full chain ends at the head of the migration manifest');
+assert.ok(objects(migrated()).includes('index:'+INDEX),'the full chain carries the index (a later additive migration keeps it)');
 const shape=rows(after,"SELECT name,\"unique\" AS uniq,partial FROM pragma_index_list('ratings_view')").find(item=>item.name===INDEX);
 assert.equal(shape.uniq,0,'non-unique');assert.equal(shape.partial,0,'not partial');
 assert.deepEqual(rows(after,"SELECT name FROM pragma_index_info('"+INDEX+"') ORDER BY seqno").map(item=>item.name),['fact_key']);
@@ -90,7 +93,7 @@ assert.equal(Number(rows(after,'SELECT COUNT(*) AS n FROM ratings_view')[0].n),R
 const cases={
  ordinary:['lid5','tmdb_5','tmdb-5'],
  thirdAliasConflict:['lid7','tmdb_7','tmdb-7'],// 'rival7' shares the fact key: ratings_alias_ambiguous
- aliasPointsElsewhere:['lid2000','tmdb_9','tmdb-9'],// the lid alias names another fact than the one the link names
+ aliasPointsElsewhere:['lid2000','tmdb_2001','tmdb-2001'],// the lid alias row carries another key (tmdb-2000) than the one the link names (tmdb-2001): ratings_alias_points_elsewhere
  noRow:['lid9999','tmdb_9999','tmdb-9999'],
 };
 for(const [name,values] of Object.entries(cases)){
@@ -103,6 +106,13 @@ for(const [name,values] of Object.entries(cases)){
 }
 assert.equal(rows(after,bind(PLANNER_SQL,cases.thirdAliasConflict)).length,3,'lid, tmdb alias and the rival alias are all returned (conflict is still visible)');
 assert.equal(rows(after,bind(PLANNER_SQL,cases.noRow)).length,0);
+{
+ const pointsElsewhere=file=>rows(file,bind(PLANNER_SQL,cases.aliasPointsElsewhere)+' ORDER BY alias_id').map(row=>row.alias_id+'|'+row.fact_key);
+ assert.deepEqual(pointsElsewhere(before),['lid2000|tmdb-2000','tmdb_2001|tmdb-2001'],'before: the lid alias row names a different fact key than the pair');
+ assert.deepEqual(pointsElsewhere(after),pointsElsewhere(before),'after: the same mismatch is returned');
+ // The planner's own verdict for this mismatch (ratings_alias_points_elsewhere) is proved on the chain without and with 0055 in tests/canonical-letterboxd-claim.mjs
+ // (section 'projection index 0055'), which reuses that file's planner fixture instead of a second planner here.
+}
 
 // ---- 4. the other readers of the projection, the uniqueness and the version -------------------------------------------------------------------------
 const BY_ALIAS="SELECT alias_id FROM ratings_view WHERE alias_id IN ('lid1','tmdb_2','nope')";

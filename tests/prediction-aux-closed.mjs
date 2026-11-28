@@ -1,6 +1,7 @@
 // ADR 0196 (amends ADR 0194 decision 1): the admission gate `closed` of the auxiliary prediction state, over the real migrations (a sqlite D1 stand-in) and the real Worker code with an in-memory R2.
 // Local stand-ins only; no Cloudflare, no production, no Task, no model.
 import assert from 'node:assert/strict';
+import {migrationHead} from './migration-head.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {migrated,sql,flowWorld} from './prediction-d1-flow-lib.mjs';
@@ -38,7 +39,7 @@ const attempt=(file,text)=>{try{sql(file,text);return 'ok';}catch(error){return 
  const open=(mode,generation)=>{const file=migrated();sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");if(mode!=='r2'){sql(file,"UPDATE prediction_aux_authority SET mode='closed', generation=1");if(mode==='d1')sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=2, activated_at='"+stamp+"'");}return {file,db:d1Standin(file,{})};};
  const env={PREDICTION_DB_REQUIRED:'on'};
  const r2=open('r2'),closed=open('closed'),d1=open('d1');
- assert.deepEqual({...await Aux.readAuxAuthority(closed.db,env)},{mode:'closed',proof:'closed',installed:true,generation:1,version:55,ready:false},'closed reads closed, not r2, not unavailable, not ready');
+ assert.deepEqual({...await Aux.readAuxAuthority(closed.db,env)},{mode:'closed',proof:'closed',installed:true,generation:1,version:migrationHead(),ready:false},'closed reads closed, not r2, not unavailable, not ready');
  assert.equal(Aux.auxClosed(await Aux.readAuxAuthority(closed.db,env)),true);assert.equal(Aux.auxClosed(await Aux.readAuxAuthority(r2.db,env)),false);assert.equal(Aux.auxClosed(await Aux.readAuxAuthority(d1.db,env)),false);
  assert.equal(await Aux.auxD1(closed.db,env),null,'closed gives no D1 branch: the R2 objects are still the data');
  assert.equal((await Aux.guardR2Write(r2.db,env)).proof,'explicit_r2','the gate lets an r2 write through');

@@ -6,6 +6,7 @@
 //  - an import or restore (no origin) has its staged signals deleted, a later unrelated transfer never promotes them, an abandoned resolver attempt is kept and promoted only by a later resolver publication;
 //  - a stale origin (an old-version statement that did not stamp it) is dropped at the next loading start and never promotes; a historical row updated by a transfer emits nothing; a retry upserts without a second signal.
 import assert from 'node:assert/strict';
+import {migrationHead} from './migration-head.mjs';
 import fs from 'node:fs';
 import {migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -38,7 +39,7 @@ const apply=f=>exec(f,M50);
  assert.equal(version(f),50);
  const v46=migrated(48),b=dump(v46);assert.notEqual(run(v46,M50).status,0,'on version 48 the file aborts');assert.deepEqual(dump(v46),b,'and nothing changed');
  assert.notEqual(run(f,"UPDATE discovery_transfer SET origin='import' WHERE id=1").status,0,'only `resolver` is a stored origin');
- assert.equal(version(migrated()),55,'the full chain ends at 55 (0055, AIR-653, after 0054, AIR-625, after 0053, AIR-693)');
+ assert.equal(version(migrated()),migrationHead(),'the full chain ends at the head of the migration manifest');
 }
 
 // ---- 2. the steady path: nothing before the activation, one signal after, TV never ----
