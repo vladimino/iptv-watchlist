@@ -208,10 +208,10 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  // listing is NOT an empty one; an empty valid listing is.
  const listingProblem=!plain(frozen)?'not_provided':frozen.complete!==true?'listing_incomplete':!Number.isFinite(Date.parse(frozen.listedAt))?'listed_at_invalid':!Array.isArray(frozen.objects)?'objects_invalid'
   :frozen.objects.some(item=>!plain(item)||typeof item.key!=='string'||!item.key||typeof item.etag!=='string'||!item.etag)?'objects_malformed'
-  :new Set(frozen.objects.map(item=>item.key)).size!==frozen.objects.length?'objects_duplicate':null;
+  :new Set(frozen.objects.map(item=>item.key)).size!==frozen.objects.length?'objects_duplicate':cohortMs===null?'cohort_missing':Date.parse(frozen.listedAt)>cohortMs?'listed_after_cohort':null;
  const r2Acquisition=listingProblem?{established:false,reason:listingProblem}:{established:true,reason:null,listedAt:frozen.listedAt,objects:frozen.objects.length};
  const d1Covers=acquisition.established===true&&cohortMs!==null&&Number.isFinite(Date.parse(acquisition.acquiredAt))&&Date.parse(acquisition.acquiredAt)<=cohortMs;
- const r2Covers=r2Acquisition.established===true&&cohortMs!==null&&Date.parse(frozen.listedAt)<=cohortMs;
+ const r2Covers=r2Acquisition.established===true&&cohortMs!==null;
  const listed=new Map(listingProblem?[]:frozen.objects.map(item=>[item.key,item.etag]));
  const later=value=>cohortMs!==null&&Date.parse(value)>cohortMs;
  // The timed membership of an append-only D1 row or an R2 record: a valid time decides; no valid time is proven only by the source's own acquisition.
@@ -226,7 +226,7 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  const noRow=new Map(),unrecordable=new Map(),unknownWriters=new Map(),writerStatus=new Map();
  const late={history:[],intents:[],r2:[]};
  const c={timeUnknown:0,rowsMapped:0,b4:{actions:0,rows:0,linked:0,linkedAssigns:0,historyOnlyAssigns:0,unlinked:0,orderUnknown:0,timeUnknown:0,ownerHistoryRows:0},b5:{eligible:0,rows:0,timeUnknown:0}};
- const unresolved={replacementSupersededMissing:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0,r2ListedNotRead:0};
+ const unresolved={replacementSupersededMissing:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0,r2ListedNotRead:0,r2DuplicateRead:0,r2ReadFailed:0};
  const addPair=mapped=>{
   const pair=mapped.input.subject.value+'|'+mapped.input.object.value;
   if(mapped.source==='tmdb_detail')pairs.b1.add(pair);else{const set=pairs.b2.get(mapped.source)||new Set();set.add(pair);pairs.b2.set(mapped.source,set);}
@@ -256,7 +256,9 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   bump(writerStatus,row.writer+'|'+status);
   if(!mapped.input){
    bump(noRow,mapped.none);
-   if(mapped.none==='unrecordable'){bump(unrecordable,mapped.reason);bump(disp.history,'unrecordable');}else bump(disp.history,'no_row:'+mapped.none);
+   if(mapped.none==='unrecordable'){bump(unrecordable,mapped.reason);bump(disp.history,'unrecordable');}
+   else if(mapped.none==='payload_unreadable'){bump(unrecordable,'decision_payload_unreadable');bump(disp.history,'unrecordable');}
+   else bump(disp.history,'no_row:'+mapped.none);
    if(mapped.none==='no_identity_source')pairs.b3.add(row.observation_key+'|'+(payload.tmdbId??''));
    if(mapped.none==='other_source')pairs.other.add(row.observation_key+'|'+(payload.tmdbId??''));
    continue;
@@ -277,7 +279,9 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   const effect=KIND_EFFECT[row.kind];
   c.b4.actions++;
   // A receipt that is absent or has no hash cannot be linked or pinned: reported, never read as a history-less action.
+  // The only successful receipt the live owner writer stores is {state:'applied', decisionHash} (commitOwnerWrite): anything else is unreadable or not an applied action, never staged.
   if(!plain(intent.receipt)||typeof intent.receipt.decisionHash!=='string'||!intent.receipt.decisionHash){bump(disp.intents,'unrecordable');bump(unrecordable,'receipt_unreadable');continue;}
+  if(intent.receipt.state!=='applied'){bump(disp.intents,'unrecordable');bump(unrecordable,'receipt_not_applied');continue;}
   const link=await linkOf(intent,owner.get(row.observation_key)||[]);
   // Every history row the receipt could name is accounted for by this action: an ambiguous link settles none of them as an independent statement.
   for(const matched of link.items||(link.item?[link.item]:[]))matched.used=true;
@@ -299,6 +303,12 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
    supersededRow=superseded?rowById.get(superseded.idempotencyKey):null;
    if(!superseded||!plain(superseded.command)||(superseded.kind!=='identity_assign'&&superseded.kind!=='identity_reject')||superseded.observationKey!==row.observation_key){
     bump(disp.intents,'replacement_superseded_missing');unresolved.replacementSupersededMissing++;continue;
+   }
+   // The live writer (ADR 0178) requires the superseded original to hold a receipt and `supersedes.decisionHash` to equal the replacement's `expected_hash`. The original's own hash is NOT compared (it may be older).
+   const edge=intent.command.supersedes;
+   if(superseded.state!=='receipt'||!plain(superseded.receipt)||superseded.receipt.state!=='applied'||typeof superseded.receipt.decisionHash!=='string'||!superseded.receipt.decisionHash
+    ||typeof edge.decisionHash!=='string'||!edge.decisionHash||edge.decisionHash!==row.expected_hash){
+    bump(disp.intents,'replacement_binding_invalid');unresolved.replacementSupersededMissing++;continue;
    }
   }
   const requires=[];
@@ -350,7 +360,9 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   const mapped=mapDecision(row.observation_key,payload);
   if(!mapped.input){
    bump(noRow,'current:'+mapped.none);
-   if(mapped.none==='unrecordable'){bump(unrecordable,mapped.reason);bump(disp.decisions,'unrecordable');}else bump(disp.decisions,'no_row:'+mapped.none);
+   if(mapped.none==='unrecordable'){bump(unrecordable,mapped.reason);bump(disp.decisions,'unrecordable');}
+   else if(mapped.none==='payload_unreadable'){bump(unrecordable,'decision_payload_unreadable');bump(disp.decisions,'unrecordable');}
+   else bump(disp.decisions,'no_row:'+mapped.none);
    if(mapped.none==='no_identity_source')pairs.b3.add(row.observation_key+'|'+payload.tmdbId);
    continue;
   }
@@ -361,10 +373,17 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  }
 
  // b5: the R2 action objects (the whole object is pinned by its ETag, and must be named by the frozen listing with that ETag).
+ const seen=new Set();
  for(const object of r2Objects){
+  // The exact listing/read correspondence comes BEFORE any classification of an object in the selected prefix, no-row cases included: one successful read per listed key, with the listed ETag.
+  if(typeof object?.key==='string'&&object.key.startsWith(R2_ACTION_PREFIX)){
+   if(seen.has(object.key)){bump(disp.r2,'duplicate_read');unresolved.r2DuplicateRead++;continue;}
+   seen.add(object.key);
+   if(!r2Acquisition.established||listed.get(object.key)!==object.etag){bump(disp.r2,'not_in_frozen_listing');unresolved.r2NotInFrozenListing++;continue;}
+   if(object.record===null||object.record===undefined||object.readError){bump(disp.r2,'read_failed');unresolved.r2ReadFailed++;continue;}
+  }
   const parsed=r2Action(object);
   if(!parsed.intent){bump(disp.r2,'ineligible:'+parsed.none);continue;}
-  if(!r2Acquisition.established||listed.get(object.key)!==object.etag){bump(disp.r2,'not_in_frozen_listing');unresolved.r2NotInFrozenListing++;continue;}
   const member=timed(parsed.finishedAt,r2Covers);
   if(member==='unprovable'){bump(disp.r2,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
   if(member==='late'){bump(disp.r2,'late');late.r2.push({key:object.key,finishedAt:parsed.finishedAt});continue;}
@@ -383,8 +402,8 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  const counts=sources.counts||{};
  const reconciled={history:sum(disp.history)===history.length,decisions:sum(disp.decisions)===decisions.length,intents:sum(disp.intents)===intents.length,r2:sum(disp.r2)===r2Objects.length};
  const unresolvedOut={replacementSupersededMissing:unresolved.replacementSupersededMissing,cohortUnprovable:unresolved.cohortUnprovable,
-  linkAmbiguous:unresolved.linkAmbiguous,linkUnprovable:unresolved.linkUnprovable,unlinkedOwnerHistory:unresolved.unlinkedOwnerHistory,r2NotInFrozenListing:unresolved.r2NotInFrozenListing,r2ListedNotRead:unresolved.r2ListedNotRead,unrecordable:obj(unrecordable)};
- const unresolvedCount=unresolved.replacementSupersededMissing+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+unresolved.r2ListedNotRead+sum(unrecordable);
+  linkAmbiguous:unresolved.linkAmbiguous,linkUnprovable:unresolved.linkUnprovable,unlinkedOwnerHistory:unresolved.unlinkedOwnerHistory,r2NotInFrozenListing:unresolved.r2NotInFrozenListing,r2ListedNotRead:unresolved.r2ListedNotRead,r2DuplicateRead:unresolved.r2DuplicateRead,r2ReadFailed:unresolved.r2ReadFailed,unrecordable:obj(unrecordable)};
+ const unresolvedCount=unresolved.replacementSupersededMissing+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+unresolved.r2ListedNotRead+unresolved.r2DuplicateRead+unresolved.r2ReadFailed+sum(unrecordable);
  const complete=acquisition.established&&r2Acquisition.established&&unresolvedCount===0&&Object.values(reconciled).every(Boolean);
  const coverage={family:FAMILY,cohortAt:cohortAt??null,
   // Three different things, never one: `complete` (every eligible proposition staged, both acquisitions established), `unresolved` (eligible but not staged), `excluded` (a deliberate no-row by

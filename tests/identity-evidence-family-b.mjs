@@ -63,7 +63,7 @@ const cohortOf=sources=>sources.acquisition.acquiredAt;
 const FUTURE=()=>new Date(Date.now()+3600000).toISOString();
 // A stored intent as `readFamilyBSources` selects it.
 const intentRow=(id,kind,observation,{command,issued={confirmedAt:at(-1800000)},receipt})=>({idempotency_key:id,kind,state:'receipt',observation_key:observation,receipt_json:receipt===null?null:JSON.stringify(receipt),
- issued_json:issued===null?null:JSON.stringify(issued),command_json:JSON.stringify(command),expected_hash:'0'.repeat(64)});
+ issued_json:issued===null?null:JSON.stringify(issued),command_json:JSON.stringify(command),expected_hash:command?.supersedes?.decisionHash??'0'.repeat(64)});
 // The decisions the real writers store for an owner action, and their receipts.
 const ASSIGN_AT=at(-7200000);
 const assignDecision=(tmdbId,requestId,when=ASSIGN_AT)=>appliedIdentityDecision({},{effect:'assign',tmdbId,basis:'owner check'},{at:when,requestId,programmeRunId:'prog-1'});
@@ -209,10 +209,28 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  const reversed=await plan(sourcesOf({history:[...history].reverse(),intents:[...intents].reverse()}));
  assert.equal(reversed.digest,result.digest);
  // A receipt that is absent or has no hash is reported as unrecordable, never read as a history-less action.
+ const failedReceipt=await plan(sourcesOf({history:[hist(1,1,'resolver_chunk',verified())],intents:[intentRow('intent-failed','identity_reject',OBS(1),{command:{effect:'reject',tmdbId:'5'},issued:{confirmedAt:at(-1000)},receipt:{state:'failed',decisionHash:'9'.repeat(64)}})]}));
+ assert.equal(failedReceipt.coverage.unresolved.unrecordable.receipt_not_applied,1);assert.equal(failedReceipt.coverage.complete,false);
  for(const receipt of [null,{state:'applied'},{state:'applied',decisionHash:7}]){
   const bad=await plan(sourcesOf({history:[hist(1,1,'resolver_chunk',verified())],intents:[intentRow('intent-bad','identity_reject',OBS(1),{command:{effect:'reject',tmdbId:'5'},issued:{confirmedAt:at(-1000)},receipt})]}));
   assert.equal(bad.coverage.dispositions.intents.unrecordable,1);assert.equal(bad.coverage.unresolved.unrecordable.receipt_unreadable,1);assert.equal(bad.coverage.complete,false);
  }
+ // Invalid replacement bindings from the start (the live writer requires the original's receipt and supersedes.decisionHash === expected_hash). The original's own hash is not compared.
+ const bindings=[
+  ['original receipt failed',[{...intents[0],receipt_json:JSON.stringify({state:'failed',decisionHash:'1'.repeat(64)})},intents[1]]],
+  ['original receipt absent',[{...intents[0],receipt_json:null},intents[1]]],
+  ['original not in state receipt',[{...intents[0],state:'running'},intents[1]]],
+  ['bound hash not the expected hash',[intents[0],{...intents[1],expected_hash:'2'.repeat(64)}]],
+  ['bound hash absent',[intents[0],{...intents[1],command_json:JSON.stringify({effect:'assign',tmdbId:'200',supersedes:{requestId:'intent-1'}})}]],
+ ];
+ for(const [name,rows] of bindings){
+  const bad=await plan(sourcesOf({history,intents:rows}));
+  assert.equal(bad.coverage.dispositions.intents.replacement_binding_invalid??bad.coverage.dispositions.intents.replacement_superseded_missing,1,name);
+  assert.equal(manifestRows(bad.manifest).filter(row=>row.sourceRoot==='intent-2').length,0,name);assert.equal(bad.coverage.complete,false,name);
+ }
+ // An older original whose own receipt hash is not the current decision hash is still valid.
+ const older=await plan(sourcesOf({history,intents:[{...intents[0],receipt_json:JSON.stringify({state:'applied',decisionHash:'3'.repeat(64)})},intents[1]]}));
+ assert.equal(older.coverage.dispositions.intents.replacement_binding_invalid,undefined);
  // A replacement whose superseded intent is not in the source: the WHOLE action is unresolved, never a replacement without its withdrawal read as settled.
  const missing=await plan(sourcesOf({history,intents:[intents[1]]}));
  assert.equal(missing.coverage.dispositions.intents.replacement_superseded_missing,1);assert.equal(missing.coverage.unresolved.replacementSupersededMissing,1);
@@ -273,7 +291,7 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  const LISTING={complete:true,listedAt:at(-30000),objects:objects.map(item=>({key:item.key,etag:item.etag}))};
  // The D1 acquisition is coherent (ACQ), but it says nothing about R2: with no frozen R2 listing the untimed record is unprovable, and the census is not complete.
  const refused=await plan(sourcesOf({r2Objects:objects}));
- assert.equal(refused.coverage.dispositions.r2.not_in_frozen_listing,7,'no listing: every eligible object is unresolved, an absent listing is not an empty one');
+ assert.equal(refused.coverage.dispositions.r2.not_in_frozen_listing,12,'no listing: every eligible object is unresolved, an absent listing is not an empty one');
  assert.equal(refused.coverage.acquisition.r2.reason,'not_provided');
  assert.equal(refused.coverage.acquisition.r2.established,false);assert.equal(refused.coverage.complete,false);
  const accepted=await plan(sourcesOf({r2Objects:objects,r2Acquisition:LISTING}),{acceptR2Residual:true});
@@ -291,12 +309,34 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  const partial=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{...LISTING,objects:LISTING.objects.filter(item=>item.key!==objects[0].key).map(item=>item.key===objects[1].key?{...item,etag:'other'}:item)}}),{acceptR2Residual:true});
  assert.equal(partial.coverage.dispositions.r2.not_in_frozen_listing,2);assert.equal(partial.coverage.unresolved.r2NotInFrozenListing,2);assert.equal(partial.coverage.complete,false);
  const afterCohort=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{...LISTING,listedAt:at(60000)}}),{acceptR2Residual:true});
- assert.equal(afterCohort.coverage.dispositions.r2.cohort_unprovable,1,'a listing made after the cohort cannot prove an earlier state');
+ assert.equal(afterCohort.coverage.acquisition.r2.reason,'listed_after_cohort','a listing made after the cohort cannot certify an earlier frozen set, from finishedAt or otherwise');
+ assert.equal(afterCohort.coverage.dispositions.r2.not_in_frozen_listing,12);assert.equal(afterCohort.coverage.complete,false);
+ const laterEmpty=await plan(sourcesOf({r2Objects:[],r2Acquisition:{complete:true,listedAt:at(60000),objects:[]}}),{acceptR2Residual:true});
+ assert.equal(laterEmpty.coverage.complete,false,'a later empty listing does not certify an empty source');
+ // The reviewer's counterexample: listed with one ETag, read with another as a null record. Never a proven no-row.
+ const aKey=R2_ACTION_PREFIX+'k1.json';
+ const swapped=await plan(sourcesOf({r2Objects:[{key:aKey,etag:'new',record:null}],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[{key:aKey,etag:'old'}]}}),{acceptR2Residual:true});
+ assert.equal(swapped.coverage.complete,false);assert.equal(swapped.coverage.unresolved.r2NotInFrozenListing,1);
+ // Same ETag but a failed read (null record, or a read error): unresolved, while a valid nonterminal record is a counted no-row.
+ for(const bad of [{key:aKey,etag:'e',record:null},{key:aKey,etag:'e',record:{},readError:'timeout'}]){
+  const failed=await plan(sourcesOf({r2Objects:[bad],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[{key:aKey,etag:'e'}]}}),{acceptR2Residual:true});
+  assert.equal(failed.coverage.unresolved.r2ReadFailed,1);assert.equal(failed.coverage.complete,false);
+ }
+ const nonterminal=await plan(sourcesOf({r2Objects:[{key:aKey,etag:'e',record:{schemaVersion:9}}],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[{key:aKey,etag:'e'}]}}),{acceptR2Residual:true});
+ assert.equal(nonterminal.coverage.complete,true);assert.equal(nonterminal.coverage.dispositions.r2['ineligible:unknown_shape'],1);
+ // Two reads of one key are a duplicate acquisition.
+ const dup=await plan(sourcesOf({r2Objects:[{key:aKey,etag:'e',record:{schemaVersion:9}},{key:aKey,etag:'e',record:{schemaVersion:9}}],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[{key:aKey,etag:'e'}]}}),{acceptR2Residual:true});
+ assert.equal(dup.coverage.unresolved.r2DuplicateRead,1);assert.equal(dup.coverage.complete,false);
+ // An unreadable D1 decision payload is unresolved, not an ordinary no-row.
+ const unreadable=await plan(sourcesOf({history:[{...hist(1,1,'resolver_chunk',verified()),payload_json:'{not json'}]}));
+ assert.equal(unreadable.coverage.unresolved.unrecordable.decision_payload_unreadable,1);assert.equal(unreadable.coverage.complete,false);
+ const unreadableCurrent=await plan(sourcesOf({decisions:[{observation_key:OBS(1),decision_hash:'a'.repeat(64),payload_json:'{not json'}]}));
+ assert.equal(unreadableCurrent.coverage.unresolved.unrecordable.decision_payload_unreadable,1);assert.equal(unreadableCurrent.coverage.complete,false);
  const incomplete=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{...LISTING,complete:false}}),{acceptR2Residual:true});
- assert.equal(incomplete.coverage.acquisition.r2.established,false);assert.equal(incomplete.coverage.acquisition.r2.reason,'listing_incomplete');assert.equal(incomplete.coverage.dispositions.r2.not_in_frozen_listing,7);assert.equal(incomplete.coverage.complete,false);
+ assert.equal(incomplete.coverage.acquisition.r2.established,false);assert.equal(incomplete.coverage.acquisition.r2.reason,'listing_incomplete');assert.equal(incomplete.coverage.dispositions.r2.not_in_frozen_listing,12);assert.equal(incomplete.coverage.complete,false);
  // Empty-list injection: a valid EMPTY listing names nothing, so every read eligible object is unresolved (never read as "no listing, nothing to check").
  const empty=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{complete:true,listedAt:at(-30000),objects:[]}}),{acceptR2Residual:true});
- assert.equal(empty.coverage.acquisition.r2.established,true);assert.equal(empty.coverage.dispositions.r2.not_in_frozen_listing,7);assert.equal(empty.coverage.complete,false);
+ assert.equal(empty.coverage.acquisition.r2.established,true);assert.equal(empty.coverage.dispositions.r2.not_in_frozen_listing,12);assert.equal(empty.coverage.complete,false);
  // The other direction: the listing names an object the read did not return.
  const unread=await plan(sourcesOf({r2Objects:objects.slice(0,1),r2Acquisition:{complete:true,listedAt:at(-30000),objects:[...LISTING.objects.slice(0,1),{key:R2_ACTION_PREFIX+'ghost.json',etag:'g'}]}}),{acceptR2Residual:true});
  assert.equal(unread.coverage.unresolved.r2ListedNotRead,1);assert.equal(unread.coverage.complete,false);
