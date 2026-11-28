@@ -23,7 +23,8 @@ import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PROD
 import {strictBinding} from './catalog-enrichment-activation-production.mjs';
 import {createS3Store} from './r2-s3-store.mjs';
 import {readCredentials} from './r2-snapshot-export.mjs';
-import {FreezeStop,readFreeze,readRatingsDocument,REGISTRY_KEY} from './letterboxd-admission-freeze-audit.mjs';
+import {FreezeStop,HEALTHY_SQL,readFreeze,readRatingsDocument,REGISTRY_KEY,ROW_SQL} from './letterboxd-admission-freeze-audit.mjs';
+import {RATED_RECEIPT_KEY} from '../src/film-admission.js';
 import {inventory,MANIFEST_KEY,planImport,importDocuments,rollbackImport,verifyParity} from '../src/letterboxd-admission-documents-import.js';
 import {scoped} from './bundle-scope.mjs';
 import * as RatingsD1 from '../src/ratings-d1.js';
@@ -57,6 +58,9 @@ const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generatio
 export const DIARY_QUEUE_KEY='letterboxd/facts/scans/diary-identity.json';
 const LINK_REASONS=new Set(['linking','link_failed','lid_only_intent']);
 const RECEIPT_ORIGIN='rated_admission_retention';
+// The unresolved states of a canonical write receipt (migration 0019, the keyed protocol of ADR 0207 / migration 0039): pending, failed AND unknown. Used by status, import, flip and the flip batch alike. A canonical operation-key
+// reservation is this receipt state; an expired source-check reservation inside the Diary queue is a different thing and is counted separately.
+const UNRESOLVED="('pending','failed','unknown')";
 const MOVED_LIKE="letterboxd/imports/%";
 
 // The bytes that run: this operator and every first-party module it executes. A transitive import of these files that is not listed (the Node runtime, `node:` built-ins) is pinned only by the exact clean commit.
@@ -118,7 +122,7 @@ export async function readState(binding){
   const activated=authority.installed?(await one(binding,'SELECT activated_at FROM letterboxd_admission_authority WHERE id=1'))?.activated_at??null:null;
   const ratings=await one(binding,'SELECT mode, cutover, generation FROM ratings_domain_authority WHERE id=1');
   const filmPerson=await one(binding,'SELECT mode, cutover, generation FROM film_person_authority WHERE id=1');
-  const receipts=await one(binding,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE origin=? AND state='pending'",[RECEIPT_ORIGIN]);
+  const receipts=await one(binding,'SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE origin=? AND state IN '+UNRESOLVED,[RECEIPT_ORIGIN]);
   const scopes=await many(binding,'SELECT scope, activated, enabled, cutoff_at, bootstrap_state, revision FROM catalog_enrichment_scope ORDER BY scope');
   const control=await one(binding,'SELECT state, generation, revision FROM catalog_enrichment_control WHERE id=1');
   const diary=await readRatingsDocument(binding,DIARY_QUEUE_KEY);
@@ -128,8 +132,8 @@ export async function readState(binding){
    marker:{mode:authority.mode,generation:authority.generation,installed:authority.installed,activatedAt:activated},
    ratings:ratings?{mode:ratings.mode,cutover:ratings.cutover,generation:Number(ratings.generation)}:null,
    filmPerson:filmPerson?{mode:filmPerson.mode,cutover:filmPerson.cutover}:null,
-   pendingReceipts:receipts?Number(receipts.n):null,
-   diary:diaryQueueState(diary),
+   openReceipts:receipts?Number(receipts.n):null,
+   diary:{...diaryQueueState(diary),etag:diary?diary.etag:null},
    scopes:scopes.map(row=>({scope:row.scope,activated:Number(row.activated),enabled:Number(row.enabled),cutoffAt:row.cutoff_at,bootstrap:row.bootstrap_state,revision:Number(row.revision)})),
    control:control?{state:control.state,generation:Number(control.generation),revision:Number(control.revision)}:null,
    moved:moved.map(row=>({key:row.key,parts:Number(row.parts),etag:row.etag===row.etag2?row.etag:null})),
@@ -168,7 +172,7 @@ export const blockers=({plan,pending},state,freeze)=>{
  if(plan.blocked.length)out.push('plan_blocked');
  if(pending&&pending.admittingCandidates>0)out.push('admitting_candidates');
  if(pending&&pending.chunksWithoutReceipt>0)out.push('chunk_intent_without_receipt');
- if(state.pendingReceipts!==0)out.push('pending_receipts');
+ if(state.openReceipts!==0)out.push('open_receipts');
  if(state.diary.linkIntents>0)out.push('diary_link_intents');
  if(state.diary.reservations>0)out.push('diary_reservations');
  if(freeze)for(const problem of freeze.problems)out.push('admission_'+problem);
@@ -181,25 +185,45 @@ async function freezeOf(binding,bucket){
  catch(error){if(error instanceof FreezeStop)throw new OperatorStop('freeze_'+error.reason,3,error.details);throw error;}
 }
 
-// ---- pinned binding: every batch of a helper (import, rollback) carries an assertion of the marker at the PINNED generation, so a close/reopen/close between the caller's pin and the helper's own fresh read refuses whole ----
-export function pinnedBinding(binding,{modes,generation}){
- return {...binding,async batch(statements){
-  const assertion=binding.prepare('UPDATE ratings_domain_cas SET ok=CASE WHEN EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode IN ('+modes.map(()=>'?').join(',')+') AND generation=?) THEN 1 ELSE 0 END WHERE id=1').bind(...modes,generation);
-  return binding.batch([assertion,...statements]);
- }};
-}
-
 // ---- the fenced statements ------------------------------------------------------------------------------------------------
 const assertSql=(sql,params=[])=>['UPDATE ratings_domain_cas SET ok=CASE WHEN '+sql+' THEN 1 ELSE 0 END WHERE id=1',params];
-// The guard row `ratings_domain_cas` id=1 EXISTS (an UPDATE of a missing row would otherwise pass every assertion); first statement of every fenced batch.
+// The guard row `ratings_domain_cas` id=1 EXISTS (an UPDATE of a missing row would otherwise pass every assertion); first statement of EVERY fenced batch, helper batches included.
 // An INSERT that trips the CHECK (ok >= 1) exactly when the row is absent; with the row present it inserts nothing.
 const GUARD_PRESENT=['INSERT INTO ratings_domain_cas (id,ok) SELECT 1,0 WHERE NOT EXISTS (SELECT 1 FROM ratings_domain_cas WHERE id=1)',[]];
 const ONE_ROW_CHANGED=['UPDATE ratings_domain_cas SET ok=CASE WHEN changes()=1 THEN 1 ELSE 0 END WHERE id=1',[]];
-// The D1 side of the admission freeze as observed: the row count and nothing newer than the newest `updated_at`.
-export function freezeAssertions(freeze){
- return [assertSql('(SELECT COUNT(*) FROM film_rated_admission)=?',[freeze.d1.rows]),assertSql('NOT EXISTS (SELECT 1 FROM film_rated_admission WHERE updated_at > COALESCE(?,\'\'))',[freeze.d1.maxUpdatedAt])];
+
+// ---- pinned binding: every batch of a helper (import, rollback) starts with the guard-row existence check and an assertion of the marker at the PINNED generation, so a close/reopen/close between the caller's pin
+// and the helper's own fresh read refuses whole, and a missing CAS row cannot turn the assertion into a no-op ----
+export function pinnedBinding(binding,{modes,generation}){
+ return {...binding,async batch(statements){
+  const present=binding.prepare(GUARD_PRESENT[0]).bind();
+  const assertion=binding.prepare(assertSql('EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode IN ('+modes.map(()=>'?').join(',')+') AND generation=?)')[0]).bind(...modes,generation);
+  return binding.batch([present,assertion,...statements]);
+ }};
 }
-// The observed moved documents (key, etag, part count) and the manifest, fenced in 40-key slices (D1 allows 100 bound variables a statement). Exact set: nothing more and nothing less under the prefix.
+
+// The D1 side of the admission freeze, EXACTLY as observed (not a count or watermark surrogate), fenced in the batch:
+//  - the exact admission rows (every column of P3 plus the Film id and receipt key), in 40-row slices, and the row count;
+//  - the P7 health of every row (the Film, its redirect state and its tmdb external-id rows), as one count over the same predicate;
+//  - the versions (etags, or absence) of the Ratings documents P4/P5 read: the link index and each fact record, and (when given) the Diary check queue.
+// Unrelated metadata updates (a title, a timestamp the audit does not read) are NOT fenced.
+export function freezeAssertions(freeze,{diary}={}){
+ const out=[assertSql('(SELECT COUNT(*) FROM film_rated_admission)=?',[freeze.fence.rows.length])];
+ for(let index=0;index<freeze.fence.rows.length;index+=40){
+  const slice=freeze.fence.rows.slice(index,index+40);
+  out.push(assertSql('(SELECT COUNT(*) FROM film_rated_admission WHERE ('+ROW_SQL+') IN ('+slice.map(()=>'?').join(',')+'))=?',[...slice,slice.length]));
+ }
+ out.push(assertSql('(SELECT COUNT(*) FROM film_rated_admission a WHERE '+HEALTHY_SQL+')=?',[freeze.fence.healthy]));
+ const versions=[...freeze.fence.documents,...(diary?[{key:DIARY_QUEUE_KEY,etag:diary.etag}]:[])];
+ for(let index=0;index<versions.length;index+=40){
+  const slice=versions.slice(index,index+40);
+  const present=slice.filter(item=>item.etag!==null),absent=slice.filter(item=>item.etag===null);
+  if(present.length)out.push(assertSql('(SELECT COUNT(*) FROM ratings_document WHERE part=0 AND ('+present.map(()=>'(key=? AND etag=?)').join(' OR ')+'))=?',[...present.flatMap(item=>[item.key,item.etag]),present.length]));
+  if(absent.length)out.push(assertSql('NOT EXISTS (SELECT 1 FROM ratings_document WHERE key IN ('+absent.map(()=>'?').join(',')+'))',absent.map(item=>item.key)));
+ }
+ return out;
+}
+// The observed moved documents (key, etag, part count) and the manifest, fenced in 40-key slices. Exact set: nothing more and nothing less under the prefix.
 export function documentFence(moved){
  const out=[assertSql('(SELECT COUNT(DISTINCT key) FROM ratings_document WHERE key LIKE ?)=?',[MOVED_LIKE,moved.length]),assertSql('(SELECT COUNT(*) FROM ratings_document WHERE key LIKE ?)=?',[MOVED_LIKE,moved.reduce((sum,item)=>sum+item.parts,0)])];
  for(let index=0;index<moved.length;index+=40){
@@ -223,15 +247,17 @@ export function transitionStatements(command,{generation,extra=[]}){
   ONE_ROW_CHANGED,
  ]};
 }
-export function flipStatements({generation,activatedAt,freeze,moved,control,scope}){
+// The reopen is fenced on the ABSENCE of every moved document and the manifest in the same batch: a competing import in the same closed generation refuses it.
+export const noMovedDocuments=()=>[assertSql('NOT EXISTS (SELECT 1 FROM ratings_document WHERE key LIKE ?)',[MOVED_LIKE])];
+export function flipStatements({generation,activatedAt,freeze,moved,control,scope,diary}){
  return {
   target:{mode:'d1',generation:generation+1},
   statements:[
    GUARD_PRESENT,
    assertSql("EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode='closed' AND generation=?)",[generation]),
-   ...freezeAssertions(freeze),
+   ...freezeAssertions(freeze,{diary}),
    ...documentFence(moved),
-   assertSql("NOT EXISTS (SELECT 1 FROM canonical_write_receipt WHERE origin=? AND state='pending')",[RECEIPT_ORIGIN]),
+   assertSql('NOT EXISTS (SELECT 1 FROM canonical_write_receipt WHERE origin=? AND state IN '+UNRESOLVED+')',[RECEIPT_ORIGIN]),
    assertSql("EXISTS (SELECT 1 FROM catalog_enrichment_control WHERE id=1 AND state='active' AND revision=?)",[control.revision]),
    assertSql("(SELECT COUNT(*) FROM catalog_enrichment_scope)=1 AND EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope='rated' AND activated=1 AND enabled=1 AND bootstrap_state='done' AND cutoff_at=? AND revision=?)",[scope.cutoffAt,scope.revision]),
    assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open') AND EXISTS (SELECT 1 FROM ratings_domain_authority WHERE id=1 AND mode='d1' AND cutover='open')",[]),
@@ -274,6 +300,12 @@ async function exactManifest(binding,plan){
 const movedCopies=state=>state.moved.length;
 
 // ---- commands ---------------------------------------------------------------------------------------------------------
+const noGo=(reason,details)=>new OperatorStop(reason,3,details);
+// A parity report for status/parity: the exact stored manifest (the production reader's contract) is part of it, not only the importer's weaker comparison.
+async function manifestVerdict(binding,plan){
+ try{await exactManifest(binding,plan);return {ok:true};}
+ catch(error){return {ok:false,reason:error instanceof OperatorStop?error.reason:'manifest_check_failed'};}
+}
 export async function execute(command,{binding,bucket,args={},now=()=>Date.now(),ctx={}}){
  const state=await readState(binding);
  const m=state.marker;
@@ -281,18 +313,21 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
  const bytes=bytesDigest();
  if(command==='status'||command==='parity'){
   const out={operation:command,writes:false,writeState:'none',bytes,state:view(state),
-   diary:state.diary,pending:{receipts:state.pendingReceipts},
+   diary:state.diary,pending:{openReceipts:state.openReceipts},
    c2:{problems:c2Problems(state,new Date(now()).toISOString()),control:state.control,scope:state.scopes.find(item=>item.scope===ACTIVATION_SCOPE)??null,scopes:state.scopes.length},
    h1RulesEmpty:state.h1RulesEmpty,d1Copies:{documents:movedCopies(state)}};
-  if(bucket){
-   const frozen=await frozenPlan(bucket),freeze=await freezeOf(binding,bucket);
-   out.r2=planView(frozen);out.freeze=freezeView(freeze);out.blockers=blockers(frozen,state,freeze);
-   if(command==='parity'){
-    if(!frozen.plan.manifest)throw new OperatorStop('plan_blocked',3,{blocked:frozen.plan.blocked.map(item=>({reason:item.reason}))});
-    const parity=await parityOf(binding,frozen.plan,bucket);
-    out.equal=parity.equal;out.differences=parity.differences.map(item=>({kind:item.kind}));
-   }
-  }else if(command==='parity')throw new OperatorStop('configuration',2);
+  if(!bucket){if(command==='parity')throw new OperatorStop('configuration',2);return out;}
+  const frozen=await frozenPlan(bucket),freeze=await freezeOf(binding,bucket);
+  out.r2=planView(frozen);out.freeze=freezeView(freeze);out.blockers=blockers(frozen,state,freeze);
+  if(command==='status')return out;
+  // parity is an UNAMBIGUOUS go / no-go: no blocker, the R2 snapshot equal to D1 byte for byte, and the stored manifest exactly the approved one under the production reader's contract
+  if(!frozen.plan.manifest)throw noGo('no_go',{...out,go:false,reasons:['plan_blocked']});
+  const parity=await parityOf(binding,frozen.plan,bucket);
+  const manifest=await manifestVerdict(binding,frozen.plan);
+  out.equal=parity.equal;out.differences=parity.differences.map(item=>({kind:item.kind}));out.exactManifest=manifest;
+  const reasons=[...out.blockers,...(parity.equal?[]:['parity_mismatch']),...(manifest.ok?[]:['manifest_'+manifest.reason])];
+  out.go=reasons.length===0;
+  if(!out.go)throw noGo('no_go',{...out,reasons});
   return out;
  }
  if(!WRITES.includes(command))throw new OperatorStop('usage',2);
@@ -302,7 +337,7 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
  if(command==='reopen'){
   if(m.mode!=='closed')throw new OperatorStop('marker_not_closed',3,{marker:m});
   if(movedCopies(state)>0)throw new OperatorStop('d1_copies_present',3,{documents:movedCopies(state)});
-  const plan=transitionStatements('reopen',{generation:m.generation});
+  const plan=transitionStatements('reopen',{generation:m.generation,extra:noMovedDocuments()});
   const after=await applyBatch(binding,plan,ctx,{unchangedState:m});
   return {operation:'reopen',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after)};
  }
@@ -320,7 +355,7 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
  // close, import and flip read the original admission freeze (R2 object + D1 rows)
  if(!bucket)throw new OperatorStop('configuration',2);
  const freeze=await freezeOf(binding,bucket);
- if(freeze.problems.length)throw new OperatorStop('no_go',3,{blockers:freeze.problems.map(problem=>'admission_'+problem),freeze:freezeView(freeze)});
+ if(freeze.problems.length)throw noGo('no_go',{blockers:freeze.problems.map(problem=>'admission_'+problem),freeze:freezeView(freeze)});
  if(freeze.pin!==args.admissionSha256)throw new OperatorStop('admission_pin_mismatch',3,{freeze:freezeView(freeze)});
  if(command==='close'){
   if(m.mode!=='r2')throw new OperatorStop('marker_not_r2',3,{marker:m});
@@ -332,7 +367,7 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
  if(m.mode!=='closed')throw new OperatorStop('marker_not_closed',3,{marker:m});
  const frozen=await frozenPlan(bucket);
  const stops=blockers(frozen,state,freeze);
- if(!frozen.plan.manifest||stops.length)throw new OperatorStop('no_go',3,{blockers:stops,r2:planView(frozen)});
+ if(!frozen.plan.manifest||stops.length)throw noGo('no_go',{blockers:stops,r2:planView(frozen)});
  if(frozen.plan.manifestSha256!==args.manifestSha256)throw new OperatorStop('manifest_pin_mismatch',3,{r2:planView(frozen)});
  if(command==='import'){
   const pinned=pinnedBinding(binding,{modes:['closed'],generation:m.generation});
@@ -348,7 +383,9 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
   if(ctx.track)ctx.track('committed');
   return {operation:'import',writes:true,writeState:'committed',imported:result.imported,skipped:result.skipped,manifest:result.manifest,manifestExact:true,parity:'equal',r2:planView(frozen),freeze:freezeView(freeze)};
  }
- // flip
+ // flip. The read sequence: C2 and pins, the moved cohort (exact manifest, parity), the whole freeze audit (the object is re-pinned at its END), then the FINAL re-pins of the moved cohort and the admissions
+ // object and registry as the LAST reads before the one fenced batch. The R2/D1 gap that remains between those reads and the batch is not atomic (no shared transaction): it is covered by the proven drain and the
+ // marker guard every writer reads before its R2 PUT, and the D1 side is fenced inside the batch.
  const flipAt=new Date(now()).toISOString();
  const problems=c2Problems(state,flipAt);
  if(problems.length)throw new OperatorStop('c2_not_active',3,{problems});
@@ -358,18 +395,37 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
  await exactManifest(binding,frozen.plan);
  const parity=await parityOf(binding,frozen.plan,bucket);
  if(!parity.equal)throw new OperatorStop('parity_mismatch',3,{differences:parity.differences.map(item=>({kind:item.kind}))});
- // the last awaited reads before the batch: the original admissions object and the registry are exactly as pinned
  const last=await freezeOf(binding,bucket);
  if(last.pin!==args.admissionSha256||last.problems.length)throw new OperatorStop('admission_moved',3,{freeze:freezeView(last)});
- const plan=flipStatements({generation:m.generation,activatedAt:flipAt,freeze:last,moved:state.moved,control:state.control,scope:rated});
+ const again=await frozenPlan(bucket);
+ if(!again.plan.manifest||again.plan.manifestSha256!==args.manifestSha256)throw new OperatorStop('manifest_moved',3,{r2:planView(again)});
+ const repinObject=await bucket.head(RATED_RECEIPT_KEY),repinRegistry=await bucket.head(REGISTRY_KEY);
+ if(!repinObject||repinObject.etag!==last.object.etag||(repinObject.size!==undefined&&repinObject.size!==null&&Number.isFinite(Number(repinObject.size))&&Number(repinObject.size)!==last.object.bytes))throw new OperatorStop('admission_moved',3,{reason:'final_repin'});
+ if((repinRegistry?repinRegistry.etag:null)!==last.registry.etag)throw new OperatorStop('registry_moved',3);
+ const plan=flipStatements({generation:m.generation,activatedAt:flipAt,freeze:last,moved:state.moved,control:state.control,scope:rated,diary:state.diary});
  const after=await applyBatch(binding,plan,ctx,{unchangedState:m,activatedAt:flipAt});
- // the verified effect: the production reader accepts the manifest at `d1`, the R2 copy still equals the D1 documents, and the frozen R2 objects did not move
- await exactManifest(binding,frozen.plan);
- const post=await parityOf(binding,frozen.plan,bucket);
- const frozenAfter=await freezeOf(binding,bucket);
- return {operation:'flip',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after),irreversible:true,
-  verified:{manifestExact:true,parityEqual:post.equal,admissionObjectUnchanged:frozenAfter.object.etag===last.object.etag&&frozenAfter.object.bytes===last.object.bytes,registryUnchanged:frozenAfter.registry.etag===last.registry.etag},
-  r2:planView(frozen),freeze:freezeView(last)};
+ // The flip is COMMITTED and irreversible from here. Every postcondition is verified and reported field by field. A failed or unproven one is an explicit committed-but-unverified STOP (marker, generation,
+ // activated_at, per-field evidence, retry false, no rollback), never a success and never a retryable failure.
+ const verified={manifestExact:null,parityEqual:null,admissionObjectUnchanged:null,registryUnchanged:null},unproven=[],violations=[];
+ try{await exactManifest(binding,frozen.plan);verified.manifestExact=true;}catch{verified.manifestExact=false;violations.push('manifest_check_failed');}
+ try{
+  const post=await parityOf(binding,frozen.plan,bucket);
+  verified.parityEqual=post.equal;
+  if(!post.equal){
+   // an R2 drift, a vanished or extra R2 key is a freeze violation; a D1 document that differs from the frozen R2 copy after the flip is legitimate natural D1 traffic and only leaves the comparison unproven
+   if(post.differences.some(item=>item.kind==='r2_drift'))violations.push('r2_frozen_moved');
+   else unproven.push('d1_moved_after_flip');
+  }
+ }catch{verified.parityEqual=null;unproven.push('parity_unreadable');}
+ try{
+  const headObject=await bucket.head(RATED_RECEIPT_KEY),headRegistry=await bucket.head(REGISTRY_KEY);
+  verified.admissionObjectUnchanged=Boolean(headObject)&&headObject.etag===last.object.etag&&(headObject.size===undefined||headObject.size===null||!Number.isFinite(Number(headObject.size))||Number(headObject.size)===last.object.bytes);
+  verified.registryUnchanged=(headRegistry?headRegistry.etag:null)===last.registry.etag;
+  if(!verified.admissionObjectUnchanged)violations.push('admissions_object_moved');
+  if(!verified.registryUnchanged)violations.push('registry_moved');
+ }catch{unproven.push('r2_unreadable');}
+ if(violations.length||unproven.length)throw new OperatorStop('committed_unverified',3,{committed:true,irreversible:true,marker:{mode:after.marker.mode,generation:after.marker.generation,activatedAt:after.marker.activatedAt},verified,violations,unproven,note:'the flip is committed; no rollback and no retry; verify by reading, then roll forward'});
+ return {operation:'flip',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after),irreversible:true,verified,r2:planView(frozen),freeze:freezeView(last)};
 }
 
 // ---- CLI --------------------------------------------------------------------------------------------------------------

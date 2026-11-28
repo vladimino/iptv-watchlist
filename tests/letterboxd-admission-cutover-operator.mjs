@@ -43,8 +43,13 @@ const makeBucket=initial=>{
  const map=new Map(Object.entries(initial).map(([key,text],index)=>[key,{text,etag:'e'+index}]));let rev=100;
  return {map,put(key,text){map.set(key,{text,etag:'e'+(++rev)});},drop(key){map.delete(key);},
   async list({prefix,limit=1000,cursor}={}){const keys=[...map.keys()].filter(key=>key.startsWith(prefix)).sort();const from=cursor?Number(cursor):0;const slice=keys.slice(from,from+Math.min(limit,3));const next=from+slice.length;return {objects:slice.map(key=>({key})),truncated:next<keys.length,cursor:next<keys.length?String(next):null};},
-  async get(key){const item=map.get(key);return item?{etag:item.etag,text:async()=>item.text}:null;},
-  async head(key){const item=map.get(key);return item?{etag:item.etag}:null;}};
+  async get(key){const item=map.get(key);return item?{etag:item.etag,size:new TextEncoder().encode(item.text).length,text:async()=>item.text}:null;},
+  async head(key){const item=map.get(key);return item?{etag:item.etag,size:new TextEncoder().encode(item.text).length}:null;}};
+};
+const receipt=(file,id,state)=>{
+ sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('"+id+"','admit','rated_admission_retention','film','film:tmdb:101','"+A+"',0,2,'pending',1,'2026-11-28T13:00:00.000Z','2026-11-28T09:00:00.000Z','2026-11-28T09:00:00.000Z')");
+ if(state==='applied')sqlite(file,"UPDATE canonical_write_receipt SET state='applied', applied_revision=1, next_attempt_at=NULL, settled_at='2026-11-28T09:00:01.000Z' WHERE request_id='"+id+"'");
+ else if(state!=='pending')sqlite(file,"UPDATE canonical_write_receipt SET state='"+state+"', error_class='transport' WHERE request_id='"+id+"'");
 };
 let copies=0;
 const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
@@ -116,7 +121,15 @@ const ADMISSION_PIN=st.freeze.pin,MANIFEST=st.r2.manifestSha256;
  assert.deepEqual((await run(f,['--target','iptv','--status'],makeBucket(noReceipt))).result.blockers,['chunk_intent_without_receipt']);
  const bad=await run(f,['--target','iptv','--status'],makeBucket(cohort({[K3]:'{nope'})));assert.deepEqual(bad.result.blockers,['plan_blocked']);assert.equal(bad.result.r2.manifestSha256,null);
  sqlite(f,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('q1','admit','rated_admission_retention','film','film:tmdb:101','"+A+"',0,2,'pending',1,'2026-11-28T09:00:00.000Z','2026-11-28T09:00:00.000Z','2026-11-28T09:00:00.000Z')");
- assert.deepEqual((await run(f,['--target','iptv','--status'],b0)).result.blockers,['pending_receipts']);
+ assert.deepEqual((await run(f,['--target','iptv','--status'],b0)).result.blockers,['open_receipts']);
+ // failed and unknown receipts are UNRESOLVED too (migration 0019, ADR 0207/0039), whatever their next_attempt_at
+ for(const state of ['failed','unknown']){
+  const g=fresh();
+  receipt(g,'q9',state);
+  assert.deepEqual((await run(g,['--target','iptv','--status'],b0)).result.blockers,['open_receipts'],state);
+ }
+ // an applied receipt is resolved
+ {const g=fresh();receipt(g,'q8','applied');assert.deepEqual((await run(g,['--target','iptv','--status'],b0)).result.blockers,[]);}
 }
 // the real Diary queue: films with the three link states (both caller paths share ONE queue), a reservation, a malformed document; the old Diary cursor document is NOT the queue
 for(const [name,value,blocker] of [
@@ -189,6 +202,24 @@ for(const [name,sql,expected] of [
  assert.equal(Audit.compareFreeze({receipts:{schemaVersion:1,films:{}},rows:[],links:null,records:new Map()}).problems.length,0);
 }
 
+// ===== 3b. unknown identity, the size check, and late R2 changes during the audit and after it =====
+{
+ const status=async(f,bucket)=>(await run(f,['--target','iptv','--status'],bucket)).result;
+ for(const identity of ['weird','',7,{}]){
+  const s=await status(fresh(),makeBucket(cohort({[ADMISSIONS]:r2Admissions({tmdb_101:{...ENTRIES.tmdb_101,identity}})})));
+  assert.ok(s.blockers.includes('admission_unknown_identity'),'an unknown identity is refused, never read as rated: '+JSON.stringify(identity));
+ }
+ // the size supplied by HEAD or GET must equal the bytes read
+ const lying=makeBucket(cohort());const headOf=lying.head;lying.head=async key=>{const found=await headOf(key);return key===ADMISSIONS?{...found,size:found.size+1}:found;};
+ let out=await run(fresh(),['--target','iptv','--status'],lying);assert.equal(out.result.reason,'freeze_admissions_object_size_mismatch');
+ // a late R2 change DURING the audit (after the initial HEAD and GET, while the rows and the facts are read) is seen by the final HEAD at the END of the audit
+ const during=makeBucket(cohort());const realHead=during.head;let heads=0;
+ const f=fresh();
+ const duringDb={onQuery:async text=>{if(/FROM film_rated_admission a WHERE/.test(text)&&heads===1){heads=99;during.put(ADMISSIONS,r2Admissions());}}};
+ during.head=async key=>{if(key===ADMISSIONS&&heads===0)heads=1;return realHead(key);};
+ out=await run(f,['--target','iptv','--status'],during,duringDb);assert.equal(out.result.reason,'freeze_admissions_object_moved','a change after the first HEAD/GET/HEAD-equivalent reads and before the last read is caught by the final HEAD');
+}
+
 // ===== 4. close: pins, the freeze, one fenced batch (the D1 admission side is asserted in the batch) =====
 {
  const f=fresh();
@@ -201,9 +232,9 @@ for(const [name,sql,expected] of [
  assert.deepEqual(marker(f),{mode:'r2',generation:0,activated_at:null});
  // a D1 admission row inserted between the read and the batch refuses the whole batch (the marker does not move)
  let raced=false;
- const refused=await run(f,argv(),b0,{onBatch:async()=>{if(!raced){raced=true;sqlite(f,"UPDATE film_rated_admission SET updated_at='2026-11-28T11:59:00.000Z' WHERE tmdb='103'");}}});
- assert.equal(refused.exit,3);assert.equal(refused.result.reason,'predicate_refused');assert.equal(marker(f).mode,'r2');
- sqlite(f,"UPDATE film_rated_admission SET updated_at='"+AT+"' WHERE tmdb='103'");
+ const refused=await run(f,argv(),b0,{onBatch:async()=>{if(!raced){raced=true;sqlite(f,"UPDATE film_rated_admission SET source_code='changed' WHERE tmdb='101'");}}});
+ assert.equal(refused.exit,3);assert.equal(refused.result.reason,'predicate_refused','a changed OLDER row with the same count and an unchanged newest updated_at is refused: the rows themselves are fenced');assert.equal(marker(f).mode,'r2');
+ sqlite(f,"UPDATE film_rated_admission SET source_code='rated1' WHERE tmdb='101'");
  const before=rows(f,'SELECT COUNT(*) AS n FROM ratings_document')[0].n;
  const closed=await run(f,argv(),b0);
  assert.equal(closed.exit,0,JSON.stringify(closed.result));assert.equal(closed.result.writeState,'committed');
@@ -232,9 +263,15 @@ const imp=(f,bucket,over={},opts={})=>run(f,pins('import',P({generation:1,admiss
  const done=await imp(f,b0);
  assert.equal(done.exit,0,JSON.stringify(done.result));assert.equal(done.result.imported,3);assert.equal(done.result.manifest,'written');assert.equal(done.result.manifestExact,true);assert.equal(done.result.parity,'equal');
  const again=await imp(f,b0);assert.equal(again.exit,0);assert.equal(again.result.imported,0);assert.equal(again.result.skipped,3);
- const parity=await run(f,['--target','iptv','--parity'],b0);assert.equal(parity.result.equal,true);assert.deepEqual(parity.result.blockers,[]);
+ const parity=await run(f,['--target','iptv','--parity'],b0);assert.equal(parity.exit,0,JSON.stringify(parity.result));assert.equal(parity.result.equal,true);assert.deepEqual(parity.result.blockers,[]);assert.equal(parity.result.go,true);assert.deepEqual(parity.result.exactManifest,{ok:true});
  const late=makeBucket(cohort());late.put(K1,JSON.stringify({candidates:{c1:{state:'verified'},c2:{state:'verified'}}}));
- const drift=await run(f,['--target','iptv','--parity'],late);assert.equal(drift.result.equal,false);assert.ok(drift.result.differences.some(item=>item.kind==='d1_differs'));
+ const drift=await run(f,['--target','iptv','--parity'],late);assert.equal(drift.exit,3,'a mismatch is an unambiguous NO-GO');assert.equal(drift.result.reason,'no_go');assert.equal(drift.result.details.go,false);assert.equal(drift.result.details.equal,false);assert.ok(drift.result.details.differences.some(item=>item.kind==='d1_differs'));
+ // before any import: NO-GO (nothing in D1, no manifest)
+ const pre=await run(closedFresh(),['--target','iptv','--parity'],b0);assert.equal(pre.exit,3);assert.equal(pre.result.reason,'no_go');assert.ok(pre.result.details.reasons.includes('parity_mismatch'));
+ // a corrupt but correctly hashed manifest: the read-only parity now reports the EXACT manifest verdict, not only the importer's weaker comparison
+ {const g=closedFresh();await imp(g,b0);const original=JSON.parse(rows(g,"SELECT body FROM ratings_document WHERE key='letterboxd/imports/documents-manifest.json'")[0].body);
+  putDoc(g,'letterboxd/imports/documents-manifest.json',{schemaVersion:1,complete:true,count:0,inventorySha256:original.inventorySha256,keys:original.keys});
+  const out=await run(g,['--target','iptv','--parity'],b0);assert.equal(out.exit,3);assert.equal(out.result.details.exactManifest.ok,false);assert.equal(out.result.details.go,false);}
 }
 
 // ===== 6. flip: every gate, the fenced batch, the verified effect =====
@@ -272,19 +309,34 @@ const flip=(f,bucket,over={},opts={})=>run(f,pins('flip',P({generation:1,admissi
  for(const [name,sql] of [
   ['paused C2 control',"UPDATE catalog_enrichment_control SET state='paused',revision=3,generation=2"],
   ['pending receipt',"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('q2','admit','rated_admission_retention','film','film:tmdb:101','"+A+"',0,2,'pending',1,'2026-11-28T09:00:00.000Z','2026-11-28T09:00:00.000Z','2026-11-28T09:00:00.000Z')"],
-  ['admission row changed',"UPDATE film_rated_admission SET updated_at='2026-11-28T11:59:59.000Z' WHERE tmdb='102'"],
+  ['older admission row changed (same count, same newest updated_at)',"UPDATE film_rated_admission SET archive_sha256='"+B+"' WHERE tmdb='101'"],
+  ['P7: trusted claim dropped without touching film_rated_admission',"UPDATE film_external_id SET trusted=0 WHERE value='101'"],
+  ['P7: redirect added',"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:103','film:tmdb:101','"+AT+"')"],
+  ['link index changed',f=>putDoc(f,'letterboxd/facts/links.json',{'letterboxd:inf1':'f102','tmdb:102':'f102','letterboxd:dia1':'f103','tmdb:103':'f103','letterboxd:extra':'f999'})],
+  ['fact record changed',f=>putDoc(f,'letterboxd/facts/films/f102.json',{links:{letterboxd:'inf1',tmdb:'102'},inferredPairs:[{kind:'inferred',letterboxd:'inf1',tmdb:'102'}],note:'x'})],
+  ['Diary queue created after a positive absence',f=>putDoc(f,Op.DIARY_QUEUE_KEY,{films:{}})],
+  ['Diary queue link intent after the initial read',f=>putDoc(f,Op.DIARY_QUEUE_KEY,{films:{x:{reason:'link_failed'}}})],
+  ['failed receipt',f=>receipt(f,'q5','failed')],
+  ['unknown receipt',f=>receipt(f,'q6','unknown')],
   ['moved document replaced',"UPDATE ratings_document SET body='{\"chunk\":9}', etag='"+sha256('{"chunk":9}')+"' WHERE key='"+K2+"'"],
   ['marker closure moved',"UPDATE letterboxd_admission_authority SET mode='r2',generation=2;UPDATE letterboxd_admission_authority SET mode='closed',generation=3"],
   ['scope changed',"UPDATE catalog_enrichment_scope SET revision=4"],
  ]){
   const f=await imported();let hit=false;
-  const out=await flip(f,b0,{},{onBatch:async()=>{if(!hit){hit=true;sqlite(f,sql);}}});
+  const out=await flip(f,b0,{},{onBatch:async()=>{if(!hit){hit=true;if(typeof sql==='function')sql(f);else sqlite(f,sql);}}});
   assert.equal(out.exit,3,name);assert.ok(['predicate_refused','write_uncertain'].includes(out.result.reason),name+': '+out.result.reason);
   assert.equal(rows(f,'SELECT mode FROM letterboxd_admission_authority')[0].mode,name==='marker closure moved'?'closed':'closed',name+': the marker did not reach d1');
  }
  // the guard row is asserted to EXIST: with ratings_domain_cas emptied no assertion could trip, so the flip must still refuse
  {const f=await imported();const out=await flip(f,b0,{},{onBatch:async()=>{sqlite(f,'DELETE FROM ratings_domain_cas');}});assert.equal(out.exit,3);assert.equal(marker(f).mode,'closed','a missing guard row refuses');}
- // success
+// the FINAL re-pins are the last reads before the batch: a change to the admissions object, or to a moved R2 document, after the whole audit refuses the flip
+ {const f=await imported();const bucket=makeBucket(cohort());const realHead=bucket.head;let n=0;
+  bucket.head=async key=>{if(key===ADMISSIONS&&++n===5)bucket.put(ADMISSIONS,r2Admissions());return realHead(key);};
+  const out=await flip(f,bucket);assert.equal(out.result.reason,'admission_moved');assert.equal(out.result.details.reason,'final_repin');assert.equal(marker(f).mode,'closed');}
+ {const f=await imported();const bucket=makeBucket(cohort());const realList=bucket.list;let starts=0;
+  bucket.list=async o=>{if(!o.cursor&&++starts===3)bucket.put(K1,JSON.stringify({candidates:{}}));return realList(o);};
+  const out=await flip(f,bucket);assert.equal(out.result.reason,'manifest_moved');assert.equal(marker(f).mode,'closed');}
+  // success
  const f2=await imported();
  const registryBefore=makeBucket(cohort());
  const ok=await flip(f2,registryBefore);
@@ -314,6 +366,45 @@ const flip=(f,bucket,over={},opts={})=>run(f,pins('flip',P({generation:1,admissi
  assert.equal(rows(f,"SELECT COUNT(*) AS n FROM ratings_document WHERE key LIKE 'letterboxd/imports/%'")[0].n,0);
  const reopened=await run(f,pins('reopen',P({generation:5})),null);
  assert.equal(reopened.exit,0,JSON.stringify(reopened.result));assert.deepEqual(marker(f),{mode:'r2',generation:6,activated_at:null});
+}
+
+// ===== 7b. helper batches assert the guard row; the reopen fences the absence of every moved document =====
+{
+ // a competing import in the SAME closed generation lands before the reopen commits: the reopen batch refuses it
+ const f=closedFresh();let hit=false;
+ const out=await run(f,pins('reopen',P({generation:1})),null,{onBatch:async()=>{if(!hit){hit=true;putDoc(f,K1,{schemaVersion:1,candidates:{}});}}});
+ assert.equal(out.exit,3);assert.equal(out.result.reason,'predicate_refused');assert.equal(marker(f).mode,'closed','the marker did not reopen over a fresh copy');
+ // missing CAS row: the pinned helper batches still refuse (the assertion cannot be a no-op)
+ const g=closedFresh();let gone=false;
+ const refused=await imp(g,b0,{},{onBatch:async()=>{if(!gone){gone=true;sqlite(g,'DELETE FROM ratings_domain_cas');}}});
+ assert.notEqual(refused.exit,0);assert.equal(rows(g,"SELECT COUNT(*) AS n FROM ratings_document WHERE key LIKE 'letterboxd/imports/%'")[0].n,0,'an import with a missing guard row writes nothing');
+ const h=await imported();let removed=false;
+ const rb=await run(h,pins('rollback-import',P({generation:1})),null,{onBatch:async()=>{if(!removed){removed=true;sqlite(h,'DELETE FROM ratings_domain_cas');}}});
+ assert.notEqual(rb.exit,0);assert.equal(rows(h,"SELECT COUNT(DISTINCT key) AS n FROM ratings_document WHERE key LIKE 'letterboxd/imports/%'")[0].n,4,'a rollback with a missing guard row deletes nothing');
+ // a competing import racing the reopen when copies are already absent is the first case; with copies present the reopen refuses before the batch
+ assert.equal((await run(await imported(),pins('reopen',P({generation:1})),null)).result.reason,'d1_copies_present');
+}
+
+// ===== 7c. a COMMITTED flip whose postcondition fails is an explicit committed-but-unverified STOP; the marker stays d1 =====
+{
+ const after=async(change)=>{
+  const f=await imported();const post=makeBucket(cohort());const realHead=post.head,realList=post.list;let done=false;
+  post.head=async key=>{if(marker(f).mode==='d1'&&!done&&change.head){done=true;change.head(post,f);}return realHead(key);};
+  post.list=async o=>{if(marker(f).mode==='d1'&&!done&&change.list){done=true;change.list(post,f);}return realList(o);};
+  const out=await flip(f,post);return {f,out};
+ };
+ for(const [name,change,expectField,expectValue] of [
+  ['the admissions object moved after the flip',{head:post=>post.put(ADMISSIONS,r2Admissions())},'violations','admissions_object_moved'],
+  ['an R2 moved document drifted after the flip',{list:post=>post.put(K1,JSON.stringify({candidates:{z:{state:'verified'}}}))},'violations','r2_frozen_moved'],
+  ['natural D1 traffic changed a moved document after the flip',{list:(post,f)=>putDoc(f,K1,{schemaVersion:1,candidates:{c1:{state:'verified'},natural:{state:'verified'}}})},'unproven','d1_moved_after_flip'],
+ ]){
+  const {f,out}=await after(change);
+  assert.equal(out.exit,3,name);assert.equal(out.result.reason,'committed_unverified',name+': '+JSON.stringify(out.result));
+  assert.equal(out.result.writeState,'committed');assert.equal(out.result.writes,true);assert.equal(out.result.retry,false,'no retry');
+  assert.equal(out.result.details.committed,true);assert.deepEqual({mode:out.result.details.marker.mode,generation:out.result.details.marker.generation},{mode:'d1',generation:2});assert.equal(out.result.details.marker.activatedAt,'2026-11-28T12:00:00.000Z');
+  assert.ok(out.result.details[expectField].includes(expectValue),name+': '+JSON.stringify(out.result.details));
+  assert.equal(marker(f).mode,'d1','no rollback: the marker remains d1 ('+name+')');
+ }
 }
 
 // ===== 8. the production transports (mocked, no live request): strict D1 reads, the bounded S3 listing, no write retry =====
