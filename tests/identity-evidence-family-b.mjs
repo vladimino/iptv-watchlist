@@ -139,7 +139,7 @@ const intentRow=async(id,kind,observation,{command,issued={confirmedAt:at(-18000
   await intentRow('intent-replace','identity_assign',OBS(3),{command:{effect:'assign',tmdbId:333,supersedes:{requestId:'intent-gone',decisionHash:'a'.repeat(64)}},receipt:{state:'applied',decisionHash:'e'.repeat(64)}}),
  ];
  const result=await plan(sourcesOf({history,intents}));
- const byRoot=Object.groupBy(manifestRows(result.manifest).filter(row=>row.route==='owner_action'),row=>row.sourceRoot);
+ const byRoot={};for(const row of manifestRows(result.manifest).filter(item=>item.route==='owner_action'))(byRoot[row.sourceRoot]=byRoot[row.sourceRoot]||[]).push(row);   // CI runs Node 20: no Object.groupBy
  // The assign: asserts, root = the intent key, time = ownerIdentity.at, source_order = the history revision of the very write (2), and the live key.
  const assign=byRoot['intent-assign'][0];
  assert.equal(assign.polarity,'asserts');assert.equal(assign.observedAt,at(-7200000));assert.equal(assign.sourceOrder,2);
