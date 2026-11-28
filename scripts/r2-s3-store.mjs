@@ -62,6 +62,13 @@ export function createS3Store({credentials,fetchImpl=fetch,allowedWrites=null,al
    do{calls.list++;const response=await send('GET',null,{'list-type':'2','max-keys':'1000',...(prefix?{prefix}:{}),...(cursor?{'continuation-token':cursor}:{})});const page=parseListing(await response.text());objects.push(...page.objects);cursor=page.truncated?page.nextCursor:null;}while(cursor);
    return {objects:objects.map(o=>({key:o.key,size:o.size,etag:o.etag})),truncated:false};
   },
+  // ONE page of a listing (AIR-608): the caller follows the continuation itself, so it can bound the page count and refuse a truncated page that carries no (or a repeated) continuation token.
+  async listPage({prefix='',cursor=null,limit=1000}={}){
+   calls.list++;
+   const response=await send('GET',null,{'list-type':'2','max-keys':String(limit),...(prefix?{prefix}:{}),...(cursor?{'continuation-token':cursor}:{})});
+   const page=parseListing(await response.text());
+   return {objects:page.objects.map(o=>({key:o.key,size:o.size,etag:o.etag})),truncated:Boolean(page.truncated),cursor:page.truncated?(page.nextCursor??null):null};
+  },
   async delete(key){
    if(!allowedDeletes||!allowedDeletes.has(key)){calls.refusedWrites++;throw new InstallError('Delete refused: this store never deletes outside its allowlist',3);}
    calls.delete=(calls.delete||0)+1;

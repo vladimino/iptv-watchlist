@@ -234,6 +234,9 @@ export const FILES={
  "letterboxd-admission-closed.mjs": {
   "suite": "core"
  },
+ "letterboxd-admission-cutover-operator.mjs": {
+  "suite": "core"
+ },
  "letterboxd-admission-documents.mjs": {
   "suite": "core"
  },
