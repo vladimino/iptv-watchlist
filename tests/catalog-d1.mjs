@@ -67,7 +67,7 @@ const gate503=await get('persons/actor/al-pacino/identity',{DB:trapped});
 assert.equal(gate503.status,503,'a retained path stays behind the authority gate');
 assert.ok(storageTouches>0,'the control: the retained path does read through the gate');
 // HEAD and other methods keep 405; retired paths are not a method bypass.
-for(const method of ['HEAD','POST','PUT','DELETE','PATCH']){for(const path of ['persons','persons/review','persons/director/michael-mann','films/tmdb:1']){assert.equal((await get(path,{DB},method).catch(()=>({status:405}))).status,405,method+' '+path);}}
+for(const method of ['HEAD','POST','PUT','DELETE','PATCH']){for(const path of ['persons','persons/review','persons/director/michael-mann','films/tmdb:1']){assert.equal((await get(path,{DB},method)).status,405,method+' '+path);}}
 // Unknown paths are not retired: 404 when the gates admit the request, 503 when the gate refuses. Only the exact shapes are matched.
 for(const path of ['persons/','films','films/','films/a/b','persons/writer/x','persons/actor','persons/actor/','persons/review/','persons/review/extra','persons/actor/al-pacino/other','persons/actor/a/b/identity','nothing','']){r=await get(path);assert.equal(r.status,404,path);assert.deepEqual({...r.body},{error:'Not found'},path);}
 assert.equal((await get('films/tmdb:1',{DB:trapped,FILM_PERSON_DB_OPTIONAL:undefined})).status,410);
@@ -255,4 +255,26 @@ assert.equal(countTable('film_person_credit'),before.credit+802+403+2);
 assert.equal((await get('status',{DB},'POST')).status,405);
 assert.equal((await get('status',{})).status,503);
 assert.equal((await get('nope')).status,404);
+// AIR-689 review P1: the owner-review overlay is a separate authority gate behind the Film/Person gate. The REAL src/owner-review-d1.js overlay (instrumented only to count calls) runs here with an admitted Film/Person
+// stand-in and an owner-review domain that refuses (no marker tables, no owner-review stand-in flag): a retired GET is a 410 and never reaches the overlay; an unknown GET keeps the typed 503 owner_review_unavailable
+// (the overlay refuses even a 404); a retained GET stays gated by it. With the owner-review stand-in admitted the same paths answer 404/200, so the 503 above is the overlay and nothing else.
+{
+ vm.runInContext(scoped('src/owner-review-d1.js','OwnerReviewReal'),ctx);
+ const realOverlay=vm.runInContext('OwnerReviewReal.overlayCatalogResponse',ctx);
+ let overlayCalls=0;
+ ctx.OwnerReview={overlayCatalogResponse:(env,response)=>{overlayCalls++;return realOverlay(env,response);}};
+ const refusing={DB,FILM_PERSON_DB_OPTIONAL:'standin'},admitted={DB,FILM_PERSON_DB_OPTIONAL:'standin',OWNER_REVIEW_DB_OPTIONAL:'standin'};
+ const OWNER_503={error:'storage_unavailable',reason:'owner_review_unavailable'};
+ for(const path of ['persons','persons/review','persons/director/michael-mann','films/tmdb:1','films/%E0%A4%A','persons/actor/%zz']){
+  for(const env of [refusing,admitted]){const before=overlayCalls;r=await get(path,env);assert.equal(r.status,410,path);assert.deepEqual({...r.body},GONE,path);assert.equal(overlayCalls,before,'a retired GET never calls the owner-review overlay: '+path);}
+ }
+ overlayCalls=0;
+ r=await get('nothing',refusing);assert.equal(r.status,503,'an unknown GET keeps the typed owner-review refusal');assert.deepEqual({...r.body},OWNER_503);assert.equal(overlayCalls,1);
+ for(const path of ['status','persons/director/michael-mann/identity']){const before=overlayCalls;r=await get(path,refusing);assert.equal(r.status,503,path);assert.deepEqual({...r.body},OWNER_503,path);assert.equal(overlayCalls,before+1,'a retained GET is still gated by the overlay: '+path);}
+ r=await get('nothing',admitted);assert.equal(r.status,404);assert.deepEqual({...r.body},{error:'Not found'});
+ assert.equal((await get('status',admitted)).status,200);
+ assert.equal((await get('persons/director/michael-mann/identity',admitted)).status,200);
+ for(const method of ['HEAD','POST'])assert.equal((await get('persons/review',admitted,method)).status,405,method+' keeps the existing 405 with the overlay admitted');
+ delete ctx.OwnerReview;
+}
 console.log('Catalog D1 views: read-only source, status, retired persons/films/review views answer a typed 410 before the gates and without storage IO, 405/404/503 unchanged, review queues still computed by d1PersonReview, identity and status retained');
