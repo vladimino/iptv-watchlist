@@ -524,23 +524,27 @@ export const DISPLAY_SQL="WITH RECURSIVE anc(id,parent,depth) AS (SELECT ?,NULL,
 +"SELECT (SELECT json_object('originalTitle',original_title,'canonicalIdentity',canonical_identity) FROM film WHERE id=?) AS film,"
  +"(SELECT json_object('year',year,'runtime',runtime,'synopsis',synopsis,'poster',poster,'url',url,'genres',genres_json,'contentSha256',content_sha256,'updatedAt',updated_at) FROM film_metadata WHERE film_id=?) AS metadata,"
  +'(SELECT json_group_array(json_array(id,parent,depth)) FROM anc) AS ancestors,'
- +"(SELECT json_group_array(json_array(kind,source_key,identity_link,identity_state,localization,generation)) FROM (SELECT kind,source_key,identity_link,identity_state,CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.localization') END AS localization,generation FROM owner_review_entry INDEXED BY owner_review_entry_identity WHERE kind='film' AND identity_state='verified' AND identity_link IN (SELECT id FROM anc) LIMIT ?)) AS owner,"
+ +"(SELECT json_group_array(json_array(kind,source_key,identity_link,identity_state,localization,generation,payload_valid)) FROM (SELECT kind,source_key,identity_link,identity_state,CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.localization') END AS localization,generation,json_valid(payload_json) AS payload_valid FROM owner_review_entry INDEXED BY owner_review_entry_identity WHERE kind='film' AND identity_state='verified' AND identity_link IN (SELECT id FROM anc) LIMIT ?)) AS owner,"
  +"(SELECT json_object('mode',mode,'writes',writes,'generation',generation) FROM owner_review_authority WHERE id=1) AS ownerMarker,"
  +'(SELECT json_group_array(json_array(source,value,source_version,provenance_json,observed_at)) FROM (SELECT source,value,source_version,provenance_json,observed_at FROM film_localization_source WHERE film_id=? ORDER BY source LIMIT ?)) AS sources,'
  +"(SELECT json_group_array(json_array(status,source,source_version,provenance_json,value,authority,updated_at)) FROM film_dimension WHERE film_id=? AND dimension='localization') AS dimension,"
  +'(SELECT json_group_array(json_array(person_id,role,ordinal,name)) FROM ('+CREDIT_SELECTION_SQL+')) AS credits';
 // AIR-648 pre-activation gate (owner review of PR #1008, 25 Nov 2026). The owner entries this section consumes are the authority of the owner title only when the owner-review marker
 // says so IN THE SAME SNAPSHOT: mode d1 (the rows are the authority, not an R2 mirror), writes open or held (a held marker still serves its rows), and the generation of EVERY consumed
-// owner row equal to the marker generation (a whole-document commit stamps all rows with the new generation, so a different one is a torn or moved read). Only then does the caller pass
+// owner row equal to the marker generation (a whole-document commit stamps all rows with the new generation, so a different one is a torn or moved read), every consumed payload valid JSON, and the ancestry and entries inside their bounds. Only then does the caller pass
 // `ownerRead: true`, which makes a marked owner PROJECTION row (provenance.projection='owner_review') a non-input so the entries decide, a revoke or a change included. Without proof a marked
 // row stays an input (missing or unproved evidence is never a proved revocation) and a lower tier (reviewed, automatic) is never reported as the title, because the owner may have decided
 // otherwise: the title is `unknown` with the typed reason. An owner tier answer needs no proof (it is the owner's own value). The marker is part of the section token and of the after-read fence.
 export function ownerEvidenceProof(marker,entries){
  if(marker==null||typeof marker!=='object'||Array.isArray(marker))return {proven:false,reason:'owner_marker_unavailable'};
  if(marker.mode!=='d1')return {proven:false,reason:'owner_review_not_authoritative'};
- const generation=Number(marker.generation);
- if(!['open','held'].includes(marker.writes)||!Number.isSafeInteger(generation)||generation<0)return {proven:false,reason:'owner_marker_malformed'};
- if(entries.some(entry=>!Array.isArray(entry)||Number(entry[5])!==generation))return {proven:false,reason:'owner_generation_mismatch'};
+ // Defensive: the SQL columns are NOT NULL INTEGER, but Number(null), Number('') and Number(false) are 0, so only a real non-negative integer counts.
+ const integer=value=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0;
+ const generation=marker.generation;
+ if(!['open','held'].includes(marker.writes)||!integer(generation))return {proven:false,reason:'owner_marker_malformed'};
+ if(entries.some(entry=>!Array.isArray(entry)||!integer(entry[5])||entry[5]!==generation))return {proven:false,reason:'owner_generation_mismatch'};
+ // A consumed row whose payload is not valid JSON says nothing: it must not prove that the owner holds no localization (a VALID payload without one is a legitimate absence).
+ if(entries.some(entry=>entry[6]!==1))return {proven:false,reason:'owner_payload_unreadable'};
  return {proven:true,generation,writes:marker.writes};
 }
 const METADATA_FIELDS=['year','runtime','synopsis','poster','url','genres'];
@@ -562,7 +566,8 @@ async function displaySection(db,fence,resolution){
  // The owner ancestry is complete only inside both bounds; an overflow of either is never read as "no more ancestors".
  const bounded=s.ancestors.some(a=>a.depth>OWNER_ANCESTOR_DEPTH)||s.ancestors.length>1+OWNER_ANCESTORS_MAX;
  const ancestry={status:bounded?'bounded':'complete',films:Math.max(0,s.ancestors.length-1),depth:s.ancestors.reduce((m,a)=>Math.max(m,a.depth),0)};
- const proof=ownerEvidenceProof(s.ownerMarker,s.owner);
+ // A bounded ancestry or an owner-entry overflow means the consumed rows are not all in hand: the evidence is never proven beyond the selected rows (the typed bounded reasons the title already carries).
+ const proof=bounded?{proven:false,reason:'owner_ancestry_bounded'}:s.owner.length>OWNER_ENTRIES_MAX?{proven:false,reason:'owner_entries_bounded'}:ownerEvidenceProof(s.ownerMarker,s.owner);
  // The title: owner (owner_review_entry of the survivor and every Film of its redirect tree) > reviewed dictionary > automatic, over the rows captured above.
  if(bounded)fields.title={status:'unknown',reason:'owner_ancestry_bounded'};
  else if(s.owner.length>OWNER_ENTRIES_MAX)fields.title={status:'unknown',reason:'owner_entries_bounded'};

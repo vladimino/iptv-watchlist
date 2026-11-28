@@ -1293,17 +1293,32 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
 }
 
 // AIR-648 pre-activation gate (owner review of PR #1008): the display title consumes the owner-review marker and the generation of every consumed owner row in the SAME snapshot
-// and fences them again after the reads. Only a proven authority (marker d1, writes open or held, every consumed owner row at the marker generation) lets the section pass
-// ownerRead:true (a marked owner PROJECTION row stops being an input, so a revoke or a change decides) and lets a lower tier (reviewed, automatic) be reported as the title.
+// and fences them again after the reads. Only a proven authority (marker d1, writes open or held, every consumed owner row at the marker generation and valid JSON, ancestry and entries inside
+// their bounds) lets the section pass ownerRead:true (a marked owner PROJECTION row stops being an input, so a revoke or a change decides) and lets a lower tier be reported as the title.
+// EVERY read below goes through the offline module AND the real built scope (dist/server/index.js, Worker-like context) on the same world and must agree byte for byte as JSON.
+const {loadBundledFilmScopes,plain}=await import('./film-aggregate-bundle-scope.mjs');
+const bundled=loadBundledFilmScopes();
 {
  const locSource=(file,filmId,source,value,{version='v1',observed='2026-11-20T10:00:00.000Z'}={})=>sqlite(file,`INSERT OR REPLACE INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES (${q(filmId)},${q(source)},${q(value)},${q(version)},'{}','req-${source}',${q(observed)},${q(AT)})`);
  const locDimension=(file,filmId,{status,source=null,value=null,authority=null,version=null})=>sqlite(file,`INSERT OR REPLACE INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,updated_at) VALUES (${q(filmId)},'localization',${q(status)},${q(source)},${q(version)},NULL,${q(value)},${q(authority)},0,${q(AT)})`);
  const redirectTo=(file,from,to)=>sqlite(file,`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES (${q(from)},${q(to)},${q(AT)})`);
  const MARKED='{"authority":"owner","projection":"owner_review","entries":["k1"]}';
- const projection=(file,filmId,value,provenance=MARKED)=>locDimension(file,filmId,{status:'reviewed',source:'owner',value,authority:'owner'})||sqlite(file,`UPDATE film_dimension SET provenance_json=${q(provenance)} WHERE film_id=${q(filmId)} AND dimension='localization'`);
+ const projection=(file,filmId,value,provenance=MARKED)=>{locDimension(file,filmId,{status:'reviewed',source:'owner',value,authority:'owner'});sqlite(file,`UPDATE film_dimension SET provenance_json=${q(provenance)} WHERE film_id=${q(filmId)} AND dimension='localization'`);};
  const marker=(file,mode,writes,generation)=>sqlite(file,`UPDATE owner_review_authority SET mode=${q(mode)},writes=${q(writes)},generation=${generation} WHERE id=1`);
- const title=async(file,id='tmdb_5')=>(await read(file,id)).body.display;
+ const rawEntry=(file,sourceKey,link,payload,generation=1)=>sqlite(file,`INSERT OR REPLACE INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film',${q(sourceKey)},${q(payload)},${q(link)},'verified',${generation})`);
  const F='film:tmdb:5';
+ const budgeted=out=>out.calls.queries+out.calls.statements<=REQUEST_STATEMENT_BUDGET;
+ // The display of a read through both implementations, equal as JSON, the database unchanged, the existing budget held.
+ const title=async(file,id='tmdb_5')=>{
+  const sha=fileSha(file);
+  const offline=await read(file,id);
+  const e=env(file);
+  const viaBundle=await bundled.FilmAggregate.readFilmAggregate(e,id);
+  assert.deepEqual(plain(viaBundle),plain({http:offline.http,body:offline.body}),'the bundled read equals the offline read for '+id);
+  assert.ok(budgeted(offline)&&e.calls.queries+e.calls.statements<=REQUEST_STATEMENT_BUDGET,'the statement budget is unchanged');
+  assert.equal(fileSha(file),sha,'the reads wrote nothing');
+  return offline.body.display;
+ };
 
  // 1. Proven authority, no owner entry: the lower tier is the title and the section says why it may.
  let file=world();locSource(file,F,'tmdb','Auto Title');
@@ -1322,8 +1337,7 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  d=await title(file);
  assert.deepEqual([d.fields.title.value,d.fields.title.provenance],['Owner Title','owner']);
 
- // 4. Revoke: the owner entry is gone but the marked projection row is stale. With proof it is not an input, so the title falls to the lower tier;
- //    without proof (below) the marked row stays an owner input and the lower tier is never reported.
+ // 4. Revoke: the owner entry is gone but the marked projection row is stale. With proof it is not an input, so the title falls to the lower tier.
  sqlite(file,"DELETE FROM owner_review_entry");
  d=await title(file);
  assert.deepEqual([d.fields.title.status,d.fields.title.value,d.fields.title.provenance],['present','Auto Title','automatic'],'a proven revoke shows the lower tier');
@@ -1345,16 +1359,59 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  ownerTitle(file,'k1',F,'Owner Title');sqlite(file,"UPDATE owner_review_entry SET generation=0 WHERE source_key='k1'");
  d=await title(file);
  assert.deepEqual([d.ownerEvidence.status,d.ownerEvidence.reason,d.fields.title.value],['unproven','owner_generation_mismatch','Owner Title'],'torn: unproven, but the owner value itself is still the owner tier');
- // Torn and no owner value left to answer: the automatic title is withheld.
  sqlite(file,"UPDATE owner_review_entry SET identity_state='held' WHERE source_key='k1'");
  d=await title(file);
  assert.deepEqual([d.fields.title.status,d.ownerEvidence.status],['present','proven'],'a held (unverified) row is not consumed, so the evidence is proven again');
- // A malformed or missing marker, and the generation rule, on the pure proof.
+ // Torn WITHOUT an owner value to answer: the automatic title is withheld.
+ file=world();locSource(file,F,'tmdb','Auto Title');rawEntry(file,'k1',F,'{}',0);
+ d=await title(file);
+ assert.deepEqual([d.ownerEvidence.reason,d.fields.title.status,d.fields.title.reason],['owner_generation_mismatch','unknown','owner_generation_mismatch'],'torn: the lower tier is not reported');
+
+ // 6b. The proof itself (pure): a missing or malformed marker, the generation rule, and the defensive numeric validation (Number(null), Number(''), Number(false) are 0).
+ const row=generation=>['film','k','l','verified',null,generation,1];
  assert.equal(ownerEvidenceProof({mode:'d1',writes:'broken',generation:1},[]).reason,'owner_marker_malformed');
  assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:'x'},[]).reason,'owner_marker_malformed');
  assert.equal(ownerEvidenceProof(null,[]).reason,'owner_marker_unavailable');
- assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:3},[['film','k','l','verified',null,3],['film','j','l','verified',null,2]]).reason,'owner_generation_mismatch');
- assert.deepEqual(ownerEvidenceProof({mode:'d1',writes:'held',generation:3},[['film','k','l','verified',null,3]]),{proven:true,generation:3,writes:'held'});
+ for(const bad of [null,'',false,'0',undefined,-1,1.5,Infinity])assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:bad},[]).reason,'owner_marker_malformed','marker generation '+String(bad));
+ for(const bad of [null,'',false,'3',undefined,2,3.5])assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:3},[row(bad)]).reason,'owner_generation_mismatch','row generation '+String(bad));
+ assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:0},[row(null)]).reason,'owner_generation_mismatch','a null row generation never equals a marker at 0');
+ assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:3},[row(3),row(2)]).reason,'owner_generation_mismatch');
+ assert.deepEqual(ownerEvidenceProof({mode:'d1',writes:'held',generation:3},[row(3)]),{proven:true,generation:3,writes:'held'});
+ for(const bad of [0,null,undefined,'1',true])assert.equal(ownerEvidenceProof({mode:'d1',writes:'open',generation:3},[[...row(3).slice(0,6),bad]]).reason,'owner_payload_unreadable','payload validity '+String(bad));
+
+ // 6c. An unreadable CONSUMED payload must not prove an absence (review of PR #1080). A verified linked row at the marker generation with invalid JSON, a stale marked projection row and an automatic
+ //     source: the projection stays an input (the accepted unproved-owner fallback), the automatic title is NOT presented as a proved revoke. A VALID payload without a localization is a legitimate absence.
+ file=world();projection(file,F,'Projected Owner');locSource(file,F,'tmdb','Auto Title');rawEntry(file,'k1',F,'not json {');
+ d=await title(file);
+ assert.deepEqual([d.ownerEvidence.status,d.ownerEvidence.reason],['unproven','owner_payload_unreadable']);
+ assert.deepEqual([d.fields.title.value,d.fields.title.provenance],['Projected Owner','owner'],'the stale projection stays an input; the automatic title is not a proved revoke');
+ sqlite(file,"DELETE FROM film_dimension");
+ d=await title(file);
+ assert.deepEqual([d.fields.title.status,d.fields.title.reason,d.fields.title.value],['unknown','owner_payload_unreadable',undefined],'unreadable payload and no owner value: the lower tier is withheld');
+ for(const payload of ['{}','{"localization":null}','{"other":1}','[]']){
+  file=world();projection(file,F,'Projected Owner');locSource(file,F,'tmdb','Auto Title');rawEntry(file,'k1',F,payload);
+  d=await title(file);
+  assert.deepEqual([d.ownerEvidence.status,d.fields.title.value,d.fields.title.provenance],['proven','Auto Title','automatic'],'valid payload '+payload+' without a localization is a legitimate absence (a proved revoke)');
+ }
+ // The validity is covered by the token and the after-read fence: a payload that turns valid (or invalid) moves the section.
+ file=world();rawEntry(file,'k1',F,'{}');
+ const tokenBefore=(await title(file)).token.ownerReview;
+ rawEntry(file,'k1',F,'not json');
+ assert.notEqual((await title(file)).token.ownerReview,tokenBefore,'payload validity is covered by the ownerReview token');
+
+ // 6d. Bounded evidence never proves an absence beyond the selected rows: an ancestry past its bound and an owner-entry overflow are unproven with the existing typed bounded reasons.
+ file=world();locSource(file,F,'tmdb','Auto Title');
+ sqlite(file,Array.from({length:OWNER_ANCESTORS_MAX+1},(_,i)=>`INSERT INTO film (id,contract_version,updated_at) VALUES ('film:w:${i}',1,'${AT}');INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:w:${i}',1,'${AT}');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:w:${i}','${F}','${AT}');`).join(''));
+ d=await title(file);
+ assert.deepEqual([d.ancestry.status,d.ownerEvidence.status,d.ownerEvidence.reason,d.fields.title.reason],['bounded','unproven','owner_ancestry_bounded','owner_ancestry_bounded']);
+ file=world();locSource(file,F,'tmdb','Auto Title');
+ for(let i=0;i<=OWNER_ENTRIES_MAX;i++)rawEntry(file,'ke'+i,F,'{}');
+ d=await title(file);
+ assert.deepEqual([d.ownerEvidence.status,d.ownerEvidence.reason,d.fields.title.reason],['unproven','owner_entries_bounded','owner_entries_bounded']);
+ file=world();locSource(file,F,'tmdb','Auto Title');
+ for(let i=0;i<OWNER_ENTRIES_MAX;i++)rawEntry(file,'ke'+i,F,'{}');
+ d=await title(file);
+ assert.deepEqual([d.ownerEvidence.status,d.fields.title.value],['proven','Auto Title'],'exactly at the entry bound the rows are all in hand');
 
  // 7. Unproven + a marked projection row: the row stays an owner input (never a proved revocation) and its value is the title; no lower tier.
  file=world();projection(file,F,'Projected Owner');locSource(file,F,'tmdb','Auto Title');marker(file,'r2','open',1);
@@ -1377,34 +1434,30 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  d=await title(file);
  assert.deepEqual([d.ownerEvidence.reason,d.fields.title.value],['owner_generation_mismatch','Ancestor Owner']);
 
- // 10. Moved evidence: the marker generation (and the rows) move between the read and its after-read -> the section is unavailable generation_moved, never an answer mixing both.
- file=world();locSource(file,F,'tmdb','Auto Title');
- let first=true;
- const moved=env(file,{onQuery:text=>{if(first&&text.includes('FROM owner_review_entry')){first=false;/* the after-read reads the moved marker */}else if(!first&&text.includes('FROM owner_review_entry')){marker(file,'d1','open',2);}}});
- const movedOut=await readFilmAggregate(moved,'tmdb_5');
- assert.deepEqual([movedOut.body.display.status,movedOut.body.display.reason],['unavailable','generation_moved']);
+ // 10. Moved evidence: the owner marker generation moves between the read and its after-read -> the section is unavailable generation_moved, never an answer mixing both.
+ // A fresh world per implementation, the same mutation at the same statement.
+ const movedRun=async impl=>{
+  const f=world();locSource(f,F,'tmdb','Auto Title');
+  let reads=0;
+  const e=env(f,{onQuery:text=>{if(text.includes('FROM owner_review_entry')&&++reads===2)marker(f,'d1','open',2);}});
+  const out=await impl(e,'tmdb_5');
+  assert.equal(reads,2,'the display statement and its after-read');
+  return plain(out);
+ };
+ const movedOffline=await movedRun((e,i)=>readFilmAggregate(e,i));
+ assert.deepEqual([movedOffline.body.display.status,movedOffline.body.display.reason],['unavailable','generation_moved']);
+ assert.deepEqual(await movedRun((e,i)=>bundled.FilmAggregate.readFilmAggregate(e,i)),movedOffline,'the bundled read of a moving marker equals the offline read');
  // The marker and the row generations are part of the section token.
  file=world();ownerTitle(file,'k1',F,'Owner Title');
  const t0=(await title(file)).token.ownerReview;
  marker(file,'d1','held',1);
  assert.notEqual((await title(file)).token.ownerReview,t0,'the marker is covered by the display token');
-
- // 11. No writes: every statement of the display reads is a SELECT, the database is byte-identical, the statement budget is unchanged.
- file=world();ownerTitle(file,'k1',F,'Owner Title');projection(file,F,'Owner Title');
- const sha=fileSha(file),statements=[];
- const counted=env(file,{onQuery:text=>statements.push(text)});
- await readFilmAggregate(counted,'tmdb_5');
- assert.ok(statements.every(text=>/^\s*(WITH|SELECT)/i.test(text)));
- assert.equal(fileSha(file),sha);
- assert.ok(counted.calls.queries+counted.calls.statements<=REQUEST_STATEMENT_BUDGET);
 }
 
 // AIR-648 bundled parity: the SAME worlds read through the real built scope (dist/server/index.js, Worker-like context) and through the offline module give the same JSON bodies, status codes and
 // tokens; the reads are SELECT-only on an unchanged database and touch neither R2 nor the network. The bundled dormant GET handler answers like the offline one, and the bundled Worker router
 // still does not dispatch to the route (it answers the internal path exactly as an unknown path).
 {
- const {loadBundledFilmScopes,plain}=await import('./film-aggregate-bundle-scope.mjs');
- const bundled=loadBundledFilmScopes();
  const both=async(file,id)=>{
   const run=async impl=>{
    const executed=[];

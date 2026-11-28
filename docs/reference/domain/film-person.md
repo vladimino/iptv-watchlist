@@ -379,7 +379,7 @@ A reinstatement is a new intent with a new `asserts` row. A partial group is a s
 
 ## Unified Film read contract (ADR 0216, Accepted, resolver and sections delivered dormant)
 
-[ADR 0216](../../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) is **Accepted**. It defines `FilmAggregateV1`, a read-only composition of one Film's identity, display, Watchlist membership, availability, personal facts, predictions and a link to history. Its typed input takes `film:<id>`, `tmdb_<n>`, `tmdb_tv:<n>` or a lid, and an identity read-set fence covers the whole answer. No deployed route answers that shape yet: the resolver and the sections are delivered dormant (not bundled); activation is [AIR-648](https://trello.com/c/zh0cfDWK).
+[ADR 0216](../../adr/0216-canonical-film-lifecycle-and-unified-read-contract.md) is **Accepted**. It defines `FilmAggregateV1`, a read-only composition of one Film's identity, display, Watchlist membership, availability, personal facts, predictions and a link to history. Its typed input takes `film:<id>`, `tmdb_<n>`, `tmdb_tv:<n>` or a lid, and an identity read-set fence covers the whole answer. No deployed route answers that shape yet: the resolver and the sections are delivered dormant (scoped into the Worker bundle but unrouted); activation is [AIR-648](https://trello.com/c/zh0cfDWK).
 
 **Typed resolver and identity fence ([AIR-646](https://trello.com/c/OzZ7uZZj), delivery graph step 2, dormant).** `src/film-aggregate-resolver.js` is scoped into the Worker bundle (AIR-648, `scopedFilmAggregate()`) but unrouted: no route or consumer calls it. It reads D1 only (SELECTs; no write, R2 or network) and requires the Film/Person marker `open`.
 
