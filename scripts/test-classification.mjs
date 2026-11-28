@@ -506,6 +506,9 @@ export const FILES={
  "upstream-cooldown-metadata.mjs": {
   "suite": "core"
  },
+ "upstream-cooldown-mode-production.mjs": {
+  "suite": "core"
+ },
  "film-aggregate-resolver.mjs": {
   "suite": "core"
  },
