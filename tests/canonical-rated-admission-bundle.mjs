@@ -3,6 +3,7 @@
 // name them, so in production both were undefined and the 19 Nov 2026 EPG stopped at `finalize` with `readRetentionWatermark is not defined`. The ES-module tests did not see it:
 // there the real import resolves. This test runs the GENERATED bundle, not the sources.
 import assert from 'node:assert/strict';
+import {migrationHead} from './migration-head.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,7 +53,7 @@ const file=path.join(root,'b.sqlite');
 sqlite(file,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
 sqlite(file,"UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:00.000Z');INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:91',1,'2026-11-01T00:00:00.000Z');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:91','tmdb','91',1,0,NULL),('film:tmdb:91','letterboxd','b91',1,0,NULL);");
-assert.equal(Number(rows(file,'SELECT version FROM schema_contract WHERE id=1')[0].version),54,'the stand-in is a schema-54 database');
+assert.equal(Number(rows(file,'SELECT version FROM schema_contract WHERE id=1')[0].version),migrationHead(),'the stand-in is a database at the head of the migration manifest');
 const env=()=>({DB:d1Standin(file)});
 const d=n=>'2026-11-'+n+'T12:00:00.000Z';
 const scan=(event,at)=>CR.applyRatedAdmissionRetention(env(),{event,retentions:[{lid:'b91',tmdbId:'91',watchlist:true,observedAt:at,evidence:{scanId:event}}],now:()=>at});

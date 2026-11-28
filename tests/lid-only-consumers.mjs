@@ -77,6 +77,7 @@ const KNOWN={
  'src/canonical-film-writers.js':'documents the minting namespace; ownership is asserted in the batch (decision 8d)',
  'src/canonical-catalog-reader.js':'catalog titles and admissions: `tmdb_<n>` -> its minting spelling `film:tmdb:<n>`; it under-matches a film:lb: Film attached later (answers absent), never asserts a claim. Resolving by claim is the attach activation (ADR 0217 step 6, 8d)',
  'src/canonical-discovery-admission-producer.js':'Discovery admission of a MOVIE: the trusted tmdb claim owner first, else the minting spelling `film:tmdb:<n>` (planAdmissionFilm)',
+ 'src/identity-evidence-claim-history.js':'dormant family (c) census (AIR-641): SQL literals only separate minting spellings (`film:tmdb:<n>`, `film:<lid>`, `film:lb:<lid>`) from claims held by other Films, for counting; no movie, claim or row is derived from a spelling',
  'src/canonical-metadata-sync-producer.js':'metadata sync of a movie id: the minting spelling of a movie Film; ownership is resolved at planning (decision 8d)',
  'src/canonical-producers.js':'producer registry: the target id of a rated admission from its `tmdb_<n>` receipt key; a lid-only receipt carries its own filmId',
  'src/domain/film-person-diagnostics.js':'diagnostic display id only (`film:tmdb:<n>` -> `tmdb_<n>`); no claim is read or written',

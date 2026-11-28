@@ -419,6 +419,13 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "migration-head.mjs": {
+  "suite": "core",
+  "note": "Helper, not a test: the head version of the migration manifest, so full-chain fixtures do not pin a literal version."
+ },
+ "migration-0055-ratings-view-fact-key-index.mjs": {
+  "suite": "core"
+ },
  "film-metadata-provenance.mjs": {
   "suite": "core"
  },
@@ -1269,6 +1276,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence-import.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-claim-history.mjs": {
   "suite": "core"
  },
  "identity-evidence-writer.mjs": {
