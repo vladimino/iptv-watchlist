@@ -106,6 +106,14 @@ const table = [
   [{type: 'ratings', state: 'unknown'}, 'interrupted', 'unknown'],
   [{type: 'ratings', state: 'interrupted', cause: 'abandoned'}, 'interrupted', 'abandoned'],
   [{type: 'ratings', state: 'something'}, null, 'unknown state'],
+  // AIR-694: the stored shape without state/cause (slot outcome + reason only) is classified from those structured fields.
+  [{type: 'ratings', status: 'error', outcome: 'error', reason: 'lease_lost'}, 'interrupted', 'legacy lease_lost'],
+  [{type: 'ratings', outcome: 'interrupted', reason: 'lease_lost'}, 'interrupted', 'legacy interrupted'],
+  [{type: 'ratings', outcome: 'error', reason: 'network_error'}, 'error', 'legacy confirmed error'],
+  [{type: 'ratings', outcome: 'blocked'}, 'warning', 'legacy blocked'],
+  [{type: 'ratings', outcome: 'rate_limited'}, 'warning', 'legacy rate_limited'],
+  [{type: 'ratings', outcome: 'finished'}, 'success', 'legacy finished'],
+  [{type: 'ratings', state: 'unknown', cause: 'interrupted', diary: null, removal: null, interruptedPhase: 'diary'}, 'interrupted', 'AIR-694 honest unknown contract'],
   // Catalog posters (not the same thing as the `outcome` of another event type)
   [{type: 'catalog_posters', outcome: 'completed', noPoster: 5}, 'success', 'completed; noPoster is not a warning'],
   [{type: 'catalog_posters', outcome: 'deferred'}, 'warning', 'deferred'],
@@ -230,5 +238,19 @@ assert.equal(run("withEventResult('/events?result=error&result=warning','success
   assert.match(css, /html\.events-screen \.event-head\{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;/);
   assert.match(css, /html\.events-screen \.event-head \.event-status\{margin:0 0 0 auto\}/, 'flush right, also when it wraps');
   assert.match(css, /html\.events-screen \.event-head time\{margin:0;min-width:0\}/);
+}
+// AIR-694: the card of a Ratings event interrupted by a lost lease — new honest shape and the already stored fallback shape — has the interrupted badge, the «Прервано» filter and no fictitious zero counters.
+{
+ const card=event=>{ctx.ev=event;return run('eventHTML(ev)');};
+ for(const event of [{id:'a',type:'ratings',at:'2026-11-27T21:34:54Z',outcome:'error',reason:'lease_lost'},{id:'b',type:'ratings',at:'2026-11-27T21:34:54Z',outcome:'interrupted',reason:'lease_lost',state:'unknown',cause:'interrupted',interruptedPhase:'diary',diary:null,removal:null}]){
+  const html=card(event);
+  assert.match(html,/Проверка рейтингов прервана/);assert.match(html,/event-status-interrupted/);assert.match(html,/Прервано/);assert.doesNotMatch(html,/<dl>|Удалений обработано|проверено/);
+  assert.equal(run(`eventMatchesFilters(${JSON.stringify(event)},'ratings','interrupted')`),true);
+  assert.equal(run(`eventMatchesFilters(${JSON.stringify(event)},'ratings','error')`),false);
+ }
+ const err=card({id:'c',type:'ratings',at:'2026-11-27T21:34:54Z',outcome:'error',reason:'network_error'});
+ assert.match(err,/event-status-error/);assert.doesNotMatch(err,/Проверка рейтингов прервана/);
+ const ok=card({id:'d',type:'ratings',at:'2026-11-27T21:34:54Z',state:'finished',diary:{pages:1,rows:3,added:0,updated:0,written:1,unchanged:2,skipped:0,conflicts:0},removal:{pending:0,checked:0,rated:0,resolved:0}});
+ assert.match(ok,/Рейтинги обновлены/);assert.match(ok,/Удалений обработано/);
 }
 console.log('events-result-status: ok');

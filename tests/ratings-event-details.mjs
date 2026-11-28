@@ -376,4 +376,54 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  text=html({incomplete:true,added:[{id:'a',title:'Фильм А',year:2001,tmdb:null,rating:4}]});assert.match(text,/список неполный/);assert.match(text,/Фильм А \(2001\)/);
  text=html({added:'x',updated:{},rated:[null,1,'s'],more:{rated:-1}});assert.doesNotMatch(text,/event-group/,'malformed details draw nothing');
 }
+// AIR-694: a step that loses its lease logs ONE bounded diagnostic line (enums and millisecond counts only) and answers `lease_lost`; a real run record shows an unknown result with null groups.
+{
+ const lines=[],{clock:fc,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket();
+ const ctx=loadContext({net,clock:fc,FakeDate,crypto,extra:{console:{log(){},warn(line){lines.push(String(line));}}}});
+ const clock=fc,env=baseEnv(bucket,{...SEPARATE}),R=g(ctx,'LetterboxdRatings');
+ migrated(bucket,{films:{}});net.diary.set(1,diaryPage([diaryRow('lost',8,'2026-11-08','v1')]));
+ const started=plain(await R.start(env,{trigger:'scheduled'}));assert.equal(started.created,true,JSON.stringify(started));
+ let jumped=0;
+ const reply=plain(await R.step(env,{runId:started.runId},{now:clock.now,clock:()=>{jumped++;return clock.now+(jumped>3?4*60000:0);}}));
+ assert.equal(reply.reason,'lease_lost');
+ const logged=lines.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(item=>item?.event==='ratings_step_lease_lost');
+ assert.equal(logged.length,1,'one diagnostic line');
+ const d=logged[0];
+ assert.deepEqual(Object.keys(d).sort(),['diaryPages','elapsedMs','event','how','leaseMs','lookups','marks','phase','runId']);
+ assert.ok(['expired','record_taken','cas_retries'].includes(d.how));assert.equal(d.leaseMs,180000);assert.ok(Number.isInteger(d.elapsedMs));
+ assert.doesNotMatch(lines.join('\n'),/https?:|letterboxd\.com|demo-user/,'no URL, row or personal data');
+ const ev=plain(R.ratingsEventOf({runId:'r',trigger:'scheduled',state:'unknown',cause:'interrupted',interruptedPhase:'diary',closedAt:at(T0),checkpoint:{diaryPagesRead:0},diary:{counts:{rows:0}},removal:null},{slotOwned:false}));
+ eq([ev.diary,ev.removal,ev.interruptedPhase],[null,null,'diary'],'unconfirmed groups are unknown, not zero');
+ const kept=plain(R.ratingsEventOf({runId:'r',trigger:'scheduled',state:'finished',finishedAt:at(T0),checkpoint:{diaryPagesRead:1},diary:{counts:{rows:0}},removal:{settled:{},lookup:{}}}));
+ eq([kept.diary.rows,kept.removal.resolved],[0,0],'a finished run keeps its real zero counts');
+}
+// AIR-694 (review): an aggregate is evidence only when it was committed. A checkpoint or an applied page record without the step summary, and an intents-only removal container, are unknown, not zero; confirmed details survive; real zeros stay.
+{
+ const {R}=setup();
+ const base={runId:'r',trigger:'scheduled',state:'unknown',cause:'interrupted',interruptedPhase:'diary',closedAt:at(T0),checkpoint:{diaryPagesRead:1,removalChecked:0}};
+ const page={'1':{state:'applied',news:2,added:[{id:'a',title:'Фильм А',year:2001,tmdb:null,rating:4}],updated:[],rated:[],resolved:[],more:{}}};
+ let ev=plain(R.ratingsEventOf({...base,diary:{pageChanges:page},removal:{intents:[{id:'x'}]}}));
+ eq([ev.diary,ev.removal],[null,null],'no summary and intents only: unknown');
+ assert.equal(ev.details.added.length,1,'the confirmed applied detail is kept');
+ ev=plain(R.ratingsEventOf({...base,diary:{counts:{pages:1,rows:0},facts:{written:0},pageChanges:{}},removal:{settled:{resolved:0},lookup:{checked:0}}}));
+ eq([ev.diary.rows,ev.diary.written,ev.removal.resolved,ev.removal.checked],[0,0,0,0],'genuine committed zeros stay zeros');
+}
+// AIR-694 (review): the exact reason a step lost its lease reaches the diagnostic from every site (clock expiry, record taken by another writer, exhausted compare-and-swap), also through the Diary page callbacks.
+{
+ const how=async (arrange)=>{
+  const lines=[],{clock:fc,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket();
+  const ctx=loadContext({net,clock:fc,FakeDate,crypto,extra:{console:{log(){},warn(line){lines.push(String(line));}}}});
+  const env=baseEnv(bucket,{...SEPARATE}),R=g(ctx,'LetterboxdRatings');
+  migrated(bucket,{films:{}});net.diary.set(1,diaryPage([diaryRow('lost',8,'2026-11-08','v1')]));
+  const started=plain(await R.start(env,{trigger:'scheduled'}));assert.equal(started.created,true);
+  const reply=plain(await arrange({R,env,bucket,fc,runId:started.runId}));
+  assert.equal(reply.reason,'lease_lost');
+  const logged=lines.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(item=>item?.event==='ratings_step_lease_lost');
+  assert.equal(logged.length,1);return logged[0].how;
+ };
+ let jumped=0;
+ assert.equal(await how(({R,env,fc,runId})=>R.step(env,{runId},{now:fc.now,clock:()=>{jumped++;return fc.now+(jumped>3?4*60000:0);}})),'expired','clock expiry');
+ assert.equal(await how(({R,env,bucket,runId})=>{let puts=0;bucket.hooks.beforePut=async(key,value,options)=>{if(key!==RUN||!options.onlyIf?.etagMatches)return;if(++puts===2)bucket.set(RUN,{...value,lease:{...value.lease,step:'another-writer'}});};return R.step(env,{runId});}),'record_taken','record taken by another writer');
+ assert.equal(await how(({R,env,bucket,runId})=>{let puts=0;bucket.hooks.beforePut=async(key,value,options)=>{if(key!==RUN||!options.onlyIf?.etagMatches)return;if(++puts>=2)bucket.set(RUN,value);};return R.step(env,{runId});}),'cas_retries','compare-and-swap exhausted');
+}
 console.log('AIR-393 ratings event details: every group, caps, retry and delivery, checkpoint, no-change and legacy compatibility, links and unknown titles passed');
