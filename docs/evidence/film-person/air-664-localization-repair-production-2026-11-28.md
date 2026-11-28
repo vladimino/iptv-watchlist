@@ -4,6 +4,8 @@ Date: **28 November 2026** (UTC). Card: [AIR-664](https://trello.com/c/Og9XxXfy)
 
 **Status: the repair was applied once and read back. All 16 Films are applied and current.** The `apply` response itself was not received (client timeout); the outcome is proved from durable receipts and read-only readbacks below. No restore, cleanup, migration, flag, Task, Workflow or Access change was made.
 
+**Successor (28 Nov 2026, later the same day):** the retained recovery artifacts described in section 7 were deleted under a separate owner GO; see [the cleanup evidence](air-664-localization-repair-cleanup-2026-11-28.md) for the current state. The observations below are historical and are not rewritten.
+
 ## 1. Authorization and actor
 
 | Item | Record |
