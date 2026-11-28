@@ -75,6 +75,34 @@ const filmJson=file=>JSON.parse(rows(file,`SELECT film_json AS j FROM catalog_en
 }
 function file0(w){return w.file;}
 
+// ---- AIR-696: a Wikidata 403 is a transport deferral; the normal retry later writes the localization ----
+{
+ const w=await world();
+ await step(w,upstream({}));// the anchor check raises the plan epoch
+ const row=()=>rows(w.file,"SELECT status,failures,pending_since,retry_at,transport_streak FROM catalog_enrichment_state WHERE part='localization' AND source='wikidata'")[0];
+ const first=await step(w,upstream({wd:'forbidden'}),at(11));
+ assert.equal(first.state,'done');
+ const afterForbidden=row();
+ assert.equal(afterForbidden.status,'due','a 403 leaves the unit due');
+ assert.equal(afterForbidden.failures,0,'a 403 is transport: no failure is charged');
+ assert.ok(afterForbidden.retry_at,'the backoff keeps its place with a retry_at');
+ assert.ok(afterForbidden.pending_since,'pending_since is set by the first transport outcome');
+ assert.equal(loc(w.file).filter(r=>r.source==='wikidata').length,0,'a 403 fabricates no localization and no absence');
+ // before its retry the source is not asked again (no hot loop)
+ const early=upstream({wd:['Матрица']});
+ await step(w,early,at(12));
+ assert.ok(!early.calls.some(url=>url.startsWith('https://query.wikidata.org/')),'no request to Wikidata before its retry_at');
+ assert.equal(row().pending_since,afterForbidden.pending_since,'pending_since is preserved through the deferral');
+ // the eligible normal retry succeeds: the unit settles with durable progress
+ sqlite(w.file,`UPDATE catalog_enrichment_state SET retry_at='${at(-1)}' WHERE part='localization' AND source='wikidata'`);
+ const retry=upstream({wd:['Матрица']});
+ await step(w,retry,at(100));
+ assert.ok(retry.calls.some(url=>url.startsWith('https://query.wikidata.org/')),'the eligible retry asks Wikidata again');
+ assert.ok(['complete','complete_with_gaps'].includes(row().status),'the unit settles after the 200');
+ assert.deepEqual(loc(w.file).filter(r=>r.source==='wikidata'),[{source:'wikidata',value:'Матрица'}],'the localization is written from the 200 answer only');
+ assert.equal(row().failures,0);
+}
+
 // ---- AIR-631 (PV1, ADR 0214 decision 4): the real C1 path DECLARES each core field it fills, so the first declared write after activation is attributed (planning is unchanged) ----
 {
  const w=await world();
