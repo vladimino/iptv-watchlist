@@ -82,7 +82,7 @@ Use them read-only through the Cloudflare Workers Observability aggregate (count
 
 > **Historical (AIR-537 slice 3, 19 Nov 2026).** The D1 enrichment projector, its runner and its write arms were removed; this section describes fields and log lines that are no longer produced. Nothing here is an operating check.
 
-This section describes historical projector summaries that can still exist in `projection_run` and be returned by `GET /api/d1/status`. The production projector and its `D1_ENRICHMENT_BULK` selector are retired ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md), AIR-512), so the live Worker cannot create a new grouped run. In the offline historical harness, a grouped run carries a `bulk` object; a per-entity run does not. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
+This section describes historical projector summaries that can still exist in `projection_run`. Since AIR-690 `GET /api/d1/status` no longer returns them ([D1 status contract](../reference/api/d1-catalog.md#d1-status-contract)); read the table only through an authorized read when the history itself is needed, and never as runtime health. The production projector and its `D1_ENRICHMENT_BULK` selector are retired ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md), AIR-512), so the live Worker cannot create a new grouped run. In the offline historical harness, a grouped run carries a `bulk` object; a per-entity run does not. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
 
 | Field | Meaning |
 | --- | --- |
