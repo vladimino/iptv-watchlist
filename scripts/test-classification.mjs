@@ -1277,6 +1277,9 @@ export const FILES={
  "identity-evidence-discovery-decision.mjs": {
   "suite": "core"
  },
+ "identity-evidence-family-b.mjs": {
+  "suite": "core"
+ },
  "identity-work-inventory.mjs": {
   "suite": "core"
  },
