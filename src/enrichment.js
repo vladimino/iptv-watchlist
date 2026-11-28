@@ -438,7 +438,9 @@ async function refreshPersonalRating(env,film){
  // AIR-604 (ADR 0211 decision 5): the shared Letterboxd cooldown, re-checked HERE at the real request (the removal queue also peeks before its claim, but a cooldown can appear during the
  // awaited plan and claim). A skip throws the typed `upstream_cooldown` error; the removal phase releases the claim without charging the attempt. The body is read once: an ok answer here
  // (then handed to the shared classifier, so a challenge page behind a 200 is a blocked answer and never a `not_rated` verdict), any other status only as a bounded prefix while coordination is on.
- const coordination=upstreamCoordinator(env,'removal-rating');
+ // A DISTINCT caller from the removal queue's pre-claim coordinator (src/letterboxd-ratings.js, `removal-rating`): both peek the same scope for the same lookup, so one coordinator per site keeps
+ // the two decision streams separable in the evidence (AIR-609); one coordinator is created per request, so each of its streams holds the decisions of that one request.
+ const coordination=upstreamCoordinator(env,'removal-rating-request');
  try{response=await(coordination?coordination.guard(fetch):fetch)(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){if(e?.code==='upstream_cooldown')throw e;throw new Error('Rating lookup failed: '+e.message);}
  // The status and the headers are recorded FIRST and on their own, and a known challenge is a blocked answer BEFORE any entity verdict: a 404 or a 200 with a challenge header is never `not_found`
  // or `not_rated`, and a failed body read cannot hide it. A challenge page behind a 200 is found in the one body read below.
