@@ -9,7 +9,7 @@ Operational reference for the [Catalog Enrichment Producer](../reference/domain/
 | Apply `migrations/0047_catalog_enrichment.sql` | Owner production operation with its own preflight and readback; follows the operation-key schema apply. A deploy never applies it |
 | Apply `migrations/0050_discovery_enrichment_scope.sql` (Discovery scope intake) | Separate owner production operation ([AIR-685](https://trello.com/c/kfks9T3n)) with its own readback, after 0047; a deploy never applies it, and the code before the apply is the former code |
 | Activate the Discovery scope (C3c-A) | Separate owner production operation: sets `activated` and `enabled` in one batch only after `CatalogEnrichmentDiscovery.activationPreflight` reports no problem (schema applied, no `loading` transfer, no staged signal) and a compatible version is deployed; the cutoff is that activation, there is no bootstrap |
-| Activate the control and enable a scope | Owner production operation. Not reachable from the admin route |
+| Activate the control and the rated scope (C2, [AIR-607](https://trello.com/c/Daq02gYy)) | Owner production operation under an exact owner GO that names the cutoff, run with `activateRated` of `src/catalog-enrichment-activation.js` (below). Not reachable from the admin route, and no other scope is enabled by it |
 | Pause, resume | Owner, through `POST /api/admin/settings/catalog-enrichment` |
 | Retry a blocked or deferred part | Owner, through the same route, on the rows the owner saw |
 | Deliver the reconcile cron expression (`CatalogEnrichmentRunner.CRON`) | Versioned configuration change under the activation operation; a deploy never adds it |
@@ -22,6 +22,26 @@ Operational reference for the [Catalog Enrichment Producer](../reference/domain/
 3. The Film/Person authority marker is open (`d1`): a closed marker defers every unit; the producer never falls back.
 4. The control row is absent or `inactive`, and `enrichment_signal` holds no stale `staged` row.
 5. The canonical credit reader can serve a Film with more credits than its current whole-read cap before any Film with more than 200 credits is written.
+
+## Activating the rated scope (C2, AIR-607)
+
+The operator is `activateRated(env, {cutoffAt, by, at, goReference})` in `src/catalog-enrichment-activation.js`. It is delivered dormant: no route, Worker module, flag or Scheduled Task calls it, and a deploy never runs it. It is executed once, by the owner's production operation, with the exact GO.
+
+**Inputs.** `cutoffAt` is the approved cutoff (an ISO instant with milliseconds, not later than the A2 flip and not in the future); it is a GO input and is never defaulted. `goReference` is the HTTPS link of the recorded owner GO, `by` identifies the operator; both are written to the control's `updated_by`. A missing or malformed input refuses before the database is read.
+
+**Order (no gap).**
+
+1. `ratedActivationPreflight` (read-only) must report no problem. It refuses on a schema below 47 or a missing table or trigger (`schema_not_applied`), a Film/Person marker that is not `open` (`film_person_marker_not_open`), a control that is not `inactive` (`control_not_inactive`), any scope row other than `rated` (`other_scope_present`), a rated scope with another cutoff (`scope_cutoff_mismatch`) and a `staged` signal (`stale_staged_signals`). Credit-reader compatibility for Films with more than 200 credits is proven by the delivered reader, not by a database read.
+2. One guarded statement inserts the `rated` scope row (`activated=1`, `enabled=1`, the cutoff, revision 1) only while no scope row exists and the control is not active. From this statement the live `film_rated_admission` trigger emits for admissions at or after the cutoff.
+3. The bounded, revision-fenced bootstrap writes `admitted` signals for the qualifying existing admissions. The inbox key deduplicates the overlap with the live tail; a page budget that ends first returns `stopped` / `bootstrap_incomplete` with the control still `inactive`, and repeating the same call resumes from the stored cursor.
+4. Only when the bootstrap is `done` the control goes `inactive` to `active` by compare-and-swap on its revision. The producer does nothing before this step.
+5. The result carries the readback (`readActivation`): control state, generation and revision, the scope rows (only `rated`), the inbox counts by source and state, the qualifying admissions and the rated signals. Record this readback as the activation evidence.
+
+A repeated call with the same cutoff after success answers `noop`; a different cutoff never changes anything. Present runtime state is read live before and after: run `readActivation`, `GET /api/admin/settings` and the read-only IPTV MCP tools, not this page.
+
+**Not part of this operation.** The reconcile cron (`CatalogEnrichmentRunner.CRON`) is delivered by its own reviewed `wrangler.jsonc` change under the same GO; until then a committed signal wakes the drainer through `kick` and the reconcile safety net is absent. The operation enables no Discovery, `c3a` or `c3b` scope, sets no flag, creates no Scheduled Task, runs no manual enrichment and no legacy backfill. Natural acceptance (new admissions enriched through the event-woken drainer) is observed afterwards, together with A2 where it applies, and is not produced by this operation.
+
+**Rollback.** Pause through `POST /api/admin/settings/catalog-enrichment`; disabling the scope holds its signals while its emitter keeps recording. A code revert changes neither the control row nor the scope row.
 
 ## Reading the state
 
