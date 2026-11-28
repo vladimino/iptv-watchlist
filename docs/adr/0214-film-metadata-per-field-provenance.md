@@ -25,7 +25,8 @@
 
 **Superseded by:** None
 
-**Amended by ADR 0224:** Amended in part by [ADR 0224](0224-russian-first-catalog-metadata.md) (Accepted 2026-11-27, decisions 2–5, 7–9 and 11 only: language/evidence basis in value-bound provenance and comparator, history/merge/revert and dormant compatibility; [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7221071584)); original status and approval retained. All other clauses remain binding.
+**Amended by ADR 0224:** Amended in part by [ADR 0224](0224-russian-first-catalog-metadata.md) (Accepted 2026-11-27, decisions 2–5, 7–9 and 11 only: language/evidence basis in value-bound provenance and comparator, history/merge/revert and dormant compatibility; [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/1045#issuecomment-7221071584)); original status and approval retained. All other clauses remain binding.  
+**Amended by AIR-636 (decision 15, the PVE drain interval only):** Amended on 2026-11-28 by the Product Owner's selected option B, a continuous interval of compatible deployments ([owner decision recorded by the Coordinator](https://github.com/vladimino/iptv-watchlist/pull/1067#issuecomment-7235886540); [amendment](#amendment-the-pve-drain-interval-air-636-28-november-2026)); original status and approval retained. All other clauses remain binding.
 
 ## Context
 
@@ -530,11 +531,23 @@ None of these cards is required for AIR-275 or for the ADR 0207 A2 flip.
 | **PV3** | The owner route of decision 9, with the command record | PV1 | refuses writes at `off` | implementation GO |
 | **PVU** | Admin UI for PV3, with visual QA | PV3 | UI only | implementation GO; owner visual check |
 | **PVM** | Apply the PV1 migration file | PV1 merged and deployed | no behaviour change at `off` | production GO |
-| **PVE** | `off → enforce`. Preflight: PVM applied; PV1, PV2 and PV3 deployed in the running version; the control row at `off`; and a **drain**: that version at 100 % for longer than the longest unit or Workflow step bound, no Workflow instance or producer unit of an older version still running, and no unsettled receipt planned by an older version (the ADR 0207 A2 pattern), because a deployed version does not prove that an older in-flight batch cannot commit later. A late pre-PV1 batch is still harmless: the invalidation triggers turn its value changes into `unknown`, and the lock triggers stop it at pins. Then a readback of the mode. Then natural acceptance in `Верификация`, on the counts of decision 13: replacements, refusals, conflicts and history. Rollback is `hold` | PVM; PV1, PV2 and PV3 deployed | the irreversible step is leaving `off`; `hold` stops replacements | production GO (owner L3) |
+| **PVE** | `off → enforce`. Preflight: PVM applied; PV1, PV2 and PV3 deployed in the running version; the control row at `off`; and a **drain**: the deployed version, within a continuous interval of proven compatible deployments at 100 % that is longer than the longest unit or Workflow step bound (the amendment below, 28 Nov 2026), no Workflow instance or producer unit of an older version still running, and no unsettled receipt planned by an older version (the ADR 0207 A2 pattern), because a deployed version does not prove that an older in-flight batch cannot commit later. A late pre-PV1 batch is still harmless: the invalidation triggers turn its value changes into `unknown`, and the lock triggers stop it at pins. Then a readback of the mode. Then natural acceptance in `Верификация`, on the counts of decision 13: replacements, refusals, conflicts and history. Rollback is `hold` | PVM; PV1, PV2 and PV3 deployed | the irreversible step is leaving `off`; `hold` stops replacements | production GO (owner L3) |
 | **PVT** | A periodic refresh policy | measured C2 and PVE costs | its own decision | owner decision |
 | **PV4** (candidate, parked) | EPG per-field lineage | PV1; its own decision | — | owner decision |
 
 **Migration apply order.** PVM applies pending files in number order and states the exact files it applies, like every apply card of ADR 0207 decision 7.
+
+#### Amendment: the PVE drain interval (AIR-636, 28 November 2026)
+
+The PVE preflight above read the drain rule as one exact version standing at 100 % for longer than the bound, so that every deployment of `main` restarted the clock. **Product Owner decision, 28 November 2026, option B:** the clock is a **continuous interval of proven compatible deployments**. The change is to the drain interval of the PVE row only.
+
+- **The rule.** The preflight is satisfied when (1) every deployment from `T0` to the final pin is a single version at 100 % that is **proven compatible**, (2) the interval from `T0` to the evidence time is longer than the longest unit or Workflow step bound `B` of the writers that reach `film_metadata`, (3) the old-work inventory is complete and empty (no nonterminal Workflow instance, no producer unit and no unsettled receipt of an older version, the in-flight HTTP and owner paths checked by their own fence and commit-time assertion), and (4) the final pinned deployment and the control revision are rechecked inside the brief window of the flip and its readback.
+- **Proven compatible** means the deployed commit contains the writer rule and its guards (PV1, PV2, PV3 and the language-aware writer of ADR 0224), **checked by the actual writer and guard contract** (the control-row assertion at commit, the locks, history and invalidation behaviour), not by ancestry alone. A deployment whose compatibility cannot be shown, a rollback to an incompatible version and a split-traffic rollout break the continuity; `T0` then restarts at the next proven deployment.
+- **`B`** is the nominal step retry envelope where a Workflow step passes no configuration of its own. It measures the length of the interval; it is **not** an additional wait once the interval and the inventory are satisfied, and it is **not** applied to HTTP requests, which Cloudflare does not hard-bound and which are fenced and asserted at commit instead.
+- **Final pin.** The owner GO still names the exact deployment, commit and control revision. A deployment after the GO that is proven compatible keeps `T0`, but is a new pin: it requires a re-pin and replan, never an ambiguous permission to use either version.
+- **Not changed.** The one-way `off`, the modes, the transitions, the protections and the rollback; no deployment freeze; no new card or control infrastructure. This amendment is not a production authorization: the live preflight and the operation-specific owner L3 GO remain required.
+
+**Selected option and decision date:** B, 2026-11-28. **Approval source for this amendment:** [Owner decision recorded by the Coordinator, PR #1067 comment](https://github.com/vladimino/iptv-watchlist/pull/1067#issuecomment-7235886540).
 
 ### 16. Tests
 
