@@ -1,4 +1,6 @@
-# Ratings projection fact-key index, migration 0055: prerequisites, window, readback and forward-only rollback (prepared, not applied; the apply needs its own owner L3 GO)
+# Ratings projection fact-key index, migration 0055: prerequisites, window, readback and forward-only rollback (applied 28 Nov 2026)
+
+**Update 28 Nov 2026:** 0055 was applied to production D1 `iptv` at 08:35 UTC under an owner operation-specific GO, with one atomic batch and an independent readback ([evidence](../evidence/d1-migration/air-653-0055-apply-2026-11-28.md)); the text that follows is the preparation and the contract, kept as history. It cannot be applied again (the file refuses anything but version 54).
 
 **Status:** prepared on 28 Nov 2026 under [AIR-653](https://trello.com/c/YSPVkb1M). The file is in the repository and **not applied**; a deploy applies nothing. Whether it has been applied is read live (`schema_contract`, `PRAGMA index_list`) and from a dated evidence page, never from this paragraph. **This runbook authorizes no operation.**
 
