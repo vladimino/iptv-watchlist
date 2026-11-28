@@ -419,6 +419,9 @@ export const FILES={
  "migration-0043-film-redirect-index.mjs": {
   "suite": "core"
  },
+ "migration-0055-ratings-view-fact-key-index.mjs": {
+  "suite": "core"
+ },
  "film-metadata-provenance.mjs": {
   "suite": "core"
  },

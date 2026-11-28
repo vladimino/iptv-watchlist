@@ -128,7 +128,7 @@ assert.deepEqual(objects(after),[...objects(before),'index:'+INDEX].sort(),'exac
 refuse(copyOf(after,'again'),'a second apply on version 43');
 assert.equal(version(migrated(42)),42,'the chain through 0042 ends at version 42');
 assert.ok(!objects(migrated(42)).includes('index:'+INDEX),'the chain through 0042 has no such index');
-assert.equal(version(migrated()),54,'the full chain ends at version 54 (0054, AIR-625, after 0053, AIR-693, after 0050, AIR-684, after 0049, AIR-631, after 0048, AIR-672, after 0047, AIR-605, after 0046, AIR-602, after 0045, AIR-604, after 0044, AIR-639, which follows this 0043)');
+assert.equal(version(migrated()),55,'the full chain ends at version 55 (0055, AIR-653, after 0054, AIR-625, after 0053, AIR-693, after 0050, AIR-684, after 0049, AIR-631, after 0048, AIR-672, after 0047, AIR-605, after 0046, AIR-602, after 0045, AIR-604, after 0044, AIR-639, which follows this 0043)');
 assert.ok(objects(migrated()).includes('index:'+INDEX),'the full chain carries the index');
 assert.ok(objects(migrated(42)).every(name=>RETIRED.includes(name)||objects(migrated()).includes(name)),'0043 keeps every earlier object');
 
