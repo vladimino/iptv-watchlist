@@ -72,7 +72,7 @@ export function writePrivate(destination,text){
  const flags=fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|(fs.constants.O_NOFOLLOW||0);
  let fd;
  try{fd=fs.openSync(destination,flags,0o600);}catch{throw new ControlledError('private_output_unavailable');}
- try{fs.fchmodSync(fd,0o600);fs.writeSync(fd,text);}
+ try{fs.fchmodSync(fd,0o600);const bytes=Buffer.from(text,'utf8');let offset=0;while(offset<bytes.length){const written=fs.writeSync(fd,bytes,offset,bytes.length-offset);if(!(written>0))throw new Error('short write');offset+=written;}}
  catch{throw new ControlledError('private_output_unavailable');}
  finally{fs.closeSync(fd);}
 }
