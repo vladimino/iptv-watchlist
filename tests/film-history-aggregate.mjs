@@ -754,4 +754,45 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
  assert.match(contractText,/not live/i,'the reference says it is not live before the consumer migration');
 }
 
+// AIR-648 bundled parity: the real built scope (dist/server/index.js, Worker-like context) assembles and reads the same history as the offline module over the SAME D1 world and the SAME
+// injected synthetic sources: nonempty alias events from every domain script the Worker supplies as a global (film-history.js, LetterboxdFacts, predictionVersionLinked), identical JSON
+// bodies and tokens, a cursor issued by one implementation accepted by the other, read-only D1, no R2, no network.
+{
+ const {loadBundledFilmScopes,plain}=await import('./film-aggregate-bundle-scope.mjs');
+ const {FilmHistoryAggregate:viaBundle,Sha256Sync}=loadBundledFilmScopes();
+ const read=(impl,file,s,options={})=>{const e=env(file);return impl.readFilmHistory(e,'tmdb_5',{limit:options.limit??100,cursor:options.cursor,sources:options.sources??sourcesOf(s),budgetLimit:options.budgetLimit}).then(out=>({out:plain(out),calls:plain(e.calls)}));};
+ const {file,s}=fixture();
+ // Pointers: one valid version link (the SHA-256 key of its own storage id) and one foreign key, so predictionVersionLinked answers both ways.
+ const sha=Sha256Sync.sha256Hex('version-a1');
+ s.bundles.a1={...s.bundles.a1,current:{...s.bundles.a1.current,r2Key:'enrichment/films/a1/predictions/versions/'+sha+'.json',contentSha256:sha}};
+ s.bundles.a2={...s.bundles.a2,current:{...s.bundles.a2.current,r2Key:'enrichment/films/other/predictions/versions/'+sha+'.json',contentSha256:sha}};
+ const versions=async({record})=>({status:'linked',r2Key:record.r2Key,contentSha256:record.contentSha256,token:'obj-etag-1',bytes:100,scanned:1});
+ const before=fileSha(file);
+ const offline=await read({readFilmHistory},file,s,{sources:sourcesOf(s,{versions})});
+ const bundled=await read(viaBundle,file,s,{sources:sourcesOf(s,{versions})});
+ assert.equal(offline.out.http,200,JSON.stringify(offline.out.body).slice(0,300));
+ const events=offline.out.body.history.events;
+ assert.ok(events.length>=10,'nonempty alias events');
+ assert.deepEqual([...new Set(events.map(event=>event.type))].sort(),['diary_viewing','legacy_rating','prediction','rating'],'events of every domain script the bundle supplies as a global');
+ assert.ok(events.some(event=>event.type==='prediction'&&event.version?.status==='invalid'),'the foreign pointer is invalid through predictionVersionLinked');
+ assert.ok(events.some(event=>event.type==='prediction'&&event.version?.status==='linked'),'the own pointer is linked through predictionVersionLinked');
+ assert.deepEqual(bundled.out,offline.out,'the bundled history equals the offline history, body and tokens');
+ // Paged: a cursor from the offline page 1 is accepted by the bundle for page 2, and the reverse, with identical pages.
+ const sources=()=>sourcesOf(s,{versions});
+ const o1=await read({readFilmHistory},file,s,{limit:4,sources:sources()}),b1=await read(viaBundle,file,s,{limit:4,sources:sources()});
+ assert.deepEqual(b1.out,o1.out);
+ const cursor=o1.out.body.history.page.nextCursor;
+ assert.ok(cursor,'a second page exists');
+ const o2=await read({readFilmHistory},file,s,{limit:4,cursor,sources:sources()}),b2=await read(viaBundle,file,s,{limit:4,cursor,sources:sources()});
+ assert.equal(b2.out.http,200);
+ assert.deepEqual(b2.out,o2.out,'a cursor issued by the offline reader is accepted by the bundle');
+ // A moved source invalidates the cursor the same way: both answer the typed 409.
+ s.legacy=[...s.legacy,{filmId:'a1',observedAt:d(12),before:1,after:2,source:'scan'}];
+ const oMoved=await read({readFilmHistory},file,s,{limit:4,cursor,sources:sourcesOf(s,{versions})}),bMoved=await read(viaBundle,file,s,{limit:4,cursor,sources:sourcesOf(s,{versions})});
+ changed(oMoved.out,'source_changed');
+ assert.deepEqual(bMoved.out,oMoved.out,'the typed history_changed answer is the same');
+ // Read-only: nothing was written and the bundled reader never reached a source writer.
+ assert.equal(fileSha(file),before,'bundled and offline reads wrote nothing');
+}
+
 console.log('film-history-aggregate: multi-alias history over the AIR-646 resolver and the AIR-647 candidate coverage; fact records are the shared G1 evidence; stable <storageId>|<sourceEventId> identities with deduplication; cursor bound to survivor, alias set, identity read-set, coverage token and source tokens; typed 409 history_changed (identity_moved, alias_set_changed, coverage_changed, source_changed); mandatory source tokens and E1 recheck incl. version evidence; bounded sources; value-based current status; incomplete coverage or Diary never present; pure read; dormant.');
