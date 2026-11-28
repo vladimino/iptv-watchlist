@@ -32,6 +32,10 @@ const READER=[
  ['an untyped read error fails closed',"throw failed('canonical_read_unavailable',error);\n }\n const again=await readAuthority(env);\n if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;","throw error;\n }\n const again=await readAuthority(env);\n if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;"],
 ];
 const CATALOG_D1=[
+ ['a retired view is decided before the gate',"if(request.method==='GET'&&D1_RETIRED_VIEW.test(url.pathname.slice('/api/d1/'.length)))return d1RetiredViewResponse();","if(false)return d1RetiredViewResponse();"],
+ ['a retired view is a GET only decision',"if(request.method==='GET'&&D1_RETIRED_VIEW","if(D1_RETIRED_VIEW"],
+ ['a retired view is not decoded',"D1_RETIRED_VIEW.test(url.pathname.slice('/api/d1/'.length))","D1_RETIRED_VIEW.test(decodeURIComponent(url.pathname.slice('/api/d1/'.length)))"],
+ ['the retired answer is a typed gone',"{error:'gone',reason:'d1_operator_view_retired'},410","{error:'gone',reason:'d1_operator_view_retired'},404"],
  ['only GET is gated, and GET is gated',"if(request.method==='GET'){","if(false){"],
  ['authoritative only for d1',"authoritative=first.mode==='d1';","authoritative=first.mode==='d1'||true;"],
  ['authoritative is not constant false',"authoritative=first.mode==='d1';","authoritative=first.mode==='never';"],
