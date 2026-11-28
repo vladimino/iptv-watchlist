@@ -739,7 +739,8 @@ const changed=(out,reason)=>{assert.equal(out.http,409,JSON.stringify(out.body).
   assert.ok(!/film-history-aggregate/.test(fs.readFileSync('src/'+name,'utf8')),name+' must not import the dormant history reader');
  const worker=fs.readFileSync('src/worker.js','utf8');
  assert.ok(!worker.includes('film-history-aggregate')&&!worker.includes(FILM_HISTORY_AGGREGATE_CONTRACT),'the Worker routes no multi-alias history');
- if(fs.existsSync('dist/server/index.js'))assert.ok(!fs.readFileSync('dist/server/index.js','utf8').includes(FILM_HISTORY_AGGREGATE_CONTRACT),'the built bundle does not serve the reader');
+ // AIR-648 scopes the reader into the bundle (build.mjs, scopedFilmAggregate) without calling it: the contract string occurs only inside that scope, never in a router.
+ if(fs.existsSync('dist/server/index.js')){const count=text=>text.split(FILM_HISTORY_AGGREGATE_CONTRACT).length-1;assert.equal(count(fs.readFileSync('dist/server/index.js','utf8')),count(fs.readFileSync('src/film-history-aggregate.js','utf8')),'the built bundle holds the reader only as an unrouted scope');}
  // The aggregate's own `history` section is unchanged: still `limited`/`unavailable`, never `present` (decision 6a until the consumer migration is accepted).
  const aggregate=await readFilmAggregate(env(world({lids:['l5']})),'tmdb_5');
  assert.deepEqual([aggregate.body.history.status,aggregate.body.history.reason,aggregate.body.history.href],['limited','history_migration_pending','/api/enrichment/history?filmId=tmdb_5']);

@@ -1,9 +1,9 @@
 // Synchronous, dependency-free SHA-256 for the shared Film resolver/aggregate (AIR-648).
-// Why not node:crypto: the Worker runs without nodejs_compat, so `createHash` cannot be bundled.
+// Why not the Node crypto module: the Worker runs without nodejs_compat, so its hash API cannot be bundled.
 // Why not crypto.subtle.digest: it is async, and the identity/section digests are computed in synchronous
 // token/fence code (identityDigest, short(digestOf(..)), after-read comparisons); going async would widen the change
 // across the whole read path. Input bytes, serialization and hex output are identical to
-// createHash('sha256').update(x).digest('hex'); parity is pinned by tests/sha256-sync.mjs.
+// the Node createHash digest of the same bytes; parity is pinned by tests/sha256-sync.mjs.
 const K=new Uint32Array([
  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -49,5 +49,5 @@ export function sha256HexOfBytes(bytes){
  return out;
 }
 
-// text -> hex digest of its UTF-8 bytes (what createHash('sha256').update(text) hashes for a string).
+// text -> hex digest of its UTF-8 bytes (the bytes a Node string digest hashes).
 export const sha256Hex=text=>sha256HexOfBytes(new TextEncoder().encode(text));

@@ -512,6 +512,9 @@ export const FILES={
  "sha256-sync.mjs": {
   "suite": "core"
  },
+ "film-aggregate-bundle.mjs": {
+  "suite": "core"
+ },
  "prediction-lid-only-exclusion.mjs": {
   "suite": "core"
  },

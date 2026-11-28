@@ -582,14 +582,20 @@ function world({lids=['l5'],links=null,records=true}={}){
  assert.ok(!/\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|DELETE\s+FROM|REPLACE\s+INTO)\b/i.test(fs.readFileSync('src/film-aggregate.js','utf8').replace(/\/\/.*$/gm,'')),'the module holds no write SQL');
 }
 
-// Dormant: the Worker bundle does not contain the aggregate, its route or the resolver, and nothing in src imports them (activation is AIR-648).
+// Dormant: AIR-648 scopes the resolver, the aggregate and the history into the Worker bundle (build.mjs, scopedFilmAggregate) so the activation can be exercised through the real bundle, but NOTHING
+// routes or calls them: the Worker names no route, no src module imports the aggregate, and the route string appears in the bundle only as the aggregate's own constant (activation is an owner GO).
 {
  const build=fs.readFileSync('build.mjs','utf8');
- for(const name of ['film-aggregate','film-aggregate-resolver','film-readiness','film-readiness-composition'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
+ assert.ok(build.includes('scopedFilmAggregate()'),'the bundle scopes the aggregate through the one scoped helper');
+ for(const name of ['film-readiness','film-readiness-composition'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
  for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'&&f!=='film-readiness-composition.js'))
   assert.ok(!/film-aggregate/.test(fs.readFileSync('src/'+name,'utf8')),name+' must not import the dormant aggregate');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the Worker routes no internal film aggregate');
- if(fs.existsSync('dist/server/index.js'))assert.ok(!fs.readFileSync('dist/server/index.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the built bundle does not serve the route');
+ if(fs.existsSync('dist/server/index.js')){
+  const bundle=fs.readFileSync('dist/server/index.js','utf8');
+  const count=text=>text.split(FILM_AGGREGATE_ROUTE).length-1;
+  assert.equal(count(bundle),count(fs.readFileSync('src/film-aggregate.js','utf8')),'the built bundle holds the route string only inside the aggregate scope, never in a router');
+ }
 }
 
 // ---- Review of PR #1004 (owner review at 85783f2f): counterexamples, each as a regression ----

@@ -80,3 +80,25 @@ export function loadDiscoveryAuthority(run){
  run(scopedIdentityEvidence());
  run(scopedDiscoveryAuthority());
 }
+
+// AIR-648: the shared Film resolver, the FilmAggregateV1 sections and the multi-alias history, scoped into the Worker bundle (DORMANT: no route names them until the owner-approved
+// activation). One definition serves the Worker and every test that loads them in a vm. The history module loads three plain domain scripts through node:fs/node:vm offline; the Worker
+// already holds those scripts as globals (film-history.js, prediction-versions.js, and the LetterboxdFacts scope), so the three loader declarations are replaced by bindings to the
+// same globals. The replacement is exact and fails the build if the source stops matching, so a changed loader can never silently ship a Node-only import. This scope must come AFTER
+// src/letterboxd-facts.js in the bundle (its LetterboxdFacts const is read when the scope runs).
+export function scopedFilmAggregate(){
+ let history=fs.readFileSync('src/film-history-aggregate.js','utf8');
+ const loader=/^const legacy=vm\.runInNewContext\([^\n]*\n[^\n]*compareHistoryEvents\}\)',\{\}\);\r?\nconst letterboxdFacts=vm\.runInNewContext\([^\n]*\r?\nconst versionRule=vm\.runInNewContext\([^\n]*\r?\n/m;
+ if(!loader.test(history))throw new Error('src/film-history-aggregate.js: the domain-script loader no longer matches the Worker replacement');
+ history=history.replace(loader,'const legacy={historyTime,historyValue,predictionHistoryEvent,ratingHistoryEvent,legacyRatingEvent,diaryViewingEvent,compareHistoryEvents};\nconst letterboxdFacts=LetterboxdFacts;\nconst versionRule={predictionVersionLinked};\n')
+  .replace(/^import fs from 'node:fs';\r?\n/m,'').replace(/^import vm from 'node:vm';\r?\n/m,'');
+ if(/node:/.test(history))throw new Error('src/film-history-aggregate.js still names a node: module after scoping');
+ const body=history.replace(/^\s*import\s+\{[^}]+\}\s+from\s+['"][^'"]+['"];?\r?\n/gm,'');
+ const preamble='const {database}=FilmPersonAuthority;\nconst {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET}=FilmAggregateResolver;\nconst {aliases:authorizedAliases,readRatings,countedDatabase}=FilmAggregate;\nconst {sha256Hex}=Sha256Sync;';
+ const exported=[...new Set([...body.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+([A-Za-z0-9_]+)/gm)].map(match=>match[1]).concat(['historyEventId']))];
+ const reexport=body.replace(/^export\s*\{([^}]+)\};?\r?\n/gm,'');
+ return scoped('src/sha256-sync.js','Sha256Sync')+'\n'
+  +scopedImports('src/film-aggregate-resolver.js','FilmAggregateResolver','const {sha256Hex}=Sha256Sync;\nconst {database,many,readAuthority}=FilmPersonAuthority;')+'\n'
+  +scopedImports('src/film-aggregate.js','FilmAggregate','const {sha256Hex}=Sha256Sync;\nconst {CREDIT_SELECTION_SQL,database}=FilmPersonAuthority;\nconst {localizationInputsFromRows,ownerCandidatesFromEntries,resolveLocalization}=LocalizationSources;\nconst {readFilmAggregateIdentity,REQUEST_STATEMENT_BUDGET,FILM_AGGREGATE_CONTRACT}=FilmAggregateResolver;\nconst {COHORT_SQL,MISSING_LID_ADMISSION,predictionEligibility}=PredictionLidOnly;')+'\n'
+  +'const FilmHistoryAggregate=(()=>{\n'+preamble+'\n'+reexport.replace(/^export\s+/gm,'')+'\nconst historyEventId=eventIdOf;\n'+'\nreturn {'+exported.join(',')+'};\n})();';
+}
