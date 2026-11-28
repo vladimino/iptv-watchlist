@@ -23,7 +23,8 @@ export async function readScope(env,scope){
 
 // One page. -> {outcome:'advanced'|'done'|'stopped', reason?, rows, cursor, state}
 // `pin` ({revision, cutoffAt}, optional) is the configuration the CALLER approved: a page that finds another revision or cutoff stops (`configuration_changed`) instead of adopting it, so an activation keeps its approved envelope on every page.
-export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=null}){
+// `extra` ({sql, params}, optional) is a further readiness condition of the CALLER (for example the authority and lease an activation asserted): it is part of the fence of EVERY write of the page, so a page whose condition no longer holds writes nothing and the bootstrap stops.
+export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=null,extra=null}){
  if(!ISO.test(String(at))||!Number.isInteger(pageSize)||pageSize<1||pageSize>200)throw failed('film_person_invalid');
  const definition=DEFINITIONS[scope];
  if(!definition)throw failed('catalog_enrichment_bootstrap_scope_unsupported');
@@ -39,9 +40,10 @@ export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=nu
  const done=page.length<pageSize;
  const fence="EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope=? AND revision=? AND cutoff_at IS ? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?)";
  const fenceParams=[scope,revision,row.cutoff_at??null,cursor];
- const statements=page.map(item=>[`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) SELECT 'admitted',?,'rated',?,1,0,'pending','bootstrap:'||?,?,0 WHERE ${fence} ON CONFLICT (kind,subject,source,part) DO NOTHING`,['tmdb:'+item.tmdb,definition.part,scope,at,...fenceParams]]);
+ const readiness=extra?` AND (${extra.sql})`:'',readinessParams=extra?extra.params:[];
+ const statements=page.map(item=>[`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) SELECT 'admitted',?,'rated',?,1,0,'pending','bootstrap:'||?,?,0 WHERE ${fence}${readiness} ON CONFLICT (kind,subject,source,part) DO NOTHING`,['tmdb:'+item.tmdb,definition.part,scope,at,...fenceParams,...readinessParams]]);
  // the cursor advance is the LAST statement, with the same fence: it moves only when the page was read at the current revision and cursor
- statements.push([`UPDATE catalog_enrichment_scope SET bootstrap_cursor=?,bootstrap_state=?,updated_at=? WHERE scope=? AND revision=? AND cutoff_at IS ? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?`,[last,done?'done':'running',at,scope,revision,row.cutoff_at??null,cursor]]);
+ statements.push([`UPDATE catalog_enrichment_scope SET bootstrap_cursor=?,bootstrap_state=?,updated_at=? WHERE scope=? AND revision=? AND cutoff_at IS ? AND activated=1 AND enabled=1 AND bootstrap_state IN ('none','running') AND bootstrap_cursor IS ?${readiness}`,[last,done?'done':'running',at,scope,revision,row.cutoff_at??null,cursor,...readinessParams]]);
  await handle.batch(statements.map(([sql,params])=>handle.prepare(sql).bind(...params)));
  const after=await readScope(env,scope);
  // the page committed when the cursor and state moved to where this page put them; a revision that moved AFTER that commit stops the next page but does not make the written rows disappear, so they are still reported
@@ -52,10 +54,10 @@ export async function bootstrapPage(env,{scope,at,pageSize=BOOTSTRAP_PAGE,pin=nu
 }
 
 // Runs pages until done, stopped or `maxPages`; resumable from the stored cursor. -> {outcome, pages, rows, cursor, state, reason?}
-export async function runBootstrap(env,{scope,at,pageSize=BOOTSTRAP_PAGE,maxPages=BOOTSTRAP_MAX_PAGES,pin=null}){
+export async function runBootstrap(env,{scope,at,pageSize=BOOTSTRAP_PAGE,maxPages=BOOTSTRAP_MAX_PAGES,pin=null,extra=null}){
  let pages=0,rows=0,last={outcome:'advanced',cursor:null,state:'none'};
  while(pages<maxPages){
-  last=await bootstrapPage(env,{scope,at,pageSize,pin});
+  last=await bootstrapPage(env,{scope,at,pageSize,pin,extra});
   rows+=last.rows;
   if(last.outcome==='stopped')break;
   pages++;

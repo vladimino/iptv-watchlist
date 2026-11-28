@@ -31,11 +31,11 @@ function world({open=true,upTo=Infinity,held=false,films=true}={}){
  return {file,env:{DB:d1Standin(file)}};
 }
 // A D1 binding that runs `before(statements)` before and `after(statements)` after every batch (an `after` that throws is a committed batch whose reply was lost), and can go blind on the control table.
-// `window` runs ONCE, in the gap after the last bootstrap page and before the final control read and commit.
+// `window` runs once, immediately before the control commit batch is sent: after the last bootstrap page and before the control commit.
 function interleaved(file,{before=null,after=null,binding=null,window=null}={}){
  const real=d1Standin(file);
- const state={blind:false,batches:0,armed:false};
- const DB={...real,prepare(text){if(state.blind&&/catalog_enrichment_control/.test(text))throw new Error('d1 unavailable');if(window&&state.armed&&/FROM catalog_enrichment_control WHERE id=1/.test(text)){state.armed=false;window();}return real.prepare(text);},async batch(statements){state.batches++;if(before)await before(statements,state);const out=await real.batch(statements);if(isLastPage(statements))state.armed=true;if(after)await after(statements,state);return out;}};
+ const state={blind:false,batches:0};
+ const DB={...real,prepare(text){if(state.blind&&/catalog_enrichment_control/.test(text))throw new Error('d1 unavailable');return real.prepare(text);},async batch(statements){state.batches++;if(window&&isControl(statements)){const run=window;window=null;run();}if(before)await before(statements,state);const out=await real.batch(statements);if(after)await after(statements,state);return out;}};
  return {env:{DB,...(binding?{CATALOG_ENRICHMENT_WORKFLOW:binding}:{})},state};
 }
 const op=(over={})=>({cutoffAt:CUTOFF,by:'operator:AIR-607',at:T,goReference:GO,...over});
@@ -207,6 +207,58 @@ for(const upTo of [Infinity,47]){
  assert.equal(controlRow(file),null);
 }
 {
+ // the marker is held RIGHT AFTER the scope insert and before the first page, and BETWEEN pages: the page fence stops every further operator write, not only the final flip
+ for(const [label,pagesBefore,rowsExpected] of [['after the insert',0,0],['between pages',1,40]]){
+  const {file}=world();
+  let pages=0;
+  const held="UPDATE film_person_authority SET cutover='held',generation=generation+1 WHERE id=1;";
+  const {env}=interleaved(file,{after:async(statements)=>{if(pagesBefore===0&&isScopeInsert(statements))sql(file,held);if(pagesBefore>0&&isPage(statements)&&++pages===pagesBefore)sql(file,held);}});
+  const out=await A.activateRated(env,op({pageSize:40}));
+  assert.equal(out.outcome,'stopped',label);assert.ok(['cursor_moved','revision_moved'].includes(out.reason)||out.reason==='bootstrap_incomplete',label+': '+out.reason);
+  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,rowsExpected,label+': nothing more was written under a held marker');
+  assert.equal(out.effects.bootstrapRows,rowsExpected,label);
+  assert.equal(controlRow(file),null,label+': the control was never enabled');
+  assert.deepEqual(rows(file,'SELECT scope FROM catalog_enrichment_scope'),[{scope:'rated'}],label+': the scope row is the reported partial effect');
+ }
+}
+{
+ // the scope this call inserted changes immediately (its revision moves): it is not adopted, and nothing is attributed to this call
+ const {file}=world();
+ const {env}=interleaved(file,{after:async(statements)=>{if(isScopeInsert(statements))sql(file,"UPDATE catalog_enrichment_scope SET revision=revision+1 WHERE scope='rated';");}});
+ const out=await A.activateRated(env,op({pageSize:40}));
+ assert.deepEqual([out.outcome,out.reason],['stopped','scope_changed_after_insert']);
+ assert.deepEqual(out.effects,{scopeInserted:'unknown',bootstrapRows:0});
+ assert.equal(rows(file,'SELECT COUNT(*) AS n FROM enrichment_signal')[0].n,0,'no bootstrap page was written under the changed revision');
+ assert.equal(controlRow(file),null);
+}
+{
+ // a zero-row INSERT (its guard fails) followed by ANOTHER writer's matching scope: that scope is neither adopted nor counted as this call's insert
+ const {file}=world();
+ const {env}=interleaved(file,{before:async(statements)=>{if(isScopeInsert(statements))sql(file,`INSERT INTO enrichment_signal (kind,subject,source,part,version,acked_version,state,cause_ref,armed_at,attempts) VALUES ('admitted','tmdb:9','discovery','',1,0,'staged','x','${T}',0);INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,revision,updated_at) VALUES ('rated',1,1,'${CUTOFF}',1,'2026-11-28T09:00:00.000Z');`);}});
+ const out=await A.activateRated(env,op({pageSize:40}));
+ assert.deepEqual([out.outcome,out.reason],['stopped','scope_changed_after_insert']);
+ assert.notEqual(out.effects.scopeInserted,true,'the other writer\'s row is not this call\'s effect');
+ assert.equal(out.effects.bootstrapRows,0);
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM enrichment_signal WHERE source='rated'")[0].n,0,'nothing was bootstrapped under a scope this call did not insert');
+ assert.equal(controlRow(file),null);
+}
+{
+ // the scope INSERT committed but its reply was lost: read back as this call's own row and continued
+ const {file}=world();
+ const {env}=interleaved(file,{after:async(statements)=>{if(isScopeInsert(statements))throw new Error('reply lost');}});
+ const out=await A.activateRated(env,op({pageSize:40}));
+ assert.deepEqual([out.outcome,out.scopeNote],['activated','scope_insert_reply_lost']);
+ assert.equal(out.effects.scopeInserted,true);
+ assert.deepEqual([out.qualifyingAdmissions,out.ratedSignals],[100,100]);
+}
+{
+ // a scope INSERT that failed whole (nothing committed) is an error, not an adoption
+ const {file}=world();
+ const {env}=interleaved(file,{before:async(statements)=>{if(isScopeInsert(statements))throw new Error('d1 down');}});
+ await assert.rejects(A.activateRated(env,op()),error=>error.code==='film_person_unavailable');
+ assert.equal(rows(file,'SELECT COUNT(*) AS n FROM catalog_enrichment_scope')[0].n,0);
+}
+{
  // after the last page and before the control commit: another scope, a disabled rated scope, a staged signal, a held marker, a live lease
  const variants=[
   ['another scope',`INSERT INTO catalog_enrichment_scope (scope,activated,enabled,cutoff_at,revision,updated_at) VALUES ('discovery',1,1,NULL,1,'${T}')`],
@@ -224,6 +276,15 @@ for(const upTo of [Infinity,47]){
   assert.equal(controlRow(file),null,label+': the global control was never enabled');
   assert.deepEqual(out.effects,{scopeInserted:true,bootstrapRows:100},label+': partial effects are reported');
  }
+}
+{
+ // another writer activates the control between the preflight and this call's commit: the guarded commit changes nothing and is never reported as this call's activation
+ const {file}=world();
+ sql(file,`INSERT INTO catalog_enrichment_control (id,state,generation,revision,updated_at,updated_by) VALUES (1,'inactive',0,1,'${T}','seed')`);
+ const {env}=interleaved(file,{window:()=>sql(file,"UPDATE catalog_enrichment_control SET state='active',generation=generation+1,revision=revision+1,updated_by='another-writer' WHERE id=1")});
+ const out=await A.activateRated(env,op({pageSize:40}));
+ assert.deepEqual([out.outcome,out.reason],['stopped','control_guard_failed']);
+ assert.equal(controlRow(file).updated_by,'another-writer','the other writer\'s activation is untouched and not attributed to this call');
 }
 {
  // the control commit applied but its reply was lost: read back, reported as activated with the note, never a false failure
@@ -303,13 +364,17 @@ for(const upTo of [Infinity,47]){
  assert.deepEqual((await A.activateRated(env2,op())).problems,['active_configuration_mismatch'],'matching cutoff and done bootstrap are not enough');
 }
 {
- // an applied activation whose bootstrap was left unfinished is recovered by the same call, with the wake
- const {file,env}=world();
- assert.equal((await A.activateRated(env,op({pageSize:40}))).outcome,'activated');
- sql(file,"DELETE FROM enrichment_signal;UPDATE catalog_enrichment_scope SET bootstrap_state='none',bootstrap_cursor=NULL WHERE scope='rated';");
- const out=await A.activateRated(env,op({pageSize:40}));
- assert.deepEqual([out.outcome,out.reason],['noop','bootstrap_recovered']);
- assert.deepEqual([out.ratedSignals,out.effects.bootstrapRows],[100,100],'the pending bootstrap was finished, not stranded');
+ // an active configuration whose bootstrap is unfinished is inconsistent (a correct C2 commits only a done bootstrap): the operator refuses and writes nothing, whatever else is true, including a held marker
+ for(const [label,extra] of [['unfinished','' ],['unfinished and held',"UPDATE film_person_authority SET cutover='held',generation=generation+1 WHERE id=1;"],['unfinished and an incomplete schema','DROP TABLE catalog_enrichment_tick;']]){
+  const {file,env}=world();
+  assert.equal((await A.activateRated(env,op({pageSize:40}))).outcome,'activated');
+  sql(file,"DELETE FROM enrichment_signal;UPDATE catalog_enrichment_scope SET bootstrap_state='none',bootstrap_cursor=NULL WHERE scope='rated';"+extra);
+  const before=snapshot(file);
+  const out=await A.activateRated(env,op({pageSize:40}));
+  assert.deepEqual([out.outcome,out.problems],['refused',['active_configuration_mismatch']],label);
+  assert.deepEqual(out.effects,{scopeInserted:false,bootstrapRows:0},label);
+  assert.equal(snapshot(file),before,label+': no signal, scope or control was written');
+ }
 }
 
 // ---- the wake: already-runnable work is started after the final commit through the existing protocol; a lost wake is recovered ----
