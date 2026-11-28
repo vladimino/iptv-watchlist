@@ -11,6 +11,7 @@ import {UpstreamCooldownSkip} from './upstream-cooldown.js';
 import {selectRussianTitle,selectSynopsis,selectPoster,mapGenres,readYear,readRuntime} from './catalog-enrichment-plan.js';
 
 export const TIMEOUT_MS=Object.freeze({tmdb:12000,letterboxd:15000,wikidata:15000});
+export const WIKIDATA_USER_AGENT='WatchlistAirtime/1.0 (personal film programme)';
 export const POSTER_BASE='https://image.tmdb.org/t/p/w500';
 const LID=/^[A-Za-z0-9]{1,16}$/;
 const MAX_BODY=3000000;
@@ -102,7 +103,8 @@ export async function fetchWikidata(env,{tmdbId,coordinator=null,fetchImpl=fetch
  if(!/^[1-9]\d{0,11}$/.test(String(tmdbId)))return failedAnswer('invalid_anchor');
  const query='SELECT DISTINCT ?label WHERE { ?film wdt:P4947 "'+tmdbId+'". ?film rdfs:label ?label. FILTER(LANG(?label)="ru") } LIMIT 5';
  const url='https://query.wikidata.org/sparql?format=json&query='+encodeURIComponent(query);
- const sent=await send({coordinator,fetchImpl,url,init:{headers:{accept:'application/sparql-results+json'}},timeoutMs});
+ // AIR-696: Wikimedia's User-Agent policy requires an identifying User-Agent; a Worker fetch sends none by default. Same client name the other Wikidata readers (src/sources.js) already send.
+ const sent=await send({coordinator,fetchImpl,url,init:{headers:{accept:'application/sparql-results+json','user-agent':WIKIDATA_USER_AGENT}},timeoutMs});
  if(sent.answer)return sent.answer;
  const {response}=sent;
  if(!response.ok)return failureOf(response.status);
