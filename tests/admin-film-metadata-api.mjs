@@ -166,6 +166,26 @@ const writes=file=>({commands:commands(file).length,history:history(file).length
  const refreshOff=await post(off.env,{action:'refresh',expectedRevision:await revisionOf(off.env),expectedRows:[{part:'core',source:'tmdb',status:'complete',updatedAt:T,refreshEpoch:0}]});
  assert.equal(refreshOff.body.error,'provenance_off');
  assert.equal((await call(off.env,{id:'film:absent',method:'GET'})).status,404);
+ // AIR-635 RCA (production, schema v54, mode off): the page asked for the programme's STORED id (`1RYk`), not the canonical record id (`film:1RYk`), and every read was this 404. The contract is the canonical id.
+ assert.equal((await call(off.env,{id:'603',method:'GET'})).status,404,'a bare programme id is not a canonical id');
+ assert.equal((await call(off.env,{id:'tmdb:603',method:'GET'})).status,404);
+ // the full chain (schema v54), mode off, a Film with LEGACY metadata and no provenance row, no history and no enrichment state: a plain 200 with the values and no rank, never an error
+ const legacy=await world({mode:'off'});
+ await CanonicalFilmWriters.writeFilmFacts(legacy.env,{id:ID,at:T,requestId:rid(),expectedRevision:await revisionOf(legacy.env),film:{contractVersion:1},metadata:{updatedAt:T,year:1990,runtime:120,synopsis:'Legacy synopsis'},requireExisting:true});
+ assert.equal(rows(legacy.file,"SELECT COUNT(*) AS n FROM film_metadata_field")[0].n,0,'legacy metadata has no provenance row');
+ assert.equal(rows(legacy.file,"SELECT COUNT(*) AS n FROM film_metadata_history")[0].n,0);
+ const before=rows(legacy.file,"SELECT (SELECT COUNT(*) FROM film_metadata) AS m,(SELECT COUNT(*) FROM film_metadata_owner_command) AS c,(SELECT COUNT(*) FROM catalog_enrichment_state) AS s")[0];
+ const legacyRead=await call(legacy.env,{method:'GET'});
+ assert.equal(legacyRead.status,200);
+ assert.equal(legacyRead.body.found,true);assert.equal(legacyRead.body.mode,'off');assert.equal(legacyRead.body.schemaAbsent,false);
+ assert.deepEqual(Object.keys(legacyRead.body.fields),['year','runtime','synopsis','poster','url','genres']);
+ assert.equal(legacyRead.body.fields.year.value,1990);assert.equal(legacyRead.body.fields.synopsis.value,'Legacy synopsis');
+ assert.equal(legacyRead.body.fields.poster.blank,true);
+ for(const entry of Object.values(legacyRead.body.fields)){assert.equal(entry.rank,undefined,'mode off claims no rank');assert.equal(entry.row,undefined,'mode off claims no lineage');}
+ assert.deepEqual(legacyRead.body.locks.owner,[]);
+ assert.deepEqual(legacyRead.body.history.rows,[]);assert.equal(legacyRead.body.history.next,null);
+ assert.ok(legacyRead.body.c1===null||(Array.isArray(legacyRead.body.c1.rows)&&Array.isArray(legacyRead.body.c1.conflicts)),'absent enrichment state is empty, not a failure');
+ assert.deepEqual(rows(legacy.file,"SELECT (SELECT COUNT(*) FROM film_metadata) AS m,(SELECT COUNT(*) FROM film_metadata_owner_command) AS c,(SELECT COUNT(*) FROM catalog_enrichment_state) AS s")[0],before,'the read wrote nothing');
 }
 
 // ---- 3. set, lock, release, revert, with the readback, the language and the command record ----

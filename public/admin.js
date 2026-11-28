@@ -300,7 +300,7 @@ function adminDetail(view) {
     ? `<p class="admin-provenance">Происхождение локализации: ${adminEscape(record.localization?.source || record.localization?.provenance?.authority || 'не указано')}. Происхождение идентичности: ${adminEscape(record.identity?.source || 'не указано')}.</p>`
     : `<p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>`;
   host.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${filmMetadata}${personForm}`;
-  if (kind === 'film') { adminBindTitleReview(host); adminBindFilmMetadata(host, record.storedId); }
+  if (kind === 'film') { adminBindTitleReview(host); adminBindFilmMetadata(host); }
   else {
     const form = host.querySelector('#admin-name-form');
     if (form && adminNamePending && adminNamePending.personId === record.id) adminRestoreNameAttempt(form, adminNamePending.command);

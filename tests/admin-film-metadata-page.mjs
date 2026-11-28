@@ -113,8 +113,13 @@ assert.match(off, /Режим provenance выключен/);
 for (const button of off.match(/<button[^>]*data-meta-action[^>]*>/g)) assert.match(button, /disabled/, 'every write is disabled while the mode is off: ' + button);
 assert.match(api.adminMetaHtml(view({schemaAbsent: true, mode: null, c1: null, history: {rows: [], next: null}})), /Схема provenance ещё не установлена/);
 assert.match(api.adminMetaHtml(view({history: {rows: [], next: null}})), /data-meta-history-empty/);
-assert.equal(api.adminFilmMetadataSection({}), '', 'no stored id, no section');
-assert.match(api.adminFilmMetadataSection({storedId: 'film:a b'}), /data-film-metadata data-stored-id="film:a b"/);
+assert.equal(api.adminFilmMetadataSection({}), '', 'no record id, no section');
+assert.equal(api.adminFilmMetadataSection({storedId: '1RYk'}), '', 'the programme stored id is not a canonical id');
+// the real shape of a programme film: `id` is the canonical record id, `storedId` the programme's own id. The section carries the canonical one.
+const realRecord = {id: 'film:1RYk', storedId: '1RYk', preferred: 'Гарри Поттер'};
+assert.match(api.adminFilmMetadataSection(realRecord), /data-film-metadata data-film-id="film:1RYk"/);
+assert.doesNotMatch(api.adminFilmMetadataSection(realRecord), /data-film-id="1RYk"|data-film-metadata data-stored-id/);
+assert.match(api.adminFilmMetadataSection({id: 'film:a b'}), /data-film-id="film:a b"/);
 const escaped = api.adminMetaHtml(view({fields: {...v.fields, synopsis: {value: '<script>alert(1)</script>', blank: false, rank: {name: 'confirmed', value: 2}, row: row()}}}));
 assert.doesNotMatch(escaped, /<script>alert/);
 
@@ -151,11 +156,11 @@ function node(attrs = {}) {
   return n;
 }
 function mount(id = 'film:1', label = 'Фильм') {
-  const section = node({'data-film-label': label}), body = node(), result = node(), reading = node(), pendingBox = node();
+  const section = node({'data-film-label': label, 'data-film-id': id}), body = node(), result = node(), reading = node(), pendingBox = node();
   section.children = {'[data-meta-body]': body, '[data-meta-result]': result, '[data-meta-reading]': reading, '[data-meta-pending]': pendingBox};
   const inputs = {};
   body.querySelector = sel => { const m = /data-meta-input="(\w+)"/.exec(sel); return m ? (inputs[m[1]] ||= node()) : null; };
-  api.adminBindFilmMetadata({querySelector: sel => sel === '[data-film-metadata]' ? section : null}, id);
+  api.adminBindFilmMetadata({querySelector: sel => sel === '[data-film-metadata]' ? section : null});
   const press = attrs => section.listeners.click({target: node(attrs)});
   return {section, body, result, reading, pendingBox, inputs, press, open: () => { section.open = true; return section.listeners.toggle(); }};
 }
@@ -189,6 +194,33 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   g.go(); await settle();
   assert.equal(calls.length, 1);
   assert.match(m.body.innerHTML, /data-meta-field="year"/);
+}
+// the real record shape end to end: the request path carries the canonical id (`film%3A1RYk`), never the programme's stored id (`1RYk`)
+{
+  reset(); script = [{status: 200, body: view({filmId: 'film:1RYk'})}];
+  const m = mount('film:1RYk', 'Гарри Поттер');
+  await m.open(); await settle();
+  assert.equal(calls[0].url, '/api/admin/films/film%3A1RYk/metadata');
+  assert.doesNotMatch(calls[0].url, /\/films\/1RYk\//);
+}
+// a 404 is an answer: this Film is not in the canonical catalogue. It says so, it is not "reading failed", and it offers no retry that would only repeat it
+{
+  reset(); script = [{status: 404, body: {error: 'not_found'}}];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.reading.innerHTML, /data-meta-notfound/);
+  assert.match(m.reading.innerHTML, /нет в каноническом каталоге/);
+  assert.doesNotMatch(m.reading.innerHTML, /Не удалось прочитать|data-meta-reload/);
+  assert.equal(calls.length, 1);
+}
+// a server failure is still a failed read with its retry
+{
+  reset(); script = [{status: 500, body: {error: 'unavailable'}}];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.reading.innerHTML, /Не удалось прочитать/);
+  assert.match(m.reading.innerHTML, /data-meta-reload/);
+  assert.doesNotMatch(m.reading.innerHTML, /data-meta-notfound/);
 }
 // a failed first read: said, controls absent, an explicit retry exists
 {
@@ -419,7 +451,7 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   script = [new Error('offline')];
   await a.press(SET); await settle();
   const heldBody = JSON.stringify(posts()[0]);
-  assert.equal(shared().pending.storedId, 'film:1');
+  assert.equal(shared().pending.filmId, 'film:1');
   // the page opens Film B (the detail DOM is replaced): B reads, and its writes are blocked with an explanation that names Film A
   script = [{status: 200, body: view({filmId: 'film:2'})}];
   const b = mount('film:2', 'Другой фильм');
@@ -520,7 +552,7 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   await b.press(SET); await settle();
   assert.equal(posts().length, 1, 'B cannot start a command while A is in flight');
   pg.go(); await first; await settle();
-  assert.equal(shared().pending.storedId, 'film:1', 'the late unknown reply keeps A\'s command held');
+  assert.equal(shared().pending.filmId, 'film:1', 'the late unknown reply keeps A\'s command held');
   assert.equal(shared().flight, null);
   assert.match(b.pendingBox.innerHTML, /data-meta-pending-elsewhere/);
   assert.match(b.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
