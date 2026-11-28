@@ -1,5 +1,6 @@
 // AIR-604 (UC1): the shared upstream cooldown core: migration 0045, the policy and the coordinator. Offline: scratch sqlite (D1 stand-in), injected fetch, no network.
 import assert from 'node:assert/strict';
+import {migrationHead} from './migration-head.mjs';
 import fs from 'node:fs';
 import {migrated, sql} from './prediction-d1-flow-lib.mjs';
 import {d1Standin} from './d1-standin.mjs';
@@ -48,7 +49,7 @@ for (const status of [200, 403, 404, 429, 500, 503]) for (const headers of [H(),
   const file = migrated(44);
   assert.equal(sql(file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 44);
   const w = world(null);
-  assert.equal(sql(w.file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, 54);
+  assert.equal(sql(w.file, 'SELECT version FROM schema_contract WHERE id=1')[0].version, migrationHead());
   assert.equal(sql(w.file, 'SELECT COUNT(*) n FROM upstream_cooldown')[0].n, 0, 'created empty');
   assert.equal(sql(w.file, 'SELECT COUNT(*) n FROM upstream_coordination')[0].n, 0, 'no mode row: off by absence');
   // a second apply and a wrong predecessor are refused before any object is created

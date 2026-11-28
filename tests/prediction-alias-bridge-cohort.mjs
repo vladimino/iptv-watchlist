@@ -76,7 +76,7 @@ const NEGATIVE_NOT_PROVED=new Set(['ratings_link_inferred','ratings_link_unverif
 const DEFAULT_CAPS={pointerPage:50,pointerInspect:2000,candidates:64,statements:300,rows:6000,chunk:10,list:64};
 // Predicates that CANNOT yet be captured within a bound. They are reported with every answer and make a live run a blocker, not a risk to accept.
 const LIVE_BLOCKERS=Object.freeze([
- 'ratings_view_fact_key_unindexed: the planner corroborates the projection by fact_key, which has no index (a scan whose size is not capped); AIR-627 saw such a predicate time out. Needs an index or a proven table-size cap first.',
+ 'ratings_view_fact_key_index_0055: the planner corroborates the projection by fact_key; the index is migration 0055 (AIR-653) and its production apply and readback are a prerequisite (without it the predicate is a scan whose size is not capped; AIR-627 saw such a predicate time out).',
  'tmdb_retirement_decision_movie_index: the ledger is read by movie_id; the index is migration 0040 and its production apply and readback are a prerequisite (AIR-667 / AIR-648). A superseding decision is assumed to name the same movie id, as the resolver does (supersedes_seq has no index).',
  'planner_unbounded_on_live: the unchanged planner re-reads the link index and records for every key and has no caps; it may be evaluated only on a private snapshot, never against production.',
 ]);
@@ -546,14 +546,14 @@ const bulk=({candidates=true,noise=0}={})=>{
  // no matches: only direct keys, a complete and empty cohort, certified on the same terms; no tmdb-spelled key is ever inspected.
  const none=await preflight(envOf(bulk({candidates:false})),{scope:SCOPE});
  assert.deepEqual([none.decision,none.counts,none.sources.direct_excluded,none.work.pointerRows],['complete',{},300,600]);
- // EXPLAIN: the captured predicates are indexed SEARCHes; the fact_key projection predicate is the documented SCAN (a live-run blocker).
+ // EXPLAIN: the captured predicates are indexed SEARCHes, the fact_key projection predicate included once migration 0055 is applied (its production apply is a live-run prerequisite).
  const plan=sql=>String(sqliteSync([f],{input:'EXPLAIN QUERY PLAN '+sql+';',encoding:'utf8'}).stdout).replace(/\s+/g,' ');
  assert.match(plan("SELECT film_id FROM film_external_id WHERE scheme='letterboxd' AND value IN (SELECT value FROM json_each('[\"a\"]')) LIMIT 5"),/SEARCH/);
  assert.match(plan("SELECT * FROM film_rated_admission WHERE tmdb IN (SELECT value FROM json_each('[\"1\"]')) LIMIT 5"),/SEARCH/);
  assert.match(plan("SELECT * FROM tmdb_retirement_decision WHERE movie_id IN (SELECT value FROM json_each('[\"1\"]')) LIMIT 5"),/SEARCH/);
  assert.match(plan("SELECT * FROM ratings_view WHERE alias_id IN (SELECT value FROM json_each('[\"a\"]')) LIMIT 5"),/SEARCH/);
- assert.match(plan("SELECT * FROM ratings_view WHERE fact_key IN (SELECT value FROM json_each('[\"a\"]')) LIMIT 5"),/SCAN/,'the fact_key predicate is a scan: the first live-run blocker');
- assert.ok(out.liveBlockers.some(item=>item.startsWith('ratings_view_fact_key_unindexed')));
+ assert.match(plan("SELECT * FROM ratings_view WHERE fact_key IN (SELECT value FROM json_each('[\"a\"]')) LIMIT 5"),/SEARCH ratings_view USING INDEX ratings_view_fact_key/,'with 0055 the fact_key predicate is an index SEARCH');
+ assert.ok(out.liveBlockers.some(item=>item.startsWith('ratings_view_fact_key_index_0055')),'the production apply of 0055 stays a live-run prerequisite');
 }
 
 // ---- 7. documents: the atomic parts/bytes statement refuses an oversized link or record part and a replacement after the measure ----
