@@ -20,7 +20,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
 - [Prediction incident response: RCA, controlled diagnostic experiments and staged recovery](prediction-incident-response.md)
 - [Prediction auxiliary state in D1: checkpoint and outbox recovery, offline import and the AIR-554 handoff (D1 authority since 24 Nov 2026)](prediction-aux-state-cutover.md)
-- [Ratings projection fact-key index, migration 0055: prerequisites, window, readback and forward-only rollback (prepared, not applied; needs its own owner L3 GO)](ratings-view-fact-key-index-0055-apply.md)
+- [Ratings projection fact-key index, migration 0055: prerequisites, window, readback and forward-only rollback (applied 28 Nov 2026)](ratings-view-fact-key-index-0055-apply.md)
 - [Film redirect target index, migration 0043: prerequisites, window, readback and forward-only rollback (prepared, not applied; applied together with the other approved pending migrations, needs its own owner GO)](film-redirect-target-index-0043-apply.md)
 - [Lid-only admission row, migration 0048: prerequisites, window, readback and forward-only rollback (prepared, not applied; applied together with the other approved pending migrations, needs its own owner GO)](film-lid-admission-0048-apply.md)
 - [D1 migration window v38 to v47 (checkpoint A) and v54 (checkpoint B): one pinned manifest of 16 files, one operator, per-file atomic batches and readbacks, stop and resume rules (**applied 28 Nov 2026**, schema 38 to 54, [evidence](../evidence/d1-migration/air-603-window-apply-2026-11-28.md); a new window needs its own GO)](d1-migration-window-v38-v54.md)
