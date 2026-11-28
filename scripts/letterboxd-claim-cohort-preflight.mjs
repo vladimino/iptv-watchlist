@@ -54,6 +54,12 @@ export const REQUIRED_INDEXES=Object.freeze({
  ratings_view_fact_key:'ratings_view_fact_key (migration 0055): the planner and the capture read the projection by fact_key; without the index that predicate is a scan whose size is not capped (AIR-627 saw such a predicate time out).',
  tmdb_retirement_decision_movie:'tmdb_retirement_decision_movie (migration 0040): the ledger is read by movie_id; a superseding decision is assumed to name the same movie id, as the resolver does (supersedes_seq has no index).',
 });
+// The exact definitions the bounded reads rely on (the names alone prove nothing: an index of that name on another column would not bound the predicate).
+export const REQUIRED_INDEX_DDL=Object.freeze({
+ ratings_view_fact_key:'CREATE INDEX ratings_view_fact_key ON ratings_view (fact_key)',
+ tmdb_retirement_decision_movie:'CREATE INDEX tmdb_retirement_decision_movie ON tmdb_retirement_decision (movie_id)',
+});
+const normalizeDdl=text=>String(text||'').replace(/\s+/g,' ').trim();
 // Limits that remain on every run: they are not blockers of a bounded capture, and a complete capture is not an eligibility proof.
 export const LIMITATIONS=Object.freeze([
  'planner_unbounded_on_live: the unchanged planner re-reads the link index and records for every key and has no caps; it is evaluated only on a private snapshot, never against production.',
@@ -249,21 +255,26 @@ export function multiplicity(subjects,raw){
 }
 const unknown=(reason,extra={})=>({decision:'unknown',reason,candidateDigest:null,readSetDigest:null,results:[],liveBlockers:[],limitations:LIMITATIONS,...extra});
 // hooks (tests only): a concurrent writer injected at a precise point. `afterDiscovery`, `afterFirstCapture` (empty cohort), `afterIndex` (between the index and the rest of the capture), `afterClassify` (between the two passes).
-export async function preflight(env,{scope=null,caps={},hooks={}}={}){
+// `subjects` (AIR-653, optional): a GIVEN list of pairs [{lid,tmdb}] (the owner's private allowlist) instead of the pointer discovery: the same bounded capture, snapshot oracle, classification and two-pass fence run for exactly those lids, and a lid
+// whose authoritative link index names another movie than the given one is `unknown / allowlist_movie_mismatch`. No discovery, so no candidate other than the given ones can appear.
+export async function preflight(env,{scope=null,caps={},hooks={},subjects=null}={}){
  const c={...DEFAULT_CAPS,...caps},budget=newBudget(c),cdb=countedDatabase(env.DB,budget.statements),work={pointerRows:0};
  const report=body=>({...body,work:{statements:budget.statements.used,rowsReserved:budget.rows,pointerRows:work.pointerRows}});
  const hook=async name=>{if(hooks[name])await hooks[name]();};
  try{
-  const present=await readRows(cdb,budget,'index_predicates',"SELECT name FROM sqlite_master WHERE type='index' AND name IN ('ratings_view_fact_key','tmdb_retirement_decision_movie') LIMIT ?",[],Object.keys(REQUIRED_INDEXES).length);
-  const missing=Object.keys(REQUIRED_INDEXES).filter(name=>!present.some(row=>row.name===name));
+  const present=await readRows(cdb,budget,'index_predicates',"SELECT name,sql FROM sqlite_master WHERE type='index' AND name IN ('ratings_view_fact_key','tmdb_retirement_decision_movie') LIMIT ?",[],Object.keys(REQUIRED_INDEXES).length);
+  const missing=Object.keys(REQUIRED_INDEXES).filter(name=>!present.some(row=>row.name===name&&normalizeDdl(row.sql)===REQUIRED_INDEX_DDL[name]));
   if(missing.length)return report(unknown('required_index_missing',{missing,liveBlockers:missing.map(name=>REQUIRED_INDEXES[name])}));
-  const found=await discover(cdb,budget,c,work);
+  const given=Array.isArray(subjects)?[...new Map(subjects.map(item=>[String(item.lid),String(item.tmdb)])).entries()].sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0):null;
+  if(given&&(!given.length||given.length>c.candidates))return report(unknown('subjects_invalid'));
+  const wanted=given?new Map(given):null;
+  const found=given?{direct:0,candidates:given.map(([lid])=>lid)}:await discover(cdb,budget,c,work);
   await hook('afterDiscovery');
   if(!found.candidates.length){
    // An empty cohort is certified only on the same terms: the markers read, evaluated by the real authority reader on a snapshot, read again after a repeated discovery, and equal.
    const a1=await captureA(cdb,budget,c,{withIndex:false});
    await hook('afterFirstCapture');
-   const again=await discover(cdb,budget,c,work);
+   const again=wanted?{direct:0,candidates:[]}:await discover(cdb,budget,c,work);
    const a2=await captureA(cdb,budget,c,{withIndex:false});
    if(again.candidates.length||digestOf(a1.markers)!==digestOf(a2.markers))return report(unknown('read_set_moved',{moved:['markers']}));
    const gate=await planLetterboxdClaim(envOf(materialize(a1,{records:[],claims:[],films:[],revisions:[],redirects:[],retirements:[],views:[],factKeyViews:[],witness:[]})),{lid:'AUTHORITY',tmdb:'1'}).then(()=>null,error=>error);
@@ -286,6 +297,7 @@ export async function preflight(env,{scope=null,caps={},hooks={}}={}){
   const results=[];
   for(const item of first.subjects){
    if(item.source==='bridge_unresolved'){results.push({lid:item.lid,movie:null,source:item.source,state:'unknown',reason:item.reason});continue;}
+   if(wanted&&wanted.get(item.lid)!==item.movie){results.push({lid:item.lid,movie:null,source:item.source,state:'unknown',reason:'allowlist_movie_mismatch'});continue;}
    let plan;
    try{plan=await planLetterboxdClaim(snapshot,{lid:item.lid,tmdb:item.movie});}
    catch(error){results.push({lid:item.lid,movie:item.movie,source:item.source,state:'unknown',reason:error?.code||'unclassified'});continue;}
@@ -294,7 +306,7 @@ export async function preflight(env,{scope=null,caps={},hooks={}}={}){
   await hook('afterClassify');
   // Revalidation: a second capture of the same subjects and a repeated discovery, charged to the SAME budget. Any difference in any section is `unknown`.
   const second=await pass(first.subjects);
-  const again=await discover(cdb,budget,c,work);
+  const again=wanted?{direct:0,candidates:found.candidates}:await discover(cdb,budget,c,work);
   const one=tokenOf(sectionsOne,{lids:first.subjects.map(item=>item.lid),scope:scopeDescriptor(scope)}),two=tokenOf(sections(second.a,second.b),{lids:second.subjects.map(item=>item.lid),scope:scopeDescriptor(scope)});
   const moved=Object.keys(one.digests).filter(name=>one.digests[name]!==two.digests[name]);
   if(again.candidates.join('\n')!==found.candidates.join('\n'))moved.push('candidate_set');

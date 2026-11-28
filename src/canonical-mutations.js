@@ -127,13 +127,24 @@ const RESERVATION_SQL=/^\(EXISTS \(SELECT 1 FROM ratings_document WHERE key=\? A
 const APPROVED_WRITES=['open','held'];
 function approvedPinsOf(pins){
  if(!pins||typeof pins!=='object'||Array.isArray(pins)||!Number.isInteger(pins.filmPersonGeneration)||pins.filmPersonGeneration<0||!Number.isInteger(pins.schemaVersion)||pins.schemaVersion<1||!Number.isInteger(pins.ownerReviewGeneration)||pins.ownerReviewGeneration<0||!APPROVED_WRITES.includes(pins.ownerReviewWrites))throw failed('film_person_invalid');
- return Object.freeze({filmPersonGeneration:pins.filmPersonGeneration,schemaVersion:pins.schemaVersion,ownerReviewGeneration:pins.ownerReviewGeneration,ownerReviewWrites:pins.ownerReviewWrites});
+ // AIR-653: optional extra approved conditions of the same operation (for example another authority's generation, or the absence of a witness row), asserted with the fixed pins in the same batches. The caller supplies SQL conditions with
+ // their values like `guards` of the writers (a boolean expression, at most 4); they are absent for every earlier caller, so its pins and statements are unchanged.
+ let guards;
+ if(pins.guards!==undefined){
+  if(!Array.isArray(pins.guards)||pins.guards.length>4)throw failed('film_person_invalid');
+  guards=Object.freeze(pins.guards.map(guard=>{
+   if(!guard||typeof guard.sql!=='string'||!guard.sql||!Array.isArray(guard.params)||guard.params.some(value=>value===undefined))throw failed('film_person_invalid');
+   return Object.freeze({sql:guard.sql,params:Object.freeze([...guard.params])});
+  }));
+ }
+ return Object.freeze({filmPersonGeneration:pins.filmPersonGeneration,schemaVersion:pins.schemaVersion,ownerReviewGeneration:pins.ownerReviewGeneration,ownerReviewWrites:pins.ownerReviewWrites,...(guards?{guards}:{})});
 }
 function bindApprovedPins(gate,pins){gate.approvedPins=approvedPinsOf(pins);return gate;}
 const approvedPinStatements=pins=>[
  [assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)"),[pins.filmPersonGeneration]],
  [assertSql('EXISTS (SELECT 1 FROM schema_contract WHERE id=1 AND version=?)'),[pins.schemaVersion]],
  [assertSql("EXISTS (SELECT 1 FROM owner_review_authority WHERE id=1 AND mode='d1' AND generation=? AND writes=?)"),[pins.ownerReviewGeneration,pins.ownerReviewWrites]],
+ ...(pins.guards||[]).map(guard=>[assertSql(guard.sql),[...guard.params]]),
 ];
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
@@ -178,6 +189,8 @@ export async function mutateFilm(env,input){
  if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
  const evidence=evidenceOf(input.evidence);
  const gate=bindProducerFence(env,assertWritable(await readWriterGate(env)));
+ // AIR-653: an operation that froze authority pins at its approval (see approvedPinsOf) binds them here too, so the domain batch asserts them next to the receipt reservation's.
+ if(input.approvedPins!==undefined&&input.approvedPins!==null)bindApprovedPins(gate,input.approvedPins);
  const db=database(env);
  const redirect=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]);
  if(redirect)throw failed('film_person_redirect');
