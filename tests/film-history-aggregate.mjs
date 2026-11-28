@@ -27,6 +27,8 @@ const OPEN=[
  "UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1",
  "UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1",
  "UPDATE prediction_domain_authority SET mode='d1' WHERE id=1",
+ // AIR-648: the owner-review marker is d1/open at generation 1, the generation every ownerTitle() row carries, so the owner evidence is proven in the base world.
+ "UPDATE owner_review_authority SET mode='d1',generation=1 WHERE id=1",
 ].join(';\n');
 const schema=path.join(root,'schema.sqlite');
 sqlite(schema,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
