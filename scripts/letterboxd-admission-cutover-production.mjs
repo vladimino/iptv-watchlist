@@ -1,43 +1,80 @@
 #!/usr/bin/env node
-// Owner-only production operator for the Letterboxd admission cutover of card A2 (AIR-608; ADR 0207 decision 1 and 7, ADR 0222). It is the reviewable, offline-tested wrapper around the delivered
-// mechanism (`src/letterboxd-admission-documents-import.js`: inventory, planImport, importDocuments, verifyParity, rollbackImport) and the marker `letterboxd_admission_authority` (r2 -> closed -> d1, closed -> r2).
-// It is NOT run by a deploy, a test or a Task. Default is read-only `status`. Every write command needs `--target iptv`, `--confirm <command>`, the pins named below and the owner's L3 GO for exactly that step.
+// Owner-only production operator for the Letterboxd admission cutover of card A2 (AIR-608; ADR 0207 decision 1 and 7, ADR 0222). It wraps the delivered mechanism (`src/letterboxd-admission-documents-import.js`: inventory,
+// planImport, importDocuments, verifyParity, rollbackImport) and the marker `letterboxd_admission_authority` (r2 -> closed -> d1, closed -> r2), and adds the gates the accepted ADRs require that the import mechanism does
+// not own: the ORIGINAL admission freeze gate (verified-films.json against film_rated_admission, scripts/letterboxd-admission-freeze-audit.mjs), the real Diary check queue, the real C2 activation and an exact manifest
+// fence. It is NOT run by a deploy, a test or a Task. Default is read-only `status`. Every write needs `--target iptv`, `--confirm <command>`, the pins named below and the owner's L3 GO for exactly that step.
 //
-//   status           read-only: schema, marker, Ratings authority, pending facts (receipts, chunk intents without receipt, admitting candidates, Diary link intents), C2 scope, the frozen R2 plan digest and the parity
-//   parity           read-only: R2 snapshot vs D1 byte for byte (verifyParity) plus the pending facts; exit 3 on any drift or pending state
-//   close            r2 G -> closed G+1       pins: --expect-generation. ONE guarded UPDATE of the marker row (the trigger of migration 0046 enforces the chain); nothing else is written
-//   import           closed G (no marker move)  pins: --expect-generation, --expect-manifest-sha256 (printed by `status` for the frozen cohort); refuses unless the plan is not blocked, the pending facts are clean and the
-//                    digest equals the pin; then importDocuments (create-only, idempotent, manifest last)
-//   flip             closed G -> d1 G+1       pins: --expect-generation, --expect-manifest-sha256. Re-runs the full parity and the pending facts, requires C2 `rated` active with a cutoff, then ONE fenced batch: the closed marker at G,
-//                    the manifest present, no pending receipt, and the marker update. IRREVERSIBLE (the trigger refuses d1 -> anything).
-//   reopen           closed G -> r2 G+1       pins: --expect-generation. Pre-flip rollback of the marker only; the D1 copies are removed by `rollback-import` first
-//   rollback-import  r2 or closed G (before the flip)  pins: --expect-generation. rollbackImport: deletes the D1 copies and the manifest in one fenced batch; R2 stays authoritative
+//   status           read-only: bytes digests, schema, marker, authorities, the freeze audit (R2 object ETag/size, fingerprints, P1-P5 and P7), the Diary queue, C2, pending facts, the frozen import cohort
+//   parity           read-only: the same plus the R2 snapshot against D1 byte for byte (verifyParity) and the exact stored manifest
+//   close            r2 G -> closed G+1       pins: generation, admission freeze pin, bytes. The freeze audit must be clean and equal the pin; its D1 side is re-asserted in the batch
+//   import           closed G (no marker move)  pins: generation, manifest digest, admission freeze pin, bytes. NO-GO unless every blocker is clear; every batch asserts closed at the pinned generation; the exact manifest is read back
+//   flip             closed G -> d1 G+1       pins: generation, manifest digest, admission pin, bytes, C2 control revision, C2 scope revision. Rechecks everything immediately before one fenced batch; IRREVERSIBLE
+//   reopen           closed G -> r2 G+1       pins: generation, bytes. Refused while any D1 copy of the moved documents exists: the rollback is verified from D1, not from the marker
+//   rollback-import  r2 or closed G (before the flip)  pins: generation, bytes. rollbackImport under a pinned marker, then a readback that no moved document and no manifest remains
 //
-// No retry, no repair, no delta: a refused or uncertain write ends in a readback and a STOP. Never calls Letterboxd, the Worker or the API. No document text, film name, code or rating is ever printed: only counts,
-// key kinds, digests and generations.
+// No retry of a write, no repair, no delta: a refused or uncertain write ends in a readback and a STOP. The D1 reads of the production path are strict (a response without a result array is an error, never an empty
+// result) and are NOT retried either (`retries: 0`). Never calls Letterboxd, the Worker or the API. No document text, film name, code or rating is ever printed: counts, reasons, digests and generations only.
+import {createHash,webcrypto} from 'node:crypto';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import {pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
+import {strictBinding} from './catalog-enrichment-activation-production.mjs';
 import {createS3Store} from './r2-s3-store.mjs';
 import {readCredentials} from './r2-snapshot-export.mjs';
+import {FreezeStop,readFreeze,readRatingsDocument,REGISTRY_KEY} from './letterboxd-admission-freeze-audit.mjs';
 import {inventory,MANIFEST_KEY,planImport,importDocuments,rollbackImport,verifyParity} from '../src/letterboxd-admission-documents-import.js';
-import {readAdmissionAuthority} from '../src/letterboxd-admission-authority.js';
-import {readOwned} from '../src/ratings-d1.js';
+import {scoped} from './bundle-scope.mjs';
+import * as RatingsD1 from '../src/ratings-d1.js';
+import * as LetterboxdAdmissionAuthority from '../src/letterboxd-admission-authority.js';
+import {ACTIVATION_SCOPE,activeConfigurationReasons,cutoffProblems} from '../src/catalog-enrichment-activation.js';
 import {H1_RULES} from '../src/domain/letterboxd-lid-only-proof.js';
 
+const {readAdmissionAuthority}=LetterboxdAdmissionAuthority;
+// The production readers (`src/letterboxd-admission-documents.js`) are Worker-scope code: they run here in the same scope the Worker bundle gives them (the way the A1 tests load them), so the manifest is proven by
+// the reader's OWN contract (`requireManifest`), not by a copy of it.
+let documents=null;
+function documentReaders(){
+ if(!documents){
+  const context=vm.createContext({RatingsD1,LetterboxdAdmissionAuthority,JSON,Object,Number,Promise,Error,Date,Map,Set,structuredClone,TextEncoder,Uint8Array,crypto:webcrypto});
+  vm.runInContext(scoped('src/letterboxd-admission-documents.js','LetterboxdAdmissionDocuments'),context);
+  documents=vm.runInContext('LetterboxdAdmissionDocuments',context);
+ }
+ return documents;
+}
 export const COMMANDS=['status','parity','close','import','flip','reopen','rollback-import'];
 const WRITES=['close','import','flip','reopen','rollback-import'];
-const NEEDS={close:['generation'],import:['generation','manifestSha256'],flip:['generation','manifestSha256'],reopen:['generation'],'rollback-import':['generation']};
-const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-manifest-sha256':'manifestSha256'};
-export const DIARY_STATE_KEY='letterboxd/diary/state.json';
+const NEEDS={
+ close:['generation','admissionSha256','bytesSha256'],
+ import:['generation','manifestSha256','admissionSha256','bytesSha256'],
+ flip:['generation','manifestSha256','admissionSha256','bytesSha256','controlRevision','scopeRevision'],
+ reopen:['generation','bytesSha256'],
+ 'rollback-import':['generation','bytesSha256'],
+};
+const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-manifest-sha256':'manifestSha256','--expect-admission-sha256':'admissionSha256','--expect-bytes-sha256':'bytesSha256','--expect-control-revision':'controlRevision','--expect-scope-revision':'scopeRevision'};
+// The authoritative shared Diary check queue (ADR 0221): `{films:{<lid>:entry}, backlog:{<lid>:record}}`. NOT `letterboxd/diary/state.json` (the Diary viewing/history cursor).
+export const DIARY_QUEUE_KEY='letterboxd/facts/scans/diary-identity.json';
 const LINK_REASONS=new Set(['linking','link_failed','lid_only_intent']);
 const RECEIPT_ORIGIN='rated_admission_retention';
+const MOVED_LIKE="letterboxd/imports/%";
 
-async function one(binding,sql,params=[]){return (await binding.prepare(sql).bind(...params).first())??null;}
-async function many(binding,sql,params=[]){return (await binding.prepare(sql).bind(...params).all()).results||[];}
+// The bytes that run: this operator and every first-party module it executes. A transitive import of these files that is not listed (the Node runtime, `node:` built-ins) is pinned only by the exact clean commit.
+const PINNED_FILES=['scripts/letterboxd-admission-cutover-production.mjs','scripts/letterboxd-admission-freeze-audit.mjs','scripts/catalog-enrichment-activation-production.mjs','scripts/d1-backfill.mjs','scripts/published-epg-production.mjs','scripts/r2-s3-store.mjs','scripts/r2-snapshot-export.mjs','scripts/bundle-scope.mjs',
+ 'src/letterboxd-admission-documents-import.js','src/letterboxd-admission-documents.js','src/letterboxd-admission-authority.js','src/ratings-d1.js','src/film-admission.js','src/catalog-enrichment-activation.js','src/domain/letterboxd-lid-only-proof.js'];
+export function bytesDigest(){
+ const list=PINNED_FILES.map(file=>[file,createHash('sha256').update(fs.readFileSync(new URL('../'+file,import.meta.url))).digest('hex')]);
+ return {sha256:createHash('sha256').update(JSON.stringify(list)).digest('hex'),files:list.length,operator:list[0][1]};
+}
 
-// ---- pure: what the frozen R2 cohort says is still in flight (a NO-GO under `closed`; nothing is repaired) ----------------------------------
-// -> {admittingCandidates, chunksWithoutReceipt, documents}. Counts only. `plan` is the output of planImport (`documents[].value` is parsed).
+async function one(binding,sql,params=[]){return (await many(binding,sql,params))[0]??null;}
+async function many(binding,sql,params=[]){
+ const result=await binding.prepare(sql).bind(...params).all();
+ if(!result||!Array.isArray(result.results))throw new OperatorStop('unknown_state',3,{reason:'read_malformed'});
+ return result.results;
+}
+
+// ---- pure: what the frozen R2 cohort says is still in flight (a NO-GO under `closed`; nothing is repaired) -----------------------------------
 export function pendingInR2(plan){
  let admitting=0,withoutReceipt=0;
  const keys=new Set(plan.documents.map(item=>item.key));
@@ -50,14 +87,26 @@ export function pendingInR2(plan){
  }
  return {admittingCandidates:admitting,chunksWithoutReceipt:withoutReceipt,documents:plan.documents.length};
 }
-// Pure. Counts Diary entries that are link intents (`linking`, `link_failed`, `lid_only_intent`) anywhere in the state document.
-export function diaryLinkIntents(value){
- let count=0;
- const walk=node=>{
-  if(Array.isArray(node)){for(const item of node)walk(item);return;}
-  if(node&&typeof node==='object'){if(typeof node.reason==='string'&&LINK_REASONS.has(node.reason))count++;for(const child of Object.values(node))if(child&&typeof child==='object')walk(child);}
- };
- walk(value);return count;
+// Pure. The Diary check queue of ADR 0221. An ABSENT document is an empty queue (positive absence: the read succeeded and found no part). A present document must have object `films` and (when present) object `backlog`
+// whose entries are objects; anything else is malformed and FAILS CLOSED, never counts as zero. -> {state, films, backlog, linkIntents, reservations, claimPending}
+export function diaryQueueState(doc){
+ if(doc===null||doc===undefined)return {state:'absent',films:0,backlog:0,linkIntents:0,reservations:0,claimPending:0};
+ const value=doc.value;
+ const object=item=>item!==null&&typeof item==='object'&&!Array.isArray(item);
+ if(!object(value))throw new OperatorStop('diary_queue_malformed',3,{reason:'not_an_object'});
+ if(value.films!==undefined&&!object(value.films))throw new OperatorStop('diary_queue_malformed',3,{reason:'films'});
+ if(value.backlog!==undefined&&!object(value.backlog))throw new OperatorStop('diary_queue_malformed',3,{reason:'backlog'});
+ const films=value.films||{},backlog=value.backlog||{};
+ let linkIntents=0,reservations=0,claimPending=0;
+ for(const entry of Object.values(films)){
+  if(!object(entry))throw new OperatorStop('diary_queue_malformed',3,{reason:'entry'});
+  if(typeof entry.reason==='string'&&LINK_REASONS.has(entry.reason))linkIntents++;
+  if(entry.reason==='claim_pending')claimPending++;
+  // any reservation (active or expired) is an old-key reservation that was never settled: unresolved
+  if(entry.reservation!==undefined&&entry.reservation!==null)reservations++;
+ }
+ for(const record of Object.values(backlog))if(!object(record))throw new OperatorStop('diary_queue_malformed',3,{reason:'backlog_entry'});
+ return {state:'present',films:Object.keys(films).length,backlog:Object.keys(backlog).length,linkIntents,reservations,claimPending};
 }
 
 // ---- state (read only) ------------------------------------------------------------------------------------------------
@@ -66,79 +115,143 @@ export async function readState(binding){
  try{
   const schema=await one(binding,'SELECT version FROM schema_contract WHERE id=1');
   const authority=await readAdmissionAuthority(env);
+  const activated=authority.installed?(await one(binding,'SELECT activated_at FROM letterboxd_admission_authority WHERE id=1'))?.activated_at??null:null;
   const ratings=await one(binding,'SELECT mode, cutover, generation FROM ratings_domain_authority WHERE id=1');
+  const filmPerson=await one(binding,'SELECT mode, cutover, generation FROM film_person_authority WHERE id=1');
   const receipts=await one(binding,"SELECT COUNT(*) AS n FROM canonical_write_receipt WHERE origin=? AND state='pending'",[RECEIPT_ORIGIN]);
-  const scopes=await many(binding,'SELECT scope, activated, enabled, cutoff_at, bootstrap_state FROM catalog_enrichment_scope ORDER BY scope');
-  const diary=await readOwned(env,DIARY_STATE_KEY);
-  if(!diary.owned)throw new OperatorStop('unknown_state',3,{reason:'ratings_domain_unavailable'});
+  const scopes=await many(binding,'SELECT scope, activated, enabled, cutoff_at, bootstrap_state, revision FROM catalog_enrichment_scope ORDER BY scope');
+  const control=await one(binding,'SELECT state, generation, revision FROM catalog_enrichment_control WHERE id=1');
+  const diary=await readRatingsDocument(binding,DIARY_QUEUE_KEY);
+  const moved=await many(binding,"SELECT key, COUNT(*) AS parts, MIN(etag) AS etag, MAX(etag) AS etag2 FROM ratings_document WHERE key LIKE ? GROUP BY key ORDER BY key",[MOVED_LIKE]);
   return {
    version:schema?Number(schema.version):null,
-   marker:{mode:authority.mode,generation:authority.generation,installed:authority.installed},
+   marker:{mode:authority.mode,generation:authority.generation,installed:authority.installed,activatedAt:activated},
    ratings:ratings?{mode:ratings.mode,cutover:ratings.cutover,generation:Number(ratings.generation)}:null,
+   filmPerson:filmPerson?{mode:filmPerson.mode,cutover:filmPerson.cutover}:null,
    pendingReceipts:receipts?Number(receipts.n):null,
-   diaryLinkIntents:diaryLinkIntents(diary.value),
-   scopes:scopes.map(row=>({scope:row.scope,activated:Number(row.activated),enabled:Number(row.enabled),cutoffAt:row.cutoff_at,bootstrap:row.bootstrap_state})),
+   diary:diaryQueueState(diary),
+   scopes:scopes.map(row=>({scope:row.scope,activated:Number(row.activated),enabled:Number(row.enabled),cutoffAt:row.cutoff_at,bootstrap:row.bootstrap_state,revision:Number(row.revision)})),
+   control:control?{state:control.state,generation:Number(control.generation),revision:Number(control.revision)}:null,
+   moved:moved.map(row=>({key:row.key,parts:Number(row.parts),etag:row.etag===row.etag2?row.etag:null})),
    h1RulesEmpty:H1_RULES.eligibleTypes.length===0&&H1_RULES.idBlockMarker===null,
   };
- }catch(error){if(error instanceof OperatorStop)throw error;throw new OperatorStop('unknown_state',3,{reason:error&&error.code?String(error.code):'read_failed'});}
+ }catch(error){
+  if(error instanceof OperatorStop)throw error;
+  if(error instanceof FreezeStop)throw new OperatorStop('unknown_state',3,{reason:error.reason});
+  throw new OperatorStop('unknown_state',3,{reason:error&&error.code?String(error.code):'read_failed'});
+ }
 }
-const view=state=>({schema:state.version,marker:state.marker,ratings:state.ratings});
+const view=state=>({schema:state.version,marker:state.marker,ratings:state.ratings,filmPerson:state.filmPerson});
 
-export function ratedScopeActive(state){const row=state.scopes.find(item=>item.scope==='rated');return Boolean(row&&row.activated===1&&row.enabled===1&&row.cutoffAt);}
+// C2 activation (card A2 prerequisite, ADR 0207 decision 1): the control is ACTIVE, exactly the rated scope is enabled and activated with a done bootstrap, and its approved cutoff is not later than the flip.
+// Film/Person and Ratings are open (an unrelated Ratings generation bump is allowed, a lost authority is not). -> the problems; empty = active.
+export function c2Problems(state,flipIso){
+ const problems=[];
+ if(!state.control||state.control.state!=='active')problems.push('c2_control_not_active');
+ const rows=state.scopes.map(row=>({scope:row.scope,activated:row.activated,enabled:row.enabled,cutoff_at:row.cutoffAt,bootstrap_state:row.bootstrap}));
+ for(const reason of activeConfigurationReasons(rows,null))problems.push('c2_'+reason);
+ const rated=state.scopes.find(row=>row.scope===ACTIVATION_SCOPE);
+ if(rated)for(const reason of cutoffProblems(rated.cutoffAt,flipIso))problems.push('c2_'+reason);
+ if(!state.filmPerson||state.filmPerson.mode!=='d1'||state.filmPerson.cutover!=='open')problems.push('film_person_not_open');
+ if(!state.ratings||state.ratings.mode!=='d1'||state.ratings.cutover!=='open')problems.push('ratings_not_open');
+ return problems;
+}
 
-// The planner of the frozen cohort: inventory (R2 read only), then planImport. -> {plan, pending}
+// The planner of the frozen cohort: inventory (R2 read only), then planImport.
 export async function frozenPlan(bucket){
  const snapshot=await inventory(bucket);
  const plan=planImport(snapshot);
  return {plan,pending:plan.manifest?pendingInR2(plan):null};
 }
-const blockers=({plan,pending},state)=>{
+export const blockers=({plan,pending},state,freeze)=>{
  const out=[];
  if(plan.blocked.length)out.push('plan_blocked');
  if(pending&&pending.admittingCandidates>0)out.push('admitting_candidates');
  if(pending&&pending.chunksWithoutReceipt>0)out.push('chunk_intent_without_receipt');
  if(state.pendingReceipts!==0)out.push('pending_receipts');
- if(state.diaryLinkIntents>0)out.push('diary_link_intents');
+ if(state.diary.linkIntents>0)out.push('diary_link_intents');
+ if(state.diary.reservations>0)out.push('diary_reservations');
+ if(freeze)for(const problem of freeze.problems)out.push('admission_'+problem);
  return out;
 };
 const planView=({plan,pending})=>({blocked:plan.blocked.map(item=>({reason:item.reason})),documents:plan.documents.length,manifestSha256:plan.manifestSha256,inventorySha256:plan.manifest?plan.manifest.inventorySha256:null,pending});
+const freezeView=freeze=>({pin:freeze.pin,object:freeze.object,registry:freeze.registry,d1:freeze.d1,counts:freeze.counts,problems:freeze.problems,r2Fingerprint:freeze.r2Fingerprint,d1Fingerprint:freeze.d1Fingerprint});
+async function freezeOf(binding,bucket){
+ try{return await readFreeze({binding,store:bucket});}
+ catch(error){if(error instanceof FreezeStop)throw new OperatorStop('freeze_'+error.reason,3,error.details);throw error;}
+}
 
-// ---- the marker transitions (ONE guarded statement each; the trigger of migration 0046 enforces the chain) ----------------
+// ---- pinned binding: every batch of a helper (import, rollback) carries an assertion of the marker at the PINNED generation, so a close/reopen/close between the caller's pin and the helper's own fresh read refuses whole ----
+export function pinnedBinding(binding,{modes,generation}){
+ return {...binding,async batch(statements){
+  const assertion=binding.prepare('UPDATE ratings_domain_cas SET ok=CASE WHEN EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode IN ('+modes.map(()=>'?').join(',')+') AND generation=?) THEN 1 ELSE 0 END WHERE id=1').bind(...modes,generation);
+  return binding.batch([assertion,...statements]);
+ }};
+}
+
+// ---- the fenced statements ------------------------------------------------------------------------------------------------
+const assertSql=(sql,params=[])=>['UPDATE ratings_domain_cas SET ok=CASE WHEN '+sql+' THEN 1 ELSE 0 END WHERE id=1',params];
+// The guard row `ratings_domain_cas` id=1 EXISTS (an UPDATE of a missing row would otherwise pass every assertion); first statement of every fenced batch.
+// An INSERT that trips the CHECK (ok >= 1) exactly when the row is absent; with the row present it inserts nothing.
+const GUARD_PRESENT=['INSERT INTO ratings_domain_cas (id,ok) SELECT 1,0 WHERE NOT EXISTS (SELECT 1 FROM ratings_domain_cas WHERE id=1)',[]];
+const ONE_ROW_CHANGED=['UPDATE ratings_domain_cas SET ok=CASE WHEN changes()=1 THEN 1 ELSE 0 END WHERE id=1',[]];
+// The D1 side of the admission freeze as observed: the row count and nothing newer than the newest `updated_at`.
+export function freezeAssertions(freeze){
+ return [assertSql('(SELECT COUNT(*) FROM film_rated_admission)=?',[freeze.d1.rows]),assertSql('NOT EXISTS (SELECT 1 FROM film_rated_admission WHERE updated_at > COALESCE(?,\'\'))',[freeze.d1.maxUpdatedAt])];
+}
+// The observed moved documents (key, etag, part count) and the manifest, fenced in 40-key slices (D1 allows 100 bound variables a statement). Exact set: nothing more and nothing less under the prefix.
+export function documentFence(moved){
+ const out=[assertSql('(SELECT COUNT(DISTINCT key) FROM ratings_document WHERE key LIKE ?)=?',[MOVED_LIKE,moved.length]),assertSql('(SELECT COUNT(*) FROM ratings_document WHERE key LIKE ?)=?',[MOVED_LIKE,moved.reduce((sum,item)=>sum+item.parts,0)])];
+ for(let index=0;index<moved.length;index+=40){
+  const slice=moved.slice(index,index+40);
+  out.push(assertSql('(SELECT COUNT(*) FROM ratings_document WHERE part=0 AND ('+slice.map(()=>'(key=? AND etag=?)').join(' OR ')+'))=?',[...slice.flatMap(item=>[item.key,item.etag]),slice.length]));
+ }
+ return out;
+}
 const TRANSITIONS={
- close:{from:'r2',to:'closed',sql:"UPDATE letterboxd_admission_authority SET mode='closed', generation=? WHERE id=1 AND mode='r2' AND generation=?"},
- reopen:{from:'closed',to:'r2',sql:"UPDATE letterboxd_admission_authority SET mode='r2', generation=? WHERE id=1 AND mode='closed' AND generation=?"},
+ close:{from:'r2',to:'closed'},
+ reopen:{from:'closed',to:'r2'},
 };
-export function transitionStatements(command,{generation}){
+export function transitionStatements(command,{generation,extra=[]}){
  const spec=TRANSITIONS[command];
  if(!spec)throw new OperatorStop('usage',2);
- return {target:{mode:spec.to,generation:generation+1},statements:[[spec.sql,[generation+1,generation]]]};
+ return {target:{mode:spec.to,generation:generation+1},statements:[
+  GUARD_PRESENT,
+  assertSql("EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode=? AND generation=?)",[spec.from,generation]),
+  ...extra,
+  ['UPDATE letterboxd_admission_authority SET mode=?, generation=? WHERE id=1 AND mode=? AND generation=?',[spec.to,generation+1,spec.from,generation]],
+  ONE_ROW_CHANGED,
+ ]};
 }
-// The flip: the assertion statements ride in the same batch as the marker update (a false condition fails the CHECK of `ratings_domain_cas` and rolls the whole batch back).
-export function flipStatements({generation,activatedAt}){
- const assert=(sql,params)=>['UPDATE ratings_domain_cas SET ok=CASE WHEN '+sql+' THEN 1 ELSE 0 END WHERE id=1',params];
+export function flipStatements({generation,activatedAt,freeze,moved,control,scope}){
  return {
   target:{mode:'d1',generation:generation+1},
   statements:[
-   assert("EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode='closed' AND generation=?)",[generation]),
-   assert('(SELECT COUNT(*) FROM ratings_document WHERE key=? AND part=0)=1',[MANIFEST_KEY]),
-   assert("NOT EXISTS (SELECT 1 FROM canonical_write_receipt WHERE origin=? AND state='pending')",[RECEIPT_ORIGIN]),
-   assert("EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope='rated' AND activated=1 AND enabled=1 AND cutoff_at IS NOT NULL)",[]),
+   GUARD_PRESENT,
+   assertSql("EXISTS (SELECT 1 FROM letterboxd_admission_authority WHERE id=1 AND mode='closed' AND generation=?)",[generation]),
+   ...freezeAssertions(freeze),
+   ...documentFence(moved),
+   assertSql("NOT EXISTS (SELECT 1 FROM canonical_write_receipt WHERE origin=? AND state='pending')",[RECEIPT_ORIGIN]),
+   assertSql("EXISTS (SELECT 1 FROM catalog_enrichment_control WHERE id=1 AND state='active' AND revision=?)",[control.revision]),
+   assertSql("(SELECT COUNT(*) FROM catalog_enrichment_scope)=1 AND EXISTS (SELECT 1 FROM catalog_enrichment_scope WHERE scope='rated' AND activated=1 AND enabled=1 AND bootstrap_state='done' AND cutoff_at=? AND revision=?)",[scope.cutoffAt,scope.revision]),
+   assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open') AND EXISTS (SELECT 1 FROM ratings_domain_authority WHERE id=1 AND mode='d1' AND cutover='open')",[]),
    ["UPDATE letterboxd_admission_authority SET mode='d1', generation=?, activated_at=? WHERE id=1 AND mode='closed' AND generation=?",[generation+1,activatedAt,generation]],
+   ONE_ROW_CHANGED,
   ],
  };
 }
 
-async function applyBatch(binding,plan,ctx,reachedState,{unchangedState}){
+async function applyBatch(binding,plan,ctx,{unchangedState,activatedAt=undefined}){
  if(ctx.track)ctx.track('unknown');
  let failure=null;
  try{await binding.batch(plan.statements.map(([sql,params])=>binding.prepare(sql).bind(...params)));}catch(error){failure=error;}
  let after=null;
  try{after=await readState(binding);}catch{after=null;}
- const reached=Boolean(after)&&after.marker.mode===reachedState.mode&&after.marker.generation===reachedState.generation;
+ const reached=Boolean(after)&&after.marker.mode===plan.target.mode&&after.marker.generation===plan.target.generation&&(activatedAt===undefined||after.marker.activatedAt===activatedAt);
  const unchanged=Boolean(after)&&after.marker.mode===unchangedState.mode&&after.marker.generation===unchangedState.generation;
  if(failure){
   // Only a PROVEN statement rejection with the marker untouched is "not applied"; anything else stays unproven and is never downgraded by a readback.
-  const rejected=failure instanceof D1Error&&failure.kind==='statement'&&unchanged;
+  const rejected=failure instanceof D1Error?failure.kind==='statement'&&unchanged:/CHECK constraint failed/i.test(String(failure&&failure.message))&&unchanged;
   if(ctx.track)ctx.track(rejected?'none':'unknown');
   throw new OperatorStop(rejected?'predicate_refused':'write_uncertain',3,{marker:after?after.marker:null,...(reached?{reachedByUnknownOutcome:true}:{})});
  }
@@ -147,72 +260,116 @@ async function applyBatch(binding,plan,ctx,reachedState,{unchangedState}){
  return after;
 }
 
-// verifyParity throws on a document that cannot be read (a damaged part, an unavailable domain): that is a STOP with its own reason, never a silent `equal`.
+// verifyParity throws on a document that cannot be read (a damaged part, an unavailable domain): a STOP with its own reason, never a silent `equal`.
 async function parityOf(binding,plan,bucket){
  try{return await verifyParity({DB:binding},plan,bucket);}
  catch(error){throw new OperatorStop('parity_unreadable',3,{reason:error&&error.code?String(error.code):'read_failed'});}
 }
+// The stored manifest must EQUAL the approved canonical manifest and satisfy the production reader's contract (`requireManifest`).
+async function exactManifest(binding,plan){
+ const stored=await readRatingsDocument(binding,MANIFEST_KEY).catch(()=>{throw new OperatorStop('manifest_unreadable',3);});
+ if(!stored||JSON.stringify(stored.value)!==JSON.stringify(plan.manifest))throw new OperatorStop('manifest_not_exact',3);
+ try{await documentReaders().validateStoredManifest({DB:binding});}catch(error){throw new OperatorStop('manifest_contract',3,{reason:error&&error.code?String(error.code):'invalid'});}
+}
+const movedCopies=state=>state.moved.length;
 
 // ---- commands ---------------------------------------------------------------------------------------------------------
 export async function execute(command,{binding,bucket,args={},now=()=>Date.now(),ctx={}}){
  const state=await readState(binding);
  const m=state.marker;
  if(state.version===null||state.version<46||!m.installed)throw new OperatorStop('marker_not_installed',3);
- if(command==='status'){
-  const out={operation:'status',writes:false,writeState:'none',state:view(state),pending:{receipts:state.pendingReceipts,diaryLinkIntents:state.diaryLinkIntents},c2:{ratedActive:ratedScopeActive(state),scopes:state.scopes.map(({scope,activated,enabled})=>({scope,activated,enabled}))},h1RulesEmpty:state.h1RulesEmpty};
-  if(bucket){const frozen=await frozenPlan(bucket);out.r2=planView(frozen);out.blockers=blockers(frozen,state);}
+ const bytes=bytesDigest();
+ if(command==='status'||command==='parity'){
+  const out={operation:command,writes:false,writeState:'none',bytes,state:view(state),
+   diary:state.diary,pending:{receipts:state.pendingReceipts},
+   c2:{problems:c2Problems(state,new Date(now()).toISOString()),control:state.control,scope:state.scopes.find(item=>item.scope===ACTIVATION_SCOPE)??null,scopes:state.scopes.length},
+   h1RulesEmpty:state.h1RulesEmpty,d1Copies:{documents:movedCopies(state)}};
+  if(bucket){
+   const frozen=await frozenPlan(bucket),freeze=await freezeOf(binding,bucket);
+   out.r2=planView(frozen);out.freeze=freezeView(freeze);out.blockers=blockers(frozen,state,freeze);
+   if(command==='parity'){
+    if(!frozen.plan.manifest)throw new OperatorStop('plan_blocked',3,{blocked:frozen.plan.blocked.map(item=>({reason:item.reason}))});
+    const parity=await parityOf(binding,frozen.plan,bucket);
+    out.equal=parity.equal;out.differences=parity.differences.map(item=>({kind:item.kind}));
+   }
+  }else if(command==='parity')throw new OperatorStop('configuration',2);
   return out;
  }
- if(command==='parity'){
-  if(!bucket)throw new OperatorStop('configuration',2);
-  const frozen=await frozenPlan(bucket);
-  if(!frozen.plan.manifest)throw new OperatorStop('plan_blocked',3,{blocked:frozen.plan.blocked.map(item=>({reason:item.reason}))});
-  const parity=await parityOf(binding,frozen.plan,bucket);
-  const stops=blockers(frozen,state);
-  return {operation:'parity',writes:false,writeState:'none',state:view(state),equal:parity.equal,differences:parity.differences.map(item=>({kind:item.kind})),blockers:stops,r2:planView(frozen)};
- }
  if(!WRITES.includes(command))throw new OperatorStop('usage',2);
+ if(bytes.sha256!==args.bytesSha256)throw new OperatorStop('bytes_pin_mismatch',3,{bytes});
  if(m.generation!==args.generation)throw new OperatorStop('generation_moved',3,{marker:m});
  if(state.ratings?.mode!=='d1'||state.ratings?.cutover!=='open')throw new OperatorStop('ratings_not_open',3,{ratings:state.ratings});
- if(command==='close'||command==='reopen'){
-  if(m.mode!==TRANSITIONS[command].from)throw new OperatorStop('marker_not_'+TRANSITIONS[command].from,3,{marker:m});
-  const plan=transitionStatements(command,{generation:m.generation});
-  const after=await applyBatch(binding,plan,ctx,plan.target,{unchangedState:m});
-  return {operation:command,writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after)};
+ if(command==='reopen'){
+  if(m.mode!=='closed')throw new OperatorStop('marker_not_closed',3,{marker:m});
+  if(movedCopies(state)>0)throw new OperatorStop('d1_copies_present',3,{documents:movedCopies(state)});
+  const plan=transitionStatements('reopen',{generation:m.generation});
+  const after=await applyBatch(binding,plan,ctx,{unchangedState:m});
+  return {operation:'reopen',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after)};
  }
  if(command==='rollback-import'){
   if(m.mode==='d1')throw new OperatorStop('rollback_after_flip',3);
+  const pinned=pinnedBinding(binding,{modes:[m.mode],generation:m.generation});
   if(ctx.track)ctx.track('unknown');
-  try{await rollbackImport({DB:binding});}catch(error){if(ctx.track)ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{reason:error&&error.code?String(error.code):'rollback_failed'});}
+  try{await rollbackImport({DB:pinned});}catch(error){throw new OperatorStop('write_uncertain',3,{reason:error&&error.code?String(error.code):'rollback_failed'});}
   const after=await readState(binding);
+  // the rollback is judged by what REMAINS in D1, never by the marker
+  if(movedCopies(after)!==0||after.marker.mode!==m.mode||after.marker.generation!==m.generation)throw new OperatorStop('write_uncertain',3,{reason:'rollback_not_verified',remaining:movedCopies(after),marker:after.marker});
   if(ctx.track)ctx.track('committed');
-  return {operation:command,writes:true,writeState:'committed',before:view(state),after:view(after)};
+  return {operation:command,writes:true,writeState:'committed',before:view(state),after:view(after),d1Copies:{documents:0}};
  }
- // import and flip need the frozen cohort and its digest pin
+ // close, import and flip read the original admission freeze (R2 object + D1 rows)
  if(!bucket)throw new OperatorStop('configuration',2);
+ const freeze=await freezeOf(binding,bucket);
+ if(freeze.problems.length)throw new OperatorStop('no_go',3,{blockers:freeze.problems.map(problem=>'admission_'+problem),freeze:freezeView(freeze)});
+ if(freeze.pin!==args.admissionSha256)throw new OperatorStop('admission_pin_mismatch',3,{freeze:freezeView(freeze)});
+ if(command==='close'){
+  if(m.mode!=='r2')throw new OperatorStop('marker_not_r2',3,{marker:m});
+  const plan=transitionStatements('close',{generation:m.generation,extra:freezeAssertions(freeze)});
+  const after=await applyBatch(binding,plan,ctx,{unchangedState:m});
+  return {operation:'close',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after),freeze:freezeView(freeze)};
+ }
+ // import and flip need the frozen cohort and its digest pin, under `closed`
  if(m.mode!=='closed')throw new OperatorStop('marker_not_closed',3,{marker:m});
  const frozen=await frozenPlan(bucket);
- const stops=blockers(frozen,state);
+ const stops=blockers(frozen,state,freeze);
  if(!frozen.plan.manifest||stops.length)throw new OperatorStop('no_go',3,{blockers:stops,r2:planView(frozen)});
  if(frozen.plan.manifestSha256!==args.manifestSha256)throw new OperatorStop('manifest_pin_mismatch',3,{r2:planView(frozen)});
  if(command==='import'){
+  const pinned=pinnedBinding(binding,{modes:['closed'],generation:m.generation});
   if(ctx.track)ctx.track('unknown');
   let result;
-  try{result=await importDocuments({DB:binding},frozen.plan);}
-  catch(error){throw new OperatorStop(error&&error.code==='diverged'?'diverged':'write_uncertain',3,{reason:error&&error.code?String(error.code):'import_failed',...(error&&error.detail&&error.detail.key?{kind:'document'}:{})});}
+  try{result=await importDocuments({DB:pinned},frozen.plan);}
+  catch(error){throw new OperatorStop(error&&error.code==='diverged'?'diverged':'write_uncertain',3,{reason:error&&error.code?String(error.code):'import_failed'});}
+  const after=await readState(binding);
+  if(after.marker.mode!=='closed'||after.marker.generation!==m.generation)throw new OperatorStop('write_uncertain',3,{reason:'marker_moved_during_import',marker:after.marker});
+  await exactManifest(binding,frozen.plan);
   const parity=await parityOf(binding,frozen.plan,bucket);
   if(!parity.equal)throw new OperatorStop('parity_mismatch',3,{differences:parity.differences.map(item=>({kind:item.kind}))});
   if(ctx.track)ctx.track('committed');
-  return {operation:'import',writes:true,writeState:'committed',imported:result.imported,skipped:result.skipped,manifest:result.manifest,parity:'equal',r2:planView(frozen)};
+  return {operation:'import',writes:true,writeState:'committed',imported:result.imported,skipped:result.skipped,manifest:result.manifest,manifestExact:true,parity:'equal',r2:planView(frozen),freeze:freezeView(freeze)};
  }
  // flip
- if(!ratedScopeActive(state))throw new OperatorStop('c2_not_active',3,{scopes:state.scopes.map(({scope,activated,enabled})=>({scope,activated,enabled}))});
+ const flipAt=new Date(now()).toISOString();
+ const problems=c2Problems(state,flipAt);
+ if(problems.length)throw new OperatorStop('c2_not_active',3,{problems});
  if(!state.h1RulesEmpty)throw new OperatorStop('h1_rules_not_empty',3);
+ const rated=state.scopes.find(item=>item.scope===ACTIVATION_SCOPE);
+ if(state.control.revision!==args.controlRevision||rated.revision!==args.scopeRevision)throw new OperatorStop('c2_pin_mismatch',3,{control:state.control,scope:{revision:rated.revision,cutoffAt:rated.cutoffAt}});
+ await exactManifest(binding,frozen.plan);
  const parity=await parityOf(binding,frozen.plan,bucket);
  if(!parity.equal)throw new OperatorStop('parity_mismatch',3,{differences:parity.differences.map(item=>({kind:item.kind}))});
- const plan=flipStatements({generation:m.generation,activatedAt:new Date(now()).toISOString()});
- const after=await applyBatch(binding,plan,ctx,plan.target,{unchangedState:m});
- return {operation:'flip',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after),irreversible:true,r2:planView(frozen)};
+ // the last awaited reads before the batch: the original admissions object and the registry are exactly as pinned
+ const last=await freezeOf(binding,bucket);
+ if(last.pin!==args.admissionSha256||last.problems.length)throw new OperatorStop('admission_moved',3,{freeze:freezeView(last)});
+ const plan=flipStatements({generation:m.generation,activatedAt:flipAt,freeze:last,moved:state.moved,control:state.control,scope:rated});
+ const after=await applyBatch(binding,plan,ctx,{unchangedState:m,activatedAt:flipAt});
+ // the verified effect: the production reader accepts the manifest at `d1`, the R2 copy still equals the D1 documents, and the frozen R2 objects did not move
+ await exactManifest(binding,frozen.plan);
+ const post=await parityOf(binding,frozen.plan,bucket);
+ const frozenAfter=await freezeOf(binding,bucket);
+ return {operation:'flip',writes:true,writeState:'committed',before:view(state),marker:plan.target,after:view(after),irreversible:true,
+  verified:{manifestExact:true,parityEqual:post.equal,admissionObjectUnchanged:frozenAfter.object.etag===last.object.etag&&frozenAfter.object.bytes===last.object.bytes,registryUnchanged:frozenAfter.registry.etag===last.registry.etag},
+  r2:planView(frozen),freeze:freezeView(last)};
 }
 
 // ---- CLI --------------------------------------------------------------------------------------------------------------
@@ -237,11 +394,11 @@ export function parseArgs(argv){
  if(parsed.confirm!==command)throw new OperatorStop('confirm',2);
  for(const need of NEEDS[command])if(parsed[need]===undefined)throw new OperatorStop('usage',2);
  const out={};
- if(!/^\d{1,9}$/.test(parsed.generation))throw new OperatorStop('usage',2);
- out.generation=Number(parsed.generation);
- if(parsed.manifestSha256!==undefined){
-  if(!NEEDS[command].includes('manifestSha256')||!/^[0-9a-f]{64}$/.test(parsed.manifestSha256))throw new OperatorStop('usage',2);
-  out.manifestSha256=parsed.manifestSha256;
+ for(const key of Object.keys(parsed)){
+  if(key==='target'||key==='confirm')continue;
+  if(!NEEDS[command].includes(key))throw new OperatorStop('usage',2);
+  if(['generation','controlRevision','scopeRevision'].includes(key)){if(!/^\d{1,9}$/.test(parsed[key]))throw new OperatorStop('usage',2);out[key]=Number(parsed[key]);}
+  else{if(!/^[0-9a-f]{64}$/.test(parsed[key]))throw new OperatorStop('usage',2);out[key]=parsed[key];}
  }
  return {command,args:out};
 }
@@ -253,8 +410,25 @@ function readStoreOf(env,fetchImpl){
  if(credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
  return createS3Store({credentials,fetchImpl});
 }
-// The S3 store already answers `get` with {etag, text()} and `list` with the complete listing (`truncated` false); the importer only reads through `list` and `get`.
-export function bucketOf(store){return {list:options=>store.list(options),get:key=>store.get(key)};}
+// The bucket the importer and the freeze audit read through. The listing is ONE PAGE per call (`listPage`), so the importer's own page bound (MAX_LIST_PAGES) applies and a truncated page without a continuation token, or
+// a repeated token, is an incomplete listing (a STOP), never a short complete one. `store.listPage`, `get` and `head` are the only calls: this bucket has no write.
+export function bucketOf(store){
+ const seen=new Set();
+ return {
+  async list({prefix,limit,cursor}={}){
+   if(!cursor)seen.clear();
+   const page=await store.listPage({prefix,limit,cursor});
+   if(page.truncated){
+    if(!page.cursor)throw new OperatorStop('listing_incomplete',3,{reason:'missing_continuation'});
+    if(page.cursor===cursor||seen.has(page.cursor))throw new OperatorStop('listing_incomplete',3,{reason:'repeated_continuation'});
+    seen.add(page.cursor);
+   }
+   return {objects:page.objects,truncated:page.truncated,cursor:page.cursor};
+  },
+  get:key=>store.get(key),
+  head:key=>store.head(key),
+ };
+}
 
 export async function runLetterboxdAdmissionCutover({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),deps=null}={}){
  const ctx={writeState:'none',bookmark:null};
@@ -266,11 +440,12 @@ export async function runLetterboxdAdmissionCutover({argv=process.argv,env=proce
   if(deps)({binding,bucket=null}=deps);
   else{
    target=productionTarget(env);
-   const adapter=trackProductionWrites(createD1Adapter({target,databaseId:PRODUCTION_DATABASE_ID,fetchImpl}),{writeState:'none'});
+   const adapter=createD1Adapter({target,databaseId:PRODUCTION_DATABASE_ID,fetchImpl,retries:0});
    const described=await adapter.describe();
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
-   binding=createPublishedBinding(adapter);
-   if(parsed.command!=='close'&&parsed.command!=='reopen'&&parsed.command!=='rollback-import')bucket=bucketOf(readStoreOf(env,fetchImpl));
+   const tracked=trackProductionWrites(adapter,ctx);
+   binding=strictBinding(createPublishedBinding(tracked),adapter);
+   if(!['reopen','rollback-import'].includes(parsed.command))bucket=bucketOf(readStoreOf(env,fetchImpl));
    if(WRITES.includes(parsed.command))ctx.bookmark=await readBookmark(target,fetchImpl);
   }
   const result=await execute(parsed.command,{binding,bucket,args:parsed.args,now,ctx:{track}});

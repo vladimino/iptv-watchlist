@@ -55,6 +55,9 @@ async function requireManifest(env){
  return {manifest,listed};
 }
 
+// AIR-608: the production reader's manifest contract, for the offline cutover operator to prove an imported manifest before the flip. Read only; throws the same typed errors the readers throw.
+export async function validateStoredManifest(env){const {listed}=await requireManifest(env);return {keys:listed.size};}
+
 // -> {value,etag}; `value` is null for a document that is absent after a complete import. Never reads R2.
 export async function readDocument(env,key){
  const {listed}=await requireManifest(env);
