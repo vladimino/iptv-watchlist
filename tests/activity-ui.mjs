@@ -27,6 +27,11 @@ assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет п�
  html=card({...hour,status:'waiting',reason:'recovery_waiting'});assert.match(html,/Discovery ждёт повтора/);
  html=card({...hour,status:'blocked',reason:'projector_window'});assert.match(html,/временный отказ/);assert.doesNotMatch(html,/projector_window/,'a reason code is not printed');
  html=card({...hour,status:'failed',reason:'recovery_exhausted'});assert.match(html,/остановлен после повторных ошибок/);
+ // AIR-695: the same zero-progress card is a warning in the badge, and the title and counters are unchanged.
+ {const noProgress={...hour,added:0,checked:0,chunks:0,remaining:null,queueEmpty:false},ok={...hour,added:0,checked:5};
+  context.discoveryEvent=noProgress;assert.equal(vm.runInContext('eventPresentationStatus(discoveryEvent)',context),'warning','no useful progress is a warning');
+  context.discoveryEvent=ok;assert.equal(vm.runInContext('eventPresentationStatus(discoveryEvent)',context),'success','processed observations without new films stay a success');
+  html=card(noProgress);assert.match(html,/полезного прогресса за час нет/);assert.match(html,/<dt>Новых фильмов<\/dt><dd>0<\/dd>/);}
  html=card({...hour,added:0,checked:0,remaining:null,queueEmpty:false});assert.match(html,/<dt>Осталось в очереди<\/dt><dd>неизвестно<\/dd>/,'an unknown remainder is not a zero');
  const unknown=card({...hour,incomplete:true,from:null,chunks:null,checked:null,added:null,reused:null,screenedOut:null,touched:null,tmdbCalls:null,remaining:null,reason:'outbox_full'});
  assert.match(unknown,/Отчёт за час неполный/);assert.match(unknown,/<dt>Новых фильмов<\/dt><dd>неизвестно<\/dd>/);assert.match(unknown,/<dt>Разобрано наблюдений<\/dt><dd>неизвестно<\/dd>/);assert.doesNotMatch(unknown,/<dd>0<\/dd>/,'an unread period never shows 0');assert.doesNotMatch(unknown,/Новых фильмов не найдено|пуста/);
