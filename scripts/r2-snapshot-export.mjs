@@ -127,7 +127,12 @@ export function parseListing(xml){
  const nextCursor=element(xml,'NextContinuationToken');
  if(truncated&&!nextCursor)throw new ExportError('protocol','Truncated listing page lacks a continuation token');
  const objects=[];
- for(const block of xml.match(/<Contents>[\s\S]*?<\/Contents>/g)||[]){
+ const blocks=xml.match(/<Contents>[\s\S]*?<\/Contents>/g)||[];
+ // A truncated or malformed Contents element is never silently dropped: every opening tag must close, and a claimed KeyCount must equal what was parsed.
+ if((xml.match(/<Contents>/g)||[]).length!==blocks.length)throw new ExportError('protocol','Listing page has an incomplete Contents element');
+ const claimed=element(xml,'KeyCount');
+ if(claimed!==null&&(!/^\d+$/.test(claimed)||Number(claimed)!==blocks.length))throw new ExportError('protocol','Listing KeyCount does not match its entries');
+ for(const block of blocks){
   const key=element(block,'Key'),size=Number(element(block,'Size')),etag=unquoteEtag(element(block,'ETag')),lastModified=element(block,'LastModified');
   if(!key||!Number.isSafeInteger(size)||size<0||!etag)throw new ExportError('protocol','Invalid listing metadata');
   objects.push({key,size,etag,lastModified});
@@ -138,7 +143,7 @@ export function parseListing(xml){
 async function atomicJson(filename,value){const temporary=filename+'.'+randomUUID()+'.tmp';await writeFile(temporary,JSON.stringify(value,null,2)+'\n',{mode:0o600});await rename(temporary,filename);}
 async function jsonIfPresent(filename){try{return JSON.parse(await readFile(filename,'utf8'));}catch(error){if(error.code==='ENOENT')return null;throw error;}}
 async function hashFile(filename){const hash=createHash('sha256');let size=0;for await(const chunk of createReadStream(filename)){hash.update(chunk);size+=chunk.length;}return {sha256:hash.digest('hex'),size};}
-function collectPages(records){
+export function collectPages(records){
  const objects=[],keys=new Set();let expectedCursor=null,complete=false;
  for(const record of records){
   if(record.requestCursor!==expectedCursor||complete)throw new ExportError('listing','Broken listing cursor chain');

@@ -425,9 +425,10 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
 // by the Discovery authority (`discovery_authority`): its mode, cutover and generation are read before the first page and after the last, and every Discovery write moves the
 // generation, so an unchanged generation under `d1`/`open` means no Discovery write happened while the tables were read. Anything else is an incoherent acquisition (`coherent: false`).
 export async function readFamilyBSources(db,{pageSize=500,maxPages=10000}={}){
- const all=async(sql,params=[])=>(await db.prepare(sql).bind(...params).all()).results||[];
+ // A read whose answer carries no result array is a failed read, never an empty table or the end of a pagination.
+ const all=async(sql,params=[])=>{const answer=await db.prepare(sql).bind(...params).all();if(!Array.isArray(answer?.results))throw new Error('identity_evidence_family_b_read_malformed');return answer.results;};
  const first=async(sql,params=[])=>(await all(sql,params))[0]||null;
- const marker=async()=>{const row=await first('SELECT mode,cutover,generation FROM discovery_authority WHERE id=1');return row&&{mode:row.mode,cutover:row.cutover,generation:Number(row.generation)};};
+ const marker=async()=>{const row=await first('SELECT mode,cutover,generation FROM discovery_authority WHERE id=1');const generation=Number(row?.generation);return row&&typeof row.mode==='string'&&typeof row.cutover==='string'&&row.generation!==null&&row.generation!==''&&Number.isSafeInteger(generation)&&generation>=0?{mode:row.mode,cutover:row.cutover,generation}:null;};
  const page=async(table,columns,keyColumns,where='')=>{
   const rows=[];let cursor=null;
   for(let i=0;i<maxPages;i++){
@@ -436,7 +437,11 @@ export async function readFamilyBSources(db,{pageSize=500,maxPages=10000}={}){
    const batch=await all(sql,[...(cursor||[]),pageSize]);
    rows.push(...batch);
    if(batch.length<pageSize)return rows;
-   const last=batch[batch.length-1];cursor=keyColumns.map(column=>last[column]);
+   const last=batch[batch.length-1];
+   const next=keyColumns.map(column=>last[column]);
+   // The keyset must advance strictly: a repeated or missing key would loop or silently stop short.
+   if(next.some(value=>value===undefined||value===null)||(cursor&&next.every((value,index)=>value===cursor[index])))throw new Error('identity_evidence_family_b_page_stalled');
+   cursor=next;
   }
   throw new Error('identity_evidence_family_b_page_limit');
  };
@@ -446,7 +451,8 @@ export async function readFamilyBSources(db,{pageSize=500,maxPages=10000}={}){
  const history=await page('discovery_decision_history','observation_key,revision,generation,written_at,writer,payload_json',['observation_key','revision']);
  const decisions=await page('discovery_decision','observation_key,decision_hash,status,tmdb_id,media_kind,payload_json',['observation_key']);
  const intents=await page('discovery_intent','idempotency_key,kind,state,observation_key,receipt_json,issued_json,command_json,expected_hash',['idempotency_key'],"kind IN ('identity_assign','identity_reject','identity_revoke') AND state='receipt'");
- const n=async sql=>Number((await first(sql))?.n??0);
+ // A COUNT answer must be exactly one row with a non-negative integer: a missing row is a failed read, never zero.
+ const n=async sql=>{const rows=await all(sql);const value=rows.length===1?rows[0]?.n:undefined;if(value===undefined||value===null||value===''||!Number.isSafeInteger(Number(value))||Number(value)<0)throw new Error('identity_evidence_family_b_count_unreadable');return Number(value);};
  const counts={observations:await n('SELECT COUNT(*) AS n FROM discovery_observation'),confirmedTmdbIds:await n('SELECT COUNT(*) AS n FROM discovery_observation WHERE confirmed_tmdb_id IS NOT NULL'),admissions:await n('SELECT COUNT(*) AS n FROM discovery_admission')};
  const end=await marker();
  let reason=null;
