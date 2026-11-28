@@ -220,6 +220,17 @@ for(const [name,sql,expected] of [
  out=await run(f,['--target','iptv','--status'],during,duringDb);assert.equal(out.result.reason,'freeze_admissions_object_moved','a change after the first HEAD/GET/HEAD-equivalent reads and before the last read is caught by the final HEAD');
 }
 
+// ===== 3c. P7 changing between the per-row observation and the sampled count is a problem of the snapshot, never a degraded pinned count =====
+{
+ const f=fresh();let hit=false;
+ const out=await run(f,['--target','iptv','--status'],b0,{onQuery:async text=>{if(!hit&&/^SELECT COUNT\(\*\) AS n FROM film_rated_admission a WHERE/.test(text)){hit=true;sqlite(f,"UPDATE film_external_id SET trusted=0 WHERE value='101'");}}});
+ assert.equal(hit,true);assert.ok(out.result.blockers.includes('admission_p7_unhealthy'),'a health change after the per-row read is caught by the all-rows-healthy invariant: '+JSON.stringify(out.result.blockers));
+ // and it is a NO-GO at close (the pin would otherwise accept a lower sampled count)
+ const g=fresh();let again=false;
+ const closed=await run(g,pins('close',P({admission:ADMISSION_PIN})),b0,{onQuery:async text=>{if(!again&&/^SELECT COUNT\(\*\) AS n FROM film_rated_admission a WHERE/.test(text)){again=true;sqlite(g,"UPDATE film_external_id SET trusted=0 WHERE value='102'");}}});
+ assert.equal(closed.exit,3);assert.equal(closed.result.reason,'no_go');assert.equal(marker(g).mode,'r2');
+}
+
 // ===== 4. close: pins, the freeze, one fenced batch (the D1 admission side is asserted in the batch) =====
 {
  const f=fresh();
@@ -266,6 +277,11 @@ const imp=(f,bucket,over={},opts={})=>run(f,pins('import',P({generation:1,admiss
  const parity=await run(f,['--target','iptv','--parity'],b0);assert.equal(parity.exit,0,JSON.stringify(parity.result));assert.equal(parity.result.equal,true);assert.deepEqual(parity.result.blockers,[]);assert.equal(parity.result.go,true);assert.deepEqual(parity.result.exactManifest,{ok:true});
  const late=makeBucket(cohort());late.put(K1,JSON.stringify({candidates:{c1:{state:'verified'},c2:{state:'verified'}}}));
  const drift=await run(f,['--target','iptv','--parity'],late);assert.equal(drift.exit,3,'a mismatch is an unambiguous NO-GO');assert.equal(drift.result.reason,'no_go');assert.equal(drift.result.details.go,false);assert.equal(drift.result.details.equal,false);assert.ok(drift.result.details.differences.some(item=>item.kind==='d1_differs'));
+ // readiness is separate from the data verdict: a clean copy with a paused C2 control, or with the marker not closed, is a NO-GO although the data parity is fine
+ {const g=closedFresh();await imp(g,b0);sqlite(g,"UPDATE catalog_enrichment_control SET state='paused',revision=3,generation=2");
+  const out=await run(g,['--target','iptv','--parity'],b0);assert.equal(out.exit,3);assert.equal(out.result.details.dataParityGo,true);assert.equal(out.result.details.readiness.go,false);assert.ok(out.result.details.readiness.reasons.includes('c2_control_not_active'));assert.equal(out.result.details.go,false);}
+ {const g=closedFresh();await imp(g,b0);sqlite(g,"UPDATE letterboxd_admission_authority SET mode='r2',generation=2");
+  const out=await run(g,['--target','iptv','--parity'],b0);assert.equal(out.exit,3);assert.ok(out.result.details.readiness.reasons.includes('marker_not_closed'));}
  // before any import: NO-GO (nothing in D1, no manifest)
  const pre=await run(closedFresh(),['--target','iptv','--parity'],b0);assert.equal(pre.exit,3);assert.equal(pre.result.reason,'no_go');assert.ok(pre.result.details.reasons.includes('parity_mismatch'));
  // a corrupt but correctly hashed manifest: the read-only parity now reports the EXACT manifest verdict, not only the importer's weaker comparison
@@ -405,6 +421,29 @@ const flip=(f,bucket,over={},opts={})=>run(f,pins('flip',P({generation:1,admissi
   assert.ok(out.result.details[expectField].includes(expectValue),name+': '+JSON.stringify(out.result.details));
   assert.equal(marker(f).mode,'d1','no rollback: the marker remains d1 ('+name+')');
  }
+}
+
+// ===== 7d. an ACKNOWLEDGED batch with an unavailable readback is committed-but-unverified; transport unreadability is not a proven violation =====
+{
+ for(const [name,make] of [
+  ['flip',async()=>{const f=await imported();return {f,argv:pins('flip',P({generation:1,admission:ADMISSION_PIN,manifest:MANIFEST})),bucket:b0,expected:{mode:'d1',generation:2}};}],
+  ['close',async()=>{const f=fresh();return {f,argv:pins('close',P({admission:ADMISSION_PIN})),bucket:b0,expected:{mode:'closed',generation:1}};}],
+ ]){
+  const {f,argv,bucket,expected}=await make();let acknowledged=false;
+  const out=await run(f,argv,bucket,{onBatch:async()=>{acknowledged=true;},onQuery:async()=>{if(acknowledged)throw new Error('read unavailable');}});
+  assert.equal(out.exit,3,name);assert.equal(out.result.reason,'committed_unverified',name+': '+JSON.stringify(out.result));
+  assert.equal(out.result.writeState,'committed',name);assert.equal(out.result.writes,true);assert.equal(out.result.retry,false);
+  assert.equal(out.result.details.committed,true);assert.equal(out.result.details.observedMarker,null,'the observed readback is explicitly unknown');assert.equal(out.result.details.readback,'unavailable');
+  assert.deepEqual({mode:out.result.details.expectedMarker.mode,generation:out.result.details.expectedMarker.generation},expected,name);
+  assert.equal(marker(f).mode,expected.mode,name+': the effect is real');
+ }
+ // post-flip: a TRANSPORT failure reading the manifest proves nothing (unproven); a damaged manifest is a proven violation
+ {const f=await imported();let flipped=false;
+  const out=await run(f,pins('flip',P({generation:1,admission:ADMISSION_PIN,manifest:MANIFEST})),b0,{onBatch:async()=>{flipped=true;},onQuery:async text=>{if(flipped&&text.includes('documents-manifest.json'))throw new Error('transport');}});
+  assert.equal(out.result.reason,'committed_unverified');assert.ok(out.result.details.unproven.includes('manifest_unreadable'));assert.ok(!out.result.details.violations.includes('manifest_check_failed'),'not a proven violation');assert.equal(out.result.details.verified.manifestExact,null);assert.equal(marker(f).mode,'d1');}
+ {const f=await imported();let flipped=false,damaged=false;
+  const out=await run(f,pins('flip',P({generation:1,admission:ADMISSION_PIN,manifest:MANIFEST})),b0,{onBatch:async()=>{flipped=true;},onQuery:async text=>{if(flipped&&!damaged&&text.includes('documents-manifest.json')){damaged=true;sqlite(f,"UPDATE ratings_document SET body='{}' WHERE key='letterboxd/imports/documents-manifest.json'");}}});
+  assert.equal(out.result.reason,'committed_unverified');assert.ok(out.result.details.violations.includes('manifest_check_failed'),JSON.stringify(out.result.details));assert.equal(out.result.details.verified.manifestExact,false);assert.equal(marker(f).mode,'d1');}
 }
 
 // ===== 8. the production transports (mocked, no live request): strict D1 reads, the bounded S3 listing, no write retry =====

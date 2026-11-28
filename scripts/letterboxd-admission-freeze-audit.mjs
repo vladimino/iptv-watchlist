@@ -144,7 +144,11 @@ export async function readFreeze({binding,store}){
  const records=new Map();
  for(const factKey of needed){const doc=recordDocs.get(FACT_RECORD(factKey));if(doc&&plain(doc.value))records.set(factKey,doc.value);}
  const audit=compareFreeze({receipts,rows,links,records});
+ // P7 is read twice (per row in ADMISSION_SQL and here as one count). The later count must be a finite integer and EXACTLY the audited row count: a health change between the two observations is a problem of
+ // the snapshot, never a lower count accepted as the pinned condition. The batch then fences the all-healthy invariant (every row healthy).
  const healthy=Number((await strictAll(binding,'SELECT COUNT(*) AS n FROM film_rated_admission a WHERE '+HEALTHY_SQL))[0]?.n);
+ if(!Number.isSafeInteger(healthy)||healthy<0)throw new FreezeStop('read_malformed');
+ if(healthy!==rows.length&&!audit.problems.includes('p7_unhealthy'))audit.problems.push('p7_unhealthy');
  // the FINAL re-pin of the object and the registry, after every other read
  const last=await store.head(RATED_RECEIPT_KEY);
  if(!last||last.etag!==body.etag)throw new FreezeStop('admissions_object_moved');

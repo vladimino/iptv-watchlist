@@ -213,7 +213,8 @@ export function freezeAssertions(freeze,{diary}={}){
   const slice=freeze.fence.rows.slice(index,index+40);
   out.push(assertSql('(SELECT COUNT(*) FROM film_rated_admission WHERE ('+ROW_SQL+') IN ('+slice.map(()=>'?').join(',')+'))=?',[...slice,slice.length]));
  }
- out.push(assertSql('(SELECT COUNT(*) FROM film_rated_admission a WHERE '+HEALTHY_SQL+')=?',[freeze.fence.healthy]));
+ // the invariant is ALL rows healthy (the audit refuses anything else), so the batch asserts the healthy count equals the number of rows, not a sampled count
+ out.push(assertSql('(SELECT COUNT(*) FROM film_rated_admission a WHERE '+HEALTHY_SQL+')=?',[freeze.fence.rows.length]));
  const versions=[...freeze.fence.documents,...(diary?[{key:DIARY_QUEUE_KEY,etag:diary.etag}]:[])];
  for(let index=0;index<versions.length;index+=40){
   const slice=versions.slice(index,index+40);
@@ -271,6 +272,8 @@ async function applyBatch(binding,plan,ctx,{unchangedState,activatedAt=undefined
  if(ctx.track)ctx.track('unknown');
  let failure=null;
  try{await binding.batch(plan.statements.map(([sql,params])=>binding.prepare(sql).bind(...params)));}catch(error){failure=error;}
+ // an ACKNOWLEDGED atomic batch is a confirmed effect (the production tracker keeps it as `committed` too), whatever the readback says afterwards
+ if(!failure&&ctx.track)ctx.track('committed');
  let after=null;
  try{after=await readState(binding);}catch{after=null;}
  const reached=Boolean(after)&&after.marker.mode===plan.target.mode&&after.marker.generation===plan.target.generation&&(activatedAt===undefined||after.marker.activatedAt===activatedAt);
@@ -281,8 +284,9 @@ async function applyBatch(binding,plan,ctx,{unchangedState,activatedAt=undefined
   if(ctx.track)ctx.track(rejected?'none':'unknown');
   throw new OperatorStop(rejected?'predicate_refused':'write_uncertain',3,{marker:after?after.marker:null,...(reached?{reachedByUnknownOutcome:true}:{})});
  }
- if(!after||!reached)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',marker:after?after.marker:null});
- if(ctx.track)ctx.track('committed');
+ // acknowledged, but the immediate readback is unavailable: committed but UNVERIFIED. The confirmed effect and the expected marker are preserved and the observed marker is explicitly unknown; no retry, no repair.
+ if(!after)throw new OperatorStop('committed_unverified',3,{committed:true,irreversible:plan.target.mode==='d1',expectedMarker:{...plan.target,...(activatedAt!==undefined?{activatedAt}:{})},observedMarker:null,readback:'unavailable',note:'the atomic batch was acknowledged; verify by reading, never retry'});
+ if(!reached){if(ctx.track)ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',marker:after.marker});}
  return after;
 }
 
@@ -291,11 +295,19 @@ async function parityOf(binding,plan,bucket){
  try{return await verifyParity({DB:binding},plan,bucket);}
  catch(error){throw new OperatorStop('parity_unreadable',3,{reason:error&&error.code?String(error.code):'read_failed'});}
 }
-// The stored manifest must EQUAL the approved canonical manifest and satisfy the production reader's contract (`requireManifest`).
+// The stored manifest must EQUAL the approved canonical manifest and satisfy the production reader's contract (`requireManifest`). The reasons separate a PROVEN violation (a damaged document, a different manifest, a
+// contract error of the reader) from an UNREADABLE one (a transport or response failure, which proves nothing about the manifest).
 async function exactManifest(binding,plan){
- const stored=await readRatingsDocument(binding,MANIFEST_KEY).catch(()=>{throw new OperatorStop('manifest_unreadable',3);});
+ let stored;
+ try{stored=await readRatingsDocument(binding,MANIFEST_KEY);}
+ catch(error){throw error instanceof FreezeStop&&error.reason==='document_unreadable'?new OperatorStop('manifest_damaged',3,{kind:error.details&&error.details.kind}):new OperatorStop('manifest_unreadable',3);}
  if(!stored||JSON.stringify(stored.value)!==JSON.stringify(plan.manifest))throw new OperatorStop('manifest_not_exact',3);
- try{await documentReaders().validateStoredManifest({DB:binding});}catch(error){throw new OperatorStop('manifest_contract',3,{reason:error&&error.code?String(error.code):'invalid'});}
+ try{await documentReaders().validateStoredManifest({DB:binding});}
+ catch(error){
+  const code=error&&error.code?String(error.code):'';
+  if(/^admission_documents_/.test(code)&&code!=='admission_documents_unavailable')throw new OperatorStop('manifest_contract',3,{reason:code});
+  throw new OperatorStop('manifest_unreadable',3);
+ }
 }
 const movedCopies=state=>state.moved.length;
 
@@ -326,8 +338,13 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
   const manifest=await manifestVerdict(binding,frozen.plan);
   out.equal=parity.equal;out.differences=parity.differences.map(item=>({kind:item.kind}));out.exactManifest=manifest;
   const reasons=[...out.blockers,...(parity.equal?[]:['parity_mismatch']),...(manifest.ok?[]:['manifest_'+manifest.reason])];
-  out.go=reasons.length===0;
-  if(!out.go)throw noGo('no_go',{...out,reasons});
+  // `dataParityGo` is the DATA verdict only (blockers, byte parity, exact manifest). `go` also requires the activation prerequisites the flip itself enforces: the marker `closed`, an active C2, open authorities and
+  // empty H1 rules, so a clean copy is never read as readiness.
+  out.dataParityGo=reasons.length===0;
+  const readiness=[...(m.mode==='closed'?[]:['marker_not_closed']),...out.c2.problems,...(state.h1RulesEmpty?[]:['h1_rules_not_empty'])];
+  out.readiness={go:readiness.length===0,reasons:readiness};
+  out.go=out.dataParityGo&&out.readiness.go;
+  if(!out.go)throw noGo('no_go',{...out,reasons:[...reasons,...readiness]});
   return out;
  }
  if(!WRITES.includes(command))throw new OperatorStop('usage',2);
@@ -407,7 +424,12 @@ export async function execute(command,{binding,bucket,args={},now=()=>Date.now()
  // The flip is COMMITTED and irreversible from here. Every postcondition is verified and reported field by field. A failed or unproven one is an explicit committed-but-unverified STOP (marker, generation,
  // activated_at, per-field evidence, retry false, no rollback), never a success and never a retryable failure.
  const verified={manifestExact:null,parityEqual:null,admissionObjectUnchanged:null,registryUnchanged:null},unproven=[],violations=[];
- try{await exactManifest(binding,frozen.plan);verified.manifestExact=true;}catch{verified.manifestExact=false;violations.push('manifest_check_failed');}
+ try{await exactManifest(binding,frozen.plan);verified.manifestExact=true;}
+ catch(error){
+  // a transport failure proves nothing about the manifest: unproven. A damaged document, another manifest or a contract error of the reader is a proven violation.
+  if(error instanceof OperatorStop&&error.reason==='manifest_unreadable'){verified.manifestExact=null;unproven.push('manifest_unreadable');}
+  else{verified.manifestExact=false;violations.push('manifest_check_failed');}
+ }
  try{
   const post=await parityOf(binding,frozen.plan,bucket);
   verified.parityEqual=post.equal;
