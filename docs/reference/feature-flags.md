@@ -70,7 +70,7 @@ Two environment names are read by Worker code but are not feature flags: they ar
 
 ### Durable control rows that are not Worker variables
 
-`upstream_coordination` (migration 0045, AIR-604) is a D1 mode row, not an environment variable and not a `feature_flags` entry: `off` (the default; an absent row, an absent table or an unreadable row), `observe` or `enforce` for the shared upstream cooldown ([contract](integrations/upstream-cooldown.md)). Moving it off `off` is the work of the follow-up cards of ADR 0207 decision 7 (UC2-UC3); its lifecycle disposition (retire or retain as a permanent gate) is decided at that rollout, not here. A mode change is an owner production operation, rollback is `off` and needs no code revert. Read the present value live from D1, never from this page.
+`upstream_coordination` (migration 0045, AIR-604) is a D1 mode row, not an environment variable and not a `feature_flags` entry: `off` (the default; an absent row, an absent table or an unreadable row), `observe` or `enforce` for the shared upstream cooldown ([contract](integrations/upstream-cooldown.md)). Moving it off `off` is the work of the follow-up cards of ADR 0207 decision 7 (UC2-UC3); its lifecycle disposition (retire or retain as a permanent gate) is decided at that rollout, not here. A mode change is an owner production operation through `scripts/upstream-cooldown-mode-production.mjs` ([runbook](../runbooks/upstream-cooldown-observe.md)), rollback is `off` and needs no code revert. Read the present value live from D1, never from this page.
 
 ## Reading the deployed values
 
