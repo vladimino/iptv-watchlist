@@ -30,13 +30,20 @@ const template=path.join(root,'template.sqlite');
  const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 }
+// The chain WITHOUT 0055 (ratings_view has no fact_key index): the section 'projection index 0055' proves the same planner verdicts on both.
+const template54=path.join(root,'template54.sqlite');
+{
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name<'0055').sort();
+ assert.equal(chain.at(-1).slice(0,4),'0054');
+ assert.equal(sqlite(template54,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
+}
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
 const BASELINE="INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:01.000Z');";
 let n=0;
-function database(stage='open'){
+function database(stage='open',source=template){
  const file=path.join(root,'c-'+(n++)+'.sqlite');
- fs.copyFileSync(template,file);
+ fs.copyFileSync(source,file);
  if(['r2','prepared','open','held'].includes(stage))assert.equal(sqlite(file,VERIFY).status,0);
  if(['prepared','open','held'].includes(stage))assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
  if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
@@ -312,6 +319,25 @@ await refusal('movie projection row carries another key',file=>{seedFilm(file,1)
 {
  const file=database();seedFilm(file,1);seedRatings(file,'AAA1',1);assert.equal(sqlite(file,"DELETE FROM ratings_view").status,0);
  assert.equal((await planLetterboxdClaim(envOf(file),I)).verdict,'pass','a missing projection is not a conflict (the link documents prove)');
+}
+// Section 'projection index 0055' (AIR-653): the planner's projection statement (`alias_id=? OR alias_id=? OR fact_key=?`) was a table scan and is index-served once migration 0055 is applied.
+// The verdicts must be identical on the chain without and with the index, for each projection conflict the statement exists to find.
+for(const [name,source] of [['without 0055',template54],['with 0055',template]]){
+ for(const [what,mutate,reason] of [
+  ['the lid alias row carries another key',file=>assert.equal(sqlite(file,"UPDATE ratings_view SET fact_key='tmdb-2000' WHERE alias_id='AAA1'").status,0),'ratings_alias_points_elsewhere'],
+  ['the movie alias row carries another key',file=>assert.equal(sqlite(file,"UPDATE ratings_view SET fact_key='tmdb-2000' WHERE alias_id='tmdb_1'").status,0),'ratings_alias_points_elsewhere'],
+  ['a rival (third) alias shares the fact key',file=>assert.equal(sqlite(file,"INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('RIVAL','tmdb-1',NULL,NULL,0,0,'"+U+"')").status,0),'ratings_alias_ambiguous'],
+ ]){
+  const file=database('open',source);seedFilm(file,1);seedRatings(file,'AAA1',1);mutate(file);
+  const env=envOf(file),before=dump(file),plan=await planLetterboxdClaim(env,I);
+  assert.deepEqual([plan.verdict,plan.reason],['conflict',reason],name+': '+what);
+  assert.equal((await applyLetterboxdClaim(env,{...REQ,...I})).state,'refused',name+': '+what+' is refused');
+  assert.equal(dump(file),before,name+': '+what+': nothing written');
+ }
+ {
+  const file=database('open',source);seedFilm(file,1);seedRatings(file,'AAA1',1);
+  assert.deepEqual([(await planLetterboxdClaim(envOf(file),I)).verdict,(await planLetterboxdClaim(envOf(file),I)).reason],['pass','proved'],name+': the unconflicted pair still passes');
+ }
 }
 // (c) The write-time guard asserts that the target Film STILL owns exactly one trusted tmdb claim for the movie.
 await raced('the Film loses its trusted tmdb claim after the plan',file=>assert.equal(sqlite(file,"DELETE FROM film_external_id WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
