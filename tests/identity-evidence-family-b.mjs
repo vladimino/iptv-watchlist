@@ -58,6 +58,9 @@ const sourcesOf=(partial={})=>({history:[],decisions:[],intents:[],r2Objects:[],
 const manifestRows=manifest=>manifest?manifest.chunks.flatMap(chunk=>chunk.rows):[];
 const plan=async(sources,over={})=>dryRunFamilyB({runId:'run-b',cohortAt:COHORT,sources,planManifest,...over});
 const reconciled=coverage=>Object.values(coverage.reconciled).every(Boolean);
+// An operator's cohort is its extraction: never earlier than the acquisition it read (an earlier cohort plus a later acquisition proves nothing about the earlier state).
+const cohortOf=sources=>sources.acquisition.acquiredAt;
+const FUTURE=()=>new Date(Date.now()+3600000).toISOString();
 // A stored intent as `readFamilyBSources` selects it.
 const intentRow=(id,kind,observation,{command,issued={confirmedAt:at(-1800000)},receipt})=>({idempotency_key:id,kind,state:'receipt',observation_key:observation,receipt_json:receipt===null?null:JSON.stringify(receipt),
  issued_json:issued===null?null:JSON.stringify(issued),command_json:JSON.stringify(command),expected_hash:'0'.repeat(64)});
@@ -239,14 +242,18 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
   object('r2-mismatch',record('other-key')),
   object('r2-shape',{schemaVersion:9}),
   object('r2-late',record('r2-late',{finishedAt:at(60000)})),
-  object('r2-nofinish',record('r2-nofinish',{finishedAt:null})),
+  object('r2-nofinish',record('r2-nofinish',{finishedAt:null})),                                                            // untimed: in the cohort only through the frozen R2 listing
   {key:'admin/actions/other/v1/x.json',etag:'e',record:{}},
  ];
  assert.deepEqual(r2Action(objects[5]),{none:'not_terminal'});assert.deepEqual(r2Action(objects[6]),{none:'observation_not_stated'});assert.deepEqual(r2Action(objects[7]),{none:'movie_not_stated'});
  assert.deepEqual(r2Action(objects[8]),{none:'key_mismatch'});assert.deepEqual(r2Action(objects[9]),{none:'unknown_shape'});assert.deepEqual(r2Action(objects[12]),{none:'not_an_action_object'});
+ const LISTING={complete:true,listedAt:at(-30000),objects:objects.map(item=>({key:item.key,etag:item.etag}))};
+ // The D1 acquisition is coherent (ACQ), but it says nothing about R2: with no frozen R2 listing the untimed record is unprovable, and the census is not complete.
  const refused=await plan(sourcesOf({r2Objects:objects}));
- assert.equal(refused.manifest,null);assert.equal(refused.report.excluded.filter(item=>item.reason==='r2_residual_not_accepted').length,6);
- const accepted=await plan(sourcesOf({r2Objects:objects}),{acceptR2Residual:true});
+ assert.equal(refused.manifest,null);assert.equal(refused.report.excluded.filter(item=>item.reason==='r2_residual_not_accepted').length,5);
+ assert.equal(refused.coverage.dispositions.r2.cohort_unprovable,1,'a D1 acquisition flag cannot prove an R2 object into the cohort');
+ assert.equal(refused.coverage.acquisition.r2.established,false);assert.equal(refused.coverage.complete,false);
+ const accepted=await plan(sourcesOf({r2Objects:objects,r2Acquisition:LISTING}),{acceptR2Residual:true});
  const byRoot=Object.fromEntries(manifestRows(accepted.manifest).map(row=>[row.sourceRoot,row]));
  assert.equal(byRoot['r2-reject'].observedAt,at(-5000000));assert.equal(byRoot['r2-reject'].sourceOrder,null,'no history revision in R2: the order is unknown');
  assert.equal(byRoot['r2-assign'].observedAt,at(-4500000),'the time of an R2 assign is afterImage.decision.ownerIdentity.at when it names this action and movie');
@@ -254,14 +261,19 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  assert.equal(byRoot['r2-bad-confirm'].observedAt,null,'a malformed time keeps the recorded proposition with an unknown time');
  assert.equal(byRoot['r2-reject'].key,await ownerRowKey({key:KEYED(9),effect:'reject',tmdbId:'555',requestId:'r2-reject'}));
  assert.deepEqual(accepted.coverage.dispositions.r2,{late:1,mapped:6,'ineligible:key_mismatch':1,'ineligible:movie_not_stated':1,'ineligible:not_an_action_object':1,'ineligible:not_terminal':1,'ineligible:observation_not_stated':1,'ineligible:unknown_shape':1});
- assert.equal(accepted.coverage.counts.b5.eligible,6,'the record with no finishedAt is in the cohort only through the proven acquisition');
+ assert.equal(accepted.coverage.counts.b5.eligible,6,'the record with no finishedAt is in the cohort through the frozen R2 listing that names it');
+ assert.equal(accepted.coverage.acquisition.r2.established,true);
  assert.equal(reconciled(accepted.coverage),true);
- // No acquisition proof: the record with no finishedAt is unprovable (not guessed into the cohort).
- const unproven=await plan(sourcesOf({r2Objects:objects,acquisition:undefined}),{acceptR2Residual:true,unfenced:true});
- assert.equal(unproven.coverage.dispositions.r2.cohort_unprovable,1);assert.equal(unproven.coverage.counts.b5.eligible,5);
+ // Only a listing that names the object and its ETag counts: an object missing from the frozen listing, or with another ETag, is unresolved. A listing listed AFTER the cohort proves nothing about it.
+ const partial=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{...LISTING,objects:LISTING.objects.filter(item=>item.key!==objects[0].key).map(item=>item.key===objects[1].key?{...item,etag:'other'}:item)}}),{acceptR2Residual:true});
+ assert.equal(partial.coverage.dispositions.r2.not_in_frozen_listing,2);assert.equal(partial.coverage.unresolved.r2NotInFrozenListing,2);assert.equal(partial.coverage.complete,false);
+ const afterCohort=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{...LISTING,listedAt:at(60000)}}),{acceptR2Residual:true});
+ assert.equal(afterCohort.coverage.dispositions.r2.cohort_unprovable,1,'a listing made after the cohort cannot prove an earlier state');
+ const incomplete=await plan(sourcesOf({r2Objects:objects,r2Acquisition:{...LISTING,complete:false}}),{acceptR2Residual:true});
+ assert.equal(incomplete.coverage.acquisition.r2.established,false);assert.equal(incomplete.coverage.dispositions.r2.cohort_unprovable,1);
  // A D1 intent and an R2 object of one action give one key: the D1 record (first in manifest order) owns it, the R2 record is a reported duplicate.
  const intent=intentRow('r2-reject','identity_reject',KEYED(9),{command:{effect:'reject',tmdbId:'555'},issued:{confirmedAt:at(-5000000)},receipt:{state:'applied',decisionHash:'9'.repeat(64)}});
- const both=await plan(sourcesOf({intents:[intent],r2Objects:[objects[0]]}),{acceptR2Residual:true});
+ const both=await plan(sourcesOf({intents:[intent],r2Objects:[objects[0]],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[{key:objects[0].key,etag:objects[0].etag}]}}),{acceptR2Residual:true});
  assert.equal(manifestRows(both.manifest).length,1);assert.equal(both.report.duplicates.length,1);
 }
 
@@ -292,6 +304,60 @@ const applied=async payload=>({state:'applied',decisionHash:await decisionHash(p
  // (f) A history row with no valid time and no proven acquisition is unprovable (reported, unresolved), never guessed.
  const noTime=await plan(sourcesOf({history:[{...hist(7,1,'resolver_chunk',payload),written_at:'garbage'}],acquisition:undefined}),{unfenced:true});
  assert.equal(noTime.coverage.dispositions.history.cohort_unprovable,1);assert.equal(noTime.coverage.unresolved.cohortUnprovable,1);assert.equal(noTime.manifest,null);
+}
+
+// ===== 6b. links and decisions are never certified from absence =====
+{
+ const assignPayload=assignDecision('111','intent-link');
+ const intent=intentRow('intent-link','identity_assign',OBS(1),{command:{effect:'assign',tmdbId:'111'},receipt:await applied(assignPayload)});
+ // (a) The matching history row has no provable time (and no acquisition proves it): the action is NOT staged as an unlinked, unknown-order action.
+ const unprovable=await plan(sourcesOf({history:[{...hist(1,1,'discovery_identity_correct',assignPayload),written_at:'garbage'}],intents:[intent],acquisition:undefined}),{unfenced:true});
+ assert.equal(unprovable.coverage.dispositions.intents.link_unprovable,1);assert.equal(unprovable.coverage.unresolved.linkUnprovable,1);assert.equal(unprovable.coverage.counts.b4.unlinked,0);
+ assert.equal(manifestRows(unprovable.manifest).length,0,'no false null-order action');
+ // (b) Two history rows carry the receipt's hash: ambiguous, not "no history".
+ const ambiguous=await plan(sourcesOf({history:[hist(1,1,'discovery_identity_correct',assignPayload),hist(1,2,'discovery_identity_correct',assignPayload)],intents:[intent]}));
+ assert.equal(ambiguous.coverage.dispositions.intents.link_ambiguous,1);assert.equal(ambiguous.coverage.unresolved.linkAmbiguous,1);assert.equal(ambiguous.coverage.counts.b4.unlinked,0);
+ assert.equal(manifestRows(ambiguous.manifest).filter(row=>row.sourceRoot==='intent-link').length,0);
+ // (c) A late link is late (covered above); only a hash that NO owner row carries is "history-less" and may keep a null order.
+ const none=await plan(sourcesOf({history:[hist(1,1,'discovery_identity_correct',assignDecision('222','other-intent'))],intents:[intent]}));
+ assert.equal(none.coverage.counts.b4.unlinked,1);
+ // (d) A mutable current decision is frozen as read: without the coherent D1 acquisition it is unprovable.
+ const payload=verified({tmdbId:700});
+ const decisionRow={observation_key:OBS(7),decision_hash:await decisionHash(payload),status:'verified',payload_json:JSON.stringify(payload)};
+ const unfencedDecision=await plan(sourcesOf({decisions:[decisionRow],acquisition:undefined}),{unfenced:true});
+ assert.equal(unfencedDecision.coverage.dispositions.decisions.cohort_unprovable,1);assert.equal(manifestRows(unfencedDecision.manifest).length,0);
+ // (e) An owner-writer history row no intent names: an assign is fully recorded in it and is staged from it (order = revision); a reject cannot be read without its intent and is unresolved.
+ const orphans=await plan(sourcesOf({history:[hist(1,1,'discovery_identity_correct',assignDecision('111','orphan-assign')),hist(2,1,'discovery_identity_correct',rejectDecision('222','orphan-reject'))]}));
+ assert.equal(orphans.coverage.counts.b4.historyOnlyAssigns,1);assert.equal(orphans.coverage.unresolved.unlinkedOwnerHistory,1);
+ assert.equal(manifestRows(orphans.manifest).find(row=>row.sourceRoot==='orphan-assign').sourceOrder,1);
+}
+
+// ===== 6c. `complete` is not `reconciled`: it needs every eligible proposition staged and both acquisitions =====
+{
+ const base=()=>({history:[hist(1,1,'resolver_chunk',verified())],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[]}});
+ const complete=await plan(sourcesOf(base()));
+ assert.equal(complete.coverage.complete,true);assert.equal(complete.coverage.unresolvedCount,0);assert.deepEqual(complete.coverage.manifest,{conflicts:0,excluded:0,duplicates:0});
+ // Each of these keeps `complete` false although every source row is accounted for (`reconciled` stays true).
+ const cases={
+  'no R2 acquisition':sourcesOf({history:base().history}),
+  'an unresolved owner history row':sourcesOf({...base(),history:[...base().history,hist(2,1,'discovery_identity_correct',rejectDecision('222','orphan-reject'))]}),
+  'a guard that cannot be pinned':sourcesOf({...base(),history:[hist(3,1,'resolver_chunk',verified({id:{nested:true}}))]}),
+  'an eligible proposition the model refuses':sourcesOf({...base(),history:[hist(4,1,'discovery_identity_correct',assignDecision('1','x'))],intents:[intentRow('x','identity_assign',OBS(4),{command:{effect:'assign',tmdbId:'abc'},receipt:{state:'applied',decisionHash:'1'.repeat(64)}})]}),
+ };
+ for(const [name,sources] of Object.entries(cases)){
+  const result=await plan(sources);
+  assert.equal(result.coverage.complete,false,name);assert.equal(reconciled(result.coverage),true,name+': reconciled is not complete');
+ }
+ // A manifest conflict (two sources, one key, different identity) and an R2 record the owner has not accepted: eligible propositions that did not reach the manifest.
+ const assign=assignDecision('111','same-key');
+ const r2=(key,rec)=>({key:R2_ACTION_PREFIX+key+'.json',etag:'e-'+key,record:rec});
+ const rec={schemaVersion:1,kind:'discovery_identity_action',idempotencyKey:'same-key',state:'succeeded',issued:{confirmedAt:at(-5000000)},command:{effect:'assign',tmdbId:'111'},provenance:{observationKey:OBS(1)},
+  afterImage:{decision:assign},finishedAt:at(-4000000),receipt:{state:'succeeded',outcomes:[{id:OBS(1),outcome:'written'}]}};
+ const withR2={...base(),history:[hist(1,1,'discovery_identity_correct',assign)],r2Objects:[r2('same-key',rec)],r2Acquisition:{complete:true,listedAt:at(-30000),objects:[{key:R2_ACTION_PREFIX+'same-key.json',etag:'e-same-key'}]}};
+ const conflict=await plan(sourcesOf(withR2),{acceptR2Residual:true});
+ assert.equal(conflict.coverage.manifest.conflicts,1,'the history row (order 1) and the R2 record (order unknown) disagree on one key');assert.equal(conflict.coverage.complete,false);
+ const notAccepted=await plan(sourcesOf(withR2));
+ assert.equal(notAccepted.coverage.manifest.excluded>0,true);assert.equal(notAccepted.coverage.complete,false);
 }
 
 // ===== 7. the acquisition is fenced by the Discovery authority =====
@@ -337,7 +403,7 @@ const activate=async env=>{
  insertHistory(file,hist(2,1,'resolver_chunk',verified({identitySource:'known_epg_alias',tmdbId:200})));
  insertHistory(file,hist(3,1,'resolver_chunk',verified({identitySource:undefined,tmdbId:300})));
  insertHistory(file,hist(4,1,'discovery_identity_correct',assignPayload));
- insertHistory(file,hist(5,1,'resolver_chunk',verified({tmdbId:500}),at(60000)));
+ insertHistory(file,hist(5,1,'resolver_chunk',verified({tmdbId:500}),FUTURE()));
  insertIntent(file,{...intentRow('intent-assign','identity_assign',OBS(4),{command:{effect:'assign',tmdbId:'111'},receipt:await applied(assignPayload)})});
  insertIntent(file,{...intentRow('intent-reject','identity_reject',OBS(6),{command:{effect:'reject',tmdbId:'666'},receipt:{state:'applied',decisionHash:'f'.repeat(64)}})});
  insertIntent(file,{idempotency_key:'intent-pending',kind:'identity_assign',state:'approved',observation_key:OBS(7),receipt_json:null,issued_json:JSON.stringify({}),command_json:JSON.stringify({effect:'assign',tmdbId:'1'})});
@@ -347,7 +413,7 @@ const activate=async env=>{
  const sources=await readFamilyBSources(watched,{pageSize:2});
  assert.equal(statements.length>0,true);assert.equal(statements.every(sql=>/^SELECT /.test(sql)),true,'the extraction only SELECTs: '+statements.filter(sql=>!/^SELECT /.test(sql)));
  assert.equal(sources.history.length,5);assert.equal(sources.intents.length,2,'only identity intents with a receipt');assert.equal(sources.acquisition.coherent,true);
- const result=await dryRunFamilyB({runId:'run-b',cohortAt:COHORT,sources,planManifest});
+ const result=await dryRunFamilyB({runId:'run-b',cohortAt:cohortOf(sources),sources,planManifest});
  assert.equal(result.coverage.lateArrivals.history,1);assert.equal(reconciled(result.coverage),true);
  assert.equal(manifestRows(result.manifest).length,4,'b1, b2, the linked owner assign and the unlinked owner reject; b3 and the late arrival give nothing');
  assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),0,'the dry run wrote nothing');
@@ -364,7 +430,11 @@ const activate=async env=>{
  assert.equal(one(file,"SELECT source_order FROM film_identity_evidence WHERE route='owner_action' AND polarity='asserts'"),1,'the linked assign carries the history revision');
  assert.equal(one(file,"SELECT source_order FROM film_identity_evidence WHERE route='owner_action' AND polarity='refutes'"),null,'the unlinked reject has an unknown order');
  assert.equal(one(file,"SELECT COUNT(*) FROM film_identity_evidence WHERE observed_at LIKE '1970-%'"),0,'no placeholder time is stored');
- const again=await dryRunFamilyB({runId:'run-b2',cohortAt:COHORT,sources,planManifest});
+ // A cohort EARLIER than the acquisition that read the mutable rows proves nothing about the earlier state: the unlinked receipt is unprovable, never imported on the strength of a later read.
+ const earlier=await dryRunFamilyB({runId:'run-early',cohortAt:COHORT,sources,planManifest});
+ assert.equal(earlier.coverage.dispositions.intents.cohort_unprovable,1);assert.equal(earlier.coverage.complete,false);
+ assert.equal(manifestRows(earlier.manifest).some(row=>row.sourceRoot==='intent-reject'),false);
+ const again=await dryRunFamilyB({runId:'run-b2',cohortAt:cohortOf(sources),sources,planManifest});
  await loadAndSealManifest(env,{manifest:again.manifest,approvedDigest:again.digest,now:at(3000)});
  await importRun(env,{runId:'run-b2',approvedDigest:again.digest,owner:'operator-a',now:at(4000)});
  assert.equal(one(file,'SELECT COUNT(*) FROM film_identity_evidence'),4,'no duplicate rows');
@@ -377,7 +447,7 @@ const mutation=async(name,seed,change)=>{
  const file=copy();
  await seed(file);
  const sources=await readFamilyBSources(d1Standin(file));
- const result=await dryRunFamilyB({runId:'run-m',cohortAt:COHORT,sources,planManifest});
+ const result=await dryRunFamilyB({runId:'run-m',cohortAt:cohortOf(sources),sources,planManifest});
  assert.ok(result.manifest,name+': a manifest exists before the change');
  const env=envOf(file);
  await loadAndSealManifest(env,{manifest:result.manifest,approvedDigest:result.digest,now:at(1000)});
@@ -421,6 +491,12 @@ const mutation=async(name,seed,change)=>{
  await mutation('revoke revokes.effect',seedRevoke,"UPDATE discovery_intent SET command_json=json_set(command_json,'$.revokes.effect','reject')");
  // A history-less decision: the decision hash is pinned.
  const seedDecision=async file=>{const payload=verified({tmdbId:700});ok(file,'INSERT INTO discovery_decision (observation_key,generation,status,attempts,decision_hash,payload_json) VALUES ('+[OBS(7),1,'verified',0,await decisionHash(payload),JSON.stringify(payload)].map(lit2).join(',')+')');};
+ await mutation('decision payload only, stored hash unchanged',seedDecision,"UPDATE discovery_decision SET payload_json=json_set(payload_json,'$.tmdbId',999)");
+ await mutation('decision identitySource only, stored hash unchanged',seedDecision,"UPDATE discovery_decision SET payload_json=json_set(payload_json,'$.identitySource','known_epg_alias')");
+ // A history-only owner assign (no intent names it) is staged from its history row alone.
+ const seedOrphan=async file=>insertHistory(file,hist(1,1,'discovery_identity_correct',assignDecision('111','orphan-assign')));
+ await mutation('history-only assign ownerIdentity.at',seedOrphan,"UPDATE discovery_decision_history SET payload_json=json_set(payload_json,'$.ownerIdentity.at','2026-01-01T00:00:00.000Z')");
+ await mutation('history-only assign ownerIdentity.requestId',seedOrphan,"UPDATE discovery_decision_history SET payload_json=json_set(payload_json,'$.ownerIdentity.requestId','other')");
  await mutation('decision hash',seedDecision,"UPDATE discovery_decision SET decision_hash='"+'0'.repeat(64)+"'");
  await mutation('decision deleted',seedDecision,'DELETE FROM discovery_decision');
 }

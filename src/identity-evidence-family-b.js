@@ -14,11 +14,12 @@
 //   b6  policy exclusions, reconsiders, deferrals, non-verified      -> no row, counted
 //   b7  observations, `confirmed_tmdb_id`, admissions                -> no row, counted
 //
-// THE COHORT. Every record is in or out of the frozen cohort by a time the record itself carries (`written_at`, the linked history row, `issued.confirmedAt`, the R2 `finishedAt`); a
-// record after `cohortAt` is a reported late arrival and is never reinterpreted by a fallback (a current decision is used only for an observation with NO history row at all, so a
-// late history row cannot be re-imported through its decision, and an owner action linked to a late history row is late, not an unlinked action). A record whose membership cannot be
-// proven (no valid time) is `cohort_unprovable`: excluded and reported, never guessed. `readFamilyBSources` fences its acquisition with the Discovery authority generation read before and
-// after the paged reads (every Discovery write moves it): a moved or not-open authority makes the acquisition incoherent and `dryRunFamilyB` refuses to certify a manifest.
+// THE COHORT, per source (ADR 0215 decision 7, step 1: each source freezes the exact list it read; no cross-store snapshot). Append-only history is in or out by its own `written_at`
+// (a later or backdated row is a reported late arrival); mutable D1 rows (a current decision, an intent receipt) are frozen as read and are in the cohort only through the coherent D1
+// acquisition (`issued.confirmedAt` is the issue time and can only exclude); an R2 object is in by its own `finishedAt`, or, untimed, only through the frozen R2 listing the operator captured.
+// No fallback reinterprets a late record: a current decision is used only for an observation with NO history row at all, and an owner action whose history row is late, unprovable or
+// ambiguous is reported, never read as "no history". A record whose membership cannot be proven is `cohort_unprovable`: excluded and reported, never guessed. `readFamilyBSources` fences its D1
+// acquisition with the Discovery authority generation read before and after the paged reads (every Discovery write moves it); an incoherent one makes `dryRunFamilyB` refuse a manifest.
 //
 // THE DEPENDENCY RULE. The ER commit-time assertion pins ONE source row per record. A row is staged only when every input it consumes is pinned by its own source:
 //   - an assign linked to its history row: the history row alone (`ownerIdentity.effect`, `tmdbId`, `requestId`, `at` are guarded; its revision is the `source_order`);
@@ -92,18 +93,24 @@ const historyBase=row=>({writer:row.writer,written_at:row.written_at});
 const decisionHistorySource=(row,payload)=>{const guard=payloadGuard('payload_json',payload);return guard&&{table:'discovery_decision_history',key:historyKey(row),guard:{...historyBase(row),...guard}};};
 const OWNER_GUARD_PATHS=Object.freeze(['ownerIdentity.effect','ownerIdentity.tmdbId','ownerIdentity.requestId','ownerIdentity.at']);
 const ownerHistorySource=(row,payload)=>{const guard=payloadGuard('payload_json',payload,OWNER_GUARD_PATHS);return guard&&{table:'discovery_decision_history',key:historyKey(row),guard:{...historyBase(row),...guard}};};
-const decisionSource=row=>({table:'discovery_decision',key:{observation_key:row.observation_key},guard:{decision_hash:row.decision_hash}});
+// A current decision is guarded by its stored hash AND by the payload fields the mapping reads: ER has no SQL hash, so a payload-only change under an unchanged stored hash is detected only by these.
+const decisionSource=(row,payload)=>{const guard=payloadGuard('payload_json',payload);return guard&&{table:'discovery_decision',key:{observation_key:row.observation_key},guard:{decision_hash:row.decision_hash,...guard}};};
 
 // ---- b4: owner intents ----
 const intentOf=row=>({kind:row.kind,idempotencyKey:row.idempotency_key,observationKey:row.observation_key,state:row.state,command:parse(row.command_json),
  issued:row.issued_json==null?null:parse(row.issued_json),receipt:row.receipt_json==null?null:parse(row.receipt_json)});
-// The history row an intent's receipt names: the owner-writer row of the same observation whose payload hashes to `receipt.decisionHash`. Exactly one, or the link is unknown.
-async function linkedHistory(intent,candidates){
+// The link between an intent and its history row. The candidates are EVERY owner-writer history row of the observation, whatever its membership. `none`: none carries the receipt's
+// hash (a genuinely history-less action); `linked`: exactly one, in the cohort; `late` / `unprovable`: exactly one, outside the cohort or with an unprovable time; `ambiguous`: several.
+// Only `none` may be read as "no history"; the others are reported and never fall through to an unlinked, unknown-order action.
+async function linkOf(intent,candidates){
  const wanted=intent.receipt?.decisionHash;
- if(typeof wanted!=='string')return null;
+ if(typeof wanted!=='string')return {status:'none'};
  const found=[];
  for(const item of candidates)if(await decisionHash(item.payload)===wanted)found.push(item);
- return found.length===1?found[0]:null;
+ if(found.length===0)return {status:'none'};
+ if(found.length>1)return {status:'ambiguous',items:found};
+ const [item]=found;
+ return {status:item.member==='in'?'linked':item.member==='late'?'late':'unprovable',item};
 }
 // The guard of an unlinked intent: exactly the fields the mapping consumes, nested references included (a revoke's `revokes.*`), and the receipt association that made it unlinked.
 function intentSource(row,intent){
@@ -163,16 +170,28 @@ export function r2Action(object){
 }
 
 // ---- the reconstruction ----
-// Pure (async for SHA-256). `sources`: {history, decisions, intents, r2Objects, counts, acquisition} as selected by `readFamilyBSources` (rows as the database returns them, `r2Objects` as
-// [{key, etag, record}]). Returns {records, coverage}. `records` is in a fixed manifest order (history, owner actions, current decisions, R2) and goes to `planManifest` as is. Every
-// source row lands in exactly one disposition, and the dispositions reconcile to the sizes read (`coverage.reconciled`).
+// Pure (async for SHA-256). `sources`: {history, decisions, intents, r2Objects, counts, acquisition, r2Acquisition} as selected by `readFamilyBSources` (rows as the database returns them) and
+// listed by the operator (`r2Objects` as [{key, etag, record}], `r2Acquisition` as {complete, listedAt, objects:[{key, etag}]}, the exact frozen listing of that source). Returns
+// {records, coverage}. `records` is in a fixed manifest order (history, owner actions, current decisions, R2) and goes to `planManifest` as is. Every source row lands in exactly one
+// disposition, and the dispositions reconcile to the sizes read (`coverage.reconciled`), which is NOT a proof of complete reconstruction: `coverage.complete` is true only when
+// no eligible proposition is unresolved and both acquisitions are established.
+//
+// Membership is proven PER SOURCE, never inferred across stores (ADR 0215 decision 7, step 1: each source freezes the exact list it read; no cross-store snapshot):
+//   - append-only history: its own `written_at` against `cohortAt` (a later or backdated row is late); an untimed row only through the coherent D1 acquisition;
+//   - mutable D1 rows (a current decision, an unlinked intent): they are frozen exactly as read, so they are in the cohort only through the coherent D1 acquisition covering `cohortAt`;
+//     `issued.confirmedAt` is the issue time, never the receipt commit: it can only EXCLUDE (an intent issued after the cohort cannot belong to it), never prove membership;
+//   - R2 objects: a terminal record's own `finishedAt`; an untimed one only through the frozen R2 listing (`r2Acquisition.complete`, listed no later than `cohortAt`, naming the object and its ETag).
 export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=false}={}){
  const cohortMs=cohortAt===undefined?null:Date.parse(cohortAt);
  const acquisition=sources.acquisition===undefined?{established:false,reason:'not_provided'}:{...sources.acquisition,established:sources.acquisition.coherent===true};
- // A record with a valid time is in the cohort iff that time is not after `cohortAt`. A record with NO valid time is in the cohort only when the acquisition is proven coherent and began
- // no later than `cohortAt` (nothing changed while it was read, so the record existed at `cohortAt`); otherwise its membership cannot be proven and it is not guessed.
- const covers=acquisition.established===true&&cohortMs!==null&&Number.isFinite(Date.parse(acquisition.acquiredAt))&&Date.parse(acquisition.acquiredAt)<=cohortMs;
- const membership=value=>{const time=instantOf(value);if(time!==null)return cohortMs!==null&&Date.parse(time)>cohortMs?'late':'in';return covers?'in':'unprovable';};
+ const frozen=sources.r2Acquisition;
+ const r2Acquisition=!plain(frozen)?{established:false,reason:'not_provided'}:{established:frozen.complete===true&&Number.isFinite(Date.parse(frozen.listedAt)),reason:frozen.complete===true?null:'listing_incomplete',listedAt:frozen.listedAt??null,objects:Array.isArray(frozen.objects)?frozen.objects.length:0};
+ const d1Covers=acquisition.established===true&&cohortMs!==null&&Number.isFinite(Date.parse(acquisition.acquiredAt))&&Date.parse(acquisition.acquiredAt)<=cohortMs;
+ const r2Covers=r2Acquisition.established===true&&cohortMs!==null&&Date.parse(frozen.listedAt)<=cohortMs;
+ const listed=new Map((plain(frozen)&&Array.isArray(frozen.objects)?frozen.objects:[]).map(item=>[item?.key,item?.etag]));
+ const later=value=>cohortMs!==null&&Date.parse(value)>cohortMs;
+ // The timed membership of an append-only D1 row or an R2 record: a valid time decides; no valid time is proven only by the source's own acquisition.
+ const timed=(value,covers)=>{const time=instantOf(value);if(time!==null)return later(time)?'late':'in';return covers?'in':'unprovable';};
  const history=[...(sources.history||[])].sort((a,b)=>compare(a.observation_key,b.observation_key)||Number(a.revision)-Number(b.revision));
  const decisions=[...(sources.decisions||[])].sort((a,b)=>compare(a.observation_key,b.observation_key));
  const intents=[...(sources.intents||[])].sort((a,b)=>compare(a.observation_key,b.observation_key)||compare(a.idempotency_key,b.idempotency_key));
@@ -182,29 +201,31 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
  const disp={history:new Map(),decisions:new Map(),intents:new Map(),r2:new Map()};
  const noRow=new Map(),unrecordable=new Map(),unknownWriters=new Map(),writerStatus=new Map();
  const late={history:[],intents:[],r2:[]};
- const c={timeUnknown:0,rowsMapped:0,b4:{actions:0,rows:0,linkedAssigns:0,unlinked:0,orderUnknown:0,timeUnknown:0,ownerHistoryRows:0,unlinkedOwnerHistory:0},b5:{eligible:0,rows:0,timeUnknown:0}};
- const unresolved={ownerActionsUnbound:new Map(),ownerWithdrawalsUnbound:0,cohortUnprovable:0};
+ const c={timeUnknown:0,rowsMapped:0,b4:{actions:0,rows:0,linkedAssigns:0,historyOnlyAssigns:0,unlinked:0,orderUnknown:0,timeUnknown:0,ownerHistoryRows:0},b5:{eligible:0,rows:0,timeUnknown:0}};
+ const unresolved={ownerActionsUnbound:new Map(),ownerWithdrawalsUnbound:0,cohortUnprovable:0,linkAmbiguous:0,linkUnprovable:0,unlinkedOwnerHistory:0,r2NotInFrozenListing:0};
  const addPair=mapped=>{
   const pair=mapped.input.subject.value+'|'+mapped.input.object.value;
   if(mapped.source==='tmdb_detail')pairs.b1.add(pair);else{const set=pairs.b2.get(mapped.source)||new Set();set.add(pair);pairs.b2.set(mapped.source,set);}
   if(mapped.timeUnknown)c.timeUnknown++;
  };
  const historyKeys=new Set(history.map(row=>row.observation_key));
- const owner=new Map();   // observation_key -> every owner-writer history row (late ones flagged)
+ const owner=new Map();   // observation_key -> every owner-writer history row, with its membership (in / late / unprovable)
 
- // b1 / b2 / b3 / b6 from the history; the owner-writer rows are set aside for b4.
+ // b1 / b2 / b3 / b6 from the history; EVERY owner-writer row is recorded for linking first (its membership is kept, never discarded).
  for(const row of history){
-  const member=membership(row.written_at);
-  if(member==='unprovable'){bump(disp.history,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
-  const isLate=member==='late';
+  const member=timed(row.written_at,d1Covers);
   const payload=parse(row.payload_json);
   if(OWNER_WRITERS.includes(row.writer)){
-   bump(disp.history,isLate?'late':'owner_history');c.b4.ownerHistoryRows++;
-   if(isLate)late.history.push({observationKey:row.observation_key,revision:Number(row.revision),writtenAt:row.written_at,writer:row.writer});
-   if(plain(payload)){const list=owner.get(row.observation_key)||[];list.push({row,payload,late:isLate});owner.set(row.observation_key,list);}
+   c.b4.ownerHistoryRows++;
+   if(member==='late')late.history.push({observationKey:row.observation_key,revision:Number(row.revision),writtenAt:row.written_at,writer:row.writer});
+   bump(disp.history,member==='in'?'owner_history':member==='late'?'late':'cohort_unprovable');
+   if(member==='unprovable')unresolved.cohortUnprovable++;
+   if(plain(payload)){const list=owner.get(row.observation_key)||[];list.push({row,payload,member,used:false});owner.set(row.observation_key,list);}
+   else if(member==='in'){bump(unrecordable,'owner_history_unreadable');}
    continue;
   }
-  if(isLate){bump(disp.history,'late');late.history.push({observationKey:row.observation_key,revision:Number(row.revision),writtenAt:row.written_at,writer:row.writer});continue;}
+  if(member==='unprovable'){bump(disp.history,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
+  if(member==='late'){bump(disp.history,'late');late.history.push({observationKey:row.observation_key,revision:Number(row.revision),writtenAt:row.written_at,writer:row.writer});continue;}
   const status=plain(payload)?payload.status??'none':'unreadable';
   if(!NON_IDENTITY_WRITERS.includes(row.writer)&&row.writer!=='resolver_chunk')bump(unknownWriters,String(row.writer));
   const mapped=NON_IDENTITY_WRITERS.includes(row.writer)?{none:'non_identity_writer'}:mapDecision(row.observation_key,payload);
@@ -222,37 +243,40 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   records.push({source,rows:[{evidence:mapped.input}]});c.rowsMapped++;bump(disp.history,'mapped');
  }
 
- // b4: the owner actions. Linking sees EVERY owner-writer history row of the observation, the late ones included, so a late row is never mistaken for "no history".
- const usedHistory=new Set();
+ // b4: the owner actions. The link between an intent and its history row is one of: none (no owner-writer row of the observation carries the receipt's hash: a genuinely history-less
+ // action), linked (exactly one, in the cohort), late, unprovable, or ambiguous. Only `none` may be staged from the intent alone; every other status is reported, never read as "absent".
  for(const row of intents){
   const intent=intentOf(row);
   if(!KIND_EFFECT[row.kind]||row.state!=='receipt'){bump(disp.intents,'not_selected');continue;}
   if(!plain(intent.command)){bump(disp.intents,'unrecordable');bump(unrecordable,'intent_unreadable');continue;}
   const effect=KIND_EFFECT[row.kind];
   c.b4.actions++;
-  const link=await linkedHistory(intent,owner.get(row.observation_key)||[]);
-  if(link){
-   usedHistory.add(row.observation_key+'#'+link.row.revision);
-   if(link.late){bump(disp.intents,'late');late.intents.push({idempotencyKey:row.idempotency_key,observationKey:row.observation_key,via:'history_row_after_cohort'});continue;}
-  }else{
-   const member=membership(intent.issued?.confirmedAt);
-   if(member==='unprovable'){bump(disp.intents,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
-   if(member==='late'){bump(disp.intents,'late');late.intents.push({idempotencyKey:row.idempotency_key,observationKey:row.observation_key,via:'confirmed_at'});continue;}
+  const link=await linkOf(intent,owner.get(row.observation_key)||[]);
+  // Every history row the receipt could name is accounted for by this action: an ambiguous link settles none of them as an independent statement.
+  for(const matched of link.items||(link.item?[link.item]:[]))matched.used=true;
+  if(link.status==='ambiguous'){bump(disp.intents,'link_ambiguous');unresolved.linkAmbiguous++;continue;}
+  if(link.status==='unprovable'){bump(disp.intents,'link_unprovable');unresolved.linkUnprovable++;continue;}
+  if(link.status==='late'){bump(disp.intents,'late');late.intents.push({idempotencyKey:row.idempotency_key,observationKey:row.observation_key,via:'history_row_after_cohort'});continue;}
+  if(link.status==='none'){
+   // A mutable receipt is frozen exactly as read: it is in the cohort only through the coherent D1 acquisition. `confirmedAt` can only exclude (issued after the cohort), never prove.
+   if(!d1Covers){bump(disp.intents,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
+   const issuedAt=instantOf(intent.issued?.confirmedAt);
+   if(issuedAt!==null&&later(issuedAt)){bump(disp.intents,'late');late.intents.push({idempotencyKey:row.idempotency_key,observationKey:row.observation_key,via:'issued_after_cohort'});continue;}
   }
   const supersedes=intent.command.supersedes!==undefined&&intent.command.supersedes!==null;
   // A linked reject or revoke consumes two source rows: not expressible by one source, so not staged and reported (never guessed, never silently dropped).
-  if(link&&effect!=='assign'){bump(disp.intents,'unbound:'+effect);bump(unresolved.ownerActionsUnbound,effect);if(supersedes)unresolved.ownerWithdrawalsUnbound++;continue;}
+  if(link.status==='linked'&&effect!=='assign'){bump(disp.intents,'unbound:'+effect);bump(unresolved.ownerActionsUnbound,effect);if(supersedes)unresolved.ownerWithdrawalsUnbound++;continue;}
   let result,source;
-  if(link){
+  if(link.status==='linked'){
    // A linked assign: everything it consumes is in its history row (`ownerIdentity`), which is its source; its revision is the source order.
-   const identity=link.payload.ownerIdentity;
+   const identity=link.item.payload.ownerIdentity;
    if(!plain(identity)||identity.effect!=='assign'||identity.requestId!==row.idempotency_key||identity.tmdbId===undefined||identity.tmdbId===null){bump(disp.intents,'unplannable');bump(unrecordable,'owner_unplannable');continue;}
    const synthetic={kind:'identity_assign',idempotencyKey:identity.requestId,observationKey:row.observation_key,command:{effect:'assign',tmdbId:identity.tmdbId},issued:null};
-   result=await ownerRows({intent:synthetic,key:row.observation_key,next:link.payload,at:instantOf(identity.at),order:Number(link.row.revision)});
-   source=ownerHistorySource(link.row,link.payload);
+   result=await ownerRows({intent:synthetic,key:row.observation_key,next:link.item.payload,at:instantOf(identity.at),order:Number(link.item.row.revision)});
+   source=ownerHistorySource(link.item.row,link.item.payload);
    if(result.rows){c.b4.linkedAssigns++;if(result.rows.some(input=>input.observedAt===null))c.b4.timeUnknown++;}
   }else{
-   // No linked history row: the intent is the only source, the order is unknown. An assign has no recorded time then (its time is `ownerIdentity.at`).
+   // Genuinely history-less: the intent is the only source, the order is unknown. An assign has no recorded time then (its time is `ownerIdentity.at`), never inferred.
    const at=effect==='assign'?null:instantOf(intent.issued?.confirmedAt);
    result=await ownerRows({intent,key:row.observation_key,next:effect==='assign'?{ownerIdentity:{effect:'assign',requestId:row.idempotency_key,tmdbId:intent.command.tmdbId,at:PLACEHOLDER_TIME}}:null,at,order:null});
    source=intentSource(row,intent);
@@ -263,14 +287,30 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
   if(supersedes)unresolved.ownerWithdrawalsUnbound++;
   records.push({source,rows:result.rows.map(evidence=>({evidence}))});c.b4.rows+=result.rows.length;c.rowsMapped+=result.rows.length;bump(disp.intents,'mapped');
  }
- for(const [key,list] of owner)for(const item of list)if(!item.late&&!usedHistory.has(key+'#'+item.row.revision))c.b4.unlinkedOwnerHistory++;
+ // Owner-writer history rows in the cohort that no intent receipt named. An assign is fully recorded in its own history row (`ownerIdentity`) and is staged from it; any other owner statement
+ // needs its intent for the movie and the time and is unresolved; a row that states no identity is a deliberate no-row.
+ for(const [key,list] of owner)for(const item of list){
+  if(item.used||item.member!=='in')continue;
+  const identity=item.payload.ownerIdentity;
+  if(plain(identity)&&identity.effect==='assign'&&typeof identity.requestId==='string'&&identity.tmdbId!=null){
+   const synthetic={kind:'identity_assign',idempotencyKey:identity.requestId,observationKey:key,command:{effect:'assign',tmdbId:identity.tmdbId},issued:null};
+   const result=await ownerRows({intent:synthetic,key,next:item.payload,at:instantOf(identity.at),order:Number(item.row.revision)});
+   const source=ownerHistorySource(item.row,item.payload);
+   if(result.rows&&source){records.push({source,rows:result.rows.map(evidence=>({evidence}))});c.b4.rows+=result.rows.length;c.b4.historyOnlyAssigns++;c.rowsMapped+=result.rows.length;if(result.rows.some(input=>input.observedAt===null))c.b4.timeUnknown++;continue;}
+   bump(unrecordable,'owner_history_unrecordable');continue;
+  }
+  if(plain(identity)||plain(item.payload.revokedOwnerAssign)){unresolved.unlinkedOwnerHistory++;continue;}
+  bump(noRow,'owner_history_no_identity');
+ }
 
  // The current decision rows. A decision is used ONLY for an observation with no history row at all (R2-era decisions loaded without one): for any other observation the history is the
- // source, and a late history row must not come back through its decision. The same mapping (b1 / b2 / b3 / b6) applies.
+ // source, and a late history row must not come back through its decision. It is a mutable row frozen exactly as read, so it needs the coherent D1 acquisition; it is guarded by its
+ // hash AND by the payload fields the mapping reads (a payload-only change under an unchanged stored hash is detected). The same mapping (b1 / b2 / b3 / b6) applies.
  const withHistory=new Map();
  for(const row of decisions){
   const payload=parse(row.payload_json);
   if(historyKeys.has(row.observation_key)){bump(disp.decisions,'history_present');bump(withHistory,plain(payload)?payload.status??'none':'unreadable');continue;}
+  if(!d1Covers){bump(disp.decisions,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
   const mapped=mapDecision(row.observation_key,payload);
   if(!mapped.input){
    bump(noRow,'current:'+mapped.none);
@@ -278,15 +318,18 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
    if(mapped.none==='no_identity_source')pairs.b3.add(row.observation_key+'|'+payload.tmdbId);
    continue;
   }
+  const source=decisionSource(row,payload);
+  if(!source){bump(unrecordable,'guard_unsupported');bump(disp.decisions,'guard_unsupported');continue;}
   addPair(mapped);
-  records.push({source:decisionSource(row),rows:[{evidence:mapped.input}]});c.rowsMapped++;bump(disp.decisions,'mapped');
+  records.push({source,rows:[{evidence:mapped.input}]});c.rowsMapped++;bump(disp.decisions,'mapped');
  }
 
- // b5: the R2 action objects (the whole object is pinned by its ETag).
+ // b5: the R2 action objects (the whole object is pinned by its ETag, and must be named by the frozen listing with that ETag).
  for(const object of r2Objects){
   const parsed=r2Action(object);
   if(!parsed.intent){bump(disp.r2,'ineligible:'+parsed.none);continue;}
-  const member=membership(parsed.finishedAt);
+  if(listed.size&&listed.get(object.key)!==object.etag){bump(disp.r2,'not_in_frozen_listing');unresolved.r2NotInFrozenListing++;continue;}
+  const member=timed(parsed.finishedAt,r2Covers);
   if(member==='unprovable'){bump(disp.r2,'cohort_unprovable');unresolved.cohortUnprovable++;continue;}
   if(member==='late'){bump(disp.r2,'late');late.r2.push({key:object.key,finishedAt:parsed.finishedAt});continue;}
   const {intent,key,at}=parsed;
@@ -300,17 +343,21 @@ export async function reconstructFamilyB({cohortAt,sources={},acceptR2Residual=f
 
  const counts=sources.counts||{};
  const reconciled={history:sum(disp.history)===history.length,decisions:sum(disp.decisions)===decisions.length,intents:sum(disp.intents)===intents.length,r2:sum(disp.r2)===r2Objects.length};
-
- const unresolvedOut={ownerActionsUnbound:obj(unresolved.ownerActionsUnbound),ownerWithdrawalsUnbound:unresolved.ownerWithdrawalsUnbound,cohortUnprovable:unresolved.cohortUnprovable};
- const complete=acquisition.established&&sum(unresolved.ownerActionsUnbound)===0&&unresolved.ownerWithdrawalsUnbound===0&&unresolved.cohortUnprovable===0&&Object.values(reconciled).every(Boolean);
- const coverage={family:FAMILY,cohortAt:cohortAt??null,complete,acquisition,reconciled,
+ const unresolvedOut={ownerActionsUnbound:obj(unresolved.ownerActionsUnbound),ownerWithdrawalsUnbound:unresolved.ownerWithdrawalsUnbound,cohortUnprovable:unresolved.cohortUnprovable,
+  linkAmbiguous:unresolved.linkAmbiguous,linkUnprovable:unresolved.linkUnprovable,unlinkedOwnerHistory:unresolved.unlinkedOwnerHistory,r2NotInFrozenListing:unresolved.r2NotInFrozenListing,unrecordable:obj(unrecordable)};
+ const unresolvedCount=sum(unresolved.ownerActionsUnbound)+unresolved.ownerWithdrawalsUnbound+unresolved.cohortUnprovable+unresolved.linkAmbiguous+unresolved.linkUnprovable+unresolved.unlinkedOwnerHistory+unresolved.r2NotInFrozenListing+sum(unrecordable);
+ const complete=acquisition.established&&r2Acquisition.established&&unresolvedCount===0&&Object.values(reconciled).every(Boolean);
+ const coverage={family:FAMILY,cohortAt:cohortAt??null,
+  // Three different things, never one: `complete` (every eligible proposition staged, both acquisitions established), `unresolved` (eligible but not staged), `excluded` (a deliberate no-row by
+  // design, plus the late arrivals), and, from the dry run, the manifest's own conflicts. `reconciled` only says that each source row was accounted for.
+  complete,unresolvedCount,acquisition:{d1:acquisition,r2:r2Acquisition},reconciled,
   sizes:{historyRows:history.length,decisionRows:decisions.length,intentRows:intents.length,r2Objects:r2Objects.length},
   dispositions:{history:obj(disp.history),decisions:obj(disp.decisions),intents:obj(disp.intents),r2:obj(disp.r2)},
   counts:{rowsMapped:c.rowsMapped,timeUnknown:c.timeUnknown,b1:{pairs:pairs.b1.size},b2:Object.fromEntries([...pairs.b2].sort(([a],[b])=>compare(a,b)).map(([name,set])=>[name,{pairs:set.size}])),b3:{pairs:pairs.b3.size},
    otherSource:{pairs:pairs.other.size},b4:c.b4,b5:{...c.b5,listed:r2Objects.length},b6:{historyByWriterAndStatus:obj(writerStatus)},
    b7:{observations:counts.observations??null,confirmedTmdbIds:counts.confirmedTmdbIds??null,admissions:counts.admissions??null},
    currentDecisionsWithHistory:{count:sum(withHistory),byStatus:obj(withHistory)}},
-  noRow:obj(noRow),unrecordable:obj(unrecordable),unknownWriters:obj(unknownWriters),unresolved:unresolvedOut,
+  excluded:{noRow:obj(noRow)},unknownWriters:obj(unknownWriters),unresolved:unresolvedOut,
   lateArrivals:{history:late.history.length,intents:late.intents.length,r2:late.r2.length,sample:{history:late.history.slice(0,20),intents:late.intents.slice(0,20),r2:late.r2.slice(0,20)}}};
  return {records,coverage};
 }
@@ -354,14 +401,18 @@ export async function readFamilyBSources(db,{pageSize=500,maxPages=10000}={}){
 }
 
 // The dry run (ADR 0215 decision 7, step 1) over already-read sources: the reconstruction, then the PURE `planManifest` of the import path. Writes nothing. `runId` and `cohortAt`
-// freeze the cohort; records after `cohortAt` are late arrivals, excluded and reported. It REFUSES to certify a manifest when the acquisition is not proven coherent
-// (`sources.acquisition.coherent`), unless the caller states `unfenced: true` (offline mapping tests only; the coverage then says `acquisition.established: false`).
+// freeze the cohort; records after `cohortAt` are late arrivals, excluded and reported. It REFUSES to certify a manifest when the D1 acquisition is not proven coherent
+// (`sources.acquisition.coherent`), unless the caller states `unfenced: true` (offline mapping tests only; the coverage then says `acquisition.d1.established: false`). The manifest's own
+// conflicts and exclusions (a key two sources disagree on, an R2 record the owner has not accepted the residual window of, a record too large) are eligible propositions that did not
+// reach the manifest: they are added to the coverage and keep `complete` false.
 export async function dryRunFamilyB({runId,cohortAt,sources,acceptR2Residual=false,planManifest,unfenced=false}={}){
  if(typeof planManifest!=='function')throw new Error('identity_evidence_family_b_plan_manifest_required');
  const {records,coverage}=await reconstructFamilyB({cohortAt,sources,acceptR2Residual});
- if(unfenced!==true&&coverage.acquisition.established!==true){
-  return {manifest:null,digest:null,report:{disposition:'acquisition_not_coherent',reason:coverage.acquisition.reason||'not_established'},coverage};
+ if(unfenced!==true&&coverage.acquisition.d1.established!==true){
+  return {manifest:null,digest:null,report:{disposition:'acquisition_not_coherent',reason:coverage.acquisition.d1.reason||'not_established'},coverage};
  }
  const plan=await planManifest({runId,family:FAMILY,cohortAt,records});
- return {...plan,coverage};
+ const manifest={conflicts:plan.report.conflicts.length,excluded:plan.report.excluded.length,duplicates:plan.report.duplicates.length};
+ const out={...coverage,manifest,complete:coverage.complete&&manifest.conflicts===0&&manifest.excluded===0};
+ return {...plan,coverage:out};
 }
