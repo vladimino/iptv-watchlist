@@ -20,7 +20,7 @@ for(const pattern of [/runD1EnrichmentProjection/,/\bBUCKET\b/,/\b(INSERT|UPDATE
 assert.deepEqual([...code.matchAll(/^(?:async )?function (\w+)/gm)].map(match=>match[1]),['d1EnrichmentStatus'],'the status is the only function left');
 assert.doesNotMatch(worker,/runD1EnrichmentProjection|D1_ENRICHMENT_(WRITE|WINDOW|BULK|TEST_HARNESS)/,'the Worker never starts the projector or reads the retired selectors');
 assert.doesNotMatch(fs.readFileSync('src/catalog-d1.js','utf8'),/runD1EnrichmentProjection/);
-assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*"\]/);
+assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*", "11-59\/15 \* \* \* \*"\]/);
 assert.doesNotMatch(fs.readFileSync('src/catalog-d1.js','utf8'),/d1EnrichmentStatus\(/,'AIR-690: /api/d1/status no longer reports the retired projector; the function stays only as a historical diagnostic with its own tests');
 // CI shards do not build first: like the other bundle tests, build the Worker bundle here (atomic write).
 assert.equal(spawnSync(process.execPath,['build.mjs'],{stdio:'ignore'}).status,0);

@@ -1,6 +1,6 @@
 // AIR-605 (card C1; ADR 0219 decisions 2 and 6). The WORKFLOW SHELL of the Catalog Enrichment drainer: the instance body, the kick that wakes it, the parked wait and the reconcile that is the safety net. DORMANT: with no control row in
-// `active` every entry point answers "not active" before it creates an instance, sends an event or makes a request; the dedicated reconcile cron is NOT in `wrangler.jsonc` (its expression is delivered by the activation
-// change, not by a deploy), and the binding does nothing while the control is inactive.
+// `active` every entry point answers "not active" before it creates an instance, sends an event or makes a request; the dedicated reconcile cron is declared in `wrangler.jsonc` by the AIR-607 delivery and is inert while the control is
+// not active (it reads the control first and returns `not_active`), and the binding does nothing while the control is inactive.
 //   - ONE owner at a time: the run record (one `projection_run` row named `catalog_enrichment_run`, its `summary_json`) names the live instance and its phase, `running`, `parked` or `retired`, and moves by compare-and-swap.
 //     The `projection_run` lease of the drainer stays the authority for writing; the run record only says whom to wake.
 //   - NO LOST WAKEUP. Parking and retiring make their INTENT DURABLE on the run record first and only then re-check for RUNNABLE work; if any exists the intent is cancelled. `kick` commits after the causal change: `parked` sends the
@@ -12,7 +12,7 @@ import {drain,dueFilms,BUDGET,repairPending,DEFER_MINUTES,countingEnv} from './c
 import {readControl,runnableSignals,deliverTicks} from './catalog-enrichment-store.js';
 
 export const RUN_PROJECTION='catalog_enrichment_run';
-// The safety-net cron expression. It is NOT in wrangler.jsonc: the activation change delivers it as a reviewed, versioned configuration change.
+// The safety-net cron expression. `wrangler.jsonc` declares exactly this string (AIR-607, a reviewed, versioned configuration change delivered BEFORE the activation); the Worker dispatches it first and it is inert while the control is not active.
 export const CRON='11-59/15 * * * *';
 const WAIT_EVENT='kick';
 const MAX_ROUNDS=64;
