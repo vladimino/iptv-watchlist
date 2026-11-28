@@ -2,6 +2,7 @@
 // read the object, check the marker AGAIN after the read, conditional put by etag with a FRESH in-object token. Offline only: the sqlite D1 stand-in and an in-memory bucket with content etags (so an etag CAN
 // repeat if the bytes repeat), conditional puts and hooks between the steps of a writer.
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';
+import {migrationHead} from './migration-head.mjs';
 import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';
 import * as PublishedEpg from '../src/published-epg.js';
 
@@ -97,7 +98,7 @@ for(const marker of ['epg/held','d1/open','d1/held']){
  const partial=open();sqlite(partial.file,'DROP TABLE watchlist_admission_pending');
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:partial.db,BUCKET:bucket()},A)).blocked,true,'a partial table set blocks');
  const noAuthority=open();sqlite(noAuthority.file,'DROP TRIGGER watchlist_cas_required;DROP TABLE watchlist_authority');
- assert.equal(Number(rows1(noAuthority.file,'SELECT version FROM schema_contract')),54);
+ assert.equal(Number(rows1(noAuthority.file,'SELECT version FROM schema_contract')),migrationHead());
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:noAuthority.db,BUCKET:bucket()},A)).blocked,true,'schema v33 with the authority table missing is not a legacy database');
  const noTables=open();sqlite(noTables.file,'PRAGMA foreign_keys=OFF;'+['watchlist_admission_pending','watchlist_effect','watchlist_change','watchlist_member','watchlist_snapshot','watchlist_staging','watchlist_current','watchlist_cas','watchlist_authority'].map(name=>'DROP TABLE '+name).join(';'));
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:noTables.db,BUCKET:bucket()},A)).blocked,true,'schema v33 with no Watchlist table at all is a contradiction, not a legacy database');
