@@ -53,7 +53,8 @@ const get=async(p,env={DB,FILM_PERSON_DB_OPTIONAL:'standin'},method='GET')=>{con
 // status
 let r=await get('status');
 assert.equal(r.status,200);
-assert.deepEqual({...r.body},{source:'d1',authoritative:false,films:3,persons:8,credits:5,candidates:0,predictions:1,ratings:1,lastImport:T,schemaVersion:3,projector:{mode:null,retired:true,schema:false,schemaVersion:3,projectionTables:[]}});
+assert.deepEqual(Object.keys(r.body),['source','authoritative','authority','schemaVersion','films','persons','credits'],'AIR-690: the narrowed Film/Person status carries no ratings, predictions, candidates, lastImport or projector');
+assert.deepEqual({...r.body,authority:{...r.body.authority}},{source:'d1',authoritative:false,authority:{state:'legacy',generation:r.body.authority.generation},schemaVersion:3,films:3,persons:8,credits:5});
 // AIR-689 (ADR 0223): the four operator views are retired with a typed 410 decided on the raw path, before the marker gate and before any storage access.
 const GONE={error:'gone',reason:'d1_operator_view_retired'};
 const retiredPaths=['persons','persons?q=Pacino&limit=2','persons/review','persons/review?limit=5','persons/director/michael-mann','persons/actor/al-pacino','persons/tmdb_director/1032','persons/tmdb_actor/555','films/tmdb:1','films/old','films/tmdb:9','films/tmdb_1','persons/actor/identity','persons/actor/%E0%A4%A','persons/actor/%zz','films/%E0%A4%A','films/%'];
@@ -251,6 +252,19 @@ assert.ok(watched.stats.nameRows<=41,`namesake reads returned ${watched.stats.na
 assert.equal(countTable('person'),before.person+2+401+2+41+2);
 assert.equal(countTable('film'),before.film+801+1+1);
 assert.equal(countTable('film_person_credit'),before.credit+802+403+2);
+// AIR-690: status counts are unique Films, person role records and credit rows. Alias rows, redirects, legacy prediction/rating rows and the import receipt never move them.
+{
+ const before=(await get('status')).body;
+ sqlite(`INSERT INTO film_redirect VALUES('film:old2','film:tmdb:2','${T}'),('film:old3','film:tmdb:3','${T}');INSERT INTO film_external_id VALUES('film:tmdb:2','tmdb','2',1,0,NULL),('film:tmdb:3','tmdb','3',1,0,NULL);INSERT INTO prediction_current(film_id,taste_profile_version,predicted_rating,updated_at) VALUES('film:tmdb:2',1,3.5,'${T}'),('film:tmdb:3',1,2.5,'${T}');INSERT INTO actual_rating VALUES('film:tmdb:2',3.0,'letterboxd','${T}'),('film:tmdb:3',2.0,'letterboxd','${T}');`);
+ const after=(await get('status')).body;
+ assert.deepEqual(after,before,'legacy tables, aliases and redirects do not move the Film/Person counts');
+ assert.equal(after.films,Number(JSON.parse(sqlite('SELECT count(*) n FROM film;',true))[0].n));
+ assert.equal(after.persons,Number(JSON.parse(sqlite('SELECT count(*) n FROM person;',true))[0].n));
+ assert.equal(after.credits,Number(JSON.parse(sqlite('SELECT count(*) n FROM film_person_credit;',true))[0].n));
+ assert.notEqual(after.films,Number(JSON.parse(sqlite('SELECT count(*) n FROM film_redirect;',true))[0].n)+Number(JSON.parse(sqlite('SELECT count(*) n FROM film_external_id;',true))[0].n),'the unit is a Film, not an alias row');
+ assert.equal((await get('status',{DB,FILM_PERSON_DB_OPTIONAL:'standin'},'HEAD')).status,405,'HEAD keeps 405');
+ assert.equal((await get('status',{DB,FILM_PERSON_DB_OPTIONAL:'standin'},'PUT')).status,405);
+}
 // guards
 assert.equal((await get('status',{DB},'POST')).status,405);
 assert.equal((await get('status',{})).status,503);

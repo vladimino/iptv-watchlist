@@ -252,7 +252,7 @@ When that lid is on neither current list and has no usable cache, the enrichment
 
 `transition()` rejects edges not permitted by the domain graph (for example, `resolved` identity cannot regress to `unresolved`, and reviewed localization cannot become provisional). `applyAutomaticLocalization()` cannot set `reviewed` and records attempted overrides; only `applyReviewedLocalization()` with `authority: dictionary` or `owner` can promote reviewed content. `observeMetadata()` does not rewrite fingerprint or prediction. `invalidatePredictionForProfile()` preserves fingerprint and chooses the appropriate next action.
 
-## `film_metadata` field provenance and the metadata writer rule ([ADR 0214](../../adr/0214-film-metadata-per-field-provenance.md), Accepted; card PV1, [AIR-631](https://trello.com/c/i8td3wu0); dormant, migration 0049 not applied)
+## `film_metadata` field provenance and the metadata writer rule ([ADR 0214](../../adr/0214-film-metadata-per-field-provenance.md), Accepted; card PV1, [AIR-631](https://trello.com/c/i8td3wu0); migration 0049 applied, control row at `off` until the owner activates it, [AIR-636](https://trello.com/c/0jJADYxg))
 
 One rule for the six core fields (`year`, `runtime`, `synopsis`, `poster`, `url`, `genres`) lives in `writeFilmFacts` (`src/canonical-film-writers.js`, with the comparator in `src/film-metadata-provenance.js`), so it covers the EPG `film_facts`, `metadata_sync`, the Catalog Enrichment Producer (C1) and the owner route alike. Nothing changes while the schema is absent or the control row is at `off`; everything below applies in modes `enforce` and `hold` only. Bookkeeping columns (`people_version`, `payload_json`, `r2_key`, `content_sha256`, `schema_version`, `updated_at`) keep today's merge. Schema: [d1-schema](../data/d1-schema.md#film-metadata-per-field-provenance-schema-v49-adr-0214-accepted-air-631-applied-28-nov-2026).
 
@@ -398,5 +398,6 @@ A reinstatement is a new intent with a new `asserts` row. A partial group is a s
 Current limits that stay true meanwhile:
 
 - `GET /api/d1/films/<id>`, which read schema v1 `actual_rating` and `prediction_current`, is retired and answers a typed `410` ([retired views](../api/d1-catalog.md#retired-views), ADR 0223). The legacy tables are unchanged and are not the authoritative personal or prediction view of a Film.
+- [`GET /api/d1/status`](../api/d1-catalog.md#d1-status-contract) (AIR-690) reports only the Film/Person schema version, marker state and generation, and the counts of Films, person role records and credits. It carries no ratings, prediction, Discovery or projector figure; those domains keep their own status contracts.
 - [`GET /api/enrichment/history?filmId=`](../api/film-history.md) bridges at most one trusted lid per Film.
 - Some historical prediction keys are reachable only through the ratings link and have no trusted canonical claim. ADR 0216 treats them as candidate aliases: they make a section `partial`, never `none`, and are never attributed until the ADR 0184 writer materializes a canonical claim for them.

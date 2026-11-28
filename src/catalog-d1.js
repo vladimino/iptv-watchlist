@@ -16,9 +16,14 @@ const HUMAN_KEY_SQL=col=>`(case when ${col} like 'person:tmdb!_%' escape '!' the
 // Every name a person is known by: the original alias and an accepted localization.
 const PERSON_NAMES_CTE=`names as (select person_id id,value name from person_alias where kind='name' union select person_id,value from person_dimension where dimension='localization' and status in ('reviewed','provisional') and value is not null)`;
 const PERSON_NAME_SQL=`(select value from person_alias a where a.person_id=p.id and a.kind='name' order by value limit 1)`;
-async function d1Status(db,env,authoritative=false){
- const counts=await d1First(db,`select (select count(*) from film) films,(select count(*) from person) persons,(select count(*) from film_person_credit) credits,(select count(*) from candidate) candidates,(select count(*) from prediction_current) predictions,(select count(*) from actual_rating) ratings,(select max(imported_at) from import_receipt) lastImport,(select version from schema_contract where id=1) schemaVersion`);
- return {source:'d1',authoritative,...counts,projector:await d1EnrichmentStatus(db,env)};
+// AIR-690 (ADR 0223): the status answers for the Film/Person domain only. films = rows of `film` (unique Films; a retired id in `film_redirect` and an alias in
+// `film_external_id` are not Films), persons = rows of `person` (one per role record: one human can be up to four), credits = rows of `film_person_credit`.
+// `authority` is the Film/Person marker the route gate already read for this request (no extra query); `authoritative` is true only at `open`. Ratings, predictions,
+// the retired enrichment projector, discovery candidates and import receipts are not reported here: those domains have their own status contracts and an
+// unknown value is never reported as zero. Three counts and one version read; no census beyond the existing COUNT(*) of the three tables.
+async function d1Status(db,authoritative=false,gate=null){
+ const counts=await d1First(db,`select (select count(*) from film) films,(select count(*) from person) persons,(select count(*) from film_person_credit) credits,(select version from schema_contract where id=1) schemaVersion`);
+ return {source:'d1',authoritative,authority:gate?{state:gate.state,generation:gate.generation}:null,schemaVersion:counts.schemaVersion,films:counts.films,persons:counts.persons,credits:counts.credits};
 }
 // Four review queues, strongest evidence first. Nothing here links or merges a person.
 // crossRole: one key of one source stored as an actor and as a director, a near-certain single person.
@@ -202,11 +207,11 @@ async function d1PersonIdentity(db,id,authoritative=false){
 // `persons/<role>/<key>/identity` and `status` are retained and never match here; an unknown path is not retired (it keeps 404/503).
 const D1_RETIRED_VIEW=/^(?:persons|persons\/review|persons\/(?:tmdb_)?(?:actor|director)\/[^/]{1,200}|films\/[^/]{1,200})$/;
 const d1RetiredViewResponse=()=>json({error:'gone',reason:'d1_operator_view_retired'},410);
-async function catalogD1Dispatch(request,env,url,authoritative=false){
+async function catalogD1Dispatch(request,env,url,authoritative=false,gate=null){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);
  if(!env.DB)return json({error:'D1 is not bound to this Worker'},503);
  const path=url.pathname.slice('/api/d1/'.length);
- if(path==='status')return json(await d1Status(env.DB,env,authoritative));
+ if(path==='status')return json(await d1Status(env.DB,authoritative,gate));
  let match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})\/identity$/);
  if(match){let key;try{key=decodeURIComponent(match[1]);}catch{return json({error:'Person not found'},404);}const body=await d1PersonIdentity(env.DB,'person:'+key,authoritative);return body?json(body):json({error:'Person not found'},404);}
  return json({error:'Not found'},404);
@@ -227,7 +232,7 @@ async function catalogD1Route(request,env,url){
   try{first=await CanonicalCatalogReader.catalogReaderGate(env);authoritative=first.mode==='d1';}
   catch(error){return refuse(error);}
  }
- let response=await catalogD1Dispatch(request,env,url,authoritative);
+ let response=await catalogD1Dispatch(request,env,url,authoritative,first);
  if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.overlayCatalogResponse==='function')response=await OwnerReview.overlayCatalogResponse(env,response);
  if(first){
   // The marker is read again after every D1 and overlay read, immediately before the answer: a view read at `open` is returned only if the marker is still open at the same

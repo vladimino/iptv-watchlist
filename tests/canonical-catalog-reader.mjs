@@ -276,6 +276,7 @@ for(const state of ['legacy','r2','prepared','held','unknown-row','unknown-table
  assert.equal(res.status,200);assert.equal((await res.json()).authoritative,false,'stand-in: not authoritative');
 }
 for(const p of ['status','persons/director/michael-mann/identity','persons/actor/solo/identity'])assert.equal(body('open',p).authoritative,true,'open '+p);
+assert.deepEqual(Object.keys(body('open','status').authority),['state','generation']);assert.equal(body('open','status').authority.state,'open','AIR-690: status names the marker state it was served under');assert.equal(typeof body('open','status').authority.generation,'number');assert.equal(body('open','status').projector,undefined,'the retired projector block is not part of the status');
 assert.equal(body('open','persons/director/michael-mann/identity').bounded,true,'the namesake cap takes the bounded path');assert.equal(body('open','persons/actor/solo/identity').bounded,false,'a lone person takes the complete path');
 assert.equal(answers.open.nothing.status,404);
 // AIR-689 (ADR 0223): a retired view answers its typed 410 in every marker state (refused or not), before the gate, and never touches R2.
