@@ -534,6 +534,9 @@ export const FILES={
  "film-aggregate-bundle-scope.mjs": {
   "suite": "core"
  },
+ "film-aggregate-activation-preflight-production.mjs": {
+  "suite": "core"
+ },
  "prediction-lid-only-exclusion.mjs": {
   "suite": "core"
  },
