@@ -1415,6 +1415,9 @@ assert.doesNotMatch(personWhen, /2026-07-01T|Invalid Date/);
 assert.match(personWhen, /<summary>Журнал<\/summary>/);
 run(`adminDetail({mode:'ready', id:'north', kind:'film', entity:{id:'film:north', storedId:'north', preferred:'Северный мост', originalTitle:'North Bridge', aliases:[{value:'North Bridge', kind:'title', provenance:{source:'letterboxd'}}], titleReview:{version:'title-review:1:north', filmId:'film:north', preferred:{value:'Северный мост', status:'reviewed', source:'dictionary'}, options:[{value:'Северный мост', origin:'preferred', provenance:{source:'dictionary'}},{value:'Мост на севере', origin:'alias', provenance:{source:'dictionary'}},{value:'North Bridge', origin:'alias', provenance:{source:'letterboxd'}}], reviews:[]}, localization:{status:'reviewed', source:'dictionary'}, identity:{status:'resolved'}, externalIds:[], localizationConflicts:[]}})`);
 assert.match(detail.innerHTML, /data-title-review/);
+// AIR-635 RCA: the metadata section carries the CANONICAL record id (`film:north`), never the programme's stored id (`north`), which the metadata API answers with 404
+assert.match(detail.innerHTML, /data-film-metadata data-film-id="film:north"/);
+assert.doesNotMatch(detail.innerHTML, /data-film-id="north"|data-film-metadata data-stored-id/);
 assert.match(detail.innerHTML, /data-title-add/);
 assert.match(detail.innerHTML, /data-title-promote/);
 assert.match(detail.innerHTML, /Добавить вариант/);

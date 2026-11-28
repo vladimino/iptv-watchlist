@@ -18,7 +18,7 @@ const context = {
     const next = script.shift();
     if (next instanceof Error) throw next;
     if (next.gate) await next.gate; // a response that is held until the test lets it go
-    return {ok: next.status < 400, status: next.status, json: async () => next.body};
+    return {ok: next.status < 400, status: next.status, json: async () => { if (next.nonJson) throw new Error('not json'); return next.body; }};
   },
 };
 vm.createContext(context);
@@ -113,8 +113,13 @@ assert.match(off, /Режим provenance выключен/);
 for (const button of off.match(/<button[^>]*data-meta-action[^>]*>/g)) assert.match(button, /disabled/, 'every write is disabled while the mode is off: ' + button);
 assert.match(api.adminMetaHtml(view({schemaAbsent: true, mode: null, c1: null, history: {rows: [], next: null}})), /Схема provenance ещё не установлена/);
 assert.match(api.adminMetaHtml(view({history: {rows: [], next: null}})), /data-meta-history-empty/);
-assert.equal(api.adminFilmMetadataSection({}), '', 'no stored id, no section');
-assert.match(api.adminFilmMetadataSection({storedId: 'film:a b'}), /data-film-metadata data-stored-id="film:a b"/);
+assert.equal(api.adminFilmMetadataSection({}), '', 'no record id, no section');
+assert.equal(api.adminFilmMetadataSection({storedId: 'Ab1x'}), '', 'the programme stored id is not a canonical id');
+// the real shape of a programme film: `id` is the canonical record id, `storedId` the programme's own id. The section carries the canonical one.
+const realRecord = {id: 'film:Ab1x', storedId: 'Ab1x', preferred: 'Тестовый фильм'};
+assert.match(api.adminFilmMetadataSection(realRecord), /data-film-metadata data-film-id="film:Ab1x"/);
+assert.doesNotMatch(api.adminFilmMetadataSection(realRecord), /data-film-id="Ab1x"|data-film-metadata data-stored-id/);
+assert.match(api.adminFilmMetadataSection({id: 'film:a b'}), /data-film-id="film:a b"/);
 const escaped = api.adminMetaHtml(view({fields: {...v.fields, synopsis: {value: '<script>alert(1)</script>', blank: false, rank: {name: 'confirmed', value: 2}, row: row()}}}));
 assert.doesNotMatch(escaped, /<script>alert/);
 
@@ -151,11 +156,11 @@ function node(attrs = {}) {
   return n;
 }
 function mount(id = 'film:1', label = 'Фильм') {
-  const section = node({'data-film-label': label}), body = node(), result = node(), reading = node(), pendingBox = node();
+  const section = node({'data-film-label': label, 'data-film-id': id}), body = node(), result = node(), reading = node(), pendingBox = node();
   section.children = {'[data-meta-body]': body, '[data-meta-result]': result, '[data-meta-reading]': reading, '[data-meta-pending]': pendingBox};
   const inputs = {};
   body.querySelector = sel => { const m = /data-meta-input="(\w+)"/.exec(sel); return m ? (inputs[m[1]] ||= node()) : null; };
-  api.adminBindFilmMetadata({querySelector: sel => sel === '[data-film-metadata]' ? section : null}, id);
+  api.adminBindFilmMetadata({querySelector: sel => sel === '[data-film-metadata]' ? section : null});
   const press = attrs => section.listeners.click({target: node(attrs)});
   return {section, body, result, reading, pendingBox, inputs, press, open: () => { section.open = true; return section.listeners.toggle(); }};
 }
@@ -189,6 +194,93 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   g.go(); await settle();
   assert.equal(calls.length, 1);
   assert.match(m.body.innerHTML, /data-meta-field="year"/);
+}
+// the real record shape end to end: the request path carries the canonical id (`film%3AAb1x`), never the programme's stored id (`Ab1x`)
+{
+  reset(); script = [{status: 200, body: view({filmId: 'film:Ab1x'})}];
+  const m = mount('film:Ab1x', 'Тестовый фильм');
+  await m.open(); await settle();
+  assert.equal(calls[0].url, '/api/admin/films/film%3AAb1x/metadata');
+  assert.doesNotMatch(calls[0].url, /\/films\/Ab1x\//);
+}
+// a 404 is an answer: this Film is not in the canonical catalogue. It says so, it is not "reading failed", and it offers no retry that would only repeat it
+{
+  reset(); script = [{status: 404, body: {error: 'not_found'}}];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.reading.innerHTML, /data-meta-notfound/);
+  assert.match(m.reading.innerHTML, /нет в каноническом каталоге/);
+  assert.doesNotMatch(m.reading.innerHTML, /Не удалось прочитать|data-meta-reload/);
+  assert.equal(calls.length, 1);
+}
+// ONLY the typed 404 not_found asserts absence: a 404 that is not JSON, or has another envelope, is a failed read and stays retryable
+for (const odd of [{status: 404, nonJson: true, body: null}, {status: 404, body: {message: 'Not Found'}}, {status: 404, body: {error: 'something_else'}}, {status: 404, body: null}, {status: 404, body: {found: false}}]) {
+  reset(); script = [odd];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.reading.innerHTML, /Не удалось прочитать/, JSON.stringify(odd));
+  assert.match(m.reading.innerHTML, /data-meta-reload/);
+  assert.doesNotMatch(m.reading.innerHTML, /data-meta-notfound|нет в каноническом каталоге/);
+}
+// a successful read followed by the typed absence (a pagination read here): the snapshot is dropped, so no value, history row, action or "Показать ещё" is offered from it
+{
+  reset(); script = [{status: 200, body: view()}];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.body.innerHTML, /data-meta-more/);
+  script = [{status: 404, body: {error: 'not_found'}}];
+  await m.press({'data-meta-more': '2026-11-02T00:00:00.000Z~10'}); await settle();
+  assert.match(m.reading.innerHTML, /data-meta-notfound/);
+  assert.equal(m.body.innerHTML, '', 'the stale snapshot is gone');
+  assert.doesNotMatch(m.body.innerHTML, /data-meta-more|data-meta-action/);
+  const before = calls.length;
+  await m.press({'data-meta-more': 'x'}); await m.press(SET); await settle();
+  assert.equal(calls.length, before, 'nothing is sent or read from the dropped snapshot');
+}
+// the typed absence after a SUCCESSFUL command: the command result is kept, no read is manufactured, no control is offered
+{
+  reset(); script = [{status: 200, body: view()}];
+  const m = mount();
+  await m.open(); await settle();
+  m.inputs.year = node(); m.inputs.year.value = '2001';
+  script = [{status: 200, body: {ok: true, outcome: 'applied'}}, {status: 404, body: {error: 'not_found'}}];
+  await m.press(SET); await settle();
+  assert.match(m.result.textContent, /выполнено/, 'the command result stays what it was');
+  assert.match(m.reading.innerHTML, /data-meta-notfound/);
+  assert.equal(m.body.innerHTML, '');
+  assert.equal(shared().pending, null); assert.equal(shared().flight, null);
+}
+// the typed absence does not discard or rewrite a HELD command: it stays shown with its retry, and the retry is the identical body
+{
+  reset(); script = [{status: 200, body: view()}];
+  const a = mount();
+  await a.open(); await settle();
+  a.inputs.year = node(); a.inputs.year.value = '1999';
+  script = [new Error('offline')];
+  await a.press(SET); await settle();
+  const heldBody = JSON.stringify(posts()[0]);
+  script = [{status: 404, body: {error: 'not_found'}}];
+  const again = mount(); await settle(); // the held command re-opens the section and reads
+  assert.match(again.reading.innerHTML, /data-meta-notfound/);
+  assert.equal(again.body.innerHTML, '');
+  assert.match(again.pendingBox.innerHTML, /Год = 1999/, 'the held command is still shown');
+  assert.match(again.pendingBox.innerHTML, /data-meta-retry/);
+  assert.equal(shared().pending.command.requestId, JSON.parse(heldBody).requestId);
+  script = [{status: 409, body: {error: 'not_found', outcome: 'rejected'}}, {status: 404, body: {error: 'not_found'}}];
+  await again.press({'data-meta-retry': ''}); await settle();
+  assert.equal(posts().length, 2);
+  assert.equal(JSON.stringify(posts()[1]), heldBody, 'the retry is the identical command');
+  assert.match(again.result.textContent, /Команда не выполнена: фильма нет в каноническом каталоге/);
+  assert.doesNotMatch(again.result.textContent, /не сбой чтения/, 'a refused command is not worded as a read');
+}
+// a server failure is still a failed read with its retry
+{
+  reset(); script = [{status: 500, body: {error: 'unavailable'}}];
+  const m = mount();
+  await m.open(); await settle();
+  assert.match(m.reading.innerHTML, /Не удалось прочитать/);
+  assert.match(m.reading.innerHTML, /data-meta-reload/);
+  assert.doesNotMatch(m.reading.innerHTML, /data-meta-notfound/);
 }
 // a failed first read: said, controls absent, an explicit retry exists
 {
@@ -419,7 +511,7 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   script = [new Error('offline')];
   await a.press(SET); await settle();
   const heldBody = JSON.stringify(posts()[0]);
-  assert.equal(shared().pending.storedId, 'film:1');
+  assert.equal(shared().pending.filmId, 'film:1');
   // the page opens Film B (the detail DOM is replaced): B reads, and its writes are blocked with an explanation that names Film A
   script = [{status: 200, body: view({filmId: 'film:2'})}];
   const b = mount('film:2', 'Другой фильм');
@@ -520,7 +612,7 @@ const SET = {'data-meta-action': 'set', 'data-field': 'year'};
   await b.press(SET); await settle();
   assert.equal(posts().length, 1, 'B cannot start a command while A is in flight');
   pg.go(); await first; await settle();
-  assert.equal(shared().pending.storedId, 'film:1', 'the late unknown reply keeps A\'s command held');
+  assert.equal(shared().pending.filmId, 'film:1', 'the late unknown reply keeps A\'s command held');
   assert.equal(shared().flight, null);
   assert.match(b.pendingBox.innerHTML, /data-meta-pending-elsewhere/);
   assert.match(b.body.innerHTML, /data-meta-action="set" data-field="year" disabled/);
