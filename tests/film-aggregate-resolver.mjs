@@ -352,8 +352,8 @@ const verdict=async(file,id)=>{const r=await resolve(file,id);return [r.verdict,
  const before=sha(file),stats={read:0,written:0};
  for(const id of ['tmdb_50','tmdb_tv:5050','l50','film:old:50','film:none','tmdb_51','bad id'])await readFilmAggregateIdentity(env(file,{rowStats:stats}),id,{sections:async()=>({})});
  assert.equal(stats.written,0);assert.equal(sha(file),before);
- // The module is not bundled: no Worker source imports it (only the equally dormant aggregate of AIR-647, proved unbundled in tests/film-aggregate.mjs).
- for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate-resolver.js'&&f!=='film-aggregate.js'&&f!=='film-history-aggregate.js'))
+ // No Worker source imports it except the equally dormant modules (the aggregate of AIR-647, the history and the stage-5 readiness composition of AIR-648; scoped into the bundle by build.mjs but unrouted, proved in tests/film-aggregate.mjs).
+ for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate-resolver.js'&&f!=='film-aggregate.js'&&f!=='film-history-aggregate.js'&&f!=='film-readiness-composition.js'))
   assert.ok(!fs.readFileSync('src/'+name,'utf8').includes('film-aggregate-resolver'),name+' must not import the dormant resolver');
  assert.ok(!fs.readFileSync('src/film-aggregate-resolver.js','utf8').match(/\b(INSERT|UPDATE|DELETE|REPLACE)\s/),'only SELECTs');
 }

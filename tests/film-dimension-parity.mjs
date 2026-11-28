@@ -370,12 +370,12 @@ async function run(file,options){const stats={read:0,written:0};const result=awa
  assert.equal(classifyRow({film_id:'film:9',dimension:'metadata',status:'fresh'},{identity:{verdict:'found'},metadata:metadataFacts(null)}).proof,'incomplete','no metadata row: unproved');
 }
 
-// 10. Static: inactive. Only the dormant stage-6 retirement module (AIR-666, itself imported by nothing, see its test) imports the reader or its pure half, so the Worker bundle cannot reach it.
+// 10. Static: inactive. Only the dormant stage-6 retirement module (AIR-666, itself imported by nothing, see its test) and the dormant stage-5 readiness reader (AIR-648: scoped into the bundle, called by nothing, no route) import the reader or its pure half.
 {
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!full.endsWith('film-dimension-parity.js')&&fs.readFileSync(full,'utf8').includes('film-dimension-parity'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.map(item=>item.replace(/\\/g,'/')),['src/film-dimension-retirement.js'],'only the dormant retirement module imports the parity reader');
+ assert.deepEqual(importers.map(item=>item.replace(/\\/g,'/')),['src/film-dimension-retirement.js','src/film-readiness-reader.js'],'only the dormant retirement module and the dormant stage-5 readiness reader import the parity reader');
  for(const f of ['package.json','wrangler.jsonc','build.mjs'])assert.ok(!fs.readFileSync(f,'utf8').includes('film-dimension-parity'),f+' does not bundle it');
 }
 
