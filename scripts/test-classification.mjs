@@ -1293,6 +1293,9 @@ export const FILES={
  "identity-evidence-import.mjs": {
   "suite": "core"
  },
+ "identity-evidence-import-requires.mjs": {
+  "suite": "core"
+ },
  "identity-evidence-claim-history.mjs": {
   "suite": "core"
  },
@@ -1300,6 +1303,9 @@ export const FILES={
   "suite": "core"
  },
  "identity-evidence-discovery-decision.mjs": {
+  "suite": "core"
+ },
+ "identity-evidence-family-b.mjs": {
   "suite": "core"
  },
  "identity-work-inventory.mjs": {

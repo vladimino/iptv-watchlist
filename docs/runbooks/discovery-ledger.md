@@ -120,6 +120,10 @@ A production write of up to 10 decisions; agents do not run it. [ADR 0181](../ad
 6. A partial result is valid. Replay finishes only children without a receipt and never adds keys.
 7. Do not start a chunk from this page. **Undo is per key** through the revoke page; code rollback does not revert D1 rows.
 
+## Historical reconstruction of Discovery evidence (family (b), E3b, dormant)
+
+The historical `discovery_decision_history`, `discovery_decision` and `discovery_intent` records can be reconstructed into the identity evidence ledger by the manifest-bound import path; the mapping reads these tables and writes nothing, and the dry run, the import and every activation need their own owner approval. Procedure and contract: [identity evidence manifest import, family (b)](identity-evidence-manifest-import.md#family-b-the-discovery-history-card-e3b-air-622-dormant). Nothing in this runbook's recovery steps changes: an owner intent, a history row and a decision are never edited or deleted by it.
+
 ## Owner evidence and a stuck owner intent (ADR 0215 decision 6, E2c)
 
 While the `discovery_owner` writer is `pending` or `on`, an owner write (assign, reject, revoke, replacement) commits its `film_identity_evidence` rows in the same batch as the decision history row and the intent receipt ([contract](../reference/domain/film-person.md)). Operationally:
