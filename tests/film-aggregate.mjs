@@ -582,14 +582,20 @@ function world({lids=['l5'],links=null,records=true}={}){
  assert.ok(!/\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|DELETE\s+FROM|REPLACE\s+INTO)\b/i.test(fs.readFileSync('src/film-aggregate.js','utf8').replace(/\/\/.*$/gm,'')),'the module holds no write SQL');
 }
 
-// Dormant: the Worker bundle does not contain the aggregate, its route or the resolver, and nothing in src imports them (activation is AIR-648).
+// Dormant: AIR-648 scopes the resolver, the aggregate and the history into the Worker bundle (build.mjs, scopedFilmAggregate) so the activation can be exercised through the real bundle, but NOTHING
+// routes or calls them: the Worker names no route, no src module imports the aggregate, and the route string appears in the bundle only as the aggregate's own constant (activation is an owner GO).
 {
  const build=fs.readFileSync('build.mjs','utf8');
- for(const name of ['film-aggregate','film-aggregate-resolver','film-readiness','film-readiness-composition'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
+ assert.ok(build.includes('scopedFilmAggregate()'),'the bundle scopes the aggregate through the one scoped helper');
+ for(const name of ['film-readiness','film-readiness-composition'])assert.ok(!build.includes("src/"+name+".js"),name+' stays out of the bundle');
  for(const name of fs.readdirSync('src').filter(f=>f.endsWith('.js')&&f!=='film-aggregate.js'&&f!=='film-aggregate-resolver.js'&&f!=='film-history-aggregate.js'&&f!=='film-readiness-composition.js'))
   assert.ok(!/film-aggregate/.test(fs.readFileSync('src/'+name,'utf8')),name+' must not import the dormant aggregate');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the Worker routes no internal film aggregate');
- if(fs.existsSync('dist/server/index.js'))assert.ok(!fs.readFileSync('dist/server/index.js','utf8').includes(FILM_AGGREGATE_ROUTE),'the built bundle does not serve the route');
+ if(fs.existsSync('dist/server/index.js')){
+  const bundle=fs.readFileSync('dist/server/index.js','utf8');
+  const count=text=>text.split(FILM_AGGREGATE_ROUTE).length-1;
+  assert.equal(count(bundle),count(fs.readFileSync('src/film-aggregate.js','utf8')),'the built bundle holds the route string only inside the aggregate scope, never in a router');
+ }
 }
 
 // ---- Review of PR #1004 (owner review at 85783f2f): counterexamples, each as a regression ----
@@ -1282,6 +1288,85 @@ function rows_(file,text){const r=sqliteSync(['-json',file],{input:text+';',enco
  const file=world();
  const out=await read(file,'tmdb_5');
  assert.ok(!('eligibility' in out.body.predictions));
+}
+
+// AIR-648 bundled parity: the SAME worlds read through the real built scope (dist/server/index.js, Worker-like context) and through the offline module give the same JSON bodies, status codes and
+// tokens; the reads are SELECT-only on an unchanged database and touch neither R2 nor the network. The bundled dormant GET handler answers like the offline one, and the bundled Worker router
+// still does not dispatch to the route (it answers the internal path exactly as an unknown path).
+{
+ const {loadBundledFilmScopes,plain}=await import('./film-aggregate-bundle-scope.mjs');
+ const bundled=loadBundledFilmScopes();
+ const both=async(file,id)=>{
+  const run=async impl=>{
+   const executed=[];
+   const e=env(file,{onQuery:t=>executed.push(t)});
+   const out=await impl(e,id);
+   return {out:plain(out),calls:plain(e.calls)};
+  };
+  const offline=await run((e,i)=>readFilmAggregate(e,i));
+  const viaBundle=await run((e,i)=>bundled.FilmAggregate.readFilmAggregate(e,i));
+  assert.deepEqual(viaBundle.out,offline.out,'bundled body differs from offline for '+id);
+  return viaBundle.out;
+ };
+ // A world mutated once during a read; each implementation reads its own fresh world, so both see the same change.
+ const moving2=(file,predicate,mutate)=>{let done=false;return env(file,{onQuery:text=>{if(!done&&predicate(text)){done=true;mutate();}}});};
+ const full=()=>{const file=world();pointer(file,'l5',3.5);watchlist(file,['l5']);show(file,'l5',1000);metadata(file,'film:tmdb:5',{year:2001});return file;};
+
+ // 1. A found aggregate with an owned ratings document (etag) and populated section tokens, by each alias.
+ const file=full(),before=fileSha(file);
+ for(const id of ['tmdb_5','l5','film:tmdb:5']){
+  const body=(await both(file,id)).body;
+  assert.equal(body.identity.verdict,'found',id);
+  assert.equal(body.predictions.status,'present');
+  assert.ok(body.predictions.token.pointers.startsWith('sha256:'),'predictions token');
+  assert.deepEqual([body.personal.status,body.personal.fields.rating.value],['present',4]);
+  assert.ok(body.watchlist.token&&body.availability.token,'populated section tokens');
+  assert.deepEqual(Object.keys(body.personal.token.coverage.records),['letterboxd/facts/films/tmdb-5.json'],'the owned ratings document passed the bundled SHA-256 etag check and is in the coverage token');
+ }
+ const ratingsEtag=sha256(JSON.stringify({schemaVersion:1,factKey:'tmdb-5',links:{letterboxd:'l5',tmdb:'5'},redirectTo:null,migrating:null}));
+ const stored=JSON.parse(sqliteSync(['-json',file],{input:"SELECT etag FROM ratings_document WHERE key='letterboxd/facts/films/tmdb-5.json';",encoding:'utf8'}).stdout)[0].etag;
+ assert.equal(stored,ratingsEtag,'the owned document the bundled reader verified carries the SHA-256 etag of its text');
+ assert.equal(fileSha(file),before,'bundled and offline reads wrote nothing');
+
+ // 2. A malformed owned ratings document (etag mismatch): the bundled SHA-256 check refuses it exactly as the offline one does.
+ const bad=full();sqlite(bad,"UPDATE ratings_document SET etag='"+'0'.repeat(64)+"' WHERE key='letterboxd/facts/films/tmdb-5.json'");
+ const badBody=(await both(bad,'tmdb_5')).body;
+ assert.deepEqual([badBody.personal.status,Object.keys(badBody.personal.token.coverage.records)],['partial',[]],'a document whose etag is not the SHA-256 of its text is not read as owned');
+
+ // 3. Invalid, not found, unverified, incomplete coverage (no fact record) and a claim that moves during the read (503 identity_moved, no section).
+ for(const [id,http] of [['bad id',400],['tmdb_999',404]])assert.equal((await both(file,id)).http,http,id);
+ const unv=world();film(unv,'film:u:1',[['letterboxd','unv',0]]);
+ assert.equal((await both(unv,'unv')).http,409);
+ const incomplete=world({records:false});pointer(incomplete,'l5',3);
+ const inc=await both(incomplete,'tmdb_5');
+ assert.notEqual(inc.body?.predictions?.coverage?.status??'incomplete','complete','missing fact record is not complete coverage');
+ const moved=await (async()=>{
+  const run=async impl=>{const f=world();const e=moving2(f,t=>t.includes('FROM published_epg_show'),()=>claim(f,'film:tmdb:5','letterboxd','late1'));return plain(await impl(e,'tmdb_5'));};
+  const a=await run((e,i)=>readFilmAggregate(e,i)),b=await run((e,i)=>bundled.FilmAggregate.readFilmAggregate(e,i));
+  assert.deepEqual(b,a);return b;
+ })();
+ assert.deepEqual([moved.http,moved.body.identity.reason,Object.keys(moved.body).sort()],[503,'identity_moved',['contract','identity']]);
+
+ // 4. The bundled dormant GET handler, read-only: GET/HEAD/405 as offline, every statement a SELECT, no R2, no network.
+ const handlerFile=full(),shaBefore=fileSha(handlerFile),executed=[];
+ const he=env(handlerFile,{onQuery:t=>executed.push(t)});
+ for(const [method,id] of [['GET','tmdb_5'],['HEAD','tmdb_5'],['GET','bad id'],['POST','tmdb_5']]){
+  const url='https://iptv.test'+FILM_AGGREGATE_ROUTE+'?id='+encodeURIComponent(id);
+  const off=await handleFilmAggregateRequest(new Request(url,{method}),env(handlerFile));
+  const via=await bundled.FilmAggregate.handleFilmAggregateRequest(new Request(url,{method}),he);
+  assert.equal(via.status,off.status,method+' '+id);
+  assert.equal(await via.text(),await off.text(),method+' '+id+' body');
+  assert.equal(via.headers.get('cache-control'),'no-store');
+ }
+ assert.equal(await bundled.FilmAggregate.handleFilmAggregateRequest(new Request('https://iptv.test/api/other'),he),null);
+ assert.ok(executed.length>0&&executed.every(text=>/^\s*(WITH|SELECT)/i.test(text)),'every bundled statement is a read');
+ assert.equal(fileSha(handlerFile),shaBefore,'the bundled handler wrote nothing');
+
+ // 5. The bundled Worker router does not dispatch to the route: the internal path is answered as an unknown path is.
+ const routed=async path=>{const response=await bundled.worker.fetch(new Request('https://iptv.test'+path),env(handlerFile));return [response.status,(await response.text()).includes('film-aggregate/v1')];};
+ const internal=await routed(FILM_AGGREGATE_ROUTE+'?id=tmdb_5'),unknown=await routed('/api/internal/film-aggregate-unrouted?id=tmdb_5');
+ assert.deepEqual(internal,unknown,'the Worker answers the internal film-aggregate path exactly as an unknown one');
+ assert.equal(internal[1],false,'the router never serves the aggregate contract');
 }
 
 console.log('film-aggregate: FilmAggregateV1 sections (display, watchlist, availability, personal, predictions, history) over the AIR-646 resolver; G1 candidate discovery and coverage with its bounds; per-section before/after tokens (generation_moved), identity_moved with no section, the 40-statement budget with the reserved fence, C2 dedup and conflicts, the Watchlist negative proof, history limited/unavailable; dormant and read-only');

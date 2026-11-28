@@ -1,3 +1,5 @@
+// The id of every request is the CANONICAL record id of the Film (`record.id`, e.g. `film:Ab1x`), the one the metadata API and the `film` table use. The programme's `storedId` (`Ab1x`) is another id and is NOT used here:
+// the API answers it with `404 not_found`.
 // AIR-635 (card PVU; ADR 0214 decision 9, language-bound per ADR 0224): the owner's view of the per-field provenance of one Film
 // and the manual corrections of the PV3 API (`/api/admin/films/<id>/metadata`). Three layers, all in this file:
 //  1. the client: ONE read (GET, paged history) and ONE write (POST, `X-IPTV-Admin-Action: film_metadata_owner`). No credential is attached.
@@ -27,6 +29,8 @@ const ADMIN_META_REFUSAL_TEXT = {
   blank_field: 'Поле пустое, закреплять нечего. Сначала задайте значение.',
   foreign_history: 'Эта запись журнала относится к другому фильму.',
   history_not_found: 'Записи журнала больше нет.',
+  not_found: 'Этого фильма нет в каноническом каталоге: происхождение метаданных для него не записывается и не читается. Это не сбой чтения, повтор не нужен.',
+  command_not_found: 'Команда не выполнена: фильма нет в каноническом каталоге.',
   not_in_scope: 'У фильма нет состояния обогащения каталога, обновлять нечего.',
   not_refreshable: 'Ни один источник сейчас нельзя переоткрыть.',
   authority_not_open: 'Запись канонического фильма сейчас закрыта (authority).',
@@ -42,8 +46,8 @@ const ADMIN_META_REFUSAL_TEXT = {
 // the writer's own bounds (ownerValue in src/film-metadata-provenance.js); the server stays the judge, the page only does not forbid a value the writer accepts
 const ADMIN_META_MAXLENGTH = {year: 5, runtime: 5, synopsis: 20000, poster: 2000, url: 2000};
 // Shared by EVERY mounted Film, because the page replaces the detail's DOM on navigation:
-//  adminMetaPending  {storedId, label, command}: the one command whose outcome is unknown
-//  adminMetaFlight   {storedId, requestId}: the one command (POST and its readback) in flight
+//  adminMetaPending  {filmId, label, command}: the one command whose outcome is unknown
+//  adminMetaFlight   {filmId, requestId}: the one command (POST and its readback) in flight
 //  adminMetaLive     the binding of the Film now on screen; an older binding is `dead` and only settles the shared state
 // Writes are serialized across Films; a settlement touches the shared state only when its own `requestId` is the one stored.
 let adminMetaPending = null;
@@ -53,18 +57,20 @@ const adminMetaText = value => String(value === null || value === undefined ? ''
 const adminMetaEsc = value => adminMetaText(value).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 
 // ---- 1. the client ----
-async function adminReadFilmMetadata(storedId, cursor) {
+async function adminReadFilmMetadata(filmId, cursor) {
   let response;
-  try { response = await fetch(ADMIN_API + '/films/' + encodeURIComponent(storedId) + '/metadata' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), {headers: {Accept: 'application/json'}, credentials: 'same-origin'}); }
+  try { response = await fetch(ADMIN_API + '/films/' + encodeURIComponent(filmId) + '/metadata' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), {headers: {Accept: 'application/json'}, credentials: 'same-origin'}); }
   catch { return {ok: false, status: 0, error: 'network', body: null}; }
   let payload = null;
   try { payload = await response.json(); } catch { payload = null; }
-  return {ok: response.ok && !!payload && payload.found === true, status: response.status, error: payload && payload.error || (response.ok ? null : 'unavailable'), body: payload};
+  // `absent`: ONLY the API's own typed answer `404 {error: 'not_found'}` says the Film is not in the canonical catalogue. A 404 that is not JSON, or has another envelope (a proxy, an older Worker, an unexpected route), is an unclassified failed read.
+  const absent = response.status === 404 && !!payload && typeof payload === 'object' && payload.error === 'not_found';
+  return {ok: response.ok && !!payload && payload.found === true, absent, status: response.status, error: payload && payload.error || (response.ok ? null : 'unavailable'), body: payload};
 }
 // A network failure is `error: 'network'`; a 503 `storage_unavailable` has `outcome: 'unknown'`. Both keep the requestId for a retry.
-async function adminWriteFilmMetadata(storedId, body) {
+async function adminWriteFilmMetadata(filmId, body) {
   let response;
-  try { response = await fetch(ADMIN_API + '/films/' + encodeURIComponent(storedId) + '/metadata', {method:'POST',headers:{Accept:'application/json','Content-Type':'application/json','X-IPTV-Admin-Action':'film_metadata_owner'}, credentials: 'same-origin', body: JSON.stringify(body)}); }
+  try { response = await fetch(ADMIN_API + '/films/' + encodeURIComponent(filmId) + '/metadata', {method:'POST',headers:{Accept:'application/json','Content-Type':'application/json','X-IPTV-Admin-Action':'film_metadata_owner'}, credentials: 'same-origin', body: JSON.stringify(body)}); }
   catch { return {ok: false, status: 0, error: 'network', outcome: 'unknown', body: null}; }
   let payload = null;
   try { payload = await response.json(); } catch { payload = null; }
@@ -158,7 +164,7 @@ function adminMetaDescribe(command) {
 // `elsewhere`: the held command belongs to another Film; it can be retried or given up only there
 function adminMetaPendingHtml(pending, elsewhere) {
   if (!pending) return '';
-  if (elsewhere) return `<div class="admin-meta-pending" data-meta-pending-elsewhere><p><strong>Команда с неизвестным исходом ждёт в другом фильме:</strong> ${adminMetaEsc(pending.label || pending.storedId)}. ${adminMetaEsc(adminMetaDescribe(pending.command))}.</p><p class="muted">${adminMetaEsc(ADMIN_META_REFUSAL_TEXT.pending_other)}</p></div>`;
+  if (elsewhere) return `<div class="admin-meta-pending" data-meta-pending-elsewhere><p><strong>Команда с неизвестным исходом ждёт в другом фильме:</strong> ${adminMetaEsc(pending.label || pending.filmId)}. ${adminMetaEsc(adminMetaDescribe(pending.command))}.</p><p class="muted">${adminMetaEsc(ADMIN_META_REFUSAL_TEXT.pending_other)}</p></div>`;
   return `<div class="admin-meta-pending" data-meta-pending-box><p><strong>Команда с неизвестным исходом.</strong> ${adminMetaEsc(adminMetaDescribe(pending.command))}. requestId: <code>${adminMetaEsc(pending.command.requestId)}</code>.</p>`
     + '<p class="muted">Неизвестно, записана ли она. «Повторить» отправит ровно эту же команду, а сохранённая запись решит, выполнена ли она уже. Другие действия отключены. Отказ от повтора не означает, что команда не записалась: после него проверьте значение и журнал.</p>'
     + '<div class="admin-meta-controls"><button type="button" data-meta-retry>Повторить ту же команду</button><button type="button" data-meta-discard>Отказаться от повтора</button></div></div>';
@@ -254,34 +260,45 @@ function adminMetaHtml(view, options) {
 // After a command (or a stale refusal) the rendered controls stay disabled until a read SUCCEEDS; a failed read is said as such, with its own retry, and never overwrites the command's result.
 // `adminMetaPending` (module level, like the title form's pending command) holds a command with an unknown outcome across a re-render of the detail: it is shown, it is the only thing
 // that can be sent, and the same body is sent again. Opening or re-mounting only READS; nothing is sent without a press.
-function adminBindFilmMetadata(host, storedId) {
+function adminBindFilmMetadata(host) {
   const section = host && host.querySelector ? host.querySelector('[data-film-metadata]') : null;
-  if (!section || !storedId) return;
+  const filmId = section && section.getAttribute ? section.getAttribute('data-film-id') : null;
+  if (!section || !filmId) return;
   const body = section.querySelector('[data-meta-body]');
   const result = section.querySelector('[data-meta-result]');
   const reading = section.querySelector('[data-meta-reading]');
   const pendingBox = section.querySelector('[data-meta-pending]');
-  const label = section.getAttribute && section.getAttribute('data-film-label') || storedId;
-  const state = {view: null, stale: true, loaded: false, busy: false, seq: 0, readFailed: false, dead: false};
-  const mine = () => (adminMetaPending && adminMetaPending.storedId === storedId ? adminMetaPending : null);
-  const elsewhere = () => (adminMetaPending && adminMetaPending.storedId !== storedId ? adminMetaPending : null);
+  const label = section.getAttribute && section.getAttribute('data-film-label') || filmId;
+  const state = {view: null, stale: true, loaded: false, busy: false, seq: 0, readFailed: false, notFound: false, dead: false};
+  const mine = () => (adminMetaPending && adminMetaPending.filmId === filmId ? adminMetaPending : null);
+  const elsewhere = () => (adminMetaPending && adminMetaPending.filmId !== filmId ? adminMetaPending : null);
   // a command of ANY Film in flight blocks this view's writes too
   const flying = () => !!adminMetaFlight;
   const say = text => { if (!state.dead) result.textContent = text; };
   const render = () => {
     if (state.dead) return;
-    if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!mine(), pendingElsewhere: !!elsewhere(), flight: flying()});
+    if (state.notFound) body.innerHTML = '';
+    else if (state.view) body.innerHTML = adminMetaHtml(state.view, {stale: state.stale || state.busy, pending: !!mine(), pendingElsewhere: !!elsewhere(), flight: flying()});
     pendingBox.innerHTML = flying() ? '<p class="muted" data-meta-flight>Идёт отправка команды…</p>' : (mine() ? adminMetaPendingHtml(mine()) : (elsewhere() ? adminMetaPendingHtml(elsewhere(), true) : ''));
-    reading.innerHTML = state.readFailed ? '<span>Не удалось прочитать метаданные. Действия отключены.</span> <button type="button" data-meta-reload>Повторить чтение</button>' : (state.busy && !state.loaded ? '<span>Читаю метаданные…</span>' : '');
+    reading.innerHTML = state.notFound ? '<span data-meta-notfound>' + adminMetaEsc(ADMIN_META_REFUSAL_TEXT.not_found) + '</span>' : state.readFailed ? '<span>Не удалось прочитать метаданные. Действия отключены.</span> <button type="button" data-meta-reload>Повторить чтение</button>' : (state.busy && !state.loaded ? '<span>Читаю метаданные…</span>' : '');
   };
   // one read of the first page, or of the page after `cursor`; resolves true only when the answer was applied
   const load = async cursor => {
     const token = ++state.seq;
-    state.stale = true; state.readFailed = false;
+    state.stale = true; state.readFailed = false; state.notFound = false;
     render();
-    const response = await adminReadFilmMetadata(storedId, cursor);
+    const response = await adminReadFilmMetadata(filmId, cursor);
     if (state.dead || token !== state.seq) return false; // an answer that is not the latest read, or from a view that left the screen, is dropped
-    if (!response.ok) { state.readFailed = true; state.stale = true; if (response.status === 404) reading.textContent = 'Фильм не найден.'; else render(); return false; }
+    if (!response.ok) {
+      state.stale = true;
+      if (response.absent) {
+        // the typed answer: this Film is not in the canonical catalogue. The snapshot of an earlier read is dropped with it, so no stale value, history row or "Показать ещё" stays on offer.
+        // A held command is independent of this read and is kept with its real outcome.
+        state.notFound = true; state.view = null; state.loaded = false;
+      } else state.readFailed = true; // anything else, an unclassified 404 included, is a failed read and stays retryable
+      render();
+      return false;
+    }
     const incoming = response.body;
     if (cursor && state.view) {
       // a later page carries the CURRENT revision and anchor: when they moved, the earlier rows' revert flags belong to the old state, so the first page is read again
@@ -310,42 +327,42 @@ function adminBindFilmMetadata(host, storedId) {
   const settled = film => {
     const live = adminMetaLive;
     if (!live || live === self || live.state.dead) return; // the view on screen settled its own command and has just read again
-    if (live.storedId === film) live.reread(); else live.render();
+    if (live.filmId === film) live.reread(); else live.render();
   };
   const send = async (command, action) => {
     const own = command.requestId;
     // the flight and the held command are claimed together, inside the serialized chain; they are released only by the attempt that owns them
-    adminMetaFlight = {storedId, requestId: own};
-    adminMetaPending = {storedId, label, command: JSON.parse(JSON.stringify(command))};
+    adminMetaFlight = {filmId, requestId: own};
+    adminMetaPending = {filmId, label, command: JSON.parse(JSON.stringify(command))};
     state.stale = true; render();
     say('Записываем…');
     let response;
-    try { response = await adminWriteFilmMetadata(storedId, command); }
+    try { response = await adminWriteFilmMetadata(filmId, command); }
     finally { /* adminWriteFilmMetadata never throws; the finally keeps the claim honest if that changes */ }
     const ownsPending = () => adminMetaPending && adminMetaPending.command.requestId === own;
     const release = () => { if (adminMetaFlight && adminMetaFlight.requestId === own) adminMetaFlight = null; };
     if (response.ok) {
       if (ownsPending()) adminMetaPending = null;
       say(adminMetaOutcomeText(response, action));
-      if (state.dead) { release(); settled(storedId); return; }
+      if (state.dead) { release(); settled(filmId); return; }
       await load(null); // a failed read leaves the controls disabled and says so in its own place; the result above stays
-      release(); settled(storedId); render();
+      release(); settled(filmId); render();
       return;
     }
     if (adminMetaRetryable(response)) {
       state.stale = false; // the old read is still the latest known state; only the held command can be sent
       say(adminMetaRefusalText(response.error === 'network' ? 'network' : 'storage_unavailable'));
-      release(); settled(storedId);
+      release(); settled(filmId);
       return;
     }
     // a definite refusal ends THIS attempt, and only this one
     if (ownsPending()) adminMetaPending = null;
-    say(adminMetaRefusalText(response.error));
+    say(adminMetaRefusalText(response.error === 'not_found' ? 'command_not_found' : response.error));
     const reload = !state.dead && (response.error === 'stale_revision' || response.error === 'stale_rows');
     if (reload) await load(null); else state.stale = false;
-    release(); settled(storedId); render();
+    release(); settled(filmId); render();
   };
-  const self = {storedId, state, render, reread: () => { if (state.busy) state.again = true; else run(() => load(null)); }};
+  const self = {filmId, state, render, reread: () => { if (state.busy) state.again = true; else run(() => load(null)); }};
   // the view that was on screen before is gone: it may still be settling a command, and must not touch this one's DOM
   if (adminMetaLive && adminMetaLive !== self) adminMetaLive.state.dead = true;
   adminMetaLive = self;
@@ -366,7 +383,7 @@ function adminBindFilmMetadata(host, storedId) {
       return run(() => load(null));
     }
     const more = target.getAttribute('data-meta-more');
-    if (more) return run(() => load(more));
+    if (more) return state.view ? run(() => load(more)) : undefined;
     const action = target.getAttribute('data-meta-action');
     if (!action || !state.view || state.stale || adminMetaPending || flying()) return;
     const field = target.getAttribute('data-field');
@@ -387,7 +404,7 @@ function adminBindFilmMetadata(host, storedId) {
   if (mine()) { section.open = true; say(flying() ? 'Команда ещё отправляется.' : 'Команда с неизвестным исходом сохранена. Её можно повторить или отменить.'); run(() => load(null)); }
 }
 function adminFilmMetadataSection(record) {
-  if (!record || !record.storedId) return '';
-  const label = record.preferred || record.original || record.originalTitle || record.id || record.storedId;
-  return `<details class="admin-meta" data-film-metadata data-stored-id="${adminMetaEsc(record.storedId)}" data-film-label="${adminMetaEsc(label)}"><summary>Происхождение метаданных</summary><div class="admin-meta-status" data-meta-result role="status" tabindex="-1"></div><div class="admin-meta-status" data-meta-reading role="status"></div><div data-meta-pending></div><div data-meta-body><p class="muted">Раздел читает данные при открытии. Запись выполняется только по кнопке.</p></div></details>`;
+  if (!record || !record.id) return '';
+  const label = record.preferred || record.original || record.originalTitle || record.id;
+  return `<details class="admin-meta" data-film-metadata data-film-id="${adminMetaEsc(record.id)}" data-film-label="${adminMetaEsc(label)}"><summary>Происхождение метаданных</summary><div class="admin-meta-status" data-meta-result role="status" tabindex="-1"></div><div class="admin-meta-status" data-meta-reading role="status"></div><div data-meta-pending></div><div data-meta-body><p class="muted">Раздел читает данные при открытии. Запись выполняется только по кнопке.</p></div></details>`;
 }

@@ -31,7 +31,7 @@
 // same counted budget and answers within `limits.recheck`; a budget error is the typed `budget_exceeded`, never a "move". The shared ratings fence runs after it.
 // The per-source limits are CONTRACTUAL obligations of the adapters the activation card wires (AIR-651): this module checks what an adapter reports against
 // them, it does not prove that an adapter really stopped before materializing.
-import {createHash} from 'node:crypto';
+import {sha256Hex} from './sha256-sync.js';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {database} from './film-person-authority.js';
@@ -61,7 +61,7 @@ const legacy=vm.runInNewContext(fs.readFileSync(new URL('./domain/film-history.j
 const letterboxdFacts=vm.runInNewContext(fs.readFileSync(new URL('./letterboxd-facts.js',import.meta.url),'utf8')+'\n;LetterboxdFacts',{});
 const versionRule=vm.runInNewContext(fs.readFileSync(new URL('./domain/prediction-versions.js',import.meta.url),'utf8')+'\n;({predictionVersionLinked})',{});
 const plain=value=>JSON.parse(JSON.stringify(value));
-const digestOf=value=>'sha256:'+createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const digestOf=value=>'sha256:'+sha256Hex(JSON.stringify(value));
 const eventIdOf=(storageId,sourceEventId)=>storageId+'|'+sourceEventId;
 export {eventIdOf as historyEventId};
 const isObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
